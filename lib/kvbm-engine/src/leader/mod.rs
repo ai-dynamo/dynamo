@@ -3,6 +3,7 @@
 
 mod accessor;
 mod blocks;
+mod composer;
 pub mod consolidator;
 pub mod control;
 mod describe_map;

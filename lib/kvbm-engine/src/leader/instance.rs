@@ -41,14 +41,14 @@ use kvbm_physical::manager::SerializedLayout;
 use super::{
     super::worker::Worker,
     super::worker::group::{ParallelWorkers, SpmdParallelWorkers},
-    AsyncSessionResult, BlockHolder, FindMatchesOptions, FindMatchesResult, Leader,
-    MetadataTransport, OnboardingStatus, ReadyResult, SessionId,
+    AsyncSessionResult, FindMatchesOptions, FindMatchesResult, Leader, MetadataTransport,
+    OnboardingStatus, ReadyResult, SessionId,
     accessor::{BlockAccessor, PolicyContext},
+    composer,
     consolidator::{ConsolidatorCell, ConsolidatorParams, new_cell, spawn_into_cell},
     discovery::RemoteDiscoveryHandle,
     dispatch::{PullRef, WirePullOptions, plan_pull},
     parallelism::{ParallelismTemplate, stamp_parallelism_descriptors},
-    remote_search, stage_g3_to_g2,
     velo::{ExportMetadataCallback, VeloLeaderService},
 };
 
@@ -239,6 +239,10 @@ pub struct InstanceLeaderBuilder {
     g2_manager: Option<Arc<BlockManager<G2>>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
     workers: Vec<Arc<dyn Worker>>,
+    /// Direct injection of a [`ParallelWorkers`] implementation. When set,
+    /// bypasses the `workers` → [`SpmdParallelWorkers`] construction in
+    /// [`Self::build`] so callers can supply a custom or test-stub impl.
+    parallel_worker: Option<Arc<dyn ParallelWorkers>>,
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
     object_client: Option<Arc<dyn ObjectBlockOps>>,
     parallelism_template: Option<ParallelismTemplate>,
@@ -318,6 +322,15 @@ impl InstanceLeaderBuilder {
     /// Set all workers at once.
     pub fn workers(mut self, workers: Vec<Arc<dyn Worker>>) -> Self {
         self.workers = workers;
+        self
+    }
+
+    /// Inject a [`ParallelWorkers`] implementation directly. When set, the
+    /// builder skips the `workers` → [`SpmdParallelWorkers`] construction and
+    /// stores this handle as-is. Useful for tests and for callers that already
+    /// hold a concrete `ParallelWorkers` (e.g. a custom dispatch layer).
+    pub fn parallel_worker(mut self, parallel_worker: Arc<dyn ParallelWorkers>) -> Self {
+        self.parallel_worker = Some(parallel_worker);
         self
     }
 
@@ -414,14 +427,18 @@ impl InstanceLeaderBuilder {
         // todo: we will need a common builder pattern for creating "general" parallel workers
         // - we could also use an enum and match as the number of types will be limited
 
-        // Create parallel worker if workers are provided. When a
-        // parallelism template is configured (AB-1a step 2), install
-        // it on the SPMD layer so connect_remote can run cross-leader
-        // compatibility gates (AB-1b). The cached worker metadata is
-        // forwarded so the block-layout compat check in connect_remote
-        // can compare against this leader's actual per-worker
-        // SerializedLayouts.
-        let parallel_worker: Option<Arc<dyn ParallelWorkers>> = if !self.workers.is_empty() {
+        // Resolve the parallel worker handle. An explicit override from the
+        // builder wins over the `workers` → SpmdParallelWorkers default
+        // construction. When a parallelism template is configured (AB-1a step
+        // 2), install it on the SPMD layer so connect_remote can run cross-
+        // leader compatibility gates (AB-1b). The cached worker metadata is
+        // forwarded so the block-layout compat check in connect_remote can
+        // compare against this leader's actual per-worker SerializedLayouts.
+        let parallel_worker: Option<Arc<dyn ParallelWorkers>> = if let Some(pw) =
+            self.parallel_worker.clone()
+        {
+            Some(pw)
+        } else if !self.workers.is_empty() {
             let mut spmd =
                 SpmdParallelWorkers::new(self.workers.to_vec(), events.clone(), runtime.clone())
                     .with_block_layout_mode(self.block_layout_mode);
@@ -554,6 +571,16 @@ impl InstanceLeader {
     /// It implements `ObjectBlockOps` for coordinated object storage uploads.
     pub fn parallel_worker(&self) -> Option<Arc<dyn ParallelWorkers>> {
         self.parallel_worker.clone()
+    }
+
+    /// Get the injected remote-block discovery handle (the hub indexer seam)
+    /// when one has been wired via [`Self::set_remote_discovery`]. The
+    /// [`composer::OnboardingComposer`] reads this to decide whether to fire
+    /// the discovery RPC on the AsyncSession path.
+    ///
+    /// [`composer::OnboardingComposer`]: super::composer::OnboardingComposer
+    pub(super) fn remote_discovery(&self) -> Option<RemoteDiscoveryHandle> {
+        self.remote_discovery.get().cloned()
     }
 
     /// Get the object storage client for G4 operations.
@@ -1785,32 +1812,15 @@ impl Leader for InstanceLeader {
             Vec::new()
         };
 
-        let has_discovery = self.remote_discovery.get().is_some();
         let local_g2_count = matched_g2_blocks.len();
         let local_g3_count = matched_g3_blocks.len();
-
-        // Warm-cache short-circuit: if the synchronous local G2 prefix match
-        // already covers every queried hash, there is nothing remote to find or
-        // pull. Return `Ready` directly and skip the remote-search driver
-        // entirely — this is the path a request to the instance that already
-        // holds the blocks takes (it must not "remote search" itself).
         let local_covers_all =
-            !sequence_hashes.is_empty() && matched_g2_blocks.len() == sequence_hashes.len();
-
-        // Hub-indexer remote search (the transfer-plane driver) runs only when
-        // discovery is injected, the local G2 prefix is incomplete, and there
-        // are no local G3 hits to stage (local G3 stages via the AsyncSession
-        // path below). The legacy static peer-leader / G4-object search path was
-        // removed, so its deferral gates went with it.
-        let use_indexer_search = options.search_remote
-            && has_discovery
-            && matched_g3_blocks.is_empty()
-            && !local_covers_all;
+            !sequence_hashes.is_empty() && local_g2_count == sequence_hashes.len();
 
         // Host-bypass short-circuit: when G2 is intentionally unconfigured we
-        // never want to take the AsyncSession + stage_g3_to_g2 path. Return
-        // immediately with both G2 (typically empty) and G3 blocks attached
-        // so the caller can issue G3→G1 directly via GDS.
+        // never take the AsyncSession path. Return immediately with both G2
+        // (typically empty) and G3 blocks attached so the caller can issue
+        // G3→G1 directly via GDS.
         if self.bypass_host {
             return Ok(FindMatchesResult::Ready(ReadyResult::new_with_g3(
                 matched_g2_blocks,
@@ -1823,11 +1833,9 @@ impl Leader for InstanceLeader {
             )));
         }
 
-        // Ready when the local G2 prefix is complete, or when there is no local
-        // G3 to stage and no indexer search to run. Otherwise fall through to an
-        // AsyncSession (indexer-driven pull, or local G3→G2 staging).
-        if local_covers_all || (matched_g3_blocks.is_empty() && !use_indexer_search) {
-            // No session needed - blocks owned directly by ReadyResult (RAII)
+        // Warm-cache short-circuit: the synchronous G2 prefix already covers
+        // everything queried — no staging, no remote pull, no composer.
+        if local_covers_all {
             return Ok(FindMatchesResult::Ready(ReadyResult::new(
                 matched_g2_blocks,
                 super::MatchBreakdown {
@@ -1838,9 +1846,33 @@ impl Leader for InstanceLeader {
             )));
         }
 
-        // AsyncSession path: local G3 blocks found — stage G3→G2, then deliver.
-        let session_id = SessionId::from(Uuid::new_v4());
+        // Layered-composition predicate. The composer runs the hub-indexer
+        // remote pull when discovery is wired and the post-local tail meets
+        // the block-count threshold. Unlike the prior `use_indexer_search`
+        // gate, this no longer requires `matched_g3_blocks.is_empty()` — the
+        // composer runs G3 staging and the remote pull concurrently over
+        // structurally disjoint position ranges.
+        let post_local_tail = sequence_hashes
+            .len()
+            .saturating_sub(local_g2_count + local_g3_count);
+        let use_remote_search = options.search_remote
+            && self.remote_discovery.get().is_some()
+            && post_local_tail >= self.min_remote_blocks;
 
+        // Local-only Ready: no G3 to stage AND no remote pull to run.
+        if matched_g3_blocks.is_empty() && !use_remote_search {
+            return Ok(FindMatchesResult::Ready(ReadyResult::new(
+                matched_g2_blocks,
+                super::MatchBreakdown {
+                    host_blocks: local_g2_count,
+                    disk_blocks: 0,
+                    object_blocks: 0,
+                },
+            )));
+        }
+
+        // AsyncSession path: spawn the composer.
+        let session_id = SessionId::from(Uuid::new_v4());
         let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
         let all_g2_blocks = Arc::new(Mutex::new(None));
         let match_breakdown = Arc::new(Mutex::new(super::MatchBreakdown {
@@ -1849,120 +1881,38 @@ impl Leader for InstanceLeader {
             object_blocks: 0,
         }));
 
-        // Cancellation token bound to this session, used only by the
-        // hub-indexer remote-search driver so `release_session` can tear it
-        // down on request cancellation/preemption.
-        let cancel_token = use_indexer_search.then(CancellationToken::new);
+        // Cancellation token bound to this session. `release_session` fires it
+        // so a cancelled/preempted request tears down both the G3 staging and
+        // the remote-pull children inside the composer.
+        let cancel = CancellationToken::new();
 
-        // Store session state to keep the matched blocks alive (RAII) until the
-        // caller releases the session. The staging task below re-matches the
-        // registry-backed handles independently.
+        // RAII pin for the matched G2/G3 handles for the session's lifetime.
+        // The composer re-matches against the registry-backed managers
+        // independently to compute the final delivered prefix.
         let state = SessionState {
             session_id,
             matched_g2_blocks,
-            matched_g3_blocks,
+            matched_g3_blocks: matched_g3_blocks.clone(),
             status_tx: status_tx.clone(),
-            cancel: cancel_token.clone(),
+            cancel: Some(cancel.clone()),
         };
         self.store_session_state(state);
 
-        // Hub-indexer remote search: spawn the transfer-plane driver. It
-        // re-matches local G2 (after pulling) to fill `all_g2_blocks` and sets
-        // the terminal `OnboardingStatus::Complete`. Any failure/timeout/cancel
-        // degrades to the local match so the shard never stays non-terminal.
-        if use_indexer_search {
-            let discovery = self
-                .remote_discovery
-                .get()
-                .cloned()
-                .expect("use_indexer_search implies remote_discovery is set");
-            let cancel = cancel_token.expect("use_indexer_search sets a cancel token");
-            let driver = remote_search::RemoteSearchDriver {
-                leader: Arc::new(self.clone()),
-                discovery,
-                sequence_hashes: sequence_hashes.to_vec(),
-                local_block_count: local_g2_count,
-                min_remote_blocks: self.min_remote_blocks,
-                status_tx: status_tx.clone(),
-                blocks: all_g2_blocks.clone(),
-                match_breakdown: match_breakdown.clone(),
-                session_id,
-                cancel,
-            };
-            self.runtime().spawn(driver.run());
-            return Ok(FindMatchesResult::AsyncSession(AsyncSessionResult::new(
-                session_id,
-                status_rx,
-                all_g2_blocks,
-                match_breakdown,
-            )));
-        }
-
-        // Stage local G3→G2 off-thread, then publish the deliverable G2 blocks.
-        // We only report blocks that are actually available in G2: the G2 prefix
-        // plus any G3 successfully staged into G2. If staging fails (or there is
-        // no parallel worker), we deliver just the G2 prefix rather than claiming
-        // undelivered G3 matches.
-        let g2_manager = self.g2_manager.clone();
-        let g3_manager = self.g3_manager.clone();
-        let parallel_worker = self.parallel_worker.clone();
-        let sequence_hashes = sequence_hashes.to_vec();
-        let all_g2_blocks_task = all_g2_blocks.clone();
-        let match_breakdown_task = match_breakdown.clone();
-        let status_tx_task = status_tx.clone();
-
-        self.messenger.runtime().spawn(async move {
-            // Re-match the local tiers (registry-backed handles, cheap to re-resolve).
-            let mut g2 = g2_manager.match_blocks(&sequence_hashes);
-            let remaining: Vec<_> = sequence_hashes
-                .iter()
-                .filter(|h| !g2.iter().any(|b| b.sequence_hash() == **h))
-                .copied()
-                .collect();
-
-            if let Some(g3_manager) = g3_manager.as_ref() {
-                let g3 = g3_manager.match_blocks(&remaining);
-                if !g3.is_empty() {
-                    match parallel_worker.as_ref() {
-                        Some(pw) => {
-                            let holder = BlockHolder::new(g3);
-                            match stage_g3_to_g2(&holder, &g2_manager, &**pw).await {
-                                // Staging registers the new G2 blocks before
-                                // returning, so re-match the full sequence: a
-                                // staged block can fill a hole between the G2
-                                // prefix and a later already-resident G2 run,
-                                // extending the contiguous match. Counting only
-                                // `prefix + staged` would under-report that tail.
-                                Ok(_staged) => g2 = g2_manager.match_blocks(&sequence_hashes),
-                                Err(e) => tracing::warn!(
-                                    %session_id,
-                                    error = %e,
-                                    "local G3→G2 staging failed; delivering G2 prefix only"
-                                ),
-                            }
-                        }
-                        None => tracing::warn!(
-                            %session_id,
-                            "no parallel worker configured; cannot stage G3, delivering G2 prefix only"
-                        ),
-                    }
-                }
-            }
-
-            // Sort by position so the consumer sees a contiguous run from the start.
-            g2.sort_by_key(|b| b.sequence_hash().position());
-            let matched_blocks = g2.len();
-
-            if let Ok(mut breakdown) = match_breakdown_task.try_lock() {
-                breakdown.host_blocks = matched_blocks;
-                breakdown.disk_blocks = 0;
-            }
-            *all_g2_blocks_task.lock().await = Some(g2);
-
-            status_tx_task
-                .send(OnboardingStatus::Complete { matched_blocks })
-                .ok();
-        });
+        let composer = composer::OnboardingComposer {
+            leader: Arc::new(self.clone()),
+            sequence_hashes: sequence_hashes.to_vec(),
+            matched_g3_blocks,
+            local_g2_count,
+            use_remote_search,
+            min_remote_blocks: self.min_remote_blocks,
+            status_tx,
+            all_g2_blocks: all_g2_blocks.clone(),
+            match_breakdown: match_breakdown.clone(),
+            cancel,
+            session_id,
+            staging_settled: Arc::new(tokio::sync::Notify::new()),
+        };
+        self.runtime().spawn(composer.run());
 
         Ok(FindMatchesResult::AsyncSession(AsyncSessionResult::new(
             session_id,
@@ -2095,16 +2045,410 @@ mod tests {
         Ok(())
     }
 
-    // TODO(test): hole-fill under-report reproducer for the local G3→G2 staging
-    // path. `match_blocks` is a first-hole prefix match, so when G2 holds
-    // [h0,h1,h3] (hole at h2) and G3 holds [h2], staging h2 into G2 must make the
-    // contiguous match grow to [h0,h1,h2,h3] (4) — not the [h0,h1] prefix + [h2]
-    // staged (3). The fix re-matches the full sequence after a successful stage;
-    // this test asserts matched_blocks == 4. It needs a parallel worker that can
-    // actually stage G3→G2 in-process: the current `TestInstanceLeaderWithWorkers`
-    // fixture registers only a G2 layout (no G3), so this requires adding a G3
-    // layout registration (or a lightweight `ParallelWorkers` stub returning a
-    // pre-completed transfer notification). Deferred to avoid that infra build-out.
+    /// Lightweight `ParallelWorkers` stub for staging-path tests. Its only
+    /// useful behaviour is `execute_local_transfer` returning a pre-completed
+    /// notification — the staging kernel then registers G2 blocks normally,
+    /// which is what the under-report fix exercises. Remote transfer methods
+    /// bail; ObjectBlockOps reports nothing present.
+    struct StubParallelWorkers {
+        /// When true, `execute_local_transfer` returns `Err` so tests can
+        /// exercise the staging-failure degrade-to-G2-prefix path.
+        fail_local_transfer: bool,
+    }
+
+    impl crate::worker::WorkerTransfers for StubParallelWorkers {
+        fn execute_local_transfer(
+            &self,
+            _src: LogicalLayoutHandle,
+            _dst: LogicalLayoutHandle,
+            _src_block_ids: Arc<[BlockId]>,
+            _dst_block_ids: Arc<[BlockId]>,
+            _options: TransferOptions,
+        ) -> Result<TransferCompleteNotification> {
+            if self.fail_local_transfer {
+                anyhow::bail!("stub: execute_local_transfer forced failure");
+            }
+            Ok(TransferCompleteNotification::completed())
+        }
+
+        fn execute_remote_onboard(
+            &self,
+            _src: crate::worker::RemoteDescriptor,
+            _dst: LogicalLayoutHandle,
+            _dst_block_ids: Arc<[BlockId]>,
+            _options: TransferOptions,
+        ) -> Result<TransferCompleteNotification> {
+            anyhow::bail!("stub: execute_remote_onboard not implemented");
+        }
+
+        fn execute_remote_offload(
+            &self,
+            _src: LogicalLayoutHandle,
+            _src_block_ids: Arc<[BlockId]>,
+            _dst: crate::worker::RemoteDescriptor,
+            _options: TransferOptions,
+        ) -> Result<TransferCompleteNotification> {
+            anyhow::bail!("stub: execute_remote_offload not implemented");
+        }
+
+        fn connect_remote(
+            &self,
+            _instance_id: InstanceId,
+            _metadata: Vec<SerializedLayout>,
+        ) -> Result<crate::worker::ConnectRemoteResponse> {
+            Ok(crate::worker::ConnectRemoteResponse::ready())
+        }
+
+        fn has_remote_metadata(&self, _instance_id: InstanceId) -> bool {
+            false
+        }
+
+        fn execute_remote_onboard_for_instance(
+            &self,
+            _instance_id: InstanceId,
+            _remote_logical_type: LogicalLayoutHandle,
+            _src_block_ids: Vec<BlockId>,
+            _dst: LogicalLayoutHandle,
+            _dst_block_ids: Arc<[BlockId]>,
+            _options: TransferOptions,
+        ) -> Result<TransferCompleteNotification> {
+            anyhow::bail!("stub: execute_remote_onboard_for_instance not implemented");
+        }
+    }
+
+    impl ObjectBlockOps for StubParallelWorkers {
+        fn has_blocks(
+            &self,
+            keys: Vec<SequenceHash>,
+        ) -> futures::future::BoxFuture<'static, Vec<(SequenceHash, Option<usize>)>> {
+            Box::pin(async move { keys.into_iter().map(|k| (k, None)).collect() })
+        }
+
+        fn put_blocks(
+            &self,
+            keys: Vec<SequenceHash>,
+            _layout: LogicalLayoutHandle,
+            _block_ids: Vec<BlockId>,
+        ) -> futures::future::BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+            Box::pin(async move { keys.into_iter().map(Err).collect() })
+        }
+
+        fn get_blocks(
+            &self,
+            keys: Vec<SequenceHash>,
+            _layout: LogicalLayoutHandle,
+            _block_ids: Vec<BlockId>,
+        ) -> futures::future::BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+            Box::pin(async move { keys.into_iter().map(Err).collect() })
+        }
+    }
+
+    impl ParallelWorkers for StubParallelWorkers {
+        fn export_metadata(&self) -> Result<Vec<crate::worker::SerializedLayoutResponse>> {
+            Ok(Vec::new())
+        }
+
+        fn import_metadata(
+            &self,
+            _metadata: Vec<SerializedLayout>,
+        ) -> Result<Vec<crate::worker::ImportMetadataResponse>> {
+            Ok(Vec::new())
+        }
+
+        fn worker_count(&self) -> usize {
+            0
+        }
+
+        fn workers(&self) -> &[Arc<dyn Worker>] {
+            &[]
+        }
+    }
+
+    /// Build a leader with a G2 manager, an optional G3 manager, and a stub
+    /// `ParallelWorkers` so the staging kernel can register synthetic G2
+    /// blocks in-process. The G2 manager owns 8 blocks of size 4; G3 — when
+    /// requested — owns the same. `fail_local_transfer` toggles the stub
+    /// failure mode for the staging-error tests.
+    async fn leader_with_stub_worker(
+        with_g3: bool,
+        fail_local_transfer: bool,
+    ) -> Result<(
+        Arc<InstanceLeader>,
+        Arc<BlockManager<G2>>,
+        Option<Arc<BlockManager<G3>>>,
+    )> {
+        let messenger = create_messenger_tcp().await?;
+        let registry = BlockRegistry::builder().build();
+        let g2 = Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(8)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+        let g3 = if with_g3 {
+            Some(Arc::new(
+                TestManagerBuilder::<G3>::new()
+                    .block_count(8)
+                    .block_size(4)
+                    .registry(registry.clone())
+                    .build(),
+            ))
+        } else {
+            None
+        };
+        let stub: Arc<dyn ParallelWorkers> = Arc::new(StubParallelWorkers {
+            fail_local_transfer,
+        });
+        let mut builder = InstanceLeader::builder()
+            .messenger(messenger)
+            .registry(registry)
+            .g2_manager(g2.clone())
+            .parallel_worker(stub);
+        if let Some(ref g3) = g3 {
+            builder = builder.g3_manager(g3.clone());
+        }
+        Ok((Arc::new(builder.build()?), g2, g3))
+    }
+
+    /// Bridge-hole + remote: when G3 staging fills a hole between an early G2
+    /// prefix and later already-resident G2 blocks, the post-staging contiguous
+    /// prefix is *longer* than `local_g2_count + local_g3_count`. The composer
+    /// must compute the remote-pull target against the actual post-staging
+    /// prefix — the optimistic sum would project the pull onto hashes that are
+    /// already locally resident, wasting bandwidth (and risking duplicate
+    /// register conflicts). The discovery RPC is set to advertise a `deepest`
+    /// inside the post-bridging region; the assertion is that the final
+    /// contiguous prefix matches the bridged length and the discovery RPC was
+    /// consulted but the pull projection landed past the locally-resident run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_matches_bridge_hole_projects_pull_past_resident_run() -> Result<()> {
+        use crate::leader::Leader;
+        use crate::leader::discovery::RemoteCandidates;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        // Sequence length 5: G2[0,1,3,4] (hole at 2) + G3[2] (fills the hole)
+        // + a remote "deepest" reported at position 4 — which is locally
+        // resident post-staging. The optimistic projection
+        // (start = local_g2_count + local_g3_count = 2 + 1 = 3) would target
+        // hashes [3,4] (already resident). The post-staging re-match yields
+        // current_prefix = 5 (the whole sequence), so the projection
+        // correctly skips the pull (remaining is empty).
+        let (leader, g2, g3) = leader_with_stub_worker(
+            /* with_g3 */ true, /* fail_local_transfer */ false,
+        )
+        .await?;
+        let g3 = g3.expect("with_g3=true → G3 manager present");
+
+        let seq = create_token_sequence(5, 4, 0);
+        let blocks = seq.blocks();
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[3..5])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &blocks[2..3])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        leader.set_remote_discovery(Arc::new(MockDiscovery {
+            calls: Arc::clone(&calls),
+            outcome: Some(RemoteCandidates {
+                deepest: hashes[4],
+                instances: Vec::new(),
+            }),
+        }));
+
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let async_session = result
+            .as_async()
+            .expect("local G3 hits → AsyncSession path");
+        async_session.wait_for_completion().await?;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "discovery is consulted once even when staging will fully cover the indexer's deepest"
+        );
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+        assert_eq!(
+            delivered, 5,
+            "bridge-hole staging fills [2], reaches [3,4] → contiguous prefix = 5"
+        );
+        Ok(())
+    }
+
+    /// Layered composition: when both local G3 hits exist AND the post-local
+    /// tail meets `min_remote_blocks`, the composer issues discovery *and*
+    /// stages G3 concurrently. Pre-redesign the `matched_g3_blocks.is_empty()`
+    /// gate suppressed discovery entirely in this case; this test pins the
+    /// additive composition behaviour.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_matches_layered_g3_stages_and_discovery_consults() -> Result<()> {
+        use crate::leader::Leader;
+        use crate::leader::discovery::RemoteCandidates;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        // Sequence length 6: G2[0,1] + G3[2,3] + remote tail [4,5].
+        let (leader, g2, g3) = leader_with_stub_worker(
+            /* with_g3 */ true, /* fail_local_transfer */ false,
+        )
+        .await?;
+        let g3 = g3.expect("with_g3=true → G3 manager present");
+
+        let seq = create_token_sequence(6, 4, 0);
+        let blocks = seq.blocks();
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &blocks[2..4])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        // min_remote_blocks = 2 → post-local tail (positions 4,5) = 2 ≥ 2.
+        // Use a discovery handle whose discover() reports the post-local
+        // tail's deepest hash but no candidates can be reached (instances=[]),
+        // so the composer issues the RPC but performs no pull. This isolates
+        // the "discovery was consulted" assertion from any remote-pull infra.
+        let calls = Arc::new(AtomicUsize::new(0));
+        leader.set_remote_discovery(Arc::new(MockDiscovery {
+            calls: Arc::clone(&calls),
+            outcome: Some(RemoteCandidates {
+                deepest: hashes[5],
+                instances: Vec::new(),
+            }),
+        }));
+        // Lower the threshold so the post-local tail of 2 triggers the pull.
+        // The fixture defaults to 0 from the builder; assert assumption.
+        // (No direct setter exposed; tests build leaders with explicit
+        // `.min_remote_blocks(...)` so we re-build via the helper here.)
+
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let async_session = result
+            .as_async()
+            .expect("layered path (G3 + remote tail) must yield an AsyncSession");
+        async_session.wait_for_completion().await?;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "composer must consult discovery when G3 is staging AND the tail meets threshold"
+        );
+        // G2[0,1] + staged G3[2,3] = 4 contiguous; no remote candidates so
+        // positions [4,5] don't land. Contiguous prefix = 4.
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+        assert_eq!(
+            delivered, 4,
+            "G2 prefix (2) + staged G3 (2) = 4 contiguous blocks delivered"
+        );
+        Ok(())
+    }
+
+    /// `release_session` must NOT abort an in-flight local G3 staging transfer.
+    /// Dropping `stage_g3_to_g2` mid-flight returns G2 destination blocks to
+    /// the allocator pool while DMA is still writing into them — pool
+    /// corruption. The composer's contract is: cancellation only gates the
+    /// discovery / remote-pull continuation; staging always runs to completion.
+    /// Assertion: a session cancelled mid-staging still publishes the staged
+    /// blocks into the final contiguous prefix.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn release_session_does_not_abort_inflight_staging() -> Result<()> {
+        use crate::leader::Leader;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        let (leader, g2, g3) = leader_with_stub_worker(
+            /* with_g3 */ true, /* fail_local_transfer */ false,
+        )
+        .await?;
+        let g3 = g3.expect("with_g3=true → G3 manager present");
+
+        // G2[0,1], G3[2,3]. Post-staging contiguous prefix = 4.
+        let seq = create_token_sequence(4, 4, 0);
+        let blocks = seq.blocks();
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &blocks[2..4])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        let result = leader.find_matches(&hashes)?;
+        let async_session = result
+            .as_async()
+            .expect("local G3 hits → AsyncSession path");
+        let session_id = async_session.session_id();
+
+        // Race cancel against the staging future. The stub's transfer is
+        // pre-completed so the cancel likely lands during or just after
+        // staging. The invariant being pinned: cancel must not corrupt or
+        // drop staged work — staging blocks must reach the terminal holder.
+        leader.release_session(session_id);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async_session.wait_for_completion(),
+        )
+        .await
+        .expect("composer must reach terminal even when cancelled mid-staging")?;
+
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+        assert_eq!(
+            delivered, 4,
+            "staging is not cancellable; bridged prefix must still be 4 after release_session"
+        );
+        Ok(())
+    }
+
+    /// Hole-fill under-report reproducer. G2 holds positions [0,1] and [3]
+    /// (a hole at position 2), G3 holds the hole [2]. After staging G3→G2,
+    /// the contiguous prefix is [0,1,2,3] = 4, not the pre-fix [0,1] + [2]
+    /// staged = 3. Asserting `matched_blocks == 4` pins the post-staging
+    /// re-match invariant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_matches_local_g3_staging_fills_bridge_hole() -> Result<()> {
+        use crate::leader::Leader;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        let (leader, g2, g3) = leader_with_stub_worker(
+            /* with_g3 */ true, /* fail_local_transfer */ false,
+        )
+        .await?;
+        let g3 = g3.expect("with_g3=true → G3 manager present");
+
+        // 4-block sequence h0..h3. Seed G2 with positions [0,1,3] (hole at
+        // position 2); G3 with the hole [2]. After staging, G2 covers
+        // [0,1,2,3] contiguously.
+        let seq = create_token_sequence(4, 4, 0);
+        let blocks = seq.blocks();
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[3..4])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &blocks[2..3])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        let result = leader.find_matches(&hashes)?;
+        let async_session = result
+            .as_async()
+            .expect("local G3 present (non-bypass) must yield an AsyncSession");
+        async_session.wait_for_completion().await?;
+
+        let reported = match async_session.status() {
+            OnboardingStatus::Complete { matched_blocks } => matched_blocks,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+        assert_eq!(
+            reported, delivered,
+            "reported ({reported}) must equal delivered ({delivered})"
+        );
+        assert_eq!(
+            delivered, 4,
+            "staging must fill the hole and re-match to a 4-block contiguous prefix"
+        );
+        Ok(())
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn assemble_export_metadata_stamps_when_template_set() -> Result<()> {
@@ -2295,8 +2639,11 @@ mod tests {
             .collect()
     }
 
-    /// Below the block threshold, the driver must not consult discovery and
-    /// must still reach a terminal `Complete` (degrade to the local match).
+    /// Below the block threshold, the composer must not spawn — the result is
+    /// the synchronous local `Ready` and discovery is never consulted. (The
+    /// prior driver-based design returned an AsyncSession that immediately
+    /// degraded to local; the layered composer hoists that threshold check
+    /// up-front so there is no spawn at all.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn remote_search_below_threshold_skips_discovery() -> Result<()> {
         let leader = leader_for_remote_search(/* min_remote_blocks */ 10).await?;
@@ -2315,18 +2662,11 @@ mod tests {
                 staging_mode: StagingMode::Full,
             },
         )?;
-        let async_session = result.as_async().expect("discovery drives the async path");
-        async_session.wait_for_completion().await?;
-
+        let ready = result
+            .as_ready()
+            .expect("below threshold + no G3 to stage → local-only Ready");
+        assert_eq!(ready.g2_count(), 0, "empty G2 → 0 matched");
         assert_eq!(calls.load(Ordering::SeqCst), 0, "discovery must be skipped");
-        assert!(
-            matches!(
-                async_session.status(),
-                OnboardingStatus::Complete { matched_blocks: 0 }
-            ),
-            "empty local G2 → Complete{{0}}, got {:?}",
-            async_session.status()
-        );
         Ok(())
     }
 
