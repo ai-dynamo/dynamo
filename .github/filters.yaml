@@ -33,7 +33,6 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
-  - 'skills/**/*.py'
 
 examples:
   - 'recipes/**'
