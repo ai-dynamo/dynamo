@@ -218,10 +218,22 @@ impl L1Cache {
 
         let total_size_needed: usize = entries_to_insert.iter().map(|(_, _, size)| size).sum();
 
-        // Evict if necessary.
+        // If this batch can't fit even into an empty cache, skip it rather than
+        // evicting everything for a guaranteed overflow.
+        if total_size_needed > self.max_memory {
+            return Ok(());
+        }
+
+        // Evict only the deficit, not the full batch size — otherwise a large batch
+        // against a near-empty cache would over-evict, and (worse) a large batch
+        // against a populated cache could still leave us over budget after insert
+        // because the eviction target was wrong.
         let current = self.current_memory.load(Ordering::Relaxed) as usize;
-        if current + total_size_needed > self.max_memory {
-            self.evict_lru(total_size_needed);
+        let deficit = current
+            .saturating_add(total_size_needed)
+            .saturating_sub(self.max_memory);
+        if deficit > 0 {
+            self.evict_lru(deficit);
         }
 
         // Insert all entries, accounting for replaced entries in memory tracking.

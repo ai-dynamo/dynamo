@@ -36,8 +36,9 @@
 //!
 //! - `special_tokens: Vec<String>` — must be supplied at construction (the
 //!   [`Tokenizer`] trait is intentionally minimal and does not expose them).
-//!   An empty list disables L1 (every lookup misses); the wrapper is still
-//!   transparent.
+//!   An empty list disables L1: `encode`/`encode_batch` short-circuit straight
+//!   to the inner tokenizer with no lookup, no miss-counter bump, and no
+//!   insert attempt.
 //! - `max_memory_bytes` — L1 byte budget; entries evicted via approximate LRU.
 //!
 //! # Provenance
@@ -74,7 +75,8 @@ impl CachedTokenizer {
     /// `special_tokens` is the list of atomic special-token strings the inner
     /// tokenizer recognizes (typically extracted via the HuggingFace tokenizer's
     /// `get_added_tokens_decoder()` filtering by `special == true`). An empty list
-    /// disables L1 — every lookup misses and the wrapper becomes a thin passthrough.
+    /// disables L1 — `encode`/`encode_batch` short-circuit to the inner tokenizer
+    /// without touching the cache or its counters.
     ///
     /// `max_memory_bytes` is the L1 cache byte budget.
     pub fn new(
@@ -119,6 +121,14 @@ fn special_token_refs(specials: &[String]) -> Vec<&str> {
 
 impl Encoder for CachedTokenizer {
     fn encode(&self, input: &str) -> Result<Encoding> {
+        // Empty specials => no boundaries are ever produced. Skip the lookup,
+        // miss-counter bump, and insert attempt entirely — otherwise the
+        // tiktoken wrapping path (which deliberately passes an empty list)
+        // pays the scan cost on every call with zero chance of a hit.
+        if self.special_tokens.is_empty() {
+            return self.inner.encode(input);
+        }
+
         let specials = special_token_refs(&self.special_tokens);
 
         if let Some((prefix_tokens, prefix_len)) = self.l1.longest_prefix_match(input, &specials) {
@@ -141,6 +151,13 @@ impl Encoder for CachedTokenizer {
     }
 
     fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
+        // True passthrough when L1 is disabled — delegate to the inner's native
+        // batch path (which may be rayon-parallel for HF) instead of falling
+        // through per-item.
+        if self.special_tokens.is_empty() {
+            return self.inner.encode_batch(inputs);
+        }
+
         // Per-item cache lookup — do NOT delegate to inner.encode_batch, which would
         // bypass the cache. Sequential iteration is fine; if rayon is added later it
         // belongs here, not inside `encode`.
@@ -177,14 +194,20 @@ mod tests {
 
     #[test]
     fn empty_specials_passes_through_correctly() {
-        // L1 disabled by empty specials list — encode must still produce correct ids.
+        // L1 disabled by empty specials list — encode must produce correct ids
+        // AND short-circuit to the inner tokenizer (no miss-counter bump, no
+        // insert attempt). Otherwise the tiktoken integration would log a
+        // miss per request with zero hits forever.
         let tok = inner();
         let cached = CachedTokenizer::new(tok.clone(), Vec::new(), 4096);
         let s = "<s>hello world</s>";
         let a = cached.encode(s).unwrap();
         let b = tok.encode(s).unwrap();
         assert_eq!(a.token_ids(), b.token_ids());
-        assert_eq!(cached.cache_stats().entries, 0);
+        let stats = cached.cache_stats();
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.misses, 0, "empty specials must not increment misses");
+        assert_eq!(stats.hits, 0);
     }
 
     #[test]
