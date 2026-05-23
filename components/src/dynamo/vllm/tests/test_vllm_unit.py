@@ -438,7 +438,7 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     monkeypatch.setattr(llm_engine, "build_sampling_params", fake_build_sampling_params)
 
     async def run_generate():
-        context = SimpleNamespace(id=lambda: "req")
+        context = SimpleNamespace(id=lambda: "req", trace_headers=lambda: None)
         async for _ in engine.generate({"token_ids": [1, 2, 3]}, context):
             pass
 
