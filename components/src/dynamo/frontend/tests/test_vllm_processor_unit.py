@@ -7,11 +7,13 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
+from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
 
 from dynamo.frontend.prepost import _prepare_request
 
@@ -337,3 +339,74 @@ class TestRoutedEnginePath:
                 "object": "chat.completion.chunk",
             }
         ]
+
+
+OBJECT_TYPED_TOOL_REQUEST = {
+    "model": MODEL,
+    "messages": [{"role": "user", "content": "set my profile"}],
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "set_profile",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "profile": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "age": {"type": "integer"},
+                            },
+                        }
+                    },
+                    "required": ["profile"],
+                },
+            },
+        }
+    ],
+    "tool_choice": "auto",
+}
+
+
+# ---------------------------------------------------------------------------
+# _prepare_request: schema-aware tool-parser end-to-end regression
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaAwareToolParser:
+    """Schema-aware parsers (e.g. qwen3_coder) need ``tools`` at construction
+    to coerce object/array-typed parameter values from raw text into JSON;
+    without them, the value comes through as a string-in-a-string inside the
+    final ``arguments`` JSON.
+    """
+
+    def test_qwen3_coder_coerces_object_typed_arg(self, tokenizer):
+        """qwen3_coder must coerce object-typed parameter values into nested
+        objects, not leave them as JSON-encoded strings inside ``arguments``.
+        """
+        model_output = (
+            "<tool_call><function=set_profile>\n"
+            "<parameter=profile>\n"
+            '{"name": "Alice", "age": 30}\n'
+            "</parameter>\n"
+            "</function></tool_call>"
+        )
+
+        request_for_sampling, parser, _, _, _ = _prepare_request(
+            OBJECT_TYPED_TOOL_REQUEST,
+            tokenizer=tokenizer,
+            tool_parser_class=Qwen3CoderToolParser,
+        )
+        assert parser is not None, "Expected _prepare_request to construct the parser"
+
+        result = parser.extract_tool_calls(model_output, request_for_sampling)
+
+        assert result.tools_called, f"Expected tools_called=True; got {result!r}"
+        assert len(result.tool_calls) == 1
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert isinstance(args["profile"], dict), (
+            f"Schema-aware parser should coerce object-typed arg to dict; "
+            f"got {type(args['profile']).__name__}: {args['profile']!r}"
+        )
+        assert args["profile"] == {"name": "Alice", "age": 30}

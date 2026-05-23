@@ -10,12 +10,28 @@ use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::agents::context::AgentContext;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
+
+/// Router-specific parameters carried via `nvext.router`.
+///
+/// Consumed by router implementations such as the global router for
+/// hierarchical pool selection. Unknown to engines/backends.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct RouterParams {
+    /// Target time-to-first-token in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_target: Option<f64>,
+
+    /// Target inter-token latency in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub itl_target: Option<f64>,
+}
 
 /// Routing hints for directing requests to specific workers.
 /// These fields are extracted from nvext and used by the router to determine
@@ -234,6 +250,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Router-specific parameters forwarded from `nvext.router`.
+    /// Consumed by router implementations (e.g. the global router) and ignored
+    /// by engines/backends.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<RouterParams>,
 
     /// Optional agent identity metadata forwarded from nvext.
     #[builder(default)]

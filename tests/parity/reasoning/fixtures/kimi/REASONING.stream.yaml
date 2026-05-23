@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: kimi
-model_label: Kimi reasoning
+model_label: Kimi Unicode reasoning
 mode: stream
 cases:
   REASONING.stream.1.a:
