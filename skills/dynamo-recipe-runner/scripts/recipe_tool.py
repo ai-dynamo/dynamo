@@ -217,9 +217,7 @@ def validate(root: Path, target: Path) -> dict[str, object]:
         mc_dir = model_cache_dir_for(root, recipe_dir)
         if mc_dir:
             files = (
-                files
-                + sorted(mc_dir.rglob("*.yaml"))
-                + sorted(mc_dir.rglob("*.yml"))
+                files + sorted(mc_dir.rglob("*.yaml")) + sorted(mc_dir.rglob("*.yml"))
             )
 
     deploy_files = [path for path in files if path.name == "deploy.yaml"]
