@@ -33,13 +33,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::numa::{
     self, GpuInfo, NumaNode, get_pci_bus_address_from_cuda, is_numa_enabled,
     topology::{NumaTopology, parse_cpulist},
 };
 
 /// How a [`GpuView`]'s [`GpuView::cpu_slice`] was derived.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SliceSource {
     /// Happy path: the GPU's NUMA node had a non-empty cpulist and the slice
     /// is its deterministic share of that cpulist.
@@ -61,7 +63,7 @@ pub enum SliceSource {
 }
 
 /// How the slicing across siblings should be computed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SlicingMode {
     /// Assume every host GPU may be running concurrently — divide each NUMA
     /// node's CPUs across all host GPUs on that node. Safe default for
@@ -82,8 +84,39 @@ impl std::fmt::Display for SlicingMode {
     }
 }
 
+/// Role classification for a NUMA node, used by host-memory pool allocators
+/// to decide which nodes they can target.
+///
+/// On a typical x86 dual-socket system every node is [`Self::HostCpu`]. On
+/// Grace/GB200 boxes the CPU-bearing Grace nodes are [`Self::HostCpu`], each
+/// GPU's HBM appears as [`Self::GpuMemory`] (CPUless), and MIG-reservation
+/// slots show up as [`Self::Reserved`] (CPUless, no GPU attached). The
+/// host-memory pool must allocate only against [`Self::HostCpu`] — see
+/// [`Resources::host_memory_nodes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NumaNodeRole {
+    /// Has CPUs. Host memory (DDR / LPDDR5X) lives here.
+    HostCpu,
+    /// No CPUs, has at least one GPU attached by sysfs. GPU HBM domain on
+    /// Grace/GB200. Owned by the GPU; host-memory allocators must not target.
+    GpuMemory,
+    /// No CPUs, no GPUs. MIG-reservation slot or other firmware-reserved
+    /// placeholder. Always excluded from allocation.
+    Reserved,
+}
+
+impl std::fmt::Display for NumaNodeRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HostCpu => f.write_str("host-cpu"),
+            Self::GpuMemory => f.write_str("gpu-mem"),
+            Self::Reserved => f.write_str("reserved"),
+        }
+    }
+}
+
 /// View of a single NUMA node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NumaNodeView {
     /// The node ID.
     pub node: NumaNode,
@@ -92,10 +125,16 @@ pub struct NumaNodeView {
     pub cpus: Vec<usize>,
     /// Indices into [`Resources::gpus`] for GPUs attached to this node.
     pub gpu_indices: Vec<usize>,
+    /// Coarse role tag for this node. See [`NumaNodeRole`] for what each
+    /// variant means and which is targetable by the host-memory pool.
+    pub role: NumaNodeRole,
+    /// `MemTotal` from `/sys/devices/system/node/node{N}/meminfo`, in bytes.
+    /// `None` if sysfs was unreadable.
+    pub total_bytes: Option<u64>,
 }
 
 /// View of a single host GPU.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuView {
     /// Normalized PCI bus address, e.g. `"0000:3b:00.0"`.
     pub pci_address: String,
@@ -119,7 +158,7 @@ pub struct GpuView {
 /// Built via [`Resources::discover`] (or [`Resources::discover_with`] to pick a
 /// non-default [`SlicingMode`]). Sync, never panics, never errors — instead
 /// degraded topologies are surfaced through [`GpuView::slice_source`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resources {
     /// One entry per NUMA node that has at least one CPU or at least one GPU.
     pub nodes: Vec<NumaNodeView>,
@@ -139,12 +178,15 @@ pub struct Resources {
     /// Process launch context: cgroup version, cgroup-imposed cpuset and
     /// memory/CPU limits, and a container hint. Diagnostic only.
     pub cgroup: CgroupInfo,
+    /// Host hugepage state at discovery time. Surfaced for the host-memory
+    /// pool to decide which `HugepageMode` is viable.
+    pub hugepage: crate::hugepage::HugepageInfo,
     /// The slicing mode that produced this snapshot.
     pub mode: SlicingMode,
 }
 
 /// Which cgroup hierarchy the current process is under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CgroupVersion {
     /// Legacy cgroup v1 (per-controller mounts under `/sys/fs/cgroup/<ctrl>`).
     V1,
@@ -168,7 +210,7 @@ impl std::fmt::Display for CgroupVersion {
 
 /// CPU bandwidth limit imposed by the cgroup (`cpu.max` in v2 or
 /// `cpu.cfs_{quota,period}_us` in v1).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct CgroupCpuMax {
     /// Quota in microseconds per period. `None` means unlimited (`"max"`
     /// in v2, `-1` in v1).
@@ -190,7 +232,7 @@ impl CgroupCpuMax {
 }
 
 /// cgroup-derived diagnostic info for the current process.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CgroupInfo {
     /// Detected hierarchy version.
     pub version: CgroupVersion,
@@ -204,7 +246,18 @@ pub struct CgroupInfo {
     /// CPUs) for this cgroup. v2 only; v1 callers see `None`.
     pub cpuset_cpus_effective: Option<Vec<usize>>,
     /// `cpuset.mems` — which NUMA memory nodes the cgroup is restricted to.
+    ///
+    /// In cgroup v2 this is the **configured** mask; an empty value means
+    /// "inherit from parent". Allocators that need the actually-enforced
+    /// restriction should prefer [`Self::cpuset_mems_effective`].
     pub cpuset_mems: Option<Vec<usize>>,
+    /// `cpuset.mems.effective` — what the kernel actually enforces after
+    /// intersecting with ancestor and online-node restrictions. v2 only;
+    /// v1 callers see `None` (in v1 the configured mask is the effective
+    /// mask). This is what allocators should consult before placing pages
+    /// on a node: `mbind(MPOL_BIND)` against a node outside this set
+    /// returns `EPERM`.
+    pub cpuset_mems_effective: Option<Vec<usize>>,
     /// CPU bandwidth limit. `None` if `cpu.max` / `cpu.cfs_*` could not be read.
     pub cpu_max: Option<CgroupCpuMax>,
     /// `memory.max` (v2) or `memory.limit_in_bytes` (v1). `None` means
@@ -247,6 +300,8 @@ impl Resources {
         let process_allowed_cpus = read_process_allowed_cpus();
         let host_cpus_fallback = available_parallelism_range();
         let cgroup = read_cgroup_info();
+        let node_total_bytes = read_all_node_total_bytes();
+        let hugepage = crate::hugepage::HugepageInfo::discover();
 
         compute_resources_from_inputs(
             topology,
@@ -256,6 +311,8 @@ impl Resources {
             host_cpus_fallback,
             process_allowed_cpus,
             cgroup,
+            node_total_bytes,
+            hugepage,
             mode,
         )
     }
@@ -276,6 +333,28 @@ impl Resources {
             .iter()
             .filter(move |g| g.numa_node == Some(node))
     }
+
+    /// Iterate NUMA nodes that the host-memory pool may target.
+    ///
+    /// A node is host-memory-targetable iff its [`NumaNodeView::role`] is
+    /// [`NumaNodeRole::HostCpu`] — it has CPUs to anchor first-touch and
+    /// `sched_setaffinity` against, and its memory is DDR/LPDDR5X attached
+    /// to those CPUs (as opposed to GPU HBM).
+    pub fn host_memory_nodes(&self) -> impl Iterator<Item = &NumaNodeView> {
+        self.nodes
+            .iter()
+            .filter(|n| n.role == NumaNodeRole::HostCpu)
+    }
+
+    /// Total host memory across [`Self::host_memory_nodes`], in bytes.
+    ///
+    /// `None` if any host-memory node is missing a `total_bytes` reading
+    /// (which would make the sum unsafe to interpret as a capacity).
+    pub fn total_host_memory_bytes(&self) -> Option<u64> {
+        self.host_memory_nodes()
+            .map(|n| n.total_bytes)
+            .try_fold(0u64, |acc, b| b.map(|v| acc + v))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -287,6 +366,8 @@ fn compute_resources_from_inputs(
     host_cpus_fallback: Vec<usize>,
     process_allowed_cpus: Vec<usize>,
     cgroup: CgroupInfo,
+    node_total_bytes: HashMap<u32, u64>,
+    hugepage: crate::hugepage::HugepageInfo,
     mode: SlicingMode,
 ) -> Resources {
     let visible_pcis: HashSet<&String> = cuda_ordinals_by_pci.keys().collect();
@@ -368,6 +449,7 @@ fn compute_resources_from_inputs(
                 host_cpus,
                 process_allowed_cpus,
                 cgroup,
+                hugepage,
                 mode,
             };
         }
@@ -491,10 +573,17 @@ fn compute_resources_from_inputs(
             if cpus.is_empty() && gpu_indices.is_empty() {
                 continue;
             }
+            let role = if !cpus.is_empty() {
+                NumaNodeRole::HostCpu
+            } else {
+                NumaNodeRole::GpuMemory
+            };
             nodes.push(NumaNodeView {
                 node: NumaNode(node_id),
                 cpus,
                 gpu_indices,
+                role,
+                total_bytes: node_total_bytes.get(&node_id).copied(),
             });
         }
     }
@@ -506,6 +595,7 @@ fn compute_resources_from_inputs(
         host_cpus,
         process_allowed_cpus,
         cgroup,
+        hugepage,
         mode,
     }
 }
@@ -543,13 +633,21 @@ fn read_cgroup_info() -> CgroupInfo {
     let path = read_self_cgroup_path(version);
     let container_hint = detect_container_hint();
 
-    let (cpuset_cpus, cpuset_cpus_effective, cpuset_mems, cpu_max, memory_max) = match version {
+    let (
+        cpuset_cpus,
+        cpuset_cpus_effective,
+        cpuset_mems,
+        cpuset_mems_effective,
+        cpu_max,
+        memory_max,
+    ) = match version {
         CgroupVersion::V2 => {
             let rel = path.as_deref().unwrap_or("");
             (
                 read_cgroup_v2(rel, "cpuset.cpus").and_then(|s| parse_cpulist(&s).ok()),
                 read_cgroup_v2(rel, "cpuset.cpus.effective").and_then(|s| parse_cpulist(&s).ok()),
                 read_cgroup_v2(rel, "cpuset.mems").and_then(|s| parse_cpulist(&s).ok()),
+                read_cgroup_v2(rel, "cpuset.mems.effective").and_then(|s| parse_cpulist(&s).ok()),
                 read_cgroup_v2(rel, "cpu.max").and_then(|s| parse_cgroup_v2_cpu_max(&s)),
                 read_cgroup_v2(rel, "memory.max").and_then(|s| parse_cgroup_v2_memory_max(&s)),
             )
@@ -571,6 +669,10 @@ fn read_cgroup_info() -> CgroupInfo {
                 read_cgroup_v1(rel, "cpuset", "cpuset.cpus").and_then(|s| parse_cpulist(&s).ok()),
                 None,
                 read_cgroup_v1(rel, "cpuset", "cpuset.mems").and_then(|s| parse_cpulist(&s).ok()),
+                // v1 has no separate effective file — the configured mask
+                // is what's enforced. Leave None so callers fall back to
+                // the configured value.
+                None,
                 cpu_max,
                 read_cgroup_v1(rel, "memory", "memory.limit_in_bytes")
                     .and_then(|s| s.trim().parse::<u64>().ok())
@@ -581,7 +683,7 @@ fn read_cgroup_info() -> CgroupInfo {
                     }),
             )
         }
-        CgroupVersion::Unknown => (None, None, None, None, None),
+        CgroupVersion::Unknown => (None, None, None, None, None, None),
     };
 
     CgroupInfo {
@@ -590,6 +692,7 @@ fn read_cgroup_info() -> CgroupInfo {
         cpuset_cpus,
         cpuset_cpus_effective,
         cpuset_mems,
+        cpuset_mems_effective,
         cpu_max,
         memory_max,
         container_hint,
@@ -644,18 +747,20 @@ fn read_self_cgroup_path(version: CgroupVersion) -> Option<String> {
 }
 
 fn read_cgroup_v2(rel_path: &str, filename: &str) -> Option<String> {
-    let candidates = [
-        // Namespaced containers: /sys/fs/cgroup is rooted at the container's
-        // cgroup, so root-level filenames are the relevant ones.
-        format!("/sys/fs/cgroup/{}", filename),
-        // Otherwise, descend the path from /proc/self/cgroup.
-        format!(
-            "/sys/fs/cgroup{}/{}",
-            rel_path.trim_end_matches('/'),
-            filename
-        ),
-    ];
-    for path in &candidates {
+    // Order matters: the process's own cgroup must win. On a host where
+    // /proc/self/cgroup reports "/user.slice/user-X.slice/session-Y.scope",
+    // the root /sys/fs/cgroup/<file> reflects the system root (unrestricted)
+    // while the path-descended file reflects what the process actually
+    // sees. Inside a namespaced container, /proc/self/cgroup reports "/"
+    // and both candidates resolve to the same path — so the swap is
+    // strictly an improvement.
+    let descended = format!(
+        "/sys/fs/cgroup{}/{}",
+        rel_path.trim_end_matches('/'),
+        filename
+    );
+    let root = format!("/sys/fs/cgroup/{}", filename);
+    for path in [&descended, &root] {
         if let Ok(s) = std::fs::read_to_string(path) {
             return Some(s);
         }
@@ -720,6 +825,66 @@ fn detect_container_hint() -> Option<String> {
     None
 }
 
+/// Read `MemTotal` (bytes) for every NUMA node directory under
+/// `/sys/devices/system/node`. Best-effort: any unreadable node is omitted.
+fn read_all_node_total_bytes() -> HashMap<u32, u64> {
+    let mut out = HashMap::new();
+    let dir = std::path::Path::new("/sys/devices/system/node");
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !name.starts_with("node") {
+            continue;
+        }
+        let node_id: u32 = match name[4..].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let meminfo_path = path.join("meminfo");
+        let content = match std::fs::read_to_string(&meminfo_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Some(bytes) = parse_node_mem_total(&content) {
+            out.insert(node_id, bytes);
+        }
+    }
+    out
+}
+
+/// Parse `Node N MemTotal:       494935328 kB` out of a per-node
+/// `/sys/devices/system/node/node*/meminfo` file. Returns the value in
+/// bytes.
+fn parse_node_mem_total(content: &str) -> Option<u64> {
+    for line in content.lines() {
+        // Format: "Node 0 MemTotal:       494935328 kB"
+        let trimmed = line.trim_start();
+        let rest = match trimmed.find("MemTotal:") {
+            Some(idx) => &trimmed[idx + "MemTotal:".len()..],
+            None => continue,
+        };
+        let mut it = rest.split_whitespace();
+        let value_str = it.next()?;
+        let unit = it.next().unwrap_or("kB");
+        let kb: u64 = value_str.parse().ok()?;
+        let multiplier = match unit {
+            "kB" | "KB" => 1024u64,
+            "MB" => 1024 * 1024,
+            "GB" => 1024 * 1024 * 1024,
+            _ => 1024,
+        };
+        return Some(kb.saturating_mul(multiplier));
+    }
+    None
+}
+
 fn read_process_allowed_cpus() -> Vec<usize> {
     let content = match std::fs::read_to_string("/proc/self/status") {
         Ok(c) => c,
@@ -776,6 +941,9 @@ impl std::fmt::Display for Resources {
         if let Some(m) = &self.cgroup.cpuset_mems {
             writeln!(f, "  cpuset.mems:          [{}]", compact_range(m))?;
         }
+        if let Some(m) = &self.cgroup.cpuset_mems_effective {
+            writeln!(f, "  cpuset.mems.effective: [{}]", compact_range(m))?;
+        }
         if let Some(c) = &self.cgroup.cpu_max {
             match c.quota_us {
                 Some(q) => writeln!(
@@ -808,9 +976,11 @@ impl std::fmt::Display for Resources {
             writeln!(f)?;
             writeln!(
                 f,
-                "NUMA node {}  cpus=[{}]",
+                "NUMA node {}  role={}  cpus=[{}]  mem={}",
                 node.node.0,
-                compact_range(&node.cpus)
+                node.role,
+                compact_range(&node.cpus),
+                format_optional_bytes(node.total_bytes),
             )?;
             for idx in &node.gpu_indices {
                 let g = &self.gpus[*idx];
@@ -850,7 +1020,55 @@ impl std::fmt::Display for Resources {
                 )?;
             }
         }
+
+        // Host-memory pool summary: what allocators that target host DDR/LPDDR5X
+        // will see when they iterate `host_memory_nodes()`.
+        let host_nodes: Vec<&NumaNodeView> = self.host_memory_nodes().collect();
+        writeln!(f)?;
+        writeln!(f, "Host-memory pool view")?;
+        let host_ids: Vec<u32> = host_nodes.iter().map(|n| n.node.0).collect();
+        writeln!(
+            f,
+            "  host-memory nodes:    {}",
+            if host_ids.is_empty() {
+                "(none)".to_string()
+            } else {
+                host_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }
+        )?;
+        writeln!(
+            f,
+            "  total host memory:    {}",
+            format_optional_bytes(self.total_host_memory_bytes()),
+        )?;
+        let gpu_mem_count = self
+            .nodes
+            .iter()
+            .filter(|n| n.role == NumaNodeRole::GpuMemory)
+            .count();
+        if gpu_mem_count > 0 {
+            writeln!(
+                f,
+                "  excluded (gpu-mem):   {} node(s) — owned by GPU, out of scope",
+                gpu_mem_count,
+            )?;
+        }
+
+        writeln!(f)?;
+        writeln!(f, "Hugepage state")?;
+        write!(f, "{}", self.hugepage)?;
         Ok(())
+    }
+}
+
+fn format_optional_bytes(b: Option<u64>) -> String {
+    match b {
+        Some(v) => format_bytes(v),
+        None => "?".to_string(),
     }
 }
 
@@ -864,7 +1082,7 @@ fn format_slice_source(s: SliceSource) -> String {
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
     const GIB: f64 = MIB * 1024.0;
@@ -934,6 +1152,8 @@ mod tests {
             vec![0, 1, 2, 3],
             vec![0, 1, 2, 3],
             CgroupInfo::default(),
+            HashMap::new(),
+            crate::hugepage::HugepageInfo::default(),
             SlicingMode::AssumeAllBusy,
         );
         assert_eq!(r.gpus.len(), 2);
@@ -954,6 +1174,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             CgroupInfo::default(),
+            HashMap::new(),
+            crate::hugepage::HugepageInfo::default(),
             SlicingMode::AssumeAllBusy,
         );
         assert_eq!(r.gpus[0].slice_source, SliceSource::NoTopology);
@@ -1052,5 +1274,153 @@ mod tests {
             "empty-numa-node-fallback"
         );
         assert_eq!(format_slice_source(SliceSource::NoTopology), "no-topology");
+    }
+
+    #[test]
+    fn parse_node_mem_total_kb() {
+        // Real `/sys/devices/system/node/node0/meminfo` shape.
+        let sample = "\
+Node 0 MemTotal:       494935328 kB
+Node 0 MemFree:        180256032 kB
+Node 0 MemUsed:        314679296 kB
+Node 0 SwapCached:             0 kB
+Node 0 Active:         200000000 kB
+";
+        let bytes = parse_node_mem_total(sample).unwrap();
+        assert_eq!(bytes, 494_935_328u64 * 1024);
+    }
+
+    #[test]
+    fn parse_node_mem_total_missing() {
+        let sample = "Node 0 MemFree: 12345 kB\n";
+        assert_eq!(parse_node_mem_total(sample), None);
+    }
+
+    fn build_topology(node_cpus: &[(u32, Vec<usize>)]) -> &'static NumaTopology {
+        // Leak for tests — compute_resources_from_inputs expects 'static.
+        let map: HashMap<u32, Vec<usize>> = node_cpus.iter().cloned().collect();
+        Box::leak(Box::new(NumaTopology::from_node_cpus(map)))
+    }
+
+    /// Mirror of GB200 4-GPU tray topology (post-filter): Grace 0+1 with
+    /// CPUs, HBM nodes 2/10/18/26 with attached GPUs (no CPUs), MIG slots
+    /// 3-9/11-17/19-25/27-33 absent because they have no GPUs and no CPUs.
+    /// Asserts the host-memory pool would target exactly [0, 1].
+    #[test]
+    fn role_classification_gb200_4gpu_tray() {
+        let topology = build_topology(&[
+            (0, (0..72).collect()),
+            (1, (72..144).collect()),
+            (2, vec![]),
+            (10, vec![]),
+            (18, vec![]),
+            (26, vec![]),
+        ]);
+        let all_gpus = vec![
+            gpu("0000:01:00.0", Some(2)),
+            gpu("0000:0a:00.0", Some(10)),
+            gpu("0000:12:00.0", Some(18)),
+            gpu("0000:1a:00.0", Some(26)),
+        ];
+        let mut node_mem: HashMap<u32, u64> = HashMap::new();
+        node_mem.insert(0, 480 * 1024 * 1024 * 1024); // 480 GiB Grace
+        node_mem.insert(1, 480 * 1024 * 1024 * 1024);
+        node_mem.insert(2, 186 * 1024 * 1024 * 1024); // 186 GiB HBM each
+        node_mem.insert(10, 186 * 1024 * 1024 * 1024);
+        node_mem.insert(18, 186 * 1024 * 1024 * 1024);
+        node_mem.insert(26, 186 * 1024 * 1024 * 1024);
+
+        let r = compute_resources_from_inputs(
+            Some(topology),
+            all_gpus,
+            HashMap::new(),
+            true,
+            (0..144).collect(),
+            (0..144).collect(),
+            CgroupInfo::default(),
+            node_mem,
+            crate::hugepage::HugepageInfo::default(),
+            SlicingMode::AssumeAllBusy,
+        );
+
+        // 6 nodes survive the filter: 2 Grace + 4 HBM (each has a GPU).
+        assert_eq!(r.nodes.len(), 6);
+
+        let host: Vec<u32> = r.host_memory_nodes().map(|n| n.node.0).collect();
+        assert_eq!(host, vec![0, 1], "host-memory pool must target only Grace nodes");
+
+        // The four HBM nodes must classify as gpu-mem and be excluded.
+        let gpu_mem: Vec<u32> = r
+            .nodes
+            .iter()
+            .filter(|n| n.role == NumaNodeRole::GpuMemory)
+            .map(|n| n.node.0)
+            .collect();
+        assert_eq!(gpu_mem, vec![2, 10, 18, 26]);
+
+        // Total host memory = 2 * 480 GiB.
+        assert_eq!(
+            r.total_host_memory_bytes(),
+            Some(2 * 480 * 1024 * 1024 * 1024)
+        );
+
+        // Per-node memory readings made it through.
+        let grace0 = r.host_memory_nodes().next().unwrap();
+        assert_eq!(grace0.node.0, 0);
+        assert_eq!(grace0.total_bytes, Some(480 * 1024 * 1024 * 1024));
+    }
+
+    /// Typical x86 dual-socket dev box: 2 NUMA nodes, both have CPUs, no
+    /// GPUs in topology. Host-memory pool targets both.
+    #[test]
+    fn role_classification_x86_2socket() {
+        let topology = build_topology(&[
+            (0, (0..32).collect()),
+            (1, (32..64).collect()),
+        ]);
+        let mut node_mem: HashMap<u32, u64> = HashMap::new();
+        node_mem.insert(0, 128 * 1024 * 1024 * 1024);
+        node_mem.insert(1, 128 * 1024 * 1024 * 1024);
+
+        let r = compute_resources_from_inputs(
+            Some(topology),
+            vec![],
+            HashMap::new(),
+            true,
+            (0..64).collect(),
+            (0..64).collect(),
+            CgroupInfo::default(),
+            node_mem,
+            crate::hugepage::HugepageInfo::default(),
+            SlicingMode::AssumeAllBusy,
+        );
+
+        assert_eq!(r.nodes.len(), 2);
+        let host: Vec<u32> = r.host_memory_nodes().map(|n| n.node.0).collect();
+        assert_eq!(host, vec![0, 1]);
+        assert!(
+            r.nodes
+                .iter()
+                .all(|n| n.role == NumaNodeRole::HostCpu)
+        );
+        assert_eq!(
+            r.total_host_memory_bytes(),
+            Some(256 * 1024 * 1024 * 1024)
+        );
+    }
+
+    /// Reserved variant exists for hand-built fixtures / external consumers
+    /// even though `compute_resources_from_inputs` filters such nodes out
+    /// (no CPUs, no GPUs → dropped).
+    #[test]
+    fn reserved_variant_is_defensible() {
+        let view = NumaNodeView {
+            node: NumaNode(3),
+            cpus: vec![],
+            gpu_indices: vec![],
+            role: NumaNodeRole::Reserved,
+            total_bytes: None,
+        };
+        assert_eq!(view.role.to_string(), "reserved");
     }
 }

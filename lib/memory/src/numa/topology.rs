@@ -102,6 +102,22 @@ impl NumaTopology {
     pub fn is_single_node(&self) -> bool {
         self.num_nodes() == 1
     }
+
+    /// Build a topology directly from a node-to-CPUs map. Test-only;
+    /// production code always reads from sysfs via [`Self::from_sysfs`].
+    #[cfg(test)]
+    pub(crate) fn from_node_cpus(node_to_cpus: HashMap<u32, Vec<usize>>) -> Self {
+        let mut cpu_to_node = HashMap::new();
+        for (node, cpus) in &node_to_cpus {
+            for cpu in cpus {
+                cpu_to_node.insert(*cpu, *node);
+            }
+        }
+        Self {
+            node_to_cpus,
+            cpu_to_node,
+        }
+    }
 }
 
 /// Parse Linux cpulist format into a sorted, deduplicated `Vec<usize>`.

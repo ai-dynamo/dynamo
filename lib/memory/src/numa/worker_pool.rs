@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::{NumaNode, get_device_numa_node};
+use super::{NumaNode, get_device_numa_node, pin_thread_to_numa_node};
+use crate::StorageError;
+use crate::mmap_pinned::{MmappedPinnedOptions, MmappedPinnedStorage};
 
 /// Wrapper for raw pointer that can be sent between threads.
 ///
@@ -345,6 +347,58 @@ impl NumaWorkerPool {
         tracing::trace!("Spawned NUMA worker for node {}", node.0);
 
         Ok(worker)
+    }
+
+    /// Allocate one [`MmappedPinnedStorage`] slab on the given NUMA node.
+    ///
+    /// Spawns a one-shot worker thread pinned to `opt.numa_node` (via
+    /// [`pin_thread_to_numa_node`]) and runs the full mmap → mbind →
+    /// first-touch → `cuMemHostRegister` pipeline there, so first-touch
+    /// pages land on the right node. Returns the wrapped slab.
+    ///
+    /// Why one-shot instead of reusing persistent workers like
+    /// [`Self::allocate_pinned_for_gpu`]: the host-memory pool allocates
+    /// once per NUMA node at startup and never again, so a thread per call
+    /// is simpler and keeps the existing CUDA-path worker pool untouched.
+    ///
+    /// # Contract
+    ///
+    /// `opt.numa_node` **must** be a host-CPU NUMA node (see
+    /// [`crate::resources::NumaNodeRole::HostCpu`] /
+    /// [`crate::Resources::host_memory_nodes`]). Passing a memory-only
+    /// node (GPU HBM, MIG-reservation slot) would either fail
+    /// `pin_thread_to_numa_node` (no CPUs to pin to) or land the
+    /// first-touched pages somewhere unintended.
+    pub fn allocate_mmap_pinned_on_node(
+        &self,
+        opt: MmappedPinnedOptions,
+    ) -> Result<MmappedPinnedStorage, StorageError> {
+        let node = opt.numa_node;
+        let handle = thread::Builder::new()
+            .name(format!("mmap-pinned-node-{}", node.0))
+            .spawn(move || -> Result<MmappedPinnedStorage, StorageError> {
+                if let Err(e) = pin_thread_to_numa_node(node) {
+                    // Warn but proceed: subsequent verification + mbind
+                    // still constrain placement; we lose only the
+                    // first-touch optimization.
+                    tracing::warn!(
+                        "pin to node {}: {} — first-touch may be misplaced",
+                        node.0,
+                        e
+                    );
+                } else {
+                    // Yield once so the scheduler honors the new affinity
+                    // before we start faulting pages.
+                    thread::yield_now();
+                }
+                MmappedPinnedStorage::allocate(opt)
+            })
+            .map_err(|e| {
+                StorageError::AllocationFailed(format!("spawn mmap worker: {}", e))
+            })?;
+        handle
+            .join()
+            .map_err(|_| StorageError::AllocationFailed("mmap worker panicked".into()))?
     }
 
     /// Allocate CUDA pinned memory for a specific GPU (auto-detects NUMA node).
