@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Kernel catalog for the planner-driven CudaAsync executor.
+//! Kernel catalog for the planner-driven Async executor.
 //!
 //! Maps `(src KvBlockLayout, dst KvBlockLayout, dtype) → KernelKind`
 //! and bundles the launch parameters into a [`KernelInvocation`] the

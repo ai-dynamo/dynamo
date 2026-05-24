@@ -50,7 +50,7 @@ fn build_fc_with_block_layout(
 
 /// Build a `BenchmarkKey` for a D2D transfer between two layouts.
 ///
-/// Uses `CudaAsyncD2D` as the route discriminant — the key only needs
+/// Uses `AsyncD2D` as the route discriminant — the key only needs
 /// to be stable within a test.
 fn make_d2d_key(src: &PhysicalLayout, dst: &PhysicalLayout) -> BenchmarkKey {
     // LayoutSignature is pub(crate) on LayoutView; construct a surrogate
@@ -82,7 +82,7 @@ fn make_d2d_key(src: &PhysicalLayout, dst: &PhysicalLayout) -> BenchmarkKey {
         sig.clone(),
         sig,
         Some(cfg.dtype_width_bytes as u32),
-        TransferStrategy::CudaAsyncD2D,
+        TransferStrategy::AsyncD2D,
     )
 }
 

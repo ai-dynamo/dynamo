@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! CUDA event polling-based completion checker.
+//!
+//! Distinct from [`super::DeviceEventChecker`]: this carries a raw typed
+//! `cudarc::driver::CudaEvent` for the planner-driven Staged executor's
+//! CUDA-only path, which sits alongside the multi-backend
+//! `DeviceEventChecker` channel.
 
 use anyhow::Result;
 use cudarc::driver::{CudaEvent, DriverError, result as cuda_result, sys::CUresult};

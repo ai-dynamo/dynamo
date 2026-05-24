@@ -33,7 +33,6 @@ dynamo-tokens = { workspace = true }
 # External
 anyhow         = { workspace = true }
 bytes          = { workspace = true }
-cudarc         = { workspace = true }
 dashmap        = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
@@ -63,7 +62,12 @@ libc = { workspace = true }
 serial_test = "3"
 
 [features]
-default = ["testing"]
+default = ["cuda", "testing"]
+# Backend selection — mutually exclusive at build time, enforced via
+# compile_error! in src/lib.rs. Forwards to the kvbm-physical / kvbm-engine
+# feature graph so cfg-gated call sites line up across the workspace.
+cuda = ["kvbm-engine/cuda", "kvbm-physical/cuda"]
+xpu-sycl = ["kvbm-engine/oneccl", "kvbm-physical/xpu-sycl"]
 static-kernels = ["kvbm-physical/static-kernels"]
 testing = [
     "kvbm-engine/testing",
@@ -77,8 +81,11 @@ testing = [
 # Non-default so the CPU pre-merge job (`cargo test --all-targets`) skips them;
 # run them in the GPU job via `cargo test -p kvbm-connector --features testing-nixl`.
 testing-nixl = []
-# Gates NCCL-accelerated intra-pass layer-wise onboard (G2→G1 via cudarc).
+# Collectives gates: NCCL on CUDA, oneCCL on SYCL/XPU. Mutually exclusive
+# in practice (one is paired with each backend); the kvbm-engine feature
+# graph enforces the dependency wiring.
 nccl = ["kvbm-engine/nccl"]
+oneccl = ["kvbm-engine/oneccl"]
 # Opt-in S3 object-storage integration tests against MinIO.
 # Forwards to kvbm-engine/s3 so the S3ObjectBlockClient surface is available.
 s3 = ["kvbm-engine/s3"]

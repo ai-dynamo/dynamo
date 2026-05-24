@@ -12,6 +12,7 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
+    "lib/device",
     "lib/kvbm-common",
     "lib/kvbm-config",
     "lib/kvbm-connector",
@@ -55,6 +56,7 @@ dynamo-tokenizers = { path = "lib/tokenizers", version = "1.2.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.2.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.2.0" }
 dynamo-memory = { path = "lib/memory", version = "1.2.0" }
+dynamo-device = { path = "lib/device", version = "1.2.0", default-features = false }
 dynamo-mocker = { path = "lib/mocker", version = "1.2.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.2.0", features = ["metrics", "runtime-protocols"] }
 dynamo-protocols = { path = "lib/protocols", version = "1.2.0" }
@@ -73,7 +75,13 @@ kvbm-hub = { path = "lib/kvbm-hub", version = "1.2.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.2.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.2.0" }
 kvbm-observability = { path = "lib/kvbm-observability", version = "1.2.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.2.0" }
+# `default-features = false`: kvbm-physical's own `default = ["cuda"]`
+# would otherwise flow into every consumer via feature unification, even
+# on `--no-default-features --features xpu-sycl` builds of an upstream
+# crate. Each consumer (kvbm-engine, kvbm-connector, mocker) explicitly
+# forwards `kvbm-physical/cuda` from their own `cuda` feature, so the
+# default cuda build is unaffected.
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.2.0", default-features = false }
 kvbm-protocols = { path = "lib/kvbm-protocols", version = "1.2.0" }
 kvbm-runtime = { path = "lib/kvbm-runtime", version = "1.2.0" }
 kvbm-service = { path = "lib/kvbm-service", version = "1.2.0" }
@@ -106,6 +114,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
 ] }
 cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"] }
+oneapi-rs = { path = "../oneAPI-rs/oneapi-rs" }
 dashmap = { version = "6.1" }
 moka = { version = "0.12", features = ["future"] }
 derive_builder = { version = "0.20" }

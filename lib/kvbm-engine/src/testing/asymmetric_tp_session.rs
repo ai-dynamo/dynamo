@@ -45,6 +45,8 @@ use anyhow::{Result, anyhow};
 use kvbm_common::KvDim;
 use kvbm_config::ParallelismMode;
 use kvbm_logical::manager::BlockManager;
+use dynamo_memory::DeviceAllocator;
+use kvbm_physical::device::{DeviceBackend, DeviceContext};
 use kvbm_physical::layout::{KvBlockLayout, LayoutConfig, PhysicalLayout};
 use kvbm_physical::manager::TransferManager;
 use kvbm_physical::transfer::{NixlAgent, StorageKind};
@@ -119,9 +121,18 @@ fn create_fc_layout_nhd(
         .with_config(config)
         .with_block_layout(KvBlockLayout::OperationalNHD)
         .fully_contiguous();
+    let backend = DeviceBackend::detect_backend()?;
     let layout = match storage {
-        StorageKind::Pinned => builder.allocate_pinned(None).build()?,
-        StorageKind::Device(d) => builder.allocate_device(d).build()?,
+        StorageKind::Pinned => {
+            let ctx: Arc<dyn DeviceAllocator> =
+                Arc::new(DeviceContext::new(backend, 0)?);
+            builder.allocate_pinned(ctx).build()?
+        }
+        StorageKind::Device(d) => {
+            let ctx: Arc<dyn DeviceAllocator> =
+                Arc::new(DeviceContext::new(backend, d)?);
+            builder.allocate_device(ctx).build()?
+        }
         StorageKind::System => builder.allocate_system().build()?,
         StorageKind::Disk(_) => {
             anyhow::bail!("disk storage unsupported for asymmetric TP test")
@@ -142,10 +153,12 @@ fn create_test_worker_nhd(
         .require_backend("UCX")
         .build()?;
     let agent = test_agent.into_nixl_agent();
+    let backend = DeviceBackend::detect_backend()?;
     let manager = TransferManager::builder()
         .event_system(Arc::new(event_system))
         .nixl_agent(agent.clone())
-        .cuda_device_id(0)
+        .device_backend(backend)
+        .device_id(0)
         .build()?;
     let layout = create_fc_layout_nhd(agent, storage, layout_config.clone())?;
     let g2_handle = manager.register_layout(layout)?;

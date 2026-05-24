@@ -24,7 +24,12 @@ pub struct G3;
 pub struct G4;
 
 pub mod audit;
-#[cfg(feature = "collectives")]
+// Two backends share this surface: NCCL on CUDA (ryan's path) and oneCCL on
+// SYCL/XPU. The legacy `collectives` umbrella feature still works (it
+// forwards to `nccl`), but the gate checks the concrete features so the
+// module is enabled symmetrically by either CUDA-side `nccl` or
+// SYCL-side `oneccl` without going through the umbrella.
+#[cfg(any(feature = "nccl", feature = "oneccl"))]
 pub mod collectives;
 
 #[doc = include_str!("../docs/leader.md")]

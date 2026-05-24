@@ -8,11 +8,11 @@
 //!      while binding the [`KvConnectorMetadata`].
 //!    - The presence of this action evaluated during the call to start_load_kv
 //!    - The metadata will contain the G2 source block_ids and G1 destination block_ids.
-//!    - Using a TransferManager CudaStream, each layer will be triggered with pre-defined set of events
+//!    - Using a TransferManager device stream, each layer will be triggered with pre-defined set of events
 //!      being recorded between each layer.
-//!    - On wait_for_layer_load, the worker will inject a cuda stream wait event on the torch.cuda.current_stream()
+//!    - On wait_for_layer_load, the worker will inject a stream-wait-event on the torch current stream
 //!      corresponding to the specific event recorded for the specific layer's onboard in start_load_kv.
-//!    - CUDA will ensure that the the next attention layer will not start until the the onboarding for that layer
+//!    - The runtime ensures that the next attention layer will not start until the onboarding for that layer
 //!      is complete.
 //! 2. Inter-Pass Onboarding
 //!    - The VeloWorkerService performs this action via the wrapped DirectWorker.
@@ -23,9 +23,9 @@
 //!    - As part of the [`KvConnectorMetadata`], an optional ForwardPassCompletionEvent will be provided
 //!      from the leader.
 //!    - On binding the metadata, the action will be armed and triggered on the last call to save_kv_layer.
-//!      - The arming of the action is the creation of CudaEvent on bindings
-//!      - The triggering is to record the CudaEvent on the Torch CUDA stream on the last call to save_kv_layer;
-//!        the event immediately pass to an async task which await on the completion, then triggers the Velo
+//!      - The arming of the action is the creation of a DeviceEvent on bindings
+//!      - The triggering is to record the DeviceEvent on the torch device stream on the last call to save_kv_layer;
+//!        the event is immediately passed to an async task which awaits on its completion, then triggers the Velo
 //!        active message to trigger the EventHandle specific to the worker's rank back to the leader.
 //!    - The ForwardPassCompletionEvent is used as a precondition for leader initiated action that require the
 //!      forward pass completion event to be triggered.
@@ -36,16 +36,12 @@ mod init;
 mod state;
 mod velo;
 
-use cudarc::driver::CudaStream;
 pub use velo::client::ConnectorWorkerClient;
 
 use init::{PendingLayoutMode, PendingWorkerState};
 use state::{WorkerDetails, WorkerState};
 
 use anyhow::{Result, bail};
-use cudarc::driver::sys::{
-    CUevent, CUresult, CUstream, cuEventQuery, cuEventRecord, cuStreamWaitEvent, cudaError_enum,
-};
 use derive_getters::Dissolve;
 use dynamo_memory::TensorDescriptor;
 use parking_lot::Mutex;
@@ -60,6 +56,7 @@ use crate::{BlockId, KvbmRuntime};
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_engine::worker::{DirectWorker, WorkerTransfers};
 use kvbm_physical::TransferOptions;
+use kvbm_physical::device::{DeviceEvent, DeviceStream};
 
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
@@ -112,24 +109,25 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     /// Wait for a specific layer's KV cache load to complete.
     ///
     /// If intra-pass onboarding was triggered in `start_load_kv`, this method
-    /// inserts a `cudaStreamWaitEvent` on the provided torch stream to synchronize
+    /// inserts a stream-wait-event on the provided torch stream to synchronize
     /// with the layer's onboard completion. This ensures the attention computation
     /// for this layer doesn't start until its KV cache data is available.
     ///
     /// # Arguments
     /// * `layer_index` - The layer index to wait for
-    /// * `stream_handle` - Raw CUDA stream handle (u64) from Python's current torch stream
+    /// * `stream_handle` - Raw device stream handle (u64): a `CUstream` on
+    ///   CUDA, a `sycl_rs_queue_t*` on SYCL — passed in from Python.
     fn wait_for_layer_load(&self, layer_index: usize, stream_handle: u64) -> Result<()>;
 
     /// Save KV layer and trigger forward pass completion on last layer.
     ///
     /// Always callable - returns immediately if no action is needed for this layer.
-    /// On the last layer, records a CUDA event and spawns a task to trigger
+    /// On the last layer, records a device event and spawns a task to trigger
     /// the Velo forward pass completion event.
     ///
     /// # Arguments
     /// * `layer_index` - The layer index being saved
-    /// * `stream_handle` - Raw CUDA stream handle (u64) from Python's current stream
+    /// * `stream_handle` - Raw device stream handle (u64) from Python's current stream
     fn save_kv_layer(&self, layer_index: usize, stream_handle: u64) -> Result<()>;
 
     /// Wait for the intra-pass offload to complete. This is a blocking call; however, we might choose to make it non-blocking
@@ -171,7 +169,7 @@ impl GpuInfo {
 }
 
 struct IntraPassOffloadState {
-    stream: Arc<CudaStream>,
+    stream: Arc<DeviceStream>,
     g1_src_block_ids: Arc<[BlockId]>,
     g2_dst_block_ids: Arc<[BlockId]>,
 }
@@ -188,7 +186,7 @@ pub struct ConnectorWorker {
     metadata: Mutex<Option<KvConnectorMetadata>>,
     /// Flag indicating whether intra-pass onboarding is active for this iteration.
     /// Set to true in start_load_kv when metadata has intra_pass_load,
-    /// used by wait_for_layer_load to decide whether to insert cudaStreamWaitEvent.
+    /// used by wait_for_layer_load to decide whether to insert a stream-wait-event.
     intra_pass_onboard_active: Arc<AtomicBool>,
     /// Flag indicating whether forward pass completion notification is active.
     /// Set to true in bind_connector_metadata when a Velo event is present,
@@ -270,7 +268,7 @@ impl ConnectorWorker {
     ///
     /// This is called from `save_kv_layer` when `needs_offload_action` returns true.
     /// Actions performed:
-    /// - Record CUDA event on the stream for this layer
+    /// - Record device event on the stream for this layer
     /// - On last layer with forward pass completion: spawn task to trigger Velo event
     fn perform_offload_action(&self, layer_index: usize, stream_handle: u64) -> Result<()> {
         let is_last_layer = layer_index == self.num_layers() - 1;
@@ -284,35 +282,21 @@ impl ConnectorWorker {
 
         let event = &layer_events[layer_index];
 
-        // Record CUDA event on the provided stream
-        unsafe {
-            let status = cuEventRecord(event.cu_event(), stream_handle as CUstream);
-            if status != cudaError_enum::CUDA_SUCCESS {
-                bail!("cuEventRecord failed with status: {:?}", status);
-            }
-        }
+        // Record device event on the torch-provided raw stream handle.
+        event.record_on_raw(stream_handle)?;
 
-        tracing::trace!(layer_index, "Recorded save layer CUDA event");
+        tracing::trace!(layer_index, "Recorded save layer device event");
 
         if let Some(intra_pass_offload_state) = &self.intra_pass_offload_active.lock().as_ref() {
-            // record a stream wait event on the intra_pass_offload_state.stream with the event just recorded
-            // Insert cudaStreamWaitEvent to make torch stream wait for this layer's onboard
-            unsafe {
-                let status = cuStreamWaitEvent(
-                    intra_pass_offload_state.stream.cu_stream(),
-                    event.cu_event(),
-                    0, // flags = 0
-                );
-                if status != cudaError_enum::CUDA_SUCCESS {
-                    bail!("cuStreamWaitEvent failed with status: {:?}", status);
-                }
-            }
+            // Make the offload stream wait for this layer's compute event before
+            // issuing the G1→G2 copy.
+            intra_pass_offload_state.stream.wait_event(event)?;
 
             let worker = self.state.service.get().expect("service not set").worker();
 
             let options = TransferOptions::builder()
                 .layer_range(layer_index..layer_index + 1)
-                .cuda_stream(intra_pass_offload_state.stream.clone())
+                .device_stream(intra_pass_offload_state.stream.clone())
                 .build()?;
 
             // trigger a local transfer operation from g1 to g2 with the block ids using the intra_pass_offload_state.stream
@@ -333,7 +317,7 @@ impl ConnectorWorker {
                     .get()
                     .expect("offload_complete_event not set")
                     .clone();
-                event.record(intra_pass_offload_state.stream.as_ref())?;
+                event.record_on(&intra_pass_offload_state.stream)?;
             }
         }
 
@@ -345,10 +329,10 @@ impl ConnectorWorker {
         Ok(())
     }
 
-    /// Spawn async task to wait for CUDA event then trigger Velo forward pass event.
+    /// Spawn async task to wait for the device event then trigger Velo forward pass event.
     fn trigger_forward_pass_completion(
         &self,
-        cuda_event: Arc<cudarc::driver::CudaEvent>,
+        device_event: Arc<DeviceEvent>,
     ) -> Result<()> {
         // Take the Velo event handle
         let velo_event = self.state.take_forward_pass_velo_event().ok_or_else(|| {
@@ -358,34 +342,32 @@ impl ConnectorWorker {
         })?;
 
         let messenger = self.runtime.messenger().clone();
-        let cuda_event_handle = cuda_event.cu_event() as u64;
 
         tracing::debug!(
             ?velo_event,
-            cuda_event = cuda_event_handle,
             "Spawning forward pass completion task"
         );
 
         self.runtime.messenger().tracker().spawn_on(
             async move {
-                // Poll the CUDA event until complete
+                // Poll the device event until complete (mirrors cuEventQuery
+                // loop shape; backend-agnostic via DeviceEvent).
                 loop {
-                    let status = unsafe { cuEventQuery(cuda_event_handle as CUevent) };
-                    match status {
-                        CUresult::CUDA_SUCCESS => break,
-                        CUresult::CUDA_ERROR_NOT_READY => {
+                    match device_event.is_complete() {
+                        Ok(true) => break,
+                        Ok(false) => {
                             // Yield to other tasks
                             tokio::task::yield_now().await;
                         }
-                        _ => {
-                            tracing::error!("CUDA event query failed: {:?}", status);
+                        Err(e) => {
+                            tracing::error!("Device event query failed: {}", e);
                             break;
                         }
                     }
                 }
 
                 // Trigger the Velo forward pass event
-                tracing::debug!(?velo_event, "CUDA event complete, triggering Velo event");
+                tracing::debug!(?velo_event, "Device event complete, triggering Velo event");
                 if let Err(e) = messenger.events().trigger(velo_event).await {
                     tracing::error!("Failed to trigger forward pass event: {}", e);
                 }
@@ -548,7 +530,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     fn bind_connector_metadata(&self, metadata: KvConnectorMetadata) -> Result<()> {
         tracing::debug!(iteration = metadata.iteration, "Binding connector metadata");
 
-        // Store Velo event handle if present (we use pre-allocated CUDA events now)
+        // Store Velo event handle if present (we use pre-allocated device events now)
         if let Some(event_map) = &metadata.foward_pass_completion_events {
             let my_instance_id = self.state.runtime().messenger().instance_id();
 
@@ -644,10 +626,11 @@ impl ConnectorWorkerInterface for ConnectorWorker {
 
             let layer_events = self.state.onboard_layer_events()?;
 
-            // Pure-CUDA per-layer H2D onboard: uses a dedicated H2D stream and
-            // records a CudaEvent per layer so that wait_for_layer_load can
-            // inject a cuStreamWaitEvent on the torch compute stream before
-            // each layer's forward pass reads its KV slots. No NCCL involved.
+            // Backend-agnostic per-layer H2D onboard: uses a dedicated H2D
+            // stream and records a DeviceEvent per layer so that
+            // wait_for_layer_load can inject a stream-wait-event on the torch
+            // compute stream before each layer's forward pass reads its KV
+            // slots. No NCCL involved.
             worker.execute_local_layerwise_onboard(
                 &load.g2_src_block_ids,
                 &load.g1_dst_block_ids,
@@ -698,21 +681,13 @@ impl ConnectorWorkerInterface for ConnectorWorker {
 
         let event = &layer_events[layer_index];
 
-        // Insert cudaStreamWaitEvent to make torch stream wait for this layer's onboard
-        unsafe {
-            let status = cuStreamWaitEvent(
-                stream_handle as CUstream,
-                event.cu_event(),
-                0, // flags = 0
-            );
-            if status != cudaError_enum::CUDA_SUCCESS {
-                bail!("cuStreamWaitEvent failed with status: {:?}", status);
-            }
-        }
+        // Insert a stream-wait dependency on the torch-provided raw stream
+        // so that subsequent attention work waits for this layer's onboard.
+        event.wait_on_raw(stream_handle)?;
 
         tracing::trace!(
             layer_index,
-            "Inserted cudaStreamWaitEvent for layer onboard sync"
+            "Inserted stream-wait-event for layer onboard sync"
         );
 
         Ok(())

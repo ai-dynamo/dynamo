@@ -83,7 +83,7 @@ pub(crate) struct GraphCacheKey {
     pub dtype_width_bytes: Option<u32>,
     /// `TransferStrategy` discriminant encoded as its debug-string hash
     /// substitute. Stored as a u8 index into the strategy family:
-    ///   0 = CudaAsyncH2D, 1 = CudaAsyncD2H, 2 = CudaAsyncD2D,
+    ///   0 = AsyncH2D, 1 = AsyncD2H, 2 = AsyncD2D,
     ///   3+ reserved for future families.
     /// The scorer only emits `CudaGraphReplay` on Cuda-family routes; the
     /// `route_family` field enforces the graph cache doesn't accidentally
@@ -252,15 +252,15 @@ pub(crate) struct SelectionContext<'a> {
 }
 
 impl TransferStrategy {
-    /// Returns `true` for `CudaAsync{H2D, D2H, D2D}`.
+    /// Returns `true` for `Async{H2D, D2H, D2D}`.
     ///
     /// Used by the scorer to distinguish Cuda-family routes from NIXL.
     pub(crate) fn is_cuda_family(self) -> bool {
         matches!(
             self,
-            TransferStrategy::CudaAsyncH2D
-                | TransferStrategy::CudaAsyncD2H
-                | TransferStrategy::CudaAsyncD2D
+            TransferStrategy::AsyncH2D
+                | TransferStrategy::AsyncD2H
+                | TransferStrategy::AsyncD2D
         )
     }
 
@@ -587,7 +587,7 @@ mod tests {
             startup_benchmark: false,
         };
         SelectionContext {
-            strategy: TransferStrategy::CudaAsyncD2D,
+            strategy: TransferStrategy::AsyncD2D,
             descriptor_count: 1,
             total_bytes: 4096,
             dtype: None,
@@ -1083,7 +1083,7 @@ mod tests {
             descriptor_count: 8,
             total_bytes: 32768,
             dtype_width_bytes: Some(2),
-            route_family: 2, // CudaAsyncD2D
+            route_family: 2, // AsyncD2D
             candidate_class: 0,
         }
     }
@@ -1118,7 +1118,7 @@ mod tests {
             startup_benchmark: false,
         };
         let ctx = SelectionContext {
-            strategy: TransferStrategy::CudaAsyncD2D,
+            strategy: TransferStrategy::AsyncD2D,
             descriptor_count: 8,
             total_bytes: 32768,
             dtype: None,
@@ -1205,7 +1205,7 @@ mod tests {
             startup_benchmark: true,
         };
         SelectionContext {
-            strategy: TransferStrategy::CudaAsyncD2D,
+            strategy: TransferStrategy::AsyncD2D,
             descriptor_count: 4,
             total_bytes: 16384,
             dtype: None,

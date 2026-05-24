@@ -32,6 +32,7 @@ pub mod pool;
 /// Common imports for working with memory types.
 pub mod prelude;
 
+mod allocator;
 mod device;
 #[cfg(target_os = "linux")]
 mod disk;
@@ -43,6 +44,7 @@ mod tensor;
 #[cfg(test)]
 mod tests;
 
+pub use allocator::DeviceAllocator;
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::DeviceStorage;
 #[cfg(target_os = "linux")]
@@ -53,12 +55,18 @@ pub use hugepage::{HugepageInfo, HugepagePool, PerNodeHugepages, ThpMode};
 #[cfg(target_os = "linux")]
 pub use mmap_pinned::{HugepageMode, HugepageTier, MmappedPinnedOptions, MmappedPinnedStorage};
 #[cfg(target_os = "linux")]
-pub use numa::{NumaNode, PciAddress, is_numa_disabled, is_numa_enabled};
+pub use numa::{
+    NumaNode, PciAddress, get_numa_node_for_pci_address, is_numa_disabled, is_numa_enabled,
+};
+#[cfg(target_os = "linux")]
+pub use numa::worker_pool::PinnedAllocator;
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};
 #[cfg(target_os = "linux")]
 pub use resources::{GpuView, NumaNodeRole, NumaNodeView, Resources, SliceSource, SlicingMode};
+#[cfg(feature = "xpu-sycl")]
+pub use pool::{SyclMemPool, SyclMemPoolBuilder};
 pub use system::SystemStorage;
 pub use tensor::{TensorDescriptor, TensorDescriptorExt};
 
@@ -111,12 +119,11 @@ pub enum StorageError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    // #[cfg(feature = "cuda")]
-    #[error("CUDA error: {0}")]
-    Cuda(#[from] cudarc::driver::DriverError),
-
     #[error("NIXL error: {0}")]
     Nixl(#[from] nixl_sys::NixlError),
+
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cudarc::driver::DriverError),
 }
 
 /// Storage type classification.

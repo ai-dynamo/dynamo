@@ -13,6 +13,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::BlockId;
+use crate::device::{DeviceBackend, DeviceContext};
 use crate::{
     layout::{BlockDimension, LayoutConfig, PhysicalLayout},
     manager::{LayoutHandle, TransferManager},
@@ -393,9 +394,15 @@ pub fn create_fc_layout_with_config(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
+        StorageKind::Pinned | StorageKind::Device(_) => {
+            let backend = DeviceBackend::detect_backend().expect("No GPU backend available");
+            match storage_kind {
+                StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(backend, 0).unwrap())).build().unwrap(),
+                StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(backend, device_id).unwrap())).build().unwrap(),
+                _ => unreachable!(),
+            }
+        }
     }
 }
 
@@ -420,9 +427,15 @@ pub fn create_lw_layout_with_config(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
+        StorageKind::Pinned | StorageKind::Device(_) => {
+            let backend = DeviceBackend::detect_backend().expect("No GPU backend available");
+            match storage_kind {
+                StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(backend, 0).unwrap())).build().unwrap(),
+                StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(backend, device_id).unwrap())).build().unwrap(),
+                _ => unreachable!(),
+            }
+        }
     }
 }
 
@@ -455,10 +468,12 @@ pub fn create_transfer_manager(
     agent: NixlAgent,
     capabilities: Option<TransferCapabilities>,
 ) -> Result<TransferManager> {
+    let backend = DeviceBackend::detect_backend()?;
     TransferManager::builder()
         .capabilities(capabilities.unwrap_or_default())
         .nixl_agent(agent)
-        .cuda_device_id(0)
+        .device_backend(backend)
+        .device_id(0)
         .build()
 }
 
@@ -471,9 +486,11 @@ pub fn create_transfer_manager(
 /// control, use the TransferManager builder directly with a custom event system.
 pub fn create_rdma_transfer_manager(agent_name: &str) -> Result<TransferManager> {
     let agent = create_test_agent_with_backends(agent_name, &["UCX"])?;
+    let backend = DeviceBackend::detect_backend()?;
     TransferManager::builder()
         .nixl_agent(agent)
-        .cuda_device_id(0)
+        .device_backend(backend)
+        .device_id(0)
         .build()
 }
 

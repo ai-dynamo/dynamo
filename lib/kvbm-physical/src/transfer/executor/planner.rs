@@ -5,7 +5,7 @@
 //!
 //! Wires `transfer::plan::plan_copy` into the existing transfer
 //! infrastructure for two strategy families:
-//! - [`TransferStrategy::CudaAsync{H2D, D2H, D2D}`] — dispatched via
+//! - [`TransferStrategy::Async{H2D, D2H, D2D}`] — dispatched via
 //!   `kvbm_kernels::memcpy_batch` (PR-5).
 //! - [`TransferStrategy::Nixl{Read, Write, ReadFlipped, WriteFlipped}`]
 //!   — dispatched via NIXL `create_xfer_req` / `post_xfer_req` (PR-5.6).
@@ -141,14 +141,14 @@ where
     Ok((a_dev, b_dev))
 }
 
-/// Dispatch a CudaAsync transfer through the stride-aware planner.
+/// Dispatch a Async transfer through the stride-aware planner.
 ///
 /// Returns the same kind of [`TransferCompleteNotification`] the
 /// legacy `execute_cuda_transfer` returns, or an `Err` when the
 /// transfer cannot be safely handled by the PR-5 planner path.
 ///
 /// Bails (no fallback) when:
-/// - the strategy is not one of `CudaAsync{H2D, D2H, D2D}` —
+/// - the strategy is not one of `Async{H2D, D2H, D2D}` —
 ///   enforced by [`validate_cuda_planner_entry`];
 /// - the src/dst block-id lists have unequal length —
 ///   enforced by [`validate_planner_block_ids`];
@@ -204,7 +204,7 @@ pub(crate) fn execute_planner_cuda_transfer(
                 s
             } else {
                 match strategy {
-                    TransferStrategy::CudaAsyncD2H => ctx.next_d2h_streams(),
+                    TransferStrategy::AsyncD2H => ctx.next_d2h_streams(),
                     _ => ctx.next_h2d_streams(),
                 }
             }
@@ -910,9 +910,9 @@ fn plan_and_lower(
                 && let [Candidate::DirectDma { ops }] = &candidates[..]
             {
                 let route_family = match strategy {
-                    TransferStrategy::CudaAsyncH2D => 0u8,
-                    TransferStrategy::CudaAsyncD2H => 1u8,
-                    TransferStrategy::CudaAsyncD2D => 2u8,
+                    TransferStrategy::AsyncH2D => 0u8,
+                    TransferStrategy::AsyncD2H => 1u8,
+                    TransferStrategy::AsyncD2D => 2u8,
                     _ => 3u8,
                 };
                 // `dtype_width_bytes` from LayoutConfig is always set
@@ -1208,7 +1208,7 @@ pub(crate) fn validate_planner_block_ids(
 
 /// Per-entrypoint guard for [`execute_planner_cuda_transfer`].
 ///
-/// Rejects strategies outside the `CudaAsync{H2D,D2H,D2D}` family.
+/// Rejects strategies outside the `Async{H2D,D2H,D2D}` family.
 /// Layout-pair compatibility is enforced downstream by the kernel
 /// catalog (`build_transform_invocation`): identical layouts go
 /// through the Direct path, registered transform pairs through the
@@ -1221,12 +1221,12 @@ pub(crate) fn validate_cuda_planner_entry(
 ) -> Result<()> {
     if !matches!(
         strategy,
-        TransferStrategy::CudaAsyncH2D
-            | TransferStrategy::CudaAsyncD2H
-            | TransferStrategy::CudaAsyncD2D
+        TransferStrategy::AsyncH2D
+            | TransferStrategy::AsyncD2H
+            | TransferStrategy::AsyncD2D
     ) {
         bail!(
-            "validate_cuda_planner_entry: strategy {strategy:?} is not a CudaAsync \
+            "validate_cuda_planner_entry: strategy {strategy:?} is not a Async \
              variant — caller routed a non-Cuda strategy into the Cuda planner \
              entrypoint"
         );
@@ -2458,13 +2458,13 @@ mod tests {
 
     // ──────────── validate_cuda_planner_entry ────────────
 
-    /// Same operational layout + CudaAsync strategy passes.
+    /// Same operational layout + Async strategy passes.
     #[test]
     fn cuda_entry_passes_same_operational_layout() {
         for s in [
-            TransferStrategy::CudaAsyncH2D,
-            TransferStrategy::CudaAsyncD2H,
-            TransferStrategy::CudaAsyncD2D,
+            TransferStrategy::AsyncH2D,
+            TransferStrategy::AsyncD2H,
+            TransferStrategy::AsyncD2D,
         ] {
             let r = validate_cuda_planner_entry(
                 s,
@@ -2486,7 +2486,7 @@ mod tests {
         // Operational ↔ Universal — PR-6.1 catalog has both directions.
         assert!(
             validate_cuda_planner_entry(
-                TransferStrategy::CudaAsyncD2D,
+                TransferStrategy::AsyncD2D,
                 KvBlockLayout::OperationalNHD,
                 KvBlockLayout::Universal,
             )
@@ -2497,7 +2497,7 @@ mod tests {
         // time.
         assert!(
             validate_cuda_planner_entry(
-                TransferStrategy::CudaAsyncD2D,
+                TransferStrategy::AsyncD2D,
                 KvBlockLayout::OperationalNHD,
                 KvBlockLayout::OperationalHND,
             )
@@ -2505,7 +2505,7 @@ mod tests {
         );
     }
 
-    /// Non-CudaAsync strategies routed into the Cuda entrypoint
+    /// Non-Async strategies routed into the Cuda entrypoint
     /// are an internal-routing bug; reject explicitly.
     #[test]
     fn cuda_entry_rejects_non_cuda_strategies() {
@@ -2581,9 +2581,9 @@ mod tests {
     #[test]
     fn nixl_entry_rejects_non_nixl_strategies() {
         for s in [
-            TransferStrategy::CudaAsyncH2D,
-            TransferStrategy::CudaAsyncD2H,
-            TransferStrategy::CudaAsyncD2D,
+            TransferStrategy::AsyncH2D,
+            TransferStrategy::AsyncD2H,
+            TransferStrategy::AsyncD2D,
             TransferStrategy::Memcpy,
             TransferStrategy::Invalid,
         ] {

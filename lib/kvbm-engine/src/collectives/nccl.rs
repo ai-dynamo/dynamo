@@ -69,20 +69,7 @@ use kvbm_physical::transfer::TransferCompleteNotification;
 use super::CollectiveOps;
 use super::bootstrap::{NcclBootstrap, check_nccl_result};
 
-/// Trait for resolving logical layout handles to physical layouts.
-///
-/// This trait decouples [`NcclCollectives`] from [`PhysicalWorker`], allowing
-/// the collective operations to work with any layout resolution strategy.
-pub trait LayoutResolver: Send + Sync {
-    /// Resolve a logical layout handle to a physical layout.
-    ///
-    /// # Arguments
-    /// * `logical` - The logical layout handle (G1, G2, G3)
-    ///
-    /// # Returns
-    /// The physical layout for the given logical handle, or an error if not found.
-    fn resolve_layout(&self, logical: LogicalLayoutHandle) -> Result<PhysicalLayout>;
-}
+use super::LayoutResolver;
 
 /// Trait for registering CUDA events for completion notification.
 ///

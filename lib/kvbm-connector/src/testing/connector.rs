@@ -28,6 +28,8 @@ use crate::connector::leader::ConnectorLeader;
 use crate::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
 use crate::{InstanceId, KvbmRuntime};
 use kvbm_engine::leader::InstanceLeader;
+use dynamo_memory::DeviceAllocator;
+use kvbm_physical::device::{DeviceBackend, DeviceContext};
 use kvbm_physical::layout::LayoutConfig;
 use kvbm_physical::layout::{BlockDimension, PhysicalLayout};
 use kvbm_physical::transfer::{BlockChecksum, FillPattern};
@@ -1227,12 +1229,16 @@ impl TestConnectorInstanceBuilder {
             // Get nixl_agent before moving worker_runtime
             let nixl_agent = worker_runtime.nixl_agent().unwrap().clone();
 
-            // Create PhysicalLayout with real GPU memory allocation
+            // Create PhysicalLayout with real GPU memory allocation.
+            // Post-merge `allocate_device` takes `Arc<dyn DeviceAllocator>`
+            // (XPU multi-backend API) — wrap a CUDA device-0 context.
+            let dev_ctx: Arc<dyn DeviceAllocator> =
+                Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0)?);
             let layout = Arc::new(
                 PhysicalLayout::builder(nixl_agent)
                     .with_config(self.layout_config.clone())
                     .layer_separate(BlockDimension::BlockIsFirstDim)
-                    .allocate_device(0)
+                    .allocate_device(dev_ctx)
                     .build()?,
             );
 

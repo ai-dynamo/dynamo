@@ -212,7 +212,7 @@ fn build_fc_with_block_layout(
 /// byte-for-byte.
 ///
 /// There's no legacy comparison path for transforms — the legacy
-/// CudaAsync executor doesn't dispatch `universal_from_block` /
+/// Async executor doesn't dispatch `universal_from_block` /
 /// `block_from_universal`, so a side-by-side check is impossible.
 /// The round-trip pattern is the strongest correctness check
 /// available.

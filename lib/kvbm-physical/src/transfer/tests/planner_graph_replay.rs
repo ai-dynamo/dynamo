@@ -54,7 +54,7 @@ fn ctx_with_graph_replay(agent: NixlAgent) -> crate::manager::TransferManager {
     create_transfer_context(agent, Some(caps)).unwrap()
 }
 
-/// Run a planner-path CudaAsync D2D transfer via `execute_transfer` with
+/// Run a planner-path Async D2D transfer via `execute_transfer` with
 /// `use_planner = true`.  This routes through the full planner dispatcher
 /// (including `CudaGraphReplay` candidate selection when the capability is
 /// enabled) without calling any private planner internals directly.

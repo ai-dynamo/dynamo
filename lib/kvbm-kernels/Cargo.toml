@@ -26,12 +26,33 @@ static-kernels = []
 # Tests are gated with #[cfg(all(test, feature = "testing-cuda", not(stub_kernels)))]
 testing-cuda = []
 
+# Enable core XPU SYCL kernels (vectorized_copy). Requires icpx/DPC++ compiler;
+# build.rs will fail clearly if the compiler is not found when this feature is active.
+xpu-sycl = []
+
+# Enable XPU permute kernels (block/universal layout transforms). Implies xpu-sycl.
+# Tests are gated with #[cfg(all(test, feature = "testing-xpu-sycl"))]
+xpu-sycl-permute = ["xpu-sycl"]
+
+# Enable XPU tests. Implies xpu-sycl-permute (which implies xpu-sycl),
+# so a single `--features testing-xpu-sycl` compiles the SYCL kernels
+# the tests call into.
+testing-xpu-sycl = ["xpu-sycl-permute"]
+
 # Enable kvbench example (pulls in clap for CLI)
 kvbench = ["dep:clap"]
+
+
+# Enable XPU SYCL kvbench example (pulls in clap + oneapi-rs)
+kvbench-xpu-sycl = ["dep:clap", "dep:oneapi-rs", "xpu-sycl-permute"]
 
 [[example]]
 name = "kvbench"
 required-features = ["kvbench"]
+
+[[example]]
+name = "kvbench_xpu_sycl"
+required-features = ["kvbench-xpu-sycl"]
 
 [dependencies]
 cudarc = { workspace = true }
@@ -39,10 +60,16 @@ cudarc = { workspace = true }
 # kvbench
 clap = { version = "4", features = ["derive"], optional = true }
 
+
+
+# XPU SYCL support (for kvbench_xpu_sycl)
+oneapi-rs = { workspace = true, optional = true }
+
 [dev-dependencies]
 ndarray = "0.17.2"
 half = "2"
 rand = { workspace = true }
 cudarc = { workspace = true, features = ["f16"] }
+oneapi-rs = { workspace = true, features = ["f16"] }
 
 [build-dependencies]

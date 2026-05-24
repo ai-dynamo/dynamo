@@ -35,6 +35,8 @@ use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_memory::TensorDescriptor;
 
+use dynamo_memory::DeviceAllocator;
+use kvbm_physical::device::{DeviceBackend, DeviceContext};
 use kvbm_physical::transfer::context::TokioRuntime;
 
 /// Pick G2's `KvBlockLayout` from `(g1, mode)` per the c3 rule.
@@ -374,11 +376,17 @@ impl PendingWorkerState {
                     "Allocating pinned host memory for G2 layout"
                 );
 
+                // Post-merge `allocate_pinned` takes `Arc<dyn DeviceAllocator>`
+                // (XPU multi-backend API) — wrap the worker's CUDA device id.
+                let pin_ctx: Arc<dyn DeviceAllocator> = Arc::new(DeviceContext::new(
+                    DeviceBackend::Cuda,
+                    self.cuda_device_id as u32,
+                )?);
                 let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(host_layout)
                     .fully_contiguous()
                     .with_block_layout(g2_block_layout)
-                    .allocate_pinned(Some(self.cuda_device_id as u32))
+                    .allocate_pinned(pin_ctx)
                     .build()
                     .map_err(|e| {
                         tracing::error!(

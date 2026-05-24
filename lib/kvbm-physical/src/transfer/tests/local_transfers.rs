@@ -7,6 +7,22 @@
 //! - Different storage types (System, Pinned, Device)
 //! - Different layout types (Fully Contiguous, Layer-wise)
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
+//!
+//! # Usage for Multiple Backends
+//!
+//! Requires `testing-kvbm` feature plus a device backend (`cuda` or `xpu-sycl`):
+//!
+//! ```sh
+//! # CUDA
+//! cargo test -p kvbm-physical --features testing-kvbm,cuda -- transfer::tests::local_transfers
+//!
+//!
+//! # XPU (SYCL) — requires icpx (Intel DPC++ compiler)
+//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-sycl -- transfer::tests::local_transfers
+//!
+//! # Release mode (recommended for GPU-bound tests)
+//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-sycl --release -- transfer::tests::local_transfers
+//! ```
 
 #[cfg(feature = "testing-nixl-gds")]
 use super::gate::nixl_serial;
@@ -83,10 +99,9 @@ pub(super) fn build_agent_for_kinds(kinds: &[StorageKind]) -> Result<NixlAgent> 
                 }
             }
             StorageKind::Device(_) => {
-                if !added_backends.contains(&"UCX") {
-                    agent.add_backend("UCX")?; // Required for VRAM
-                    added_backends.push("UCX");
-                }
+                // No NIXL backend needed for local device transfers.
+                // Local H2D/D2H/D2D go through SYCL/CUDA APIs directly.
+                // UCX would only be needed for remote RDMA transfers.
             }
             StorageKind::Disk(_) => {
                 if !added_backends.contains(&"POSIX") {
@@ -501,7 +516,7 @@ async fn test_page_size_sweep_partial_layer(
 ///
 /// Strategy selection routes pinned↔disk through `TransferStrategy::NixlRead/Write`,
 /// so this is the only sweep that actually exercises NIXL transport (the other
-/// sweeps land in `Memcpy` / `CudaAsync*`). The chunk sizes submitted to NIXL
+/// sweeps land in `Memcpy` / `Async*`). The chunk sizes submitted to NIXL
 /// scale with `page_size * inner_dim * dtype_width`, which is exactly the
 /// indexing math we want to verify across the production range.
 ///

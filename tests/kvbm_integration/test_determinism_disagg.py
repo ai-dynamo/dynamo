@@ -51,9 +51,34 @@ pytestmark = [
 SUCCESS_RATE_THRESHOLD = 0.95
 
 
+def _detect_device() -> str:
+    """Detect device type: 'cuda' or 'xpu'."""
+    try:
+        subprocess.check_output(
+            ["nvidia-smi"], stderr=subprocess.DEVNULL, timeout=5
+        )
+        return "cuda"
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
+    try:
+        subprocess.check_output(
+            ["xpu-smi", "discovery"], stderr=subprocess.DEVNULL, timeout=5
+        )
+        return "xpu"
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        raise RuntimeError("No supported device found (tried nvidia-smi and xpu-smi)")
+
+
+_DEVICE_TYPE = _detect_device()
+# CUDA uses CUDA_VISIBLE_DEVICES; XPU uses ZE_AFFINITY_MASK (same value format).
+_DEVICE_VISIBILITY_ENV = "CUDA_VISIBLE_DEVICES" if _DEVICE_TYPE == "cuda" else "ZE_AFFINITY_MASK"
+
+
 # TRT-LLM will crash when loading the deepseek-ai/DeepSeek-R1-Distill-Llama-8B model on GB200 with a KV block size of 16.
 # As a workaround, use a block size of 32 on GB200.
 def is_gb200() -> bool:
+    if _DEVICE_TYPE != "cuda":
+        return False
     out = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
         text=True,
@@ -294,10 +319,10 @@ class LLMServerManager:
 
         # Create separate environment configs for different processes
         decoder_env = self.env.copy()
-        decoder_env["CUDA_VISIBLE_DEVICES"] = "0"
+        decoder_env[_DEVICE_VISIBILITY_ENV] = "0"
 
         prefiller_env = self.env.copy()
-        prefiller_env["CUDA_VISIBLE_DEVICES"] = "1"
+        prefiller_env[_DEVICE_VISIBILITY_ENV] = "1"
 
         # Launch frontend first
         self.process_frontend = subprocess.Popen(

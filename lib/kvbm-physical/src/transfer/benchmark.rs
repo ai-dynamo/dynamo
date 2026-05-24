@@ -95,7 +95,7 @@ pub struct BenchmarkKey {
     /// integer so the type stays hashable without a custom impl.
     ///
     /// Mapping:
-    ///   0 = CudaAsyncH2D, 1 = CudaAsyncD2H, 2 = CudaAsyncD2D,
+    ///   0 = AsyncH2D, 1 = AsyncD2H, 2 = AsyncD2D,
     ///   10 = NixlRead, 11 = NixlWrite, 12 = NixlReadFlipped,
     ///   13 = NixlWriteFlipped, 255 = Other.
     pub route_discriminant: u8,
@@ -125,9 +125,9 @@ impl BenchmarkKey {
 /// numbers, never reassign existing ones.
 fn strategy_discriminant(s: TransferStrategy) -> u8 {
     match s {
-        TransferStrategy::CudaAsyncH2D => 0,
-        TransferStrategy::CudaAsyncD2H => 1,
-        TransferStrategy::CudaAsyncD2D => 2,
+        TransferStrategy::AsyncH2D => 0,
+        TransferStrategy::AsyncD2H => 1,
+        TransferStrategy::AsyncD2D => 2,
         TransferStrategy::NixlRead => 10,
         TransferStrategy::NixlWrite => 11,
         TransferStrategy::NixlReadFlipped => 12,
@@ -443,6 +443,13 @@ fn dispatch_benchmark_candidate(
             Ok(("DirectDma", t0.elapsed().as_micros() as u64))
         }
 
+        // TransformKernel benchmarking is CUDA-only today: the
+        // dispatch path takes `&Arc<CudaStream>` and uses
+        // `cudarc::driver::CudaSlice` for the H2D pointer-table
+        // upload. SYCL kernel-dispatch scaffolding (DeviceSlice<T>,
+        // generic clone_htod, sycl_nhd_hnd_transpose) is not in
+        // place.
+        #[cfg(feature = "cuda")]
         BenchmarkCandidate::TransformKernel {
             invocation,
             src,
@@ -474,6 +481,13 @@ fn dispatch_benchmark_candidate(
             )?;
             stream.synchronize()?;
             Ok(("TransformKernel", t0.elapsed().as_micros() as u64))
+        }
+        #[cfg(not(feature = "cuda"))]
+        BenchmarkCandidate::TransformKernel { .. } => {
+            anyhow::bail!(
+                "BenchmarkCandidate::TransformKernel requires the cuda feature; \
+                 SYCL transform-kernel dispatch is TODO"
+            );
         }
 
         BenchmarkCandidate::NixlDirectDma {
@@ -681,7 +695,7 @@ mod tests {
     #[test]
     fn benchmark_cache_lookup_miss_returns_none() {
         let cache = BenchmarkCache::new();
-        let key = make_key(TransferStrategy::CudaAsyncD2D);
+        let key = make_key(TransferStrategy::AsyncD2D);
         assert!(
             cache.lookup(&key).is_none(),
             "empty cache must return None on lookup"
@@ -693,7 +707,7 @@ mod tests {
     #[test]
     fn benchmark_cache_insert_then_lookup() {
         let cache = BenchmarkCache::new();
-        let key = make_key(TransferStrategy::CudaAsyncD2D);
+        let key = make_key(TransferStrategy::AsyncD2D);
         let outcome = make_outcome("DirectDma");
 
         cache.insert(key.clone(), outcome);
@@ -722,7 +736,7 @@ mod tests {
                 None,
             );
             let dst_sig = make_sig();
-            let key = BenchmarkKey::new(src_sig, dst_sig, Some(2), TransferStrategy::CudaAsyncD2D);
+            let key = BenchmarkKey::new(src_sig, dst_sig, Some(2), TransferStrategy::AsyncD2D);
             cache.insert(key, make_outcome("DirectDma"));
         }
 
@@ -739,9 +753,9 @@ mod tests {
     /// Route discriminants must be stable across PR revisions.
     #[test]
     fn strategy_discriminants_are_stable() {
-        assert_eq!(strategy_discriminant(TransferStrategy::CudaAsyncH2D), 0);
-        assert_eq!(strategy_discriminant(TransferStrategy::CudaAsyncD2H), 1);
-        assert_eq!(strategy_discriminant(TransferStrategy::CudaAsyncD2D), 2);
+        assert_eq!(strategy_discriminant(TransferStrategy::AsyncH2D), 0);
+        assert_eq!(strategy_discriminant(TransferStrategy::AsyncD2H), 1);
+        assert_eq!(strategy_discriminant(TransferStrategy::AsyncD2D), 2);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlRead), 10);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlWrite), 11);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlReadFlipped), 12);
