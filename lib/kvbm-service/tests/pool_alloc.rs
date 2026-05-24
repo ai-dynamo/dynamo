@@ -7,28 +7,28 @@
 //!
 //! Gated behind `testing-cuda` because the path goes through
 //! `cuMemHostRegister`, which requires a working CUDA driver + at least
-//! one visible device.
+//! one visible device. The UCX NIXL plugin must also be installed in the
+//! test environment — this is a project invariant; tests fail loudly if
+//! UCX is missing rather than silently falling back to local-only slabs.
 
 #![cfg(feature = "testing-cuda")]
 
 use std::time::Duration;
 
 use dynamo_memory::HugepageMode;
-use kvbm_service::{HostMemoryPool, KvbmService, PoolConfig, PoolSizing, ServiceConfig};
+use kvbm_service::{HostMemoryPool, KvbmService, PoolConfig, ServiceConfig};
 
 const SMALL_SLAB_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Small NIXL-backed pool config used by all alloc tests. UCX is on the
+/// default backend list so production / test parity is preserved — no env
+/// vars required.
 fn small_pool_config() -> PoolConfig {
-    PoolConfig {
-        sizing: PoolSizing::PerNode {
-            bytes_per_node: SMALL_SLAB_BYTES,
-        },
-        hugepage_mode: HugepageMode::Disabled,
-        // No NIXL backends are configured in this test process — opt out
-        // of the production-safety check so slabs can be built local-only.
-        allow_no_nixl_backends: true,
-        ..Default::default()
-    }
+    PoolConfig::builder()
+        .per_node_bytes(SMALL_SLAB_BYTES)
+        .hugepage_mode(HugepageMode::Disabled)
+        .with_ucx()
+        .build()
 }
 
 #[tokio::test]
@@ -45,16 +45,20 @@ async fn pool_allocates_one_slab_per_host_memory_node() {
 
     for slab in &snapshot.slabs {
         assert_eq!(slab.size_bytes, SMALL_SLAB_BYTES);
-        // Agent name is Some when nixl_sys has a working DRAM backend
-        // (we'd be in the `Registered` SlabStorage variant) and None on
-        // stub-mode hosts where the pool falls back to local-only slabs.
-        // When present, it must follow the documented format.
-        if let Some(name) = &slab.agent_name {
-            assert!(
-                name.starts_with("kvbm-svc:test-instance:n"),
-                "unexpected agent name {name}",
-            );
-        }
+        assert!(
+            slab.registered,
+            "slab on node {} should be NIXL-registered (UCX is in default backends); \
+             got registered=false. Is libplugin_UCX.so available in this env?",
+            slab.numa_node,
+        );
+        let name = slab
+            .agent_name
+            .as_deref()
+            .expect("registered slab must have an agent_name");
+        assert!(
+            name.starts_with("kvbm-svc:test-instance:n"),
+            "unexpected agent name {name}",
+        );
     }
 
     assert_eq!(
@@ -86,10 +90,14 @@ async fn http_v1_pool_returns_snapshot() {
         .await
         .unwrap();
 
-    assert!(body["slabs"].as_array().is_some_and(|a| !a.is_empty()));
+    let slabs = body["slabs"].as_array().expect("snapshot has slabs array");
+    assert!(!slabs.is_empty(), "expected at least one slab");
+    for slab in slabs {
+        assert_eq!(slab["registered"].as_bool(), Some(true));
+        assert!(slab["agent_name"].as_str().is_some());
+    }
     let total = body["total_bytes"].as_u64().unwrap();
-    let slab_count = body["slabs"].as_array().unwrap().len() as u64;
-    assert_eq!(total, SMALL_SLAB_BYTES * slab_count);
+    assert_eq!(total, SMALL_SLAB_BYTES * (slabs.len() as u64));
 
     // Default container drops the lease, so the snapshot reports leased=false.
     assert_eq!(body["leased"], false);
@@ -119,4 +127,25 @@ async fn http_v1_pool_503_without_pool() {
     assert!(body["error"].as_str().is_some());
 
     svc.shutdown_graceful(Some(Duration::from_secs(60))).await;
+}
+
+#[tokio::test]
+async fn pool_local_only_builder_succeeds_without_nixl() {
+    // The escape hatch for environments without UCX (or any NIXL libs).
+    // Slabs allocate but are local-only — not reachable from remote NIXL.
+    let cfg = PoolConfig::builder()
+        .per_node_bytes(SMALL_SLAB_BYTES)
+        .hugepage_mode(HugepageMode::Disabled)
+        .local_only()
+        .build();
+    let pool = HostMemoryPool::new(&cfg, "test-local").expect("HostMemoryPool::new local-only");
+    let snapshot = pool.snapshot();
+    assert!(!snapshot.slabs.is_empty());
+    for slab in &snapshot.slabs {
+        assert!(
+            !slab.registered,
+            "local-only slab must not be NIXL-registered"
+        );
+        assert!(slab.agent_name.is_none());
+    }
 }

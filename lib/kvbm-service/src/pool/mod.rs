@@ -184,8 +184,16 @@ impl HostMemoryPool {
             );
         }
 
-        let backend_config = NixlBackendConfig::from_env()
-            .map_err(|e| ServiceError::Internal(format!("parse NIXL backend env: {e}")))?;
+        let backend_config = if config.backends.is_empty() {
+            NixlBackendConfig::from_env()
+                .map_err(|e| ServiceError::Internal(format!("parse NIXL backend env: {e}")))?
+        } else {
+            let mut bc = NixlBackendConfig::default();
+            for name in &config.backends {
+                bc = bc.with_backend(name);
+            }
+            bc
+        };
         // Production trap: a NIXL agent with no DRAM-capable backend will
         // silently accept register_memory and produce slabs whose handle
         // looks valid but cannot satisfy remote pulls. Refuse to start in
