@@ -30,22 +30,30 @@ const (
 // backendRef to the InferencePool (inference.networking.k8s.io).
 //
 // The route is only generated when the inference-gateway annotation carries a
-// gateway name; the caller (reconcileEPPResources) gates on that.
+// gateway name; the caller (reconcileEPPResources) gates on that. gatewayNamespace
+// may differ from the pool's namespace (cross-namespace Gateway, as the standalone
+// dynamo-gaie http-route.yaml supports); empty means same namespace as the pool.
+// Cross-namespace parentRefs additionally require the target Gateway's
+// allowedRoutes to permit this namespace (cluster-side config, not emitted here).
 func GenerateHTTPRoute(
 	dgd *v1beta1.DynamoGraphDeployment,
 	eppConfig *v1beta1.EPPConfig,
 	gatewayName string,
+	gatewayNamespace string,
 ) *gatewayv1.HTTPRoute {
 	poolName := GetPoolName(dgd.Name, eppConfig)
 	poolNamespace := GetPoolNamespace(dgd.Namespace, eppConfig)
 
-	parent := gatewayv1.ParentReference{
-		Group: ptr.To(gatewayv1.Group(gatewayAPIGroup)),
-		Kind:  ptr.To(gatewayv1.Kind("Gateway")),
-		Name:  gatewayv1.ObjectName(gatewayName),
+	gwNamespace := gatewayNamespace
+	if gwNamespace == "" {
+		gwNamespace = poolNamespace
 	}
-	// Default the Gateway's namespace to the pool's when not cross-namespace.
-	parent.Namespace = ptr.To(gatewayv1.Namespace(poolNamespace))
+	parent := gatewayv1.ParentReference{
+		Group:     ptr.To(gatewayv1.Group(gatewayAPIGroup)),
+		Kind:      ptr.To(gatewayv1.Kind("Gateway")),
+		Name:      gatewayv1.ObjectName(gatewayName),
+		Namespace: ptr.To(gatewayv1.Namespace(gwNamespace)),
+	}
 
 	return &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{

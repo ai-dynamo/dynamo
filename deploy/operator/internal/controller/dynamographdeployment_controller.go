@@ -1966,7 +1966,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// Absent the annotation, the EPP InferencePool is still created but no route is
 	// emitted (e.g. hand-authored EPP DGDs that wire their own gateway).
 	if gatewayName := dgd.Annotations[consts.KubeAnnotationInferenceGatewayName]; gatewayName != "" {
-		httpRoute := epp.GenerateHTTPRoute(dgd, eppService.EPPConfig, gatewayName)
+		gatewayNamespace := dgd.Annotations[consts.KubeAnnotationInferenceGatewayNamespace]
+		httpRoute := epp.GenerateHTTPRoute(dgd, eppService.EPPConfig, gatewayName, gatewayNamespace)
 		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*gatewayv1.HTTPRoute, bool, error) {
 			return httpRoute, false, nil
 		})

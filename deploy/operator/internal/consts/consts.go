@@ -50,6 +50,10 @@ const (
 	// should bind the EPP InferencePool to via a generated HTTPRoute. Empty/unset
 	// means no HTTPRoute is emitted (the EPP InferencePool is still created).
 	KubeAnnotationInferenceGatewayName = "nvidia.com/inference-gateway-name"
+	// KubeAnnotationInferenceGatewayNamespace optionally names the Gateway's
+	// namespace when it differs from the DGD's (cross-namespace parentRef). Empty
+	// means same namespace as the generated HTTPRoute / InferencePool.
+	KubeAnnotationInferenceGatewayNamespace = "nvidia.com/inference-gateway-namespace"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
