@@ -159,8 +159,8 @@ class InferenceGatewayFeature(BaseModel):
 
     enabled: bool = Field(default=False, description="Enabled turns on the inference-gateway integration.")
     routingProfile: RoutingProfile = Field(default="balanced", description="RoutingProfile selects the EPP routing policy preset.")
-    gatewayClassName: Optional[str] = Field(default=None, description="GatewayClassName is the Gateway API GatewayClass to attach the generated HTTPRoute to. Defaults to the platform's configured class (agentgateway) when empty.")
-    gatewayName: Optional[str] = Field(default=None, description="GatewayName, when set, attaches the generated HTTPRoute to an existing Gateway instead of having the operator create one.")
+    gatewayName: Optional[str] = Field(default=None, description="GatewayName is the name of the existing Gateway to attach the generated HTTPRoute to. The operator attaches to a pre-provisioned, shared Gateway (typically platform-managed); it does not create one. When empty, the EPP InferencePool is still created but no HTTPRoute is emitted.")
+    gatewayNamespace: Optional[str] = Field(default=None, description="GatewayNamespace is the namespace of the Gateway named by GatewayName. A shared inference Gateway usually lives in its own namespace (e.g. the gateway controller's namespace), separate from the workload, so the HTTPRoute attaches cross-namespace. When empty, defaults to the generated deployment's namespace.")
 
 
 class FeaturesSpec(BaseModel):
