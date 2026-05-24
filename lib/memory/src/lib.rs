@@ -49,20 +49,16 @@ pub use device::DeviceStorage;
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
 #[cfg(target_os = "linux")]
-pub use numa::{NumaNode, PciAddress, is_numa_disabled, is_numa_enabled};
-#[cfg(target_os = "linux")]
 pub use hugepage::{HugepageInfo, HugepagePool, PerNodeHugepages, ThpMode};
 #[cfg(target_os = "linux")]
-pub use mmap_pinned::{
-    HugepageMode, HugepageTier, MmappedPinnedOptions, MmappedPinnedStorage,
-};
+pub use mmap_pinned::{HugepageMode, HugepageTier, MmappedPinnedOptions, MmappedPinnedStorage};
 #[cfg(target_os = "linux")]
-pub use resources::{
-    GpuView, NumaNodeRole, NumaNodeView, Resources, SliceSource, SlicingMode,
-};
+pub use numa::{NumaNode, PciAddress, is_numa_disabled, is_numa_enabled};
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};
+#[cfg(target_os = "linux")]
+pub use resources::{GpuView, NumaNodeRole, NumaNodeView, Resources, SliceSource, SlicingMode};
 pub use system::SystemStorage;
 pub use tensor::{TensorDescriptor, TensorDescriptorExt};
 
