@@ -90,9 +90,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sharded-ssd-roots",
         default="",
-        help=(
-            "Comma-separated SSD roots for the sharded-ssd restore backend."
-        ),
+        help=("Comma-separated SSD roots for the sharded-ssd restore backend."),
     )
     return parser
 
