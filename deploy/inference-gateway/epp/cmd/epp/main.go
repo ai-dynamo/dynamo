@@ -43,6 +43,7 @@ import (
 	// Dynamo plugins
 	"github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/disagg"
 	labelfilter "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/label_filter"
+	poolselector "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/pool_selector"
 )
 
 func main() {
@@ -51,6 +52,7 @@ func main() {
 	plugins.Register(disagg.DisaggProfileHandlerType, disagg.DisaggProfileHandlerFactory)
 	plugins.Register(disagg.DynPrefillScorerType, disagg.DynPrefillScorerFactory)
 	plugins.Register(disagg.DynDecodeScorerType, disagg.DynDecodeScorerFactory)
+	plugins.Register(poolselector.PoolSelectorType, poolselector.PoolSelectorFactory)
 
 	// Run using standard GAIE runner (it registers built-in plugins automatically)
 	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {
