@@ -1,0 +1,118 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Tier 0 · Simulate Before You Deploy"
+subtitle: Validate your configuration and predict performance with zero GPUs — using Mocker and AIConfigurator — before you allocate a single accelerator.
+---
+
+<Note>
+**Well-Lit Path · Tier 0.** This is the recommended starting point for any new deployment. It comes *before* [Stage 1 — Run a Real Model as a Service](/dynamo/dev/well-lit-paths/aggregated-service), and it needs **no GPUs at all**.
+</Note>
+
+## What you'll have at the end
+
+A configuration you trust — the right prefill/decode split, parallelism, and worker counts for your model, hardware budget, and SLA — **validated by simulation before you spend a GPU-hour on trial and error.**
+
+## Why simulate first
+
+The most common — and most expensive — onboarding mistake is jumping straight to GPU deployments and tuning by trial and error. Dynamo ships two tools specifically to short-circuit that:
+
+- **Mocker** simulates an inference engine on CPU, so you can validate routing, disaggregation, and autoscaling logic without hardware.
+- **AIConfigurator** searches the configuration space and tells you the best topology for your SLA in ~20–30 seconds.
+
+Run them together and you walk into your first GPU deployment already knowing it will work.
+
+## Mocker — a GPU-free inference engine
+
+Mocker is a high-fidelity simulation of an LLM inference engine, written in Rust. It replicates the behaviors that actually determine system performance — block-based KV cache management with LRU eviction, vLLM/SGLang-style continuous batching, prefix caching, chunked prefill, realistic prefill/decode timing, disaggregated P/D with KV-transfer latency, and KV-cache event publishing — all without a GPU.
+
+That makes it the right tool to validate KV-aware routing, test disaggregated topologies, rehearse Planner autoscaling, and build regression tests in CI — at zero GPU cost.
+
+### Run a mocker worker
+
+It speaks the same Dynamo endpoints a real worker does, so you point a frontend at it unchanged:
+
+```bash
+# A single simulated worker
+python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B
+
+# A simulated disaggregated pair (two terminals)
+python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B --disaggregation-mode prefill --bootstrap-ports 50100
+python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B --disaggregation-mode decode
+
+# Several workers in one process, with timing sped up for fast tests
+python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B --num-workers 4 --speedup-ratio 10.0
+```
+
+### Replay a realistic workload
+
+`dynamo.replay` drives a simulated fleet with Mooncake-style traces or synthetic traffic (configurable ISL/OSL, concurrency, shared-prefix ratio, multi-turn sessions) and prints an AIPerf-style summary — TTFT, ITL, throughput, scaling behavior:
+
+```bash
+# Replay a captured trace against 4 simulated workers
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+  --num-workers 4 \
+  --replay-mode offline \
+  --report-json /tmp/replay-report.json
+
+# Or synthesize a workload shape directly
+python -m dynamo.replay \
+  --input-tokens 5000 --output-tokens 500 \
+  --request-count 1000 --replay-concurrency 100 \
+  --replay-mode offline \
+  --report-json /tmp/replay-report.json
+```
+
+> [!NOTE]
+> Mocker does not yet simulate multi-tier KV offloading (CPU/disk) or multimodal workloads. For everything else on this path — routing, disaggregation, planner behavior — it's faithful enough to make real decisions on.
+
+## AIConfigurator — find the optimal config in seconds
+
+Once you understand your workload shape, AIConfigurator removes the guesswork from sizing. Give it a model, GPU type, GPU budget, quantization, and SLA targets (TTFT, TPOT); it searches tensor/data/expert parallelism and prefill/decode ratios and returns the best configuration — plus ready-to-deploy `DynamoGraphDeployment` manifests.
+
+```bash
+pip3 install aiconfigurator
+
+aiconfigurator cli default \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 32 --system h200_sxm \
+  --backend vllm --backend-version 0.12.0 \
+  --isl 4000 --osl 500 --ttft 300 --tpot 10 \
+  --save-dir ./results
+```
+
+It's also available as a web UI at [aiconfigurator.nvidia.com](https://aiconfigurator.nvidia.com).
+
+> [!TIP]
+> **Example payoff:** for Qwen3-32B on 32× H200 (FP8), AIConfigurator reports the **disaggregated** config delivering **2.39× the throughput** of aggregated under TTFT ≤ 300 ms / TPOT ≤ 10 ms at ISL:OSL = 4000:500. Finding that by hand is hours of GPU sweeps; here it's seconds.
+
+## The Tier 0 loop
+
+```text
+Run Mocker trace replay  →  feed the workload shape to AIConfigurator
+        ↑                                   │
+        └─────  re-simulate to confirm  ◀───┘   recommended P/D split + TP size
+                the recommended config meets your SLA
+```
+
+The profiling output also feeds the [Planner](/dynamo/dev/components/planner/planner-guide) later, so this loop pays off again in Tier 3.
+
+## You now have a validated plan — without touching a GPU
+
+> [!TIP]
+> **Continue to Stage 1** to stand the recommended configuration up for real on hardware. You'll deploy with confidence instead of guessing.
+
+<CardGroup cols={2}>
+  <Card title="Next · Stage 1 — Run a Real Model as a Service" icon="regular server" href="/dynamo/dev/well-lit-paths/aggregated-service">
+    Take the validated config to real hardware.
+  </Card>
+  <Card title="See the full feature map" icon="regular map" href="/dynamo/dev/well-lit-paths/adoption-guide">
+    All 12 features across 5 adoption tiers, and when to enable each.
+  </Card>
+</CardGroup>
+
+## Go deeper
+
+- [Simulation with Mocker](../mocker/mocker.md) — full CLI reference and what it simulates.
+- [Mocker Offline Trace Replay](../benchmarks/mocker-trace-replay.md) — trace formats, synthetic workloads, and report fields.
+- [AIConfigurator & Disaggregated Serving](../features/disaggregated-serving/README.md) — the end-to-end profiling-to-deployment workflow.

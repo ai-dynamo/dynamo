@@ -1,0 +1,207 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Feature Adoption Guide"
+subtitle: 12 features across 5 adoption tiers — from pre-deployment simulation to production-scale Kubernetes orchestration, in the order you should adopt them.
+---
+
+Dynamo's modular design rewards incremental adoption. You don't enable everything at once — you start with simulation and planning before touching GPUs, get serving working with the highest-impact features, then layer on scale, reliability, and orchestration as your needs grow.
+
+This guide maps **12 features across five tiers** and, crucially, tells you *when* to reach for each. The single most important takeaway: **use Mocker and AIConfigurator first**, before any GPU is allocated, to validate your configuration and predict performance under a realistic workload.
+
+> [!TIP]
+> Want the hands-on, copy-paste version? The [Well-Lit Path](/dynamo/dev/well-lit-paths) walks the same journey as runnable stages. This page is the strategic map; the path is the guided walk.
+
+## Adoption tiers at a glance
+
+| Tier | Purpose | Features |
+|------|---------|----------|
+| **Tier 0 — Simulate Before You Deploy** | Validate configs and performance without GPUs | Mocker, AIConfigurator |
+| **Tier 1 — Foundation** | Get serving working with core performance gains | KV-Aware Routing, Tool Calling, Reasoning Parsing |
+| **Tier 2 — Scale & Efficiency** | Maximize GPU utilization, reduce memory bottlenecks | Disaggregated Serving, KV Offloading, Fastokens |
+| **Tier 3 — Production Operations** | Reliability, visibility, SLO-based automation | Fault Tolerance, Observability, Planner |
+| **Tier 4 — Kubernetes Orchestration** | Data-center-scale multi-component orchestration | Grove |
+
+---
+
+## Tier 0 — Simulate Before You Deploy
+
+The most common mistake when onboarding Dynamo is going straight to GPU deployments before understanding the optimal configuration. Mocker and AIConfigurator are designed to short-circuit that expensive trial-and-error phase. See the hands-on [Tier 0 · Simulate First](/dynamo/dev/well-lit-paths/simulate-first) stage for runnable commands.
+
+### Mocker
+
+The [Mocker](../mocker/mocker.md) is a **GPU-free, high-fidelity simulation** of an LLM inference engine, written in Rust. It replicates the core scheduling, memory management, prefix caching, and KV-event behaviors of production engines without any GPU hardware — the right starting point for any new deployment.
+
+It simulates block-based KV cache management with LRU eviction; vLLM- and SGLang-style continuous batching; prefix caching with hash-based block deduplication; chunked prefill; realistic prefill/decode timing; disaggregated P/D separation with KV-transfer latency; and KV-cache event publishing for router integration.
+
+[Trace replay](../benchmarks/mocker-trace-replay.md) (`python -m dynamo.replay`) replays Mooncake-style traces or synthetic workloads (configurable ISL, OSL, concurrency, shared-prefix ratio, multi-turn sessions) against a simulated fleet in both aggregated and disaggregated topologies, and prints an AIPerf-style summary of TTFT, ITL, throughput, and scaling.
+
+**Key use cases:** validate KV-aware routing before deploying workers; rehearse SLA-based Planner responses to traffic spikes and scale-downs; exercise request-migration and graceful-shutdown paths; prototype scheduling policies at zero GPU cost; run fast integration/regression tests in CI.
+
+**Current limitations:** Mocker does not yet simulate multi-tier KV offloading (CPU/disk) or multimodal workloads.
+
+### AIConfigurator
+
+Once a workload shape is understood from trace replay, [AIConfigurator](../features/disaggregated-serving/README.md) eliminates the manual search for the optimal GPU configuration. Given a model, GPU type, GPU budget, quantization, and SLO targets (TTFT, TPOT), it searches the configuration space — tensor parallelism, data-parallel attention, expert parallelism, prefill/decode ratios — and returns the best configuration in ~20–30 seconds.
+
+It's available as a web UI (`aiconfigurator.nvidia.com`) and a CLI, integrates with the Planner profiler, and emits ready-to-deploy `DynamoGraphDeployment` manifests.
+
+**Example:** for Qwen3-32B on 32× H200 (FP8), AIConfigurator reports the disaggregated configuration delivering **2.39× the throughput** of aggregated under TTFT ≤ 300 ms and TPOT ≤ 10 ms at ISL:OSL = 4000:500.
+
+**Recommended Tier 0 loop:** run Mocker trace replay → feed results to AIConfigurator → confirm the recommended configuration → deploy with confidence. The entire loop runs without GPU access.
+
+---
+
+## Tier 1 — Foundation: enable before going to production
+
+### KV-Aware Routing
+
+[KV-Aware Routing](../components/router/README.md) is the single highest-impact serving feature to enable first: a one-line change that produces immediate throughput and latency gains for almost any workload. The router monitors KV-cache events from all workers, computes a cache-overlap score per request, and steers each request to the worker that already holds the most relevant cached blocks — minimizing redundant prefill.
+
+Enable it with `--router-mode kv` on the frontend, or `DYN_ROUTER_MODE=kv` on the Kubernetes Frontend service. Workers publish KV-cache events automatically — no worker-side changes. The router supports NATS (default) and ZMQ transports and falls back gracefully to approximate cache-state prediction when event delivery is disrupted.
+
+**Measured impact:** [Baseten](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/) observed a 34% reduction in TPOT, 50% reduction in TTFT, 48–49% lower P95/P99 latency, and 61% more requests/sec versus round-robin — with no model or hardware changes.
+
+### Tool Calling
+
+Enable [tool calling](../tool-calling/README.md) early if your deployment serves agentic or function-calling workflows. Dynamo parses tool-call syntax out of raw model output and returns OpenAI-compatible structured `tool_calls`. Configure per-worker with `--dyn-tool-call-parser <name>`.
+
+### Reasoning Parsing
+
+Thinking models (DeepSeek, Qwen3, Kimi K2.5, Gemma) emit an internal chain-of-thought alongside the answer. [`--dyn-reasoning-parser`](../reasoning/README.md) splits output into `reasoning_content` and standard `content`, both surfaced as OpenAI-compatible fields. Tool calling and reasoning are frequently paired on the same worker — e.g. Kimi K2.5 uses `--dyn-tool-call-parser kimi_k2 --dyn-reasoning-parser kimi_k25` together.
+
+| Model | Tool Call Parser | Reasoning Parser |
+|-------|------------------|------------------|
+| DeepSeek-V4 | `deepseek_v4` | `deepseek_v4` |
+| Kimi K2.5 | `kimi_k2` | `kimi_k25` |
+| Qwen3 | `qwen3` | — |
+| GPT-OSS | `harmony` | `gpt_oss` |
+| GLM-4.7 | `glm47` | `glm45` |
+
+---
+
+## Tier 2 — Scale & Efficiency: maximize GPU utilization
+
+### Disaggregated Serving
+
+[Disaggregated serving](../features/disaggregated-serving/README.md) separates the **prefill** phase (context processing, compute-bound) from the **decode** phase (token generation, memory-bandwidth-bound) onto different GPUs, so each can be sized and scaled independently. A prefill worker computes the KV cache, transfers it to a decode worker via NIXL over InfiniBand/NVLink, and the decode worker generates tokens. The disaggregated router decides per request whether to use a dedicated prefill worker or handle prefill locally, based on prompt length and prefill-queue depth.
+
+**When to enable:** prefill-heavy traffic (long prompts, RAG, agents) and larger models. On Blackwell with TRT-LLM, disaggregation delivered 4× faster interactivity for long-context workloads and 2.5× higher throughput on DeepSeek-R1 671B. **Prerequisites:** NIXL for KV transfer; workers launched with `--disaggregation-mode prefill|decode`; frontend router in `kv` mode. Walk it hands-on in [Stage 3](/dynamo/dev/well-lit-paths/disaggregated).
+
+### KV Offloading
+
+[KV Offloading](../components/kvbm/README.md) extends GPU VRAM by tiering the KV cache into cheaper, larger memory — CPU host memory, local SSD, and optionally external object storage. Dynamo integrates [LMCache](../integrations/lmcache-integration.md), and the KV Block Manager (KVBM) handles promotion/eviction across tiers (hot blocks in HBM, warm in DRAM/NVMe, cold in external storage). This serves contexts beyond GPU memory limits, avoids recomputation for evicted blocks, and raises effective concurrency per GPU. VAST Data reported a 20× TTFT improvement at scale with KV offload to their storage tier.
+
+### Fastokens
+
+[`fastokens`](../features/tokenizer/README.md) is a Rust BPE tokenizer backend that replaces HuggingFace `tokenizers` for encoding while keeping HuggingFace for decoding. Enable it with `--tokenizer fastokens` on the frontend. Gains grow with prompt length, with the largest speedups on very long prompts and a meaningful TTFT reduction once tokenization is on the critical path.
+
+**When to enable:** prompts routinely in the thousands-to-tens-of-thousands of tokens; strong KV-cache hit rates (so tokenization is now the bottleneck); a BPE `tokenizer.json` model. **Skip it** for short prompts or non-BPE tokenizers.
+
+---
+
+## Tier 3 — Production Operations: reliability, visibility, automation
+
+### Fault Tolerance
+
+[Dynamo's fault tolerance](../fault-tolerance/README.md) works at three levels: **in-flight request migration** moves a partially generated sequence to a healthy worker when one fails mid-generation, with no error returned; **overload protection** rejects requests early based on configurable KV-utilization thresholds to prevent cascading failure; and **health monitoring** exposes `/health` and `/live` endpoints, canary health checks, and automatic engine shutdown on failure. On Kubernetes, Shadow Engine Failover (backed by GMS) handles same-node engine crashes by attaching a standby engine to GMS-resident weights.
+
+### Observability
+
+[Dynamo observability](../observability/README.md) emits Prometheus metrics at `/metrics` (default port 8081) — TTFT, ITL, throughput, sequence lengths, GPU utilization and power, KV block-manager stats — with published Grafana dashboards and integrations (Splunk Observability Cloud, Dynatrace). Distributed tracing via OpenTelemetry/Tempo spans the full request path (frontend → router → worker → engine), so flame graphs pinpoint whether latency lives in the router, KV transfer, or engine.
+
+### Planner
+
+The [Planner](../components/planner/planner-guide.md) is an **LLM-aware autoscaler** built for inference's specific constraints: latency depends on request content, prefill and decode scale differently, and CPU utilization doesn't map to TTFT/ITL. It offers three optimization targets:
+
+| Target | Description | Requires profiling? |
+|--------|-------------|---------------------|
+| `throughput` (default) | Scales on queue depth and KV-cache utilization | No |
+| `latency` | Scales aggressively at lower utilization thresholds | No |
+| `sla` | Targets specific TTFT/ITL via regression-based models | Yes (recommended) |
+
+It supports **throughput-based scaling** (uses AIConfigurator profiler output + traffic prediction to set a long-term capacity floor, ~180 s cadence) and **load-based scaling** (uses per-engine ForwardPassMetrics + online regression to react to bursts, ~5 s cadence). Run both together — the floor handles capacity, the fast loop handles spikes. Feeding AIConfigurator's profiling output into the Planner closes the loop: **Mocker → AIConfigurator → deploy → Planner in SLA mode.**
+
+---
+
+## Tier 4 — Kubernetes orchestration at scale
+
+### Grove
+
+[Grove](../kubernetes/grove.md) is a Kubernetes API for orchestrating multi-component inference as a single logical system rather than a pile of independent pods. It ships as an optional Dynamo module and is open source at [ai-dynamo/grove](https://github.com/ai-dynamo/grove).
+
+Disaggregated deployments — frontend, prefill leaders/workers, decode leaders/workers, KV router — can't be managed by standard controllers: scaling prefill may require more decode capacity, failed workers must reconnect to leaders, and rolling updates must preserve NVLink topology. Grove solves this with three hierarchical custom resources:
+
+- **PodClique** — a group of pods with a role (e.g. "prefill-worker"), with its own config, resources, and scaling policy.
+- **PodCliqueScalingGroup** — tightly coupled PodCliques that must scale together (e.g. prefill-leader + workers = one model instance).
+- **PodCliqueSet** — the entire workload: startup ordering, scaling policies, gang-scheduling and spread constraints.
+
+It delivers **hierarchical gang scheduling** (enforces minimum viable component combinations while allowing independent per-component scaling ratios), **topology-aware placement** (co-locates related prefill/decode pods on the same NVLink domain on systems like GB200 NVL72, while spreading replicas for availability), and **explicit startup ordering** (workers wait for their leaders; deterministic init without custom scripts). Grove works with the KAI Scheduler to translate PodGang resources into concrete, topology-aware scheduling constraints.
+
+---
+
+## Complete adoption sequence
+
+```text
+Pre-Deployment (no GPUs needed):
+  → Run Mocker trace replay with realistic ISL/OSL/concurrency
+  → Feed results to AIConfigurator → get recommended P/D split and TP size
+  → Re-run Mocker with the recommended config to validate SLA targets
+  → Optionally simulate Planner autoscaling responses in Mocker
+
+Day 1-2 (first deployment):
+  → Deploy with your engine (vLLM / SGLang / TRT-LLM)
+  → Enable KV-Aware Routing (1 flag, immediate gains)
+  → Enable Tool Calling if serving agentic workflows (1 flag)
+  → Enable Reasoning Parsing if using thinking models (1 flag)
+
+Week 1 (scale and efficiency):
+  → Enable Disaggregated Serving (if prefill-heavy or multi-node)
+  → Enable KV Offloading for long-context or high-concurrency workloads
+  → Enable Fastokens if prompts are routinely large
+
+Week 2-3 (operationalize):
+  → Wire up Observability (Prometheus + Grafana + optional Tempo tracing)
+  → Configure Fault Tolerance thresholds and request migration
+  → Deploy Planner with throughput target; graduate to sla once profiled
+
+At scale (Kubernetes automation):
+  → Enable Grove for topology-aware, hierarchical gang-scheduled deployments
+  → Describe the full P/D system as a single PodCliqueSet
+  → Let Grove + Planner + KAI Scheduler coordinate placement and autoscaling
+```
+
+## Feature compatibility reference
+
+| Feature | vLLM | SGLang | TRT-LLM | Multi-GPU | Notes |
+|---------|:----:|:------:|:-------:|:---------:|-------|
+| Mocker | ✅ sim | ✅ sim | ✅ sim | ✅ sim | GPU-free; BPE tokenizer needed for Fastokens sim |
+| AIConfigurator | ✅ | ✅ | ✅ | ✅ | Web UI or CLI; ~20–30 s |
+| KV-Aware Routing | ✅ | ✅ | ✅ | ✅ | Single flag on frontend |
+| Tool Calling | ✅ | ✅ | ✅ | ✅ | Parser registry per model |
+| Reasoning Parsing | ✅ | ✅ | ✅ | ✅ | Parser registry per model |
+| Disaggregated Serving | ✅ | ✅ | ✅ | Required | NIXL for KV transfer |
+| KV Offloading (KVBM) | 🚧 | 🚧 | ✅ | ✅ | LMCache integration; vLLM/SGLang in progress |
+| Fastokens | ✅ | ✅ | ✅ | ✅ | BPE `tokenizer.json` models only |
+| Fault Tolerance | ✅ | ✅ | ✅ | ✅ | GMS/Shadow Engine is K8s-only |
+| Observability | ✅ | ✅ | ✅ | ✅ | Prometheus + optional Tempo |
+| Planner | ✅ | ✅ | ✅ | ✅ | Load-based mode vLLM-only currently |
+| Grove | ✅ | ✅ | ✅ | Required | Requires KAI Scheduler or compatible gang scheduler |
+
+> [!NOTE]
+> Backend and mode support evolves quickly. Confirm specifics against the [Support Matrix](../reference/support-matrix.md) and [Feature Matrix](../reference/feature-matrix.md) before you commit to a design.
+
+## References
+
+1. [NVIDIA Dynamo Planner Brings SLO-Driven Automation to Multi-Node Inference (InfoQ)](https://www.infoq.com/news/2026/01/nvidia-dynamo-ai-kubernetes/)
+2. [NVIDIA Dynamo Adds GPU Autoscaling, Kubernetes Automation, and Networking Optimizations](https://developer.nvidia.com/blog/nvidia-dynamo-adds-gpu-autoscaling-kubernetes-automation-and-networking-optimizations/)
+3. [Introduction — NVIDIA Dynamo Documentation](https://docs.nvidia.com/dynamo/getting-started/introduction)
+4. [Mocker — NVIDIA Dynamo Documentation](https://docs.nvidia.com/dynamo/user-guides/mocker/testing-with-mocker)
+5. [aiconfigurator — PyPI](https://pypi.org/project/aiconfigurator/)
+6. [2× faster inference with KV cache-aware routing — Baseten](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)
+7. [Router — NVIDIA Dynamo Documentation](https://docs.nvidia.com/dynamo/components/router)
+8. [Dynamo 0.4 Delivers 4× Faster Performance, SLO-Based Autoscaling, and Real-Time Observability](https://developer.nvidia.com/blog/dynamo-0-4-delivers-4x-faster-performance-slo-based-autoscaling-and-real-time-observability/)
+9. [NVIDIA Dynamo + LMCache: Accelerating the Future of LLM Inference](https://blog.lmcache.ai/en/2025/09/07/nvidia-dynamo-lmcache-accelerating-the-future-of-llm-inference/)
+10. [NVIDIA Dynamo + VAST = Scalable, Optimized Inference](https://www.vastdata.com/blog/nvidia-dynamo-vast-scalable-optimized-inference)
+11. [Streamline Complex AI Inference on Kubernetes with NVIDIA Grove](https://developer.nvidia.com/blog/streamline-complex-ai-inference-on-kubernetes-with-nvidia-grove/)
+12. [ai-dynamo/dynamo — GitHub](https://github.com/ai-dynamo/dynamo)

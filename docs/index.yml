@@ -25,6 +25,9 @@ navigation:
     slug: well-lit-paths
     path: path/README.mdx
     contents:
+      - page: "Tier 0 · Simulate Before You Deploy"
+        path: path/simulate-first.mdx
+        slug: simulate-first
       - page: "Stage 1 · Run a Real Model as a Service"
         path: path/aggregated-service.mdx
         slug: aggregated-service
@@ -37,6 +40,9 @@ navigation:
       - page: "Stage 4 · Go to Production on Kubernetes"
         path: path/production.mdx
         slug: production
+      - page: "Feature Adoption Guide"
+        path: path/adoption-guide.mdx
+        slug: adoption-guide
 
   # ==================== Getting Started ====================
   - section: Getting Started

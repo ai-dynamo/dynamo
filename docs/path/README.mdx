@@ -15,11 +15,17 @@ A **well-lit path** is exactly that: a tested, opinionated, end-to-end route thr
 **You don't have to walk the whole path.** Each stage is a complete, working deployment. Stop at the stage that meets your needs — a lot of teams run happily on Stage 1 or 2 and never disaggregate. The later stages are there when your scale demands them, not as homework.
 </Note>
 
+> [!IMPORTANT]
+> **Simulate before you deploy.** The most expensive onboarding mistake is allocating GPUs and tuning by trial and error. Dynamo's **Mocker** and **AIConfigurator** let you validate your configuration and predict performance with *zero GPUs* — so start at [Tier 0 · Simulate First](/dynamo/dev/well-lit-paths/simulate-first), then walk the hands-on stages knowing your design works.
+
 ## The Path
 
 <CardGroup cols={1}>
   <Card title="Stage 0 · Hello World — one request in 5 minutes" icon="regular bolt" href="/dynamo/dev/getting-started/quickstart">
     Pull a container, start a frontend and a worker, get one chat completion back. Proves your environment works. **~5 min · 1 GPU.**
+  </Card>
+  <Card title="Tier 0 · Simulate Before You Deploy — no GPUs needed" icon="regular flask" href="/dynamo/dev/well-lit-paths/simulate-first">
+    Validate routing, disaggregation, and sizing with Mocker + AIConfigurator before you allocate hardware. **~30 min · 0 GPUs.**
   </Card>
   <Card title="Stage 1 · Run a Real Model as a Service" icon="regular server" href="/dynamo/dev/well-lit-paths/aggregated-service">
     Stand up a persistent OpenAI-compatible endpoint serving a model you actually care about. Understand the frontend + worker split and health checks. **~15 min · 1–2 GPUs.**
@@ -33,7 +39,22 @@ A **well-lit path** is exactly that: a tested, opinionated, end-to-end route thr
   <Card title="Stage 4 · Go to Production on Kubernetes" icon="regular cubes" href="/dynamo/dev/well-lit-paths/production">
     Take the same topology to a cluster: install the Dynamo Platform, deploy with one manifest, let AIConfigurator pick the config and the Planner autoscale to your SLA. Add observability and fault tolerance. **Hours · multi-GPU / multi-node.**
   </Card>
+  <Card title="Feature Adoption Guide — all 12 features, 5 tiers" icon="regular map" href="/dynamo/dev/well-lit-paths/adoption-guide">
+    The strategic map: every feature grouped by *when* to adopt it, the full adoption sequence, and a backend compatibility matrix.
+  </Card>
 </CardGroup>
+
+## The five adoption tiers
+
+The stages above are the hands-on walk. The [Feature Adoption Guide](/dynamo/dev/well-lit-paths/adoption-guide) is the map behind them — **12 features across five tiers**, in the order you should adopt them:
+
+| Tier | Purpose | Features |
+|------|---------|----------|
+| **0 · Simulate Before You Deploy** | Validate configs and performance without GPUs | Mocker, AIConfigurator |
+| **1 · Foundation** | Get serving working with core performance gains | KV-Aware Routing, Tool Calling, Reasoning Parsing |
+| **2 · Scale & Efficiency** | Maximize GPU utilization, reduce memory bottlenecks | Disaggregated Serving, KV Offloading, Fastokens |
+| **3 · Production Operations** | Reliability, visibility, SLO-based automation | Fault Tolerance, Observability, Planner |
+| **4 · Kubernetes Orchestration** | Data-center-scale multi-component orchestration | Grove |
 
 ## From 1 to 100
 
