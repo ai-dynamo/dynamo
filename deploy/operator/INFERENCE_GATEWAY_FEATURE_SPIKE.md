@@ -5,6 +5,22 @@ gateway path that today is wired by hand (the EPP note's Fix-1/Fix-4). **Status:
 reconcile + DGDR→DGD wiring sketched below. Not yet built (`make generate`/`go build` pending — no Go
 toolchain on the authoring box).**
 
+## Phase-1 code landed (unbuilt — needs a Go box)
+- `api/.../dynamographdeploymentrequest_types.go`: `Features.InferenceGateway` field + enum (DONE).
+- `internal/dynamo/epp/httproute.go` + `httproute_test.go`: **typed** gateway-api HTTPRoute generator
+  (mirrors the dynamo-gaie `http-router.yaml`), not unstructured — per sttts/tmonty12 typed-over-convenience.
+- `internal/controller/dynamographdeployment_controller.go`: least-privilege `+kubebuilder:rbac` for
+  `gateway.networking.k8s.io/httproutes` (HTTPRoute is namespaced → rides the existing controller-gen
+  Role/ClusterRole path; no dedicated ClusterRole needed, unlike tmonty12's node-read case).
+- `v1alpha1/...conversion.go`: listed `Features.InferenceGateway` as a v1beta1-only field (conversion contract).
+
+**Required to build/land (do on a Go box):**
+1. `go get sigs.k8s.io/gateway-api@<ver matched to inference-extension v1.2.0>` + `go mod tidy`
+   (core gateway-api is NOT yet a module dep — this is the typed-dep cost we accepted).
+2. `make generate` (deepcopy for InferenceGatewayFeature) + `make manifests` (CRD YAML + RBAC role.yaml).
+3. Wire the reconcile hook (§3) + DGDR→DGD EPP injection (§2); add controller `_test.go` + run envtest +
+   the DGDR conversion **fuzz** test.
+
 ## 1. CRD field — DONE
 `api/v1beta1/dynamographdeploymentrequest_types.go`: added `FeaturesSpec.InferenceGateway
 *InferenceGatewayFeature` + `InferenceGatewayFeature{Enabled, RoutingProfile, GatewayClassName,
