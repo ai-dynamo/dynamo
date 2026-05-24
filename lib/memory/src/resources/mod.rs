@@ -1065,9 +1065,125 @@ impl std::fmt::Display for Resources {
 
         writeln!(f)?;
         writeln!(f, "Hugepage state")?;
-        write!(f, "{}", self.hugepage)?;
+        render_hugepage_state(f, self)?;
         Ok(())
     }
+}
+
+/// Role-aware hugepage rendering. Shows per-node detail only for host-CPU
+/// nodes (the ones the pool can target); collapses the long tail of
+/// CPU-less / MIG-reservation nodes (common on Grace/GB200) into a single
+/// summary line so the operator doesn't have to scroll past 32 identical
+/// all-zero blocks.
+fn render_hugepage_state(f: &mut std::fmt::Formatter<'_>, r: &Resources) -> std::fmt::Result {
+    let hp = &r.hugepage;
+    writeln!(
+        f,
+        "  default page size:    {}",
+        if hp.default_size_bytes == 0 {
+            "?".to_string()
+        } else {
+            format_bytes(hp.default_size_bytes as u64)
+        }
+    )?;
+    writeln!(f, "  THP enabled:          {}", hp.thp_enabled)?;
+    if hp.pools.is_empty() {
+        writeln!(f, "  system-wide pools:    (none)")?;
+    } else {
+        writeln!(f, "  system-wide pools:")?;
+        for p in &hp.pools {
+            writeln!(
+                f,
+                "    {} pages  nr={}  free={}  resv={}  surplus={}",
+                format_bytes(p.page_size_bytes as u64),
+                p.nr_pages,
+                p.free_pages,
+                p.resv_pages,
+                p.surplus_pages,
+            )?;
+        }
+    }
+    if hp.per_node.is_empty() {
+        return Ok(());
+    }
+
+    let host_node_ids: HashSet<u32> = r.host_memory_nodes().map(|n| n.node.0).collect();
+
+    let (host_pools, other_pools): (Vec<_>, Vec<_>) = hp
+        .per_node
+        .iter()
+        .partition(|n| host_node_ids.contains(&n.node.0));
+
+    if !host_pools.is_empty() {
+        writeln!(f, "  per-host-node pools:")?;
+        for n in &host_pools {
+            for p in &n.pools {
+                writeln!(
+                    f,
+                    "    node {}  {} pages  nr={}  free={}  surplus={}",
+                    n.node.0,
+                    format_bytes(p.page_size_bytes as u64),
+                    p.nr_pages,
+                    p.free_pages,
+                    p.surplus_pages,
+                )?;
+            }
+        }
+    }
+
+    if !other_pools.is_empty() {
+        let any_reserved = other_pools
+            .iter()
+            .flat_map(|n| n.pools.iter())
+            .any(|p| p.nr_pages > 0 || p.surplus_pages > 0);
+        let ids: Vec<u32> = other_pools.iter().map(|n| n.node.0).collect();
+        let id_range = compact_node_ids(&ids);
+        if any_reserved {
+            writeln!(
+                f,
+                "  CPU-less nodes [{}]:  {} node(s) with reservations — see /sys for detail",
+                id_range,
+                other_pools.len(),
+            )?;
+        } else {
+            writeln!(
+                f,
+                "  CPU-less nodes [{}]:  {} node(s), all pools empty (excluded from pool)",
+                id_range,
+                other_pools.len(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn compact_node_ids(ids: &[u32]) -> String {
+    if ids.is_empty() {
+        return String::new();
+    }
+    let mut sorted: Vec<u32> = ids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let start = sorted[i];
+        let mut end = start;
+        while i + 1 < sorted.len() && sorted[i + 1] == end + 1 {
+            i += 1;
+            end = sorted[i];
+        }
+        if !out.is_empty() {
+            out.push(',');
+        }
+        if start == end {
+            out.push_str(&start.to_string());
+        } else {
+            out.push_str(&format!("{}-{}", start, end));
+        }
+        i += 1;
+    }
+    out
 }
 
 fn format_optional_bytes(b: Option<u64>) -> String {
