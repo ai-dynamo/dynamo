@@ -159,7 +159,8 @@ type GPUMemoryServiceMode string
 const (
 	// GMSModeIntraPod runs GMS as a sidecar within the same pod.
 	GMSModeIntraPod GPUMemoryServiceMode = "IntraPod"
-	// GMSModeInterPod runs GMS as a separate pod (not yet supported).
+	// GMSModeInterPod runs GMS as rank-local pods that share GPUs through DRA.
+	// Extra client pod rendering is reserved for a follow-up change.
 	GMSModeInterPod GPUMemoryServiceMode = "InterPod"
 )
 
@@ -171,8 +172,8 @@ const (
 // graduate out of this block (and become first-class fields on the shared
 // spec) once their API is considered stable.
 type ExperimentalSpec struct {
-	// gpuMemoryService configures the GPU Memory Service (GMS) sidecar.
-	// When set, a GMS sidecar is injected and GPU access is managed via DRA.
+	// gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU
+	// access for GMS clients is managed via DRA.
 	// +optional
 	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
@@ -194,10 +195,14 @@ type ExperimentalSpec struct {
 	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
 
-// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a
-// worker component. The operator injects a GMS sidecar and replaces the main
+// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a
+// worker component. The operator injects GMS wiring and replaces the main
 // container's GPU resources with a DRA `ResourceClaim` for shared GPU access.
 // See ExperimentalSpec for the stability caveat.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == 'IntraPod'",message="extraClientContainers is only supported with mode=IntraPod"
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == 'InterPod'",message="extraClientPods is only supported with mode=InterPod"
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientPods) || size(self.extraClientPods) == 0",message="extraClientPods is reserved for inter-pod GMS and is not implemented yet"
 type GPUMemoryServiceSpec struct {
 	// mode selects the GMS deployment topology.
 	// +optional
@@ -208,6 +213,39 @@ type GPUMemoryServiceSpec struct {
 	// +optional
 	// +kubebuilder:default="gpu.nvidia.com"
 	DeviceClassName string `json:"deviceClassName,omitempty"`
+
+	// extraClientContainers lists additional user-declared containers that should
+	// be wired as GMS clients in service pods. Checkpoint Job clients are declared
+	// under checkpoint.job.gmsClientContainers. In each rendered pod, only
+	// matching container names are wired; absent names are ignored.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ExtraClientContainers []string `json:"extraClientContainers,omitempty"`
+
+	// extraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+	// reserved for future use and is rejected until inter-pod client orchestration is wired.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	ExtraClientPods []GMSClientPodSpec `json:"extraClientPods,omitempty"`
+}
+
+// GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+type GMSClientPodSpec struct {
+	// name identifies this client pod.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// podTemplate configures the pod to run as a GMS client.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
@@ -249,6 +287,8 @@ const (
 
 // ComponentCheckpointConfig configures checkpointing for a DGD component.
 // +kubebuilder:validation:XValidation:rule="(has(self.checkpointRef) && size(self.checkpointRef) > 0) || has(self.identity)",message="When checkpoint is configured, either checkpointRef or identity must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.mode) || self.mode == 'Auto'",message="checkpoint.job can only be set in Auto mode"
 type ComponentCheckpointConfig struct {
 	// mode defines how checkpoint creation is handled.
 	// `Auto`: DGD controller creates the DynamoCheckpoint CR automatically.
@@ -268,6 +308,39 @@ type ComponentCheckpointConfig struct {
 	// Required when `checkpointRef` is not specified.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
+
+	// targetContainerName is the workload container to snapshot and restore.
+	// +optional
+	// +kubebuilder:default=main
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	TargetContainerName string `json:"targetContainerName,omitempty"`
+
+	// job customizes the checkpoint Job that is created in Auto mode.
+	// +optional
+	Job *ComponentCheckpointJobConfig `json:"job,omitempty"`
+}
+
+// ComponentCheckpointJobConfig customizes the checkpoint Job created for a DGD component.
+type ComponentCheckpointJobConfig struct {
+	// gmsClientContainers lists checkpoint Job containers that should receive
+	// GMS client wiring. Requires gpuMemoryService on the component.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	GMSClientContainers []string `json:"gmsClientContainers,omitempty"`
+
+	// podTemplate customizes the checkpoint Job pod. The operator starts from the
+	// selected workload container and merges this template so users can add helper
+	// containers such as gms-saver.
+	// +optional
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence.
