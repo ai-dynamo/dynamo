@@ -75,20 +75,26 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_b64(["green"]),
                     ),
                     # --frontend-decoding (HTTP-URL): exercises strip_inline_data_urls
-                    # + NIXL RDMA. post_merge-only — local pre-merge builds outside
-                    # docker can pick up NIXL stubs that don't support this path;
-                    # CI post_merge runs in a container with real NIXL.
+                    # + NIXL RDMA. Promoted to pre_merge — the cuda vllm-runtime
+                    # image now exposes libnixl.so on LD_LIBRARY_PATH (the wheel's
+                    # hidden `.nixl_cu${CUDA_MAJOR}.mesonpy.libs/` sibling), so
+                    # the frontend instantiates real NIXL and stub fallback is
+                    # no longer a risk in pre-merge runs. Per-MmCase marks
+                    # override the topology's post_merge default.
                     MmCase(
                         suffix="frontend_decoding",
                         payload=make_image_payload(["green"]),
                         extra_script_args=["--frontend-decoding"],
+                        marks=[pytest.mark.pre_merge],
                     ),
-                    # --frontend-decoding (inline base64). Same NIXL stub
-                    # caveat as the HTTP-URL variant above.
+                    # --frontend-decoding (inline base64). Same libnixl
+                    # rationale as the HTTP-URL variant above; promoted to
+                    # pre_merge alongside it.
                     MmCase(
                         suffix="b64_frontend_decoding",
                         payload=make_image_payload_b64(["green"]),
                         extra_script_args=["--frontend-decoding"],
+                        marks=[pytest.mark.pre_merge],
                     ),
                 ],
             ),
