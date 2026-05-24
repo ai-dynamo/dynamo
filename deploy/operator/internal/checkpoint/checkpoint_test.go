@@ -412,7 +412,7 @@ func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *te
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{}, nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{}, "", nil)
 	require.NoError(t, err)
 	assert.Equal(t, friendly.Name, ckpt.Name)
 
@@ -427,7 +427,7 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{}, nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{}, "", nil)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
@@ -445,6 +445,7 @@ func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.
 		testNamespace,
 		testIdentity(),
 		corev1.PodTemplateSpec{},
+		"",
 		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
 	)
 	require.Error(t, err)
@@ -602,18 +603,27 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, "/snapshots", mounts[snapshotprotocol.CheckpointVolumeName])
 	})
 
-	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
+	t.Run("ready gms checkpoint wires declared restore client", func(t *testing.T) {
 		podSpec := testPodSpec()
 		podSpec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
-		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}}
+		podSpec.Containers = append(podSpec.Containers, corev1.Container{Name: "gms-loader", Image: "loader:latest"})
+		info := &CheckpointInfo{
+			Enabled: true,
+			Ready:   true,
+			Hash:    testHash,
+			GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+				Enabled:               true,
+				ExtraClientContainers: []string{"gms-loader"},
+			},
+		}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		gmsServer := findContainer(podSpec, gms.ServerContainerName)
 		require.NotNil(t, gmsServer, "gms-server is a native sidecar (init+restartPolicy=Always)")
-		loader := findContainer(podSpec, GMSLoaderContainer)
-		require.NotNil(t, loader, "gms-loader is a regular sidecar")
+		loader := findContainer(podSpec, "gms-loader")
+		require.NotNil(t, loader, "gms-loader is a regular container")
 		serverInitCount := 0
 		for _, container := range podSpec.InitContainers {
 			if container.Name == gms.ServerContainerName {
@@ -622,7 +632,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		}
 		loaderCount := 0
 		for _, container := range podSpec.Containers {
-			if container.Name == GMSLoaderContainer {
+			if container.Name == "gms-loader" {
 				loaderCount++
 			}
 		}
@@ -631,18 +641,17 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 
 		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
 		assert.Nil(t, gmsServer.StartupProbe, "no StartupProbe — clients drive readiness via connect-retry")
-		assert.Nil(t, loader.RestartPolicy, "loader is a regular sidecar; pod RestartPolicy applies")
+		assert.Nil(t, loader.RestartPolicy, "loader is a regular container; pod RestartPolicy applies")
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
 			mounts[mount.Name] = mount.MountPath
 		}
-		assert.Equal(t, "/checkpoints", mounts[snapshotprotocol.CheckpointVolumeName])
+		assert.Empty(t, mounts[snapshotprotocol.CheckpointVolumeName])
 		assert.Equal(t, gms.SharedMountPath, mounts[gms.SharedVolumeName])
 
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gmsServer.Command)
-		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.loader"}, loader.Command)
-		assert.Empty(t, loader.Args)
+		assert.Empty(t, loader.Command)
 	})
 
 	t.Run("error cases", func(t *testing.T) {
