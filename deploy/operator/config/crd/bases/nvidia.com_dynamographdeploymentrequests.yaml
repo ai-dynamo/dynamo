@@ -580,14 +580,6 @@ spec:
                             HTTPRoute attaches cross-namespace. When empty, defaults to the generated
                             deployment's namespace.
                           type: string
-                        routingProfile:
-                          default: balanced
-                          description: RoutingProfile selects the EPP routing policy preset.
-                          enum:
-                            - throughput
-                            - latency
-                            - balanced
-                          type: string
                       type: object
                     mocker:
                       description: Mocker configures the simulated (mocker) backend for testing without GPUs.

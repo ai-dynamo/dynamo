@@ -330,31 +330,19 @@ type KVRouterSpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
-// RoutingProfile is a preset that maps to the EPP scorer weights
-// (KV-overlap vs. load), so users don't tune raw env vars.
-// +kubebuilder:validation:Enum=throughput;latency;balanced
-type RoutingProfile string
-
-const (
-	// RoutingProfileThroughput favors KV-cache reuse (overlap-weighted) for max tokens/GPU.
-	RoutingProfileThroughput RoutingProfile = "throughput"
-	// RoutingProfileLatency favors least-loaded endpoints to minimize TTFT/queueing.
-	RoutingProfileLatency RoutingProfile = "latency"
-	// RoutingProfileBalanced blends overlap and load (default).
-	RoutingProfileBalanced RoutingProfile = "balanced"
-)
-
 // InferenceGatewayFeature enables the GAIE EPP integration for the generated DGD.
+//
+// Routing policy is intentionally not exposed here: the EPP embeds the Dynamo
+// KV router (via FFI) and inherits its built-in defaults, exactly like every
+// other Dynamo deployment. We do not hand-tune router knobs (overlap credit,
+// prefill load scale, temperature) from this feature. If validated routing
+// presets ever exist, they belong as a router-level setting shared by the
+// frontend KV router and the EPP, not a GAIE-only enum.
 type InferenceGatewayFeature struct {
 	// Enabled turns on the inference-gateway integration.
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
-
-	// RoutingProfile selects the EPP routing policy preset.
-	// +optional
-	// +kubebuilder:default=balanced
-	RoutingProfile RoutingProfile `json:"routingProfile,omitempty"`
 
 	// GatewayName is the name of the existing Gateway to attach the generated
 	// HTTPRoute to. The operator attaches to a pre-provisioned, shared Gateway
