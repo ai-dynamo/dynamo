@@ -51,13 +51,20 @@ pub struct SglangBridge {
 }
 
 impl SglangBridge {
-    pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
-        let args = match argv {
-            Some(a) => <Args as clap::Parser>::try_parse_from(a),
-            None => <Args as clap::Parser>::try_parse(),
-        }
-        .map_err(|e| invalid_arg(e.to_string()))?;
+    /// Parse from process args (the binary entry point).
+    pub fn from_env() -> Result<(Self, WorkerConfig), DynamoError> {
+        Self::build(<Args as clap::Parser>::try_parse())
+    }
 
+    /// Parse from an explicit argv (the PyO3 entry point).
+    pub fn from_argv(argv: Vec<String>) -> Result<(Self, WorkerConfig), DynamoError> {
+        Self::build(<Args as clap::Parser>::try_parse_from(argv))
+    }
+
+    fn build(
+        parsed: Result<Args, clap::Error>,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let args = parsed.map_err(|e| invalid_arg(e.to_string()))?;
         let engine = SglangBridge {
             grpc_endpoint: args.sglang_grpc_endpoint,
             disaggregation_mode: OnceCell::new(),
@@ -66,8 +73,6 @@ impl SglangBridge {
             kv_events: OnceCell::new(),
             dp_size: OnceCell::new(),
         };
-        // disaggregation_mode is discovered by `start()` from SGLang and
-        // returned on EngineConfig; Worker reads the engine's override.
         let config = WorkerConfig {
             namespace: args.common.namespace,
             component: args.common.component,
@@ -81,6 +86,187 @@ impl SglangBridge {
 
     fn mode(&self) -> DisaggregationMode {
         self.disaggregation_mode.get().copied().unwrap_or_default()
+    }
+
+    async fn generate_decode(
+        &self,
+        request: PreprocessedRequest,
+        ctx: Arc<dyn AsyncEngineContext>,
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        let mut client = self.client_or_err()?;
+        let prompt_len = request.token_ids.len() as u32;
+        let grpc_req = GenerateRequest {
+            input_ids: request.token_ids.iter().map(|&t| t as i32).collect(),
+            sampling_params: Some(build_sampling_params(&request.sampling_options, &request.stop_conditions)),
+            stream: Some(true),
+            rid: Some(ctx.id().to_string()),
+            disaggregated_params: request.bootstrap_info.as_ref().map(|bi| DisaggregatedParams {
+                bootstrap_host: bi.bootstrap_host.clone(),
+                bootstrap_port: bi.bootstrap_port.into(),
+                bootstrap_room: bi.bootstrap_room as i64,
+            }),
+            ..Default::default()
+        };
+        let mut stream = client
+            .generate(grpc_req)
+            .await
+            .map_err(|e| backend_error(format!("Generate RPC: {e}")))?
+            .into_inner();
+
+        Ok(Box::pin(async_stream::stream! {
+            let mut completion_tokens: u32 = 0;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = ctx.stopped() => {
+                        yield Ok(LLMEngineOutput::cancelled()
+                            .with_usage(usage(prompt_len, completion_tokens)));
+                        break;
+                    }
+                    maybe_chunk = stream.next() => {
+                        let Some(chunk_res) = maybe_chunk else {
+                            yield Ok(LLMEngineOutput::error("stream ended without terminal".into()));
+                            break;
+                        };
+                        let resp = match chunk_res {
+                            Ok(r) => r,
+                            Err(s) => {
+                                yield Ok(LLMEngineOutput::error(format!("gRPC stream error: {s}")));
+                                break;
+                            }
+                        };
+                        // Terminal chunks may carry the final token(s); flush before the terminal.
+                        if !resp.output_ids.is_empty() {
+                            completion_tokens = completion_tokens.saturating_add(resp.output_ids.len() as u32);
+                            for tid in resp.output_ids {
+                                yield Ok(chunk::token(tid as u32));
+                            }
+                        }
+                        if !resp.finished {
+                            continue;
+                        }
+                        let finish = parse_finish_reason(
+                            resp.meta_info.get("finish_reason").map(String::as_str).unwrap_or(""),
+                        );
+                        let total = resp.meta_info.get("completion_tokens")
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(completion_tokens);
+                        let terminal = match finish {
+                            FinishReason::Length => LLMEngineOutput::length(),
+                            FinishReason::Cancelled => LLMEngineOutput::cancelled(),
+                            FinishReason::Error(msg) => LLMEngineOutput::error(msg),
+                            _ => LLMEngineOutput::stop(),
+                        };
+                        yield Ok(terminal.with_usage(usage(prompt_len, total)));
+                        break;
+                    }
+                }
+            }
+        }))
+    }
+
+    /// Mirrors `components/src/dynamo/sglang/request_handlers/llm/prefill_handler.py`:
+    /// open the Generate RPC once, yield ONE non-terminal bootstrap chunk
+    /// synchronously, then drain the gRPC stream in-band (inside the same
+    /// async_stream) until SGLang signals `finished` — only then close the
+    /// outer stream with a terminal Stop chunk.
+    ///
+    /// The drain must stay in-band (no `tokio::spawn`) because closing the
+    /// outer stream early — i.e. before sglang acknowledges prefill done —
+    /// makes the frontend treat the stream as incomplete and retry the
+    /// prefill on the same worker, which then collides with the still-active
+    /// gRPC request (sglang rejects "Duplicate active gRPC request id").
+    async fn generate_prefill(
+        &self,
+        request: PreprocessedRequest,
+        ctx: Arc<dyn AsyncEngineContext>,
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        let mut client = self.client_or_err()?;
+        let (bootstrap_host, bootstrap_port) = self
+            .bootstrap
+            .get()
+            .ok_or_else(|| backend_error("prefill: bootstrap not initialised"))?
+            .clone();
+        // Honour a router-supplied room (carries dp_rank), else mint a fresh 63-bit room.
+        let bootstrap_room: i64 = request
+            .bootstrap_info
+            .as_ref()
+            .map(|bi| bi.bootstrap_room as i64)
+            .unwrap_or_else(|| rand::rng().random_range(1..i64::MAX));
+
+        let grpc_req = GenerateRequest {
+            input_ids: request.token_ids.iter().map(|&t| t as i32).collect(),
+            sampling_params: Some(build_sampling_params(&request.sampling_options, &request.stop_conditions)),
+            stream: Some(true),
+            rid: Some(ctx.id().to_string()),
+            disaggregated_params: Some(DisaggregatedParams {
+                bootstrap_host: bootstrap_host.clone(),
+                bootstrap_port: bootstrap_port.into(),
+                bootstrap_room,
+            }),
+            ..Default::default()
+        };
+        let bootstrap_chunk = LLMEngineOutput {
+            disaggregated_params: Some(serde_json::json!({
+                "bootstrap_host": bootstrap_host,
+                "bootstrap_port": bootstrap_port,
+                "bootstrap_room": bootstrap_room,
+            })),
+            ..Default::default()
+        };
+
+        Ok(Box::pin(async_stream::stream! {
+            // Open the gRPC stream BEFORE yielding bootstrap so a failed RPC
+            // surfaces as an error chunk on the outer stream rather than a
+            // closed stream after the frontend has already extracted the
+            // bootstrap triple.
+            let mut stream = match client.generate(grpc_req).await {
+                Ok(r) => r.into_inner(),
+                Err(e) => {
+                    yield Ok(LLMEngineOutput::error(format!("prefill Generate RPC: {e}")));
+                    return;
+                }
+            };
+            yield Ok(bootstrap_chunk);
+
+            // Drain the stream until SGLang signals `finished`. SGLang prefill
+            // blocks until decode pulls KV, so this is what holds the outer
+            // stream open.
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = ctx.stopped() => {
+                        yield Ok(LLMEngineOutput::cancelled());
+                        return;
+                    }
+                    maybe_chunk = stream.next() => match maybe_chunk {
+                        Some(Ok(r)) if r.finished => {
+                            yield Ok(LLMEngineOutput::stop());
+                            return;
+                        }
+                        // Non-terminal chunks from prefill carry no tokens we
+                        // need to forward (the bootstrap triple was already
+                        // emitted); discard them.
+                        Some(Ok(_)) => continue,
+                        Some(Err(s)) => {
+                            yield Ok(LLMEngineOutput::error(format!("prefill stream error: {s}")));
+                            return;
+                        }
+                        None => {
+                            yield Ok(LLMEngineOutput::error("prefill stream closed without terminal".to_string()));
+                            return;
+                        }
+                    },
+                }
+            }
+        }))
+    }
+
+    fn client_or_err(&self) -> Result<SglangServiceClient<Channel>, DynamoError> {
+        self.client
+            .get()
+            .ok_or_else(|| backend_error("generate called before start"))
+            .cloned()
     }
 }
 
@@ -282,188 +468,6 @@ impl LLMEngine for SglangBridge {
     }
 }
 
-impl SglangBridge {
-    async fn generate_decode(
-        &self,
-        request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let mut client = self.client_or_err()?;
-        let prompt_len = request.token_ids.len() as u32;
-        let grpc_req = GenerateRequest {
-            input_ids: request.token_ids.iter().map(|&t| t as i32).collect(),
-            sampling_params: Some(build_sampling_params(&request)),
-            stream: Some(true),
-            rid: Some(ctx.id().to_string()),
-            disaggregated_params: request.bootstrap_info.as_ref().map(|bi| DisaggregatedParams {
-                bootstrap_host: bi.bootstrap_host.clone(),
-                bootstrap_port: bi.bootstrap_port as i32,
-                bootstrap_room: bi.bootstrap_room as i64,
-            }),
-            ..Default::default()
-        };
-        let mut stream = client
-            .generate(grpc_req)
-            .await
-            .map_err(|e| backend_error(format!("Generate RPC: {e}")))?
-            .into_inner();
-
-        Ok(Box::pin(async_stream::stream! {
-            let mut completion_tokens: u32 = 0;
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = ctx.stopped() => {
-                        yield Ok(LLMEngineOutput::cancelled()
-                            .with_usage(usage(prompt_len, completion_tokens)));
-                        break;
-                    }
-                    maybe_chunk = stream.next() => {
-                        let Some(chunk_res) = maybe_chunk else {
-                            yield Ok(LLMEngineOutput::error("stream ended without terminal".into()));
-                            break;
-                        };
-                        let resp = match chunk_res {
-                            Ok(r) => r,
-                            Err(s) => {
-                                yield Ok(LLMEngineOutput::error(format!("gRPC stream error: {s}")));
-                                break;
-                            }
-                        };
-                        // Terminal chunks may carry the final token(s); flush before the terminal.
-                        if !resp.output_ids.is_empty() {
-                            completion_tokens = completion_tokens.saturating_add(resp.output_ids.len() as u32);
-                            for tid in resp.output_ids {
-                                yield Ok(chunk::token(tid as u32));
-                            }
-                        }
-                        if !resp.finished {
-                            continue;
-                        }
-                        let finish = parse_finish_reason(
-                            resp.meta_info.get("finish_reason").map(String::as_str).unwrap_or(""),
-                        );
-                        let total = resp.meta_info.get("completion_tokens")
-                            .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(completion_tokens);
-                        let terminal = match finish {
-                            FinishReason::Length => LLMEngineOutput::length(),
-                            FinishReason::Cancelled => LLMEngineOutput::cancelled(),
-                            FinishReason::Error(msg) => LLMEngineOutput::error(msg),
-                            _ => LLMEngineOutput::stop(),
-                        };
-                        yield Ok(terminal.with_usage(usage(prompt_len, total)));
-                        break;
-                    }
-                }
-            }
-        }))
-    }
-
-    /// Mirrors `components/src/dynamo/sglang/request_handlers/llm/prefill_handler.py`:
-    /// open the Generate RPC once, yield ONE non-terminal bootstrap chunk
-    /// synchronously, then drain the gRPC stream in-band (inside the same
-    /// async_stream) until SGLang signals `finished` — only then close the
-    /// outer stream with a terminal Stop chunk.
-    ///
-    /// The drain must stay in-band (no `tokio::spawn`) because closing the
-    /// outer stream early — i.e. before sglang acknowledges prefill done —
-    /// makes the frontend treat the stream as incomplete and retry the
-    /// prefill on the same worker, which then collides with the still-active
-    /// gRPC request (sglang rejects "Duplicate active gRPC request id").
-    async fn generate_prefill(
-        &self,
-        request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let mut client = self.client_or_err()?;
-        let (bootstrap_host, bootstrap_port) = self
-            .bootstrap
-            .get()
-            .ok_or_else(|| backend_error("prefill: bootstrap not initialised"))?
-            .clone();
-        // Honour a router-supplied room (carries dp_rank), else mint a fresh 63-bit room.
-        let bootstrap_room: i64 = request
-            .bootstrap_info
-            .as_ref()
-            .map(|bi| bi.bootstrap_room as i64)
-            .unwrap_or_else(|| rand::rng().random_range(1..i64::MAX));
-
-        let grpc_req = GenerateRequest {
-            input_ids: request.token_ids.iter().map(|&t| t as i32).collect(),
-            sampling_params: Some(build_sampling_params(&request)),
-            stream: Some(true),
-            rid: Some(ctx.id().to_string()),
-            disaggregated_params: Some(DisaggregatedParams {
-                bootstrap_host: bootstrap_host.clone(),
-                bootstrap_port: bootstrap_port as i32,
-                bootstrap_room,
-            }),
-            ..Default::default()
-        };
-        let bootstrap_chunk = LLMEngineOutput {
-            disaggregated_params: Some(serde_json::json!({
-                "bootstrap_host": bootstrap_host,
-                "bootstrap_port": bootstrap_port,
-                "bootstrap_room": bootstrap_room,
-            })),
-            ..Default::default()
-        };
-
-        Ok(Box::pin(async_stream::stream! {
-            // Open the gRPC stream BEFORE yielding bootstrap so a failed RPC
-            // surfaces as an error chunk on the outer stream rather than a
-            // closed stream after the frontend has already extracted the
-            // bootstrap triple.
-            let mut stream = match client.generate(grpc_req).await {
-                Ok(r) => r.into_inner(),
-                Err(e) => {
-                    yield Ok(LLMEngineOutput::error(format!("prefill Generate RPC: {e}")));
-                    return;
-                }
-            };
-            yield Ok(bootstrap_chunk);
-
-            // Drain the stream until SGLang signals `finished`. SGLang prefill
-            // blocks until decode pulls KV, so this is what holds the outer
-            // stream open.
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = ctx.stopped() => {
-                        yield Ok(LLMEngineOutput::cancelled());
-                        return;
-                    }
-                    maybe_chunk = stream.next() => match maybe_chunk {
-                        Some(Ok(r)) if r.finished => {
-                            yield Ok(LLMEngineOutput::stop());
-                            return;
-                        }
-                        // Non-terminal chunks from prefill carry no tokens we
-                        // need to forward (the bootstrap triple was already
-                        // emitted); discard them.
-                        Some(Ok(_)) => continue,
-                        Some(Err(s)) => {
-                            yield Ok(LLMEngineOutput::error(format!("prefill stream error: {s}")));
-                            return;
-                        }
-                        None => {
-                            yield Ok(LLMEngineOutput::error("prefill stream closed without terminal".to_string()));
-                            return;
-                        }
-                    },
-                }
-            }
-        }))
-    }
-
-    fn client_or_err(&self) -> Result<SglangServiceClient<Channel>, DynamoError> {
-        self.client
-            .get()
-            .ok_or_else(|| backend_error("generate called before start"))
-            .cloned()
-    }
-}
 
 /// Canary `PreprocessedRequest` shape sent by the runtime's health-check
 /// manager (when `DYN_HEALTH_CHECK_ENABLED=true`) through the normal

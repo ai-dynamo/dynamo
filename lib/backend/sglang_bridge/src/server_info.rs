@@ -94,14 +94,17 @@ fn parse_kv_events_config(raw: &str) -> Option<KvEventsConfig> {
         tracing::info!(publisher, "kv_events publisher != zmq; KV routing disabled");
         return None;
     }
-    Some(KvEventsConfig {
-        endpoint: v.get("endpoint").and_then(|e| e.as_str())?.to_string(),
-        topic: v
-            .get("topic")
-            .and_then(|t| t.as_str())
-            .unwrap_or_default()
-            .to_string(),
-    })
+    let endpoint = v
+        .get("endpoint")
+        .and_then(|e| e.as_str())
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let topic = v
+        .get("topic")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(KvEventsConfig { endpoint, topic })
 }
 
 /// Mirror of SGLang's `ZmqEventPublisher.offset_endpoint_port`. DP rank N
@@ -190,6 +193,12 @@ mod tests {
 
         // malformed JSON-inside-JSON → off, not panic
         let info = parse_server_info(r#"{"kv_events_config": "not json"}"#);
+        assert!(info.kv_events.is_none());
+
+        // empty endpoint → off (would otherwise reach ZMQ subscribe).
+        let info = parse_server_info(
+            r#"{"kv_events_config": "{\"publisher\":\"zmq\",\"endpoint\":\"\"}"}"#,
+        );
         assert!(info.kv_events.is_none());
     }
 

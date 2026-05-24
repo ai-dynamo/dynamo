@@ -1,35 +1,37 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Request shaping: Dynamo `PreprocessedRequest` -> SGLang v1 `SamplingParams`.
+//! Request shaping: Dynamo sampling/stop options -> SGLang v1 `SamplingParams`.
 
-use dynamo_backend_common::{FinishReason, PreprocessedRequest};
+use dynamo_backend_common::{FinishReason, SamplingOptions, StopConditions};
 
 use crate::proto::v1::SamplingParams;
 
-pub fn build_sampling_params(req: &PreprocessedRequest) -> SamplingParams {
-    let (json_schema, regex) = build_structured_constraint(req);
+pub fn build_sampling_params(
+    sampling: &SamplingOptions,
+    stop: &StopConditions,
+) -> SamplingParams {
+    let (json_schema, regex) = build_structured_constraint(sampling);
     SamplingParams {
-        temperature: req.sampling_options.temperature,
-        top_p: req.sampling_options.top_p,
-        top_k: req.sampling_options.top_k,
-        min_p: req.sampling_options.min_p,
-        frequency_penalty: req.sampling_options.frequency_penalty,
-        presence_penalty: req.sampling_options.presence_penalty,
-        repetition_penalty: req.sampling_options.repetition_penalty,
-        max_new_tokens: req.stop_conditions.max_tokens.map(|v| v as i32),
-        min_new_tokens: req.stop_conditions.min_tokens.map(|v| v as i32),
-        stop: req.stop_conditions.stop.clone().unwrap_or_default(),
-        stop_token_ids: req
-            .stop_conditions
+        temperature: sampling.temperature,
+        top_p: sampling.top_p,
+        top_k: sampling.top_k,
+        min_p: sampling.min_p,
+        frequency_penalty: sampling.frequency_penalty,
+        presence_penalty: sampling.presence_penalty,
+        repetition_penalty: sampling.repetition_penalty,
+        max_new_tokens: stop.max_tokens.map(|v| v as i32),
+        min_new_tokens: stop.min_tokens.map(|v| v as i32),
+        stop: stop.stop.clone().unwrap_or_default(),
+        stop_token_ids: stop
             .stop_token_ids_hidden
             .clone()
             .unwrap_or_default()
             .into_iter()
             .map(|t| t as i32)
             .collect(),
-        ignore_eos: req.stop_conditions.ignore_eos,
-        n: req.sampling_options.n.map(|v| v as i32),
+        ignore_eos: stop.ignore_eos,
+        n: sampling.n.map(|v| v as i32),
         json_schema,
         regex,
     }
@@ -37,8 +39,8 @@ pub fn build_sampling_params(req: &PreprocessedRequest) -> SamplingParams {
 
 /// Priority: json > regex > choice (anchored alternation) > grammar
 /// (forwarded as regex; v1 has no EBNF field).
-fn build_structured_constraint(req: &PreprocessedRequest) -> (Option<String>, Option<String>) {
-    let Some(g) = req.sampling_options.guided_decoding.as_ref() else {
+fn build_structured_constraint(sampling: &SamplingOptions) -> (Option<String>, Option<String>) {
+    let Some(g) = sampling.guided_decoding.as_ref() else {
         return (None, None);
     };
     if let Some(schema) = &g.json {
@@ -109,4 +111,56 @@ mod tests {
         }
     }
 
+    /// Snapshot test for the sampling-param mapping. If a SGLang proto field
+    /// is renamed/moved during an upstream bump, this fires immediately
+    /// rather than silently dropping the value at runtime.
+    #[test]
+    fn build_sampling_params_maps_all_fields() {
+        let sampling = SamplingOptions {
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            top_k: Some(40),
+            min_p: Some(0.05),
+            frequency_penalty: Some(0.1),
+            presence_penalty: Some(0.2),
+            repetition_penalty: Some(1.1),
+            n: Some(2),
+            ..Default::default()
+        };
+        let stop = StopConditions {
+            max_tokens: Some(128),
+            min_tokens: Some(4),
+            stop: Some(vec!["</s>".into()]),
+            stop_token_ids_hidden: Some(vec![2, 11]),
+            ignore_eos: Some(true),
+            ..Default::default()
+        };
+        let params = build_sampling_params(&sampling, &stop);
+        assert_eq!(params.temperature, Some(0.7));
+        assert_eq!(params.top_p, Some(0.9));
+        assert_eq!(params.top_k, Some(40));
+        assert_eq!(params.min_p, Some(0.05));
+        assert_eq!(params.frequency_penalty, Some(0.1));
+        assert_eq!(params.presence_penalty, Some(0.2));
+        assert_eq!(params.repetition_penalty, Some(1.1));
+        assert_eq!(params.max_new_tokens, Some(128));
+        assert_eq!(params.min_new_tokens, Some(4));
+        assert_eq!(params.stop, vec!["</s>".to_string()]);
+        assert_eq!(params.stop_token_ids, vec![2, 11]);
+        assert_eq!(params.ignore_eos, Some(true));
+        assert_eq!(params.n, Some(2));
+        assert!(params.json_schema.is_none());
+        assert!(params.regex.is_none());
+    }
+
+    #[test]
+    fn build_sampling_params_empty_when_no_options() {
+        let params = build_sampling_params(&SamplingOptions::default(), &StopConditions::default());
+        assert!(params.temperature.is_none());
+        assert!(params.max_new_tokens.is_none());
+        assert!(params.stop.is_empty());
+        assert!(params.stop_token_ids.is_empty());
+        assert!(params.json_schema.is_none());
+        assert!(params.regex.is_none());
+    }
 }

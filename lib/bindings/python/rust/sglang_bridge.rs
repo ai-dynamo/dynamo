@@ -14,7 +14,7 @@ pub fn run_sglang_bridge(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
     argv.push("python -m dynamo.sglang_grpc".to_string());
     argv.extend(args);
 
-    let (engine, config) = dynamo_sglang_bridge::SglangBridge::from_args(Some(argv))
+    let (engine, config) = dynamo_sglang_bridge::SglangBridge::from_argv(argv)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     py.allow_threads(|| {
