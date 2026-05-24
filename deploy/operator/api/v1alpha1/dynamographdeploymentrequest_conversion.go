@@ -429,6 +429,14 @@ func restoreDGDRHubOnlySpec(restored *v1beta1.DynamoGraphDeploymentRequestSpec, 
 			dst.Features.Mocker = &v1beta1.MockerSpec{Enabled: false}
 		}
 	}
+	// InferenceGateway is hub-only (no v1alpha1 representation); restore it from
+	// the sparse annotation so a spoke->hub->spoke round-trip preserves it.
+	if restored.Features != nil && restored.Features.InferenceGateway != nil {
+		if dst.Features == nil {
+			dst.Features = &v1beta1.FeaturesSpec{}
+		}
+		dst.Features.InferenceGateway = restored.Features.InferenceGateway.DeepCopy()
+	}
 	if restored.SearchStrategy != "" {
 		dst.SearchStrategy = restored.SearchStrategy
 	}
@@ -724,6 +732,13 @@ func saveDGDRHubOnlySpec(src *v1beta1.DynamoGraphDeploymentRequestSpec, save *v1
 	}
 	if src.Features != nil && src.Features.Mocker != nil && !src.Features.Mocker.Enabled {
 		save.Features = &v1beta1.FeaturesSpec{Mocker: &v1beta1.MockerSpec{Enabled: false}}
+	}
+	// InferenceGateway is hub-only; save it sparsely so it survives hub->spoke->hub.
+	if src.Features != nil && src.Features.InferenceGateway != nil {
+		if save.Features == nil {
+			save.Features = &v1beta1.FeaturesSpec{}
+		}
+		save.Features.InferenceGateway = src.Features.InferenceGateway.DeepCopy()
 	}
 	save.SearchStrategy = src.SearchStrategy
 }

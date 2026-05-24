@@ -8,6 +8,7 @@ require (
 	github.com/ai-dynamo/dynamo/deploy/snapshot v0.0.0
 	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.8
 	github.com/bsm/gomega v1.27.10
+	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-cmp v0.7.0
 	github.com/imdario/mergo v0.3.16
@@ -30,8 +31,10 @@ require (
 	k8s.io/client-go v0.34.3
 	k8s.io/utils v0.0.0-20260108192941-914a6e750570
 	sigs.k8s.io/controller-runtime v0.22.4
+	sigs.k8s.io/gateway-api v1.3.1-0.20251106052652-079e4774d76b
 	sigs.k8s.io/gateway-api-inference-extension v1.2.0
 	sigs.k8s.io/lws v0.6.1
+	sigs.k8s.io/randfill v1.0.0
 	sigs.k8s.io/yaml v1.6.0
 	volcano.sh/apis v1.12.2
 )
@@ -48,7 +51,6 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/evanphx/json-patch v5.7.0+incompatible // indirect
-	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
@@ -116,6 +118,5 @@ require (
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.2 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
-	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.1 // indirect
 )

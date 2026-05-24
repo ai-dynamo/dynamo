@@ -41,7 +41,6 @@ class DGDRPhase(str, Enum):
     Deployed = "Deployed"
     Failed = "Failed"
 
-
 class ProfilingPhase(str, Enum):
     Initializing = "Initializing"
     SweepingPrefill = "SweepingPrefill"
@@ -51,11 +50,9 @@ class ProfilingPhase(str, Enum):
     GeneratingDGD = "GeneratingDGD"
     Done = "Done"
 
-
 class SearchStrategy(str, Enum):
     Rapid = "rapid"
     Thorough = "thorough"
-
 
 class GPUSKUType(str, Enum):
     GB200SXM = "gb200_sxm"
@@ -75,37 +72,29 @@ class GPUSKUType(str, Enum):
     MI200 = "mi200"
     MI300 = "mi300"
 
-
 class BackendType(str, Enum):
     Auto = "auto"
     Sglang = "sglang"
     Trtllm = "trtllm"
     Vllm = "vllm"
 
-
 class OptimizationType(str, Enum):
     Latency = "latency"
     Throughput = "throughput"
+
+class RoutingProfile(str, Enum):
+    Throughput = "throughput"
+    Latency = "latency"
+    Balanced = "balanced"
 
 
 class WorkloadSpec(BaseModel):
     """WorkloadSpec defines the workload characteristics for SLA-based profiling."""
 
-    isl: Optional[int] = Field(
-        default=4000, description="ISL is the Input Sequence Length (number of tokens)."
-    )
-    osl: Optional[int] = Field(
-        default=1000,
-        description="OSL is the Output Sequence Length (number of tokens).",
-    )
-    concurrency: Optional[float] = Field(
-        default=None,
-        description="Concurrency is the target concurrency level. Required (or RequestRate) when the planner is disabled.",
-    )
-    requestRate: Optional[float] = Field(
-        default=None,
-        description="RequestRate is the target request rate (req/s). Required (or Concurrency) when the planner is disabled.",
-    )
+    isl: Optional[int] = Field(default=4000, description="ISL is the Input Sequence Length (number of tokens).")
+    osl: Optional[int] = Field(default=1000, description="OSL is the Output Sequence Length (number of tokens).")
+    concurrency: Optional[float] = Field(default=None, description="Concurrency is the target concurrency level. Required (or RequestRate) when the planner is disabled.")
+    requestRate: Optional[float] = Field(default=None, description="RequestRate is the target request rate (req/s). Required (or Concurrency) when the planner is disabled.")
 
 
 class SLASpec(BaseModel):
@@ -116,21 +105,10 @@ class SLASpec(BaseModel):
     - ``ttft`` + ``itl``: explicit latency targets (default: 2000 ms / 30 ms)
     - ``e2eLatency``: end-to-end latency target (mutually exclusive with ttft/itl)"""
 
-    ttft: Optional[float] = Field(
-        default=2000,
-        description="TTFT is the Time To First Token target in milliseconds.",
-    )
-    itl: Optional[float] = Field(
-        default=30, description="ITL is the Inter-Token Latency target in milliseconds."
-    )
-    e2eLatency: Optional[float] = Field(
-        default=None,
-        description="E2ELatency is the target end-to-end request latency in milliseconds. Alternative to specifying TTFT + ITL.",
-    )
-    optimizationType: Optional[OptimizationType] = Field(
-        default=None,
-        description="OptimizationType is the optimization target for SLA profiling. Valid values: latency, throughput.",
-    )
+    ttft: Optional[float] = Field(default=2000, description="TTFT is the Time To First Token target in milliseconds.")
+    itl: Optional[float] = Field(default=30, description="ITL is the Inter-Token Latency target in milliseconds.")
+    e2eLatency: Optional[float] = Field(default=None, description="E2ELatency is the target end-to-end request latency in milliseconds. Alternative to specifying TTFT + ITL.")
+    optimizationType: Optional[OptimizationType] = Field(default=None, description="OptimizationType is the optimization target for SLA profiling. Valid values: latency, throughput.")
 
     @model_validator(mode="after")
     def _validate_sla_options(self) -> "SLASpec":
@@ -139,9 +117,7 @@ class SLASpec(BaseModel):
         ttft_itl_touched = (
             "ttft" in self.model_fields_set or "itl" in self.model_fields_set
         )
-        has_ttft_itl = (
-            self.ttft is not None or self.itl is not None
-        ) and ttft_itl_touched
+        has_ttft_itl = (self.ttft is not None or self.itl is not None) and ttft_itl_touched
         if has_e2e and has_ttft_itl:
             raise ValueError(
                 "SLA must specify either (ttft and itl) or e2eLatency, not both."
@@ -154,215 +130,108 @@ class SLASpec(BaseModel):
 class ModelCacheSpec(BaseModel):
     """ModelCacheSpec references a PVC containing pre-downloaded model weights."""
 
-    pvcName: Optional[str] = Field(
-        default=None,
-        description="PVCName is the name of the PersistentVolumeClaim containing model weights. The PVC must exist in the same namespace as the DGDR.",
-    )
-    pvcModelPath: Optional[str] = Field(
-        default=None,
-        description='PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").',
-    )
-    pvcMountPath: str = Field(
-        default="/opt/model-cache",
-        description="PVCMountPath is the mount path for the PVC inside the container.",
-    )
+    pvcName: Optional[str] = Field(default=None, description="PVCName is the name of the PersistentVolumeClaim containing model weights. The PVC must exist in the same namespace as the DGDR.")
+    pvcModelPath: Optional[str] = Field(default=None, description="PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. \"deepseek-r1\" or \"models/Llama-3.1-405B-FP8\").")
+    pvcMountPath: str = Field(default="/opt/model-cache", description="PVCMountPath is the mount path for the PVC inside the container.")
 
 
 class OverridesSpec(BaseModel):
     """OverridesSpec allows customizing the profiling job and the generated DynamoGraphDeployment."""
 
-    profilingJob: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.",
-    )
-    dgd: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment to use as the base for the generated deployment. Fields from profiling results are merged on top. Use this to override backend worker images.  The field is stored as a raw embedded resource rather than a typed *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already imports v1beta1 as the conversion hub and Go does not allow import cycles.  The EmbeddedResource marker tells the API server to validate that the value is a well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion, kind, and field schema) is performed by the controller during reconciliation. TODO(future MR): add webhook admission validation for the DGD field type.",
-    )
+    profilingJob: Optional[Dict[str, Any]] = Field(default=None, description="ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.")
+    dgd: Optional[Dict[str, Any]] = Field(default=None, description="DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment to use as the base for the generated deployment. Fields from profiling results are merged on top. Use this to override backend worker images.  The field is stored as a raw embedded resource rather than a typed *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already imports v1beta1 as the conversion hub and Go does not allow import cycles.  The EmbeddedResource marker tells the API server to validate that the value is a well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion, kind, and field schema) is performed by the controller during reconciliation. TODO(future MR): add webhook admission validation for the DGD field type.")
 
 
 class MockerSpec(BaseModel):
     """MockerSpec configures the simulated (mocker) backend."""
 
-    enabled: Optional[bool] = Field(
-        default=None,
-        description="Enabled indicates whether to deploy mocker workers instead of real inference workers. Useful for large-scale testing without GPUs.",
-    )
+    enabled: Optional[bool] = Field(default=None, description="Enabled indicates whether to deploy mocker workers instead of real inference workers. Useful for large-scale testing without GPUs.")
 
 
 class KVRouterSpec(BaseModel):
     """KVRouterSpec configures KV-cache-aware routing."""
 
-    enabled: Optional[bool] = Field(
-        default=None,
-        description="Enabled indicates whether to enable KV-cache-aware routing in the generated DGD. KV routing optimizes request scheduling based on KV cache locality.",
-    )
+    enabled: Optional[bool] = Field(default=None, description="Enabled indicates whether to enable KV-cache-aware routing in the generated DGD. KV routing optimizes request scheduling based on KV cache locality.")
+
+
+class InferenceGatewayFeature(BaseModel):
+    """InferenceGatewayFeature enables the GAIE EPP integration for the generated DGD."""
+
+    enabled: bool = Field(default=False, description="Enabled turns on the inference-gateway integration.")
+    routingProfile: RoutingProfile = Field(default="balanced", description="RoutingProfile selects the EPP routing policy preset.")
+    gatewayClassName: Optional[str] = Field(default=None, description="GatewayClassName is the Gateway API GatewayClass to attach the generated HTTPRoute to. Defaults to the platform's configured class (agentgateway) when empty.")
+    gatewayName: Optional[str] = Field(default=None, description="GatewayName, when set, attaches the generated HTTPRoute to an existing Gateway instead of having the operator create one.")
 
 
 class FeaturesSpec(BaseModel):
     """FeaturesSpec controls optional Dynamo platform features in the generated deployment."""
 
-    planner: Optional[PlannerConfig] = Field(
-        default=None,
-        description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. Go treats this as opaque bytes; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
-    )
-    mocker: Optional[MockerSpec] = Field(
-        default=None,
-        description="Mocker configures the simulated (mocker) backend for testing without GPUs.",
-    )
+    planner: Optional[PlannerConfig] = Field(default=None, description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. Go treats this as opaque bytes; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.")
+    mocker: Optional[MockerSpec] = Field(default=None, description="Mocker configures the simulated (mocker) backend for testing without GPUs.")
+    inferenceGateway: Optional[InferenceGatewayFeature] = Field(default=None, description="InferenceGateway fronts the generated deployment with a Gateway API Inference Extension (GAIE) endpoint picker (EPP) for token-aware routing. When enabled, the operator injects an EPP component into the generated DGD and emits the InferencePool + HTTPRoute so the gateway routes through the Dynamo EPP. The per-pool TTFT-vs-ISL curves produced during profiling feed the EPP routing table (and, when the planner is enabled, its scaling curves).")
 
 
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the GPU hardware for profiling and deployment. All fields are auto-detected from cluster GPU nodes when omitted (requires cluster-wide mode with GPU discovery enabled). gpuSku is a selector (restricts which nodes are considered); the other fields are pure overrides passed to the profiler. If all four fields are set, discovery is skipped."""
 
-    gpuSku: Optional[GPUSKUType] = Field(
-        default=None,
-        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.",
-    )
-    vramMb: Optional[float] = Field(
-        default=None,
-        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes.",
-    )
-    totalGpus: Optional[int] = Field(
-        default=None,
-        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by gpuSku when set), temporarily capped at 32 to limit profiler search space. This cap may be removed in a future release. Set this field explicitly to override.",
-    )
-    numGpusPerNode: Optional[int] = Field(
-        default=None,
-        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected from cluster GPU nodes.",
-    )
-    interconnect: Optional[str] = Field(
-        default=None,
-        description='Interconnect describes the primary GPU-to-GPU interconnect *within a node*.  Semantics / usage: - This is capability metadata used for profiling, planning, and deployment decisions. - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed. - When omitted, the operator may attempt best-effort discovery (currently distinguishes "nvlink" vs "pcie" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.  Impact of wrong / missing values: - If set more optimistically than reality (e.g., "nvlink" when only PCIe is present), performance models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts, resulting in degraded performance compared to expectations. - If set more pessimistically than reality (e.g., "pcie" when NVLink is present), the system may choose conservative plans and leave performance on the table. - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to conservative assumptions.  Example values: "pcie", "nvlink". Other values may be accepted but may not be auto-detected. ',
-    )
-    rdma: Optional[bool] = Field(
-        default=None,
-        description="RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.  Semantics / usage: - This is capability metadata used for profiling, planning, and deployment decisions. - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator, GPUDirect settings). It only expresses availability/intent. - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery is unavailable, it may remain unset.  Impact of wrong / missing values: - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or deployments to assume RDMA is available; depending on the runtime transport selection and fallback behavior, this can lead to connection/setup failures or performance regressions. - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and fall back to non-RDMA transports, usually remaining functional but potentially slower. - If unset and undiscovered, consumers should treat RDMA availability as unknown and use conservative defaults / fallback transports. ",
-    )
+    gpuSku: Optional[GPUSKUType] = Field(default=None, description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.")
+    vramMb: Optional[float] = Field(default=None, description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes.")
+    totalGpus: Optional[int] = Field(default=None, description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by gpuSku when set), temporarily capped at 32 to limit profiler search space. This cap may be removed in a future release. Set this field explicitly to override.")
+    numGpusPerNode: Optional[int] = Field(default=None, description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected from cluster GPU nodes.")
+    interconnect: Optional[str] = Field(default=None, description="Interconnect describes the primary GPU-to-GPU interconnect *within a node*.  Semantics / usage: - This is capability metadata used for profiling, planning, and deployment decisions. - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed. - When omitted, the operator may attempt best-effort discovery (currently distinguishes \"nvlink\" vs \"pcie\" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.  Impact of wrong / missing values: - If set more optimistically than reality (e.g., \"nvlink\" when only PCIe is present), performance models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts, resulting in degraded performance compared to expectations. - If set more pessimistically than reality (e.g., \"pcie\" when NVLink is present), the system may choose conservative plans and leave performance on the table. - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to conservative assumptions.  Example values: \"pcie\", \"nvlink\". Other values may be accepted but may not be auto-detected. ")
+    rdma: Optional[bool] = Field(default=None, description="RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.  Semantics / usage: - This is capability metadata used for profiling, planning, and deployment decisions. - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator, GPUDirect settings). It only expresses availability/intent. - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery is unavailable, it may remain unset.  Impact of wrong / missing values: - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or deployments to assume RDMA is available; depending on the runtime transport selection and fallback behavior, this can lead to connection/setup failures or performance regressions. - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and fall back to non-RDMA transports, usually remaining functional but potentially slower. - If unset and undiscovered, consumers should treat RDMA availability as unknown and use conservative defaults / fallback transports. ")
 
 
 class DynamoGraphDeploymentRequestSpec(BaseModel):
     """DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest. Only the Model field is required; all other fields are optional and have sensible defaults."""
 
-    model: str = Field(
-        description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.'
-    )
-    backend: BackendType = Field(
-        default="auto",
-        description="Backend specifies the inference backend to use for profiling and deployment.",
-    )
-    image: Optional[str] = Field(
-        default=None,
-        description='Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1". For Dynamo < 1.1.0, use dynamo-frontend.',
-    )
-    modelCache: Optional[ModelCacheSpec] = Field(
-        default=None,
-        description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.",
-    )
-    hardware: Optional[HardwareSpec] = Field(
-        default=None,
-        description="Hardware describes the hardware resources available for profiling and deployment. Typically auto-filled by the operator from cluster discovery.",
-    )
-    workload: Optional[WorkloadSpec] = Field(
-        default=None,
-        description="Workload defines the expected workload characteristics for SLA-based profiling.",
-    )
-    sla: Optional[SLASpec] = Field(
-        default=None,
-        description="SLA defines service-level agreement targets that drive profiling optimization.",
-    )
-    overrides: Optional[OverridesSpec] = Field(
-        default=None,
-        description="Overrides allows customizing the profiling job and the generated DynamoGraphDeployment.",
-    )
-    features: Optional[FeaturesSpec] = Field(
-        default=None,
-        description="Features controls optional Dynamo platform features in the generated deployment.",
-    )
-    searchStrategy: SearchStrategy = Field(
-        default="rapid",
-        description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
-    )
-    autoApply: Optional[bool] = Field(
-        default=True,
-        description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
-    )
+    model: str = Field(description="Model specifies the model to deploy (e.g., \"Qwen/Qwen3-0.6B\", \"meta-llama/Llama-3-70b\"). Can be a HuggingFace ID or a private model name.")
+    backend: BackendType = Field(default="auto", description="Backend specifies the inference backend to use for profiling and deployment.")
+    image: Optional[str] = Field(default=None, description="Image is the container image reference for the profiling job (planner image). Example: \"nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1\". For Dynamo < 1.1.0, use dynamo-frontend.")
+    modelCache: Optional[ModelCacheSpec] = Field(default=None, description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.")
+    hardware: Optional[HardwareSpec] = Field(default=None, description="Hardware describes the hardware resources available for profiling and deployment. Typically auto-filled by the operator from cluster discovery.")
+    workload: Optional[WorkloadSpec] = Field(default=None, description="Workload defines the expected workload characteristics for SLA-based profiling.")
+    sla: Optional[SLASpec] = Field(default=None, description="SLA defines service-level agreement targets that drive profiling optimization.")
+    overrides: Optional[OverridesSpec] = Field(default=None, description="Overrides allows customizing the profiling job and the generated DynamoGraphDeployment.")
+    features: Optional[FeaturesSpec] = Field(default=None, description="Features controls optional Dynamo platform features in the generated deployment.")
+    searchStrategy: SearchStrategy = Field(default="rapid", description="SearchStrategy controls the profiling search depth. \"rapid\" performs a fast sweep; \"thorough\" explores more configurations.")
+    autoApply: Optional[bool] = Field(default=True, description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.")
 
 
 class ParetoConfig(BaseModel):
     """ParetoConfig represents a single Pareto-optimal deployment configuration discovered during profiling."""
 
-    config: Dict[str, Any] = Field(
-        description="Config is the full deployment configuration for this Pareto point."
-    )
+    config: Dict[str, Any] = Field(description="Config is the full deployment configuration for this Pareto point.")
 
 
 class ProfilingResultsStatus(BaseModel):
     """ProfilingResultsStatus contains the output of the profiling process."""
 
-    pareto: Optional[List[ParetoConfig]] = Field(
-        default=None,
-        description="Pareto is the list of Pareto-optimal deployment configurations discovered during profiling. Each entry represents a different cost/performance trade-off.",
-    )
-    selectedConfig: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="SelectedConfig is the recommended configuration chosen by the profiler based on the SLA targets. This is the configuration used for deployment when autoApply is true.",
-    )
+    pareto: Optional[List[ParetoConfig]] = Field(default=None, description="Pareto is the list of Pareto-optimal deployment configurations discovered during profiling. Each entry represents a different cost/performance trade-off.")
+    selectedConfig: Optional[Dict[str, Any]] = Field(default=None, description="SelectedConfig is the recommended configuration chosen by the profiler based on the SLA targets. This is the configuration used for deployment when autoApply is true.")
 
 
 class DeploymentInfoStatus(BaseModel):
     """DeploymentInfoStatus tracks the state of the deployed DynamoGraphDeployment."""
 
-    replicas: Optional[int] = Field(
-        default=None, description="Replicas is the desired number of replicas."
-    )
-    availableReplicas: Optional[int] = Field(
-        default=None,
-        description="AvailableReplicas is the number of replicas that are available and ready.",
-    )
+    replicas: Optional[int] = Field(default=None, description="Replicas is the desired number of replicas.")
+    availableReplicas: Optional[int] = Field(default=None, description="AvailableReplicas is the number of replicas that are available and ready.")
 
 
 class DynamoGraphDeploymentRequestStatus(BaseModel):
     """DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest."""
 
-    phase: Optional[DGDRPhase] = Field(
-        default=None,
-        description="Phase is the high-level lifecycle phase of the deployment request.",
-    )
-    profilingPhase: Optional[ProfilingPhase] = Field(
-        default=None,
-        description='ProfilingPhase indicates the current sub-phase of the profiling pipeline. Only meaningful when Phase is "Profiling". Cleared when profiling completes or fails.',
-    )
-    dgdName: Optional[str] = Field(
-        default=None,
-        description="DGDName is the name of the generated or created DynamoGraphDeployment.",
-    )
-    profilingJobName: Optional[str] = Field(
-        default=None,
-        description="ProfilingJobName is the name of the Kubernetes Job running the profiler.",
-    )
-    profilingResults: Optional[ProfilingResultsStatus] = Field(
-        default=None,
-        description="ProfilingResults contains the output of the profiling process including Pareto-optimal configurations and the selected deployment configuration.",
-    )
-    deploymentInfo: Optional[DeploymentInfoStatus] = Field(
-        default=None,
-        description="DeploymentInfo tracks the state of the deployed DynamoGraphDeployment. Populated when a DGD has been created (either via autoApply or manually).",
-    )
-    observedGeneration: Optional[int] = Field(
-        default=None,
-        description="ObservedGeneration is the most recent generation observed by the controller.",
-    )
+    phase: Optional[DGDRPhase] = Field(default=None, description="Phase is the high-level lifecycle phase of the deployment request.")
+    profilingPhase: Optional[ProfilingPhase] = Field(default=None, description="ProfilingPhase indicates the current sub-phase of the profiling pipeline. Only meaningful when Phase is \"Profiling\". Cleared when profiling completes or fails.")
+    dgdName: Optional[str] = Field(default=None, description="DGDName is the name of the generated or created DynamoGraphDeployment.")
+    profilingJobName: Optional[str] = Field(default=None, description="ProfilingJobName is the name of the Kubernetes Job running the profiler.")
+    profilingResults: Optional[ProfilingResultsStatus] = Field(default=None, description="ProfilingResults contains the output of the profiling process including Pareto-optimal configurations and the selected deployment configuration.")
+    deploymentInfo: Optional[DeploymentInfoStatus] = Field(default=None, description="DeploymentInfo tracks the state of the deployed DynamoGraphDeployment. Populated when a DGD has been created (either via autoApply or manually).")
+    observedGeneration: Optional[int] = Field(default=None, description="ObservedGeneration is the most recent generation observed by the controller.")
 
 
 class DynamoGraphDeploymentRequest(BaseModel):
     """DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API. It provides a simplified, SLA-driven interface for deploying inference models on Dynamo. Users specify a model and optional performance targets; the controller handles profiling, configuration selection, and deployment."""
 
-    spec: Optional[DynamoGraphDeploymentRequestSpec] = Field(
-        default=None,
-        description="Spec defines the desired state for this deployment request.",
-    )
-    status: Optional[DynamoGraphDeploymentRequestStatus] = Field(
-        default=None,
-        description="Status reflects the current observed state of this deployment request.",
-    )
+    spec: Optional[DynamoGraphDeploymentRequestSpec] = Field(default=None, description="Spec defines the desired state for this deployment request.")
+    status: Optional[DynamoGraphDeploymentRequestStatus] = Field(default=None, description="Status reflects the current observed state of this deployment request.")

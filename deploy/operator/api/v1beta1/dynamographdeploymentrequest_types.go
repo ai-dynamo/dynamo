@@ -330,34 +330,6 @@ type KVRouterSpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
-// FeaturesSpec controls optional Dynamo platform features in the generated deployment.
-type FeaturesSpec struct {
-	// Planner is the raw SLA planner configuration passed to the planner service.
-	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
-	// Go treats this as opaque bytes; the Planner service validates it at startup.
-	// The presence of this field (non-null) enables the planner in the generated DGD.
-	// +optional
-	// +kubebuilder:pruning:PreserveUnknownFields
-	// +kubebuilder:validation:Type=object
-	Planner *runtime.RawExtension `json:"planner,omitempty"`
-
-	// TODO: KVRouter support is not yet implemented in the operator.
-	// KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
-
-	// Mocker configures the simulated (mocker) backend for testing without GPUs.
-	// +optional
-	Mocker *MockerSpec `json:"mocker,omitempty"`
-
-	// InferenceGateway fronts the generated deployment with a Gateway API
-	// Inference Extension (GAIE) endpoint picker (EPP) for token-aware routing.
-	// When enabled, the operator injects an EPP component into the generated DGD
-	// and emits the InferencePool + HTTPRoute so the gateway routes through the
-	// Dynamo EPP. The per-pool TTFT-vs-ISL curves produced during profiling feed
-	// the EPP routing table (and, when the planner is enabled, its scaling curves).
-	// +optional
-	InferenceGateway *InferenceGatewayFeature `json:"inferenceGateway,omitempty"`
-}
-
 // RoutingProfile is a preset that maps to the EPP scorer weights
 // (KV-overlap vs. load), so users don't tune raw env vars.
 // +kubebuilder:validation:Enum=throughput;latency;balanced
@@ -394,6 +366,34 @@ type InferenceGatewayFeature struct {
 	// Gateway instead of having the operator create one.
 	// +optional
 	GatewayName string `json:"gatewayName,omitempty"`
+}
+
+// FeaturesSpec controls optional Dynamo platform features in the generated deployment.
+type FeaturesSpec struct {
+	// Planner is the raw SLA planner configuration passed to the planner service.
+	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
+	// Go treats this as opaque bytes; the Planner service validates it at startup.
+	// The presence of this field (non-null) enables the planner in the generated DGD.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Planner *runtime.RawExtension `json:"planner,omitempty"`
+
+	// TODO: KVRouter support is not yet implemented in the operator.
+	// KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
+
+	// Mocker configures the simulated (mocker) backend for testing without GPUs.
+	// +optional
+	Mocker *MockerSpec `json:"mocker,omitempty"`
+
+	// InferenceGateway fronts the generated deployment with a Gateway API
+	// Inference Extension (GAIE) endpoint picker (EPP) for token-aware routing.
+	// When enabled, the operator injects an EPP component into the generated DGD
+	// and emits the InferencePool + HTTPRoute so the gateway routes through the
+	// Dynamo EPP. The per-pool TTFT-vs-ISL curves produced during profiling feed
+	// the EPP routing table (and, when the planner is enabled, its scaling curves).
+	// +optional
+	InferenceGateway *InferenceGatewayFeature `json:"inferenceGateway,omitempty"`
 }
 
 // HardwareSpec describes the GPU hardware for profiling and deployment.
