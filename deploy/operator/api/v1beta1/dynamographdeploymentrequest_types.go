@@ -356,16 +356,20 @@ type InferenceGatewayFeature struct {
 	// +kubebuilder:default=balanced
 	RoutingProfile RoutingProfile `json:"routingProfile,omitempty"`
 
-	// GatewayClassName is the Gateway API GatewayClass to attach the generated
-	// HTTPRoute to. Defaults to the platform's configured class (agentgateway)
-	// when empty.
-	// +optional
-	GatewayClassName string `json:"gatewayClassName,omitempty"`
-
-	// GatewayName, when set, attaches the generated HTTPRoute to an existing
-	// Gateway instead of having the operator create one.
+	// GatewayName is the name of the existing Gateway to attach the generated
+	// HTTPRoute to. The operator attaches to a pre-provisioned, shared Gateway
+	// (typically platform-managed); it does not create one. When empty, the EPP
+	// InferencePool is still created but no HTTPRoute is emitted.
 	// +optional
 	GatewayName string `json:"gatewayName,omitempty"`
+
+	// GatewayNamespace is the namespace of the Gateway named by GatewayName.
+	// A shared inference Gateway usually lives in its own namespace (e.g. the
+	// gateway controller's namespace), separate from the workload, so the
+	// HTTPRoute attaches cross-namespace. When empty, defaults to the generated
+	// deployment's namespace.
+	// +optional
+	GatewayNamespace string `json:"gatewayNamespace,omitempty"`
 }
 
 // FeaturesSpec controls optional Dynamo platform features in the generated deployment.
