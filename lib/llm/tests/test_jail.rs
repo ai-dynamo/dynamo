@@ -3623,6 +3623,7 @@ fahrenheit
                 Some("minimax_m2".to_string()),
                 None,
                 None,
+                false,
                 stream::iter(input_chunks),
             )
             .collect()

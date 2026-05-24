@@ -1335,7 +1335,7 @@ async fn tool_choice_matrix_force_reasoning_required_bare_json() {
                 .map(Annotated::from_data),
         );
         let output_stream = preprocessor
-            .postprocessor_parsing_stream(input_stream, &request, prompt_injected)
+            .postprocessor_parsing_stream(input_stream, &request, prompt_injected, false)
             .expect("postprocessor_parsing_stream should build");
         let DrainOutput {
             reasoning,
@@ -1376,7 +1376,7 @@ async fn tool_choice_matrix_force_reasoning_named_bare_json() {
             .map(Annotated::from_data),
     );
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true)
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
         .expect("postprocessor_parsing_stream should build");
     let DrainOutput {
         reasoning,
@@ -1406,7 +1406,7 @@ async fn tool_choice_matrix_non_force_required_no_injection_bare_json() {
             .map(Annotated::from_data),
     );
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false)
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
         .expect("postprocessor_parsing_stream should build");
     let DrainOutput {
         reasoning,
@@ -1437,7 +1437,7 @@ async fn tool_choice_matrix_non_force_required_prompt_injected_with_close_marker
             .map(Annotated::from_data),
     );
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true)
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
         .expect("postprocessor_parsing_stream should build");
     let DrainOutput {
         reasoning,
@@ -1479,7 +1479,7 @@ async fn tool_choice_matrix_non_force_required_prompt_injected_bare_json_contrac
             .map(Annotated::from_data),
     );
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true)
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
         .expect("postprocessor_parsing_stream should build");
     let DrainOutput {
         reasoning,
@@ -1525,7 +1525,7 @@ async fn tool_choice_matrix_immediate_jail_reasoning_only_first_chunk() {
         .map(Annotated::from_data),
     );
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false)
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
         .expect("postprocessor_parsing_stream should build");
     let DrainOutput {
         reasoning,
