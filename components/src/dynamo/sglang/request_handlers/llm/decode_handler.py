@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -35,6 +36,9 @@ _TOP_LOGPROBS_UNSUPPORTED_MSG = (
 )
 
 _REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY = "remote_kv_reuse_plan"
+_REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY = "remote_kv_reuse_no_plan_reason"
+_SHARED_HICACHE_SOURCE_ENDPOINTS_ENV = "DYN_SHARED_HICACHE_SOURCE_ENDPOINTS"
+_SHARED_HICACHE_SOURCE_MEDIUM = "CPU_PINNED"
 
 
 def _top_logprobs_allowed() -> bool:
@@ -100,12 +104,41 @@ def _extract_remote_kv_reuse_plan(
 ) -> Optional[Dict[str, Any]]:
     plan = request.get(_REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY)
     if isinstance(plan, dict):
-        return plan
+        return _to_shared_hicache_plan(plan)
     if isinstance(extra_args, dict):
         plan = extra_args.get(_REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY)
         if isinstance(plan, dict):
-            return plan
+            return _to_shared_hicache_plan(plan)
     return None
+
+
+def _shared_hicache_source_endpoints() -> dict[str, str]:
+    raw = os.environ.get(_SHARED_HICACHE_SOURCE_ENDPOINTS_ENV)
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        logging.warning("Invalid %s=%r", _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV, raw)
+        return {}
+    if not isinstance(value, dict):
+        logging.warning("%s must be a JSON object", _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV)
+        return {}
+    return {str(k): str(v) for k, v in value.items() if v is not None}
+
+
+def _to_shared_hicache_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    shared_plan = dict(plan)
+    shared_plan["source_medium"] = _SHARED_HICACHE_SOURCE_MEDIUM
+    shared_plan.pop("source_tier", None)
+
+    if not shared_plan.get("source_endpoint"):
+        source_worker_id = shared_plan.get("source_worker_id")
+        endpoint = _shared_hicache_source_endpoints().get(str(source_worker_id))
+        if endpoint:
+            shared_plan["source_endpoint"] = endpoint
+
+    return shared_plan
 
 
 def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -441,12 +474,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         remote_kv_reuse_plan = _extract_remote_kv_reuse_plan(request, extra_args)
         if remote_kv_reuse_plan is not None:
             logging.debug(
-                "Forwarding remote_kv_reuse_plan to SGLang: plan_id=%s extra_arg_keys=%s",
+                "Forwarding router remote_kv_reuse_plan as SGLang shared_hicache_plan: "
+                "plan_id=%s source_worker_id=%s source_endpoint=%s extra_arg_keys=%s",
                 remote_kv_reuse_plan.get("plan_id"),
+                remote_kv_reuse_plan.get("source_worker_id"),
+                remote_kv_reuse_plan.get("source_endpoint"),
                 sorted(extra_args.keys()) if isinstance(extra_args, dict) else None,
             )
         elif isinstance(extra_args, dict) and (
-            "remote_kv_reuse_no_plan_reason" in extra_args
+            _REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY in extra_args
             or _REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY in extra_args
         ):
             logging.debug(
@@ -497,8 +533,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                extra_args=extra_args,
-                remote_kv_reuse_plan=remote_kv_reuse_plan,
+                shared_hicache_plan=remote_kv_reuse_plan,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
@@ -544,8 +579,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                extra_args=extra_args,
-                remote_kv_reuse_plan=remote_kv_reuse_plan,
+                shared_hicache_plan=remote_kv_reuse_plan,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
