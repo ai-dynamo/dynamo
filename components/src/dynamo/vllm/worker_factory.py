@@ -737,6 +737,23 @@ class WorkerFactory:
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
 
+        # MX refit cycle: trainer-driven pause → update → flush → resume,
+        # POST'd to /engine/<route> over HTTP on each worker's system port.
+        # Gated on DYN_MX_REFIT_ENABLED so the routes are inert when MX
+        # isn't in use; the polling thread (extension.start_mx_refit_poller)
+        # remains the fallback path for users without a trainer driver.
+        if os.environ.get("DYN_MX_REFIT_ENABLED") == "1":
+            runtime.register_engine_route(
+                "pause_generation", handler.pause_generation
+            )
+            runtime.register_engine_route(
+                "resume_generation", handler.resume_generation
+            )
+            runtime.register_engine_route("flush_cache", handler.flush_cache)
+            runtime.register_engine_route(
+                "update_weights_via_mx", handler.update_weights_via_mx_engine
+            )
+
         logger.info(
             "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep, /engine/start_profile, /engine/stop_profile"
         )
