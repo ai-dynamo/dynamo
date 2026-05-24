@@ -1,0 +1,96 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Llama-3.3-70B Topology Benchmark"
+subtitle: "How do aggregate, single-node disaggregated, and multi-node disaggregated vLLM topologies compare when normalized by GPU?"
+---
+
+<div className="dynamo-benchmark-hero">
+<div>
+<p className="dynamo-recipe-eyebrow">Simple topology benchmark</p>
+<h2>Aggregate vs single-node P/D vs multi-node P/D topology</h2>
+<p>How do aggregate, single-node disaggregated, and multi-node disaggregated vLLM topologies compare when normalized by GPU?</p>
+<div className="dynamo-hero-actions">
+<a href="#arms">Compared arms</a>
+<a href="#results">Results</a>
+<a href="#reproduce">Reproduce</a>
+<a href="/dynamo/dev/resources/recipes/llama-3-3-70b">Related recipe</a>
+</div>
+</div>
+<div className="dynamo-benchmark-facts">
+<div><span>Model</span><strong>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</strong></div>
+<div><span>Traffic</span><strong>Static 8K ISL / 1K OSL with 16 concurrency per GPU and 10x request count</strong></div>
+<div><span>Metric focus</span><strong>Output TPS, TPS/GPU, TTFT, ITL, and error rate</strong></div>
+</div>
+</div>
+
+## Benchmark Question
+
+How do aggregate, single-node disaggregated, and multi-node disaggregated vLLM topologies compare when normalized by GPU?
+
+<div className="dynamo-comparison-brief">
+<div>
+<span>Held constant</span>
+<strong>Model, vLLM runtime, H100/H200 hardware family, ISL=8192, OSL=1024, and concurrency per GPU.</strong>
+</div>
+<div>
+<span>How to use this</span>
+<strong>Inspect the performance claim here, then open the related recipe for the deployment target.</strong>
+</div>
+</div>
+
+## Compared Arms
+
+<div id="arms"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Arm</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>vLLM aggregated</strong><span>4 GPUs</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role treatment">Treatment</em></td>
+<td><strong>vLLM disagg single-node</strong><span>8 GPUs</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role scale-out-treatment">Scale-out treatment</em></td>
+<td><strong>vLLM disagg multi-node</strong><span>16 GPUs</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Results
+
+<div id="results"></div>
+
+<div className="dynamo-placeholder-note">
+<strong>Expected results placeholder</strong>
+<p>All three perf.yaml files are checked in, but result numbers are not published. Because GPU counts differ, report total throughput and TPS/GPU together.</p>
+</div>
+
+## Reproduce
+
+<div id="reproduce"></div>
+
+The `perf.yaml` files wrap the AIPerf command below. Run each arm in isolation unless the source README says the benchmark can run side by side.
+
+```bash
+aiperf profile --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --endpoint-type chat --endpoint /v1/chat/completions --url http://<frontend>:8000 --streaming --synthetic-input-tokens-mean 8192 --output-tokens-mean 1024 --concurrency <16*gpu_count> --request-count <10*concurrency>
+```
+
+```bash
+export NAMESPACE=your-namespace
+# Pick one arm from the table above, deploy it, wait for readiness, then apply its perf.yaml.
+kubectl apply -f <arm>/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f <arm>/perf.yaml -n ${NAMESPACE}
+```
+
+## Related Recipe
+
+The recipe-facing deployment target is here: [RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic](/dynamo/dev/resources/recipes/llama-3-3-70b).

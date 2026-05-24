@@ -1,0 +1,96 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3.6 Frontend and Cache Benchmark"
+subtitle: "How do Dynamo frontend decoding and embedding cache change a single-GPU multimodal sliding-window benchmark versus vanilla vLLM serve?"
+---
+
+<div className="dynamo-benchmark-hero">
+<div>
+<p className="dynamo-recipe-eyebrow">Consolidated benchmark</p>
+<h2>Dynamo frontend decoding plus multimodal embedding cache</h2>
+<p>How do Dynamo frontend decoding and embedding cache change a single-GPU multimodal sliding-window benchmark versus vanilla vLLM serve?</p>
+<div className="dynamo-hero-actions">
+<a href="#arms">Compared arms</a>
+<a href="#results">Results</a>
+<a href="#reproduce">Reproduce</a>
+<a href="/dynamo/dev/resources/recipes/qwen3-6-35b">Related recipe</a>
+</div>
+</div>
+<div className="dynamo-benchmark-facts">
+<div><span>Model</span><strong>Qwen/Qwen3.6-35B-A3B-FP8</strong></div>
+<div><span>Traffic</span><strong>30 users x 8 turns, 5-image sliding window, 8K text tokens, max output 1024</strong></div>
+<div><span>Metric focus</span><strong>Throughput, TTFT, ITL, request latency, and cache behavior</strong></div>
+</div>
+</div>
+
+## Benchmark Question
+
+How do Dynamo frontend decoding and embedding cache change a single-GPU multimodal sliding-window benchmark versus vanilla vLLM serve?
+
+<div className="dynamo-comparison-brief">
+<div>
+<span>Held constant</span>
+<strong>Model, one-GPU hardware target, generated sliding-window dataset, request count, and shared benchmark template.</strong>
+</div>
+<div>
+<span>How to use this</span>
+<strong>Inspect the performance claim here, then open the related recipe for the deployment target.</strong>
+</div>
+</div>
+
+## Compared Arms
+
+<div id="arms"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Arm</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role winner-candidate">Winner candidate</em></td>
+<td><strong>Dynamo FD + embedding cache</strong><span>Recommended recipe target</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role step">Step</em></td>
+<td><strong>Dynamo frontend decoding</strong><span>Isolates frontend decoding</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b/deploy/dynamo-fd.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>vanilla vLLM serve</strong><span>Plain vLLM serving</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b/deploy/vllm-serve.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Results
+
+<div id="results"></div>
+
+<div className="dynamo-placeholder-note">
+<strong>Expected results placeholder</strong>
+<p>The shared perf.yaml and run scripts exist, but expected results are not checked in yet. Add a table for vanilla vLLM, Dynamo FD, and Dynamo FD + embedding cache.</p>
+</div>
+
+## Reproduce
+
+<div id="reproduce"></div>
+
+The `perf.yaml` files wrap the AIPerf command below. Run each arm in isolation unless the source README says the benchmark can run side by side.
+
+```bash
+aiperf profile --model Qwen/Qwen3.6-35B-A3B-FP8 --input-file 30u_8t_5w_8000word_base64.jsonl --custom-dataset-type single_turn --url http://<frontend>:8000 --streaming --request-count 240 --concurrency 30 --extra-inputs max_tokens:1024 --extra-inputs min_tokens:1024 --extra-inputs ignore_eos:true
+```
+
+```bash
+export NAMESPACE=your-namespace
+# Pick one arm from the table above, deploy it, wait for readiness, then apply its perf.yaml.
+kubectl apply -f <arm>/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f <arm>/perf.yaml -n ${NAMESPACE}
+```
+
+## Related Recipe
+
+The recipe-facing deployment target is here: [Qwen/Qwen3.6-35B-A3B-FP8](/dynamo/dev/resources/recipes/qwen3-6-35b).

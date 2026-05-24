@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: DeepSeek-V4-Pro
-subtitle: Choose Day-0 DeepSeek-V4-Pro recipes across vLLM and SGLang on B200 or GB200.
+title: "DeepSeek-V4-Pro"
+subtitle: "Day-0 DeepSeek-V4-Pro recipes across vLLM and SGLang on B200 and GB200."
 ---
 
 <div className="dynamo-model-detail-hero">
@@ -10,292 +10,275 @@ subtitle: Choose Day-0 DeepSeek-V4-Pro recipes across vLLM and SGLang on B200 or
 <div className="dynamo-model-title-lockup">
 <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
 <div>
-<p className="dynamo-recipe-eyebrow">DeepSeek / vLLM and SGLang / B200 and GB200</p>
-<h2>Choose Day-0 DeepSeek-V4-Pro recipes across vLLM and SGLang on B200 or GB200.</h2>
+<p className="dynamo-recipe-eyebrow">DeepSeek / vLLM / 16x GB200</p>
+<h2>Day-0 DeepSeek-V4-Pro recipes across vLLM and SGLang on B200 and GB200.</h2>
 </div>
 </div>
-<p>
-This source recipe is an <strong>alternative recipe set</strong>. The table below shows each
-deployable variant, its role in the recipe set, and the benchmark evidence available today.
-</p>
+<p>Choose by runtime, hardware, and topology. The vLLM disaggregated GB200 target is the only row with benchmark YAML today.</p>
 <div className="dynamo-hero-actions">
-<a href="#recipe-set">Recipe set</a>
-<a href="#benchmark-evidence">Benchmark</a>
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
 <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro">Source</a>
 </div>
 </div>
 
 <div className="dynamo-recommendation-card">
-<span>Alternative Recipe Set</span>
-<strong>Experimental</strong>
-<p>Which Day-0 backend and hardware target should serve DeepSeek-V4-Pro, and which path has benchmark coverage?</p>
+<span>Primary target</span>
+<strong>vLLM disagg GB200</strong>
+<p>Only V4-Pro path with benchmark instructions checked in today.</p>
 <div className="dynamo-recommendation-facts">
-<div>
-<span>Model</span>
-<strong>deepseek-ai/DeepSeek-V4-Pro</strong>
-</div>
-<div>
-<span>Traffic</span>
-<strong>Benchmark-backed row: ISL 8192 / OSL 1024 / concurrency sweep 256, 512, 1024</strong>
-</div>
-<div>
-<span>Shape</span>
-<strong>Alternative recipe set</strong>
-</div>
+<div><span>Model</span><strong>deepseek-ai/DeepSeek-V4-Pro</strong></div>
+<div><span>Traffic</span><strong>8K ISL / 1K OSL concurrency sweep</strong></div>
+<div><span>Technique</span><strong>Disaggregated prefill/decode</strong></div>
 </div>
 </div>
 </div>
 
-## Alternative Recipe Set
+## Recipe Targets
 
-<div className="dynamo-comparison-brief" id="recipe-set">
-<div>
-<span>Question</span>
-<strong>Which Day-0 backend and hardware target should serve DeepSeek-V4-Pro, and which path has benchmark coverage?</strong>
-</div>
-<div>
-<span>Held constant</span>
-<strong>Same V4-Pro model, but variants differ by backend, hardware, topology, and benchmark availability.</strong>
-</div>
-</div>
+<div id="recipe-targets"></div>
 
 <div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table">
-<thead>
-<tr>
-<th>Variant</th>
-<th>Role</th>
-<th>Runtime</th>
-<th>Hardware</th>
-<th>Traffic</th>
-<th></th>
-</tr>
-</thead>
-<tbody>
-<tr className="deploy-only">
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr>
 <td><strong>vLLM agg B200</strong><span>Single-node TP=8 + expert-parallel path for B200.</span></td>
-<td><em className="role deploy-only">Deploy-only alternative</em></td>
 <td>vLLM</td>
 <td>8x B200</td>
 <td>Deployment validation</td>
-<td><a href="#deploy-vllm-agg-b200">Deploy</a></td>
-</tr><tr className="deploy-only">
+<td>Aggregated serving; Expert parallel / MoE</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/b200/deploy.yaml">deploy.yaml</a><br /><span>benchmark placeholder</span></td>
+</tr><tr>
 <td><strong>vLLM agg GB200</strong><span>TP=8 cross-node MNNVL path when one GB200 tray is not enough HBM.</span></td>
-<td><em className="role deploy-only">Deploy-only alternative</em></td>
 <td>vLLM</td>
 <td>8x GB200 across 2 nodes</td>
 <td>Deployment validation</td>
-<td><a href="#deploy-vllm-agg-gb200">Deploy</a></td>
+<td>Aggregated serving</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/deploy.yaml">deploy.yaml</a><br /><span>benchmark placeholder</span></td>
 </tr><tr className="recommended">
 <td><strong>vLLM disagg GB200</strong><span>Only V4-Pro path with benchmark instructions checked in today.</span></td>
-<td><em className="role benchmark-backed">Benchmark-backed alternative</em></td>
 <td>vLLM</td>
 <td>16x GB200</td>
 <td>8K ISL / 1K OSL concurrency sweep</td>
-<td><a href="#deploy-vllm-disagg-gb200">Deploy</a></td>
-</tr><tr className="deploy-only">
+<td>Disaggregated prefill/decode</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/perf.yaml">perf.yaml</a></td>
+</tr><tr>
 <td><strong>SGLang agg B200</strong><span>TP=8 SGLang path with MXFP4 MoE via FlashInfer and EAGLE MTP.</span></td>
-<td><em className="role deploy-only">Deploy-only alternative</em></td>
 <td>SGLang</td>
 <td>8x B200</td>
 <td>Deployment validation</td>
-<td><a href="#deploy-sglang-agg-b200">Deploy</a></td>
-</tr><tr className="deploy-only">
+<td>Aggregated serving; Expert parallel / MoE</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/sglang/agg/deploy.yaml">deploy.yaml</a><br /><span>benchmark placeholder</span></td>
+</tr><tr>
 <td><strong>SGLang agg GB200</strong><span>GB200 SGLang aggregate path present in manifests but not benchmarked.</span></td>
-<td><em className="role deploy-only">Deploy-only alternative</em></td>
 <td>SGLang</td>
 <td>8x GB200</td>
 <td>Deployment validation</td>
-<td><a href="#deploy-sglang-agg-gb200">Deploy</a></td>
-</tr><tr className="deploy-only">
+<td>Aggregated serving</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/sglang/agg-gb200/deploy.yaml">deploy.yaml</a><br /><span>benchmark placeholder</span></td>
+</tr><tr>
 <td><strong>SGLang disagg B200</strong><span>Cluster-specific SGLang disagg path; keep as deploy-only until benchmark YAML lands.</span></td>
-<td><em className="role deploy-only">Deploy-only alternative</em></td>
 <td>SGLang</td>
 <td>B200</td>
 <td>Deployment validation</td>
-<td><a href="#deploy-sglang-disagg-b200">Deploy</a></td>
-</tr><tr className="deploy-only">
+<td>Disaggregated prefill/decode</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/sglang/disagg-b200/deploy.yaml">deploy.yaml</a><br /><span>benchmark placeholder</span></td>
+</tr><tr>
 <td><strong>SGLang disagg GB200</strong><span>GB200 SGLang disagg path with cluster-specific notes.</span></td>
-<td><em className="role deploy-only">Deploy-only alternative</em></td>
 <td>SGLang</td>
 <td>GB200</td>
 <td>Deployment validation</td>
-<td><a href="#deploy-sglang-disagg-gb200">Deploy</a></td>
-</tr>
-</tbody>
+<td>Disaggregated prefill/decode</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/sglang/disagg-gb200/deploy.yaml">deploy.yaml</a><br /><span>benchmark placeholder</span></td>
+</tr></tbody>
 </table>
 </div>
 
-## When to Use
-
-Use this page when your deployment decision starts with `deepseek-ai/DeepSeek-V4-Pro` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
-
-## Results Placeholder
-
-<div className="dynamo-placeholder-note">
-<strong>Benchmark results are not checked in yet</strong>
-<p>The GB200 vLLM disaggregated variant has perf.yaml instructions for an 8K/1K concurrency sweep. Numeric expected results are not checked in, so the page keeps a placeholder.</p>
-</div>
-
-| Placeholder | What should be filled in |
-| --- | --- |
-| vLLM disagg GB200 result placeholder | Report TTFT, ITL, request latency, output TPS, and errors for 256/512/1024 concurrency sweep. |
-| Deploy-only rows | Record readiness and smoke-test status until per-variant perf.yaml files exist. |
-
-## Before You Run
+## Prerequisites
 
 <div className="dynamo-prereq-grid">
-<div>
-<span>Status</span>
-<strong>Experimental Day-0</strong>
-</div>
-<div>
-<span>Model size</span>
-<strong>~865 GB on disk</strong>
-</div>
-<div>
-<span>B200 target</span>
-<strong>8x B200 single node</strong>
-</div>
-<div>
-<span>GB200 target</span>
-<strong>two NVL4 trays via MNNVL</strong>
-</div>
-<div>
-<span>Runtime</span>
-<strong>vLLM and SGLang</strong>
-</div>
-<div>
-<span>Benchmark-backed row</span>
-<strong>vLLM disagg GB200</strong>
-</div>
+<div><span>Runtime options</span><strong>vLLM and SGLang</strong></div>
+<div><span>Hardware options</span><strong>B200 and GB200</strong></div>
+<div><span>Launch time</span><strong>60-90 minutes depending on target</strong></div>
+<div><span>Placement</span><strong>GB200 vLLM paths use ComputeDomain/MNNVL</strong></div>
+<div><span>Benchmark coverage</span><strong>vLLM disagg GB200 only</strong></div>
+<div><span>Setup assets</span><strong>model-cache and model-download manifests</strong></div>
 </div>
 
 <Warning>
-Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
+Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests.
 </Warning>
 
-## Deploy
+## Deployment Instructions
 
-<h3 id="deploy-vllm-agg-b200">Deploy: vLLM agg B200</h3>
+<div id="deploy"></div>
+
+<h3 id="deploy-vllm-agg-b200">vLLM agg B200</h3>
 
 Single-node TP=8 + expert-parallel path for B200.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-pro`.
+# Prepare model cache and model assets using setup manifests in recipes/deepseek-v4/deepseek-v4-pro.
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/b200/deploy.yaml -n ${NAMESPACE}
-# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
 ```
-
-<h3 id="deploy-vllm-agg-gb200">Deploy: vLLM agg GB200</h3>
+<h3 id="deploy-vllm-agg-gb200">vLLM agg GB200</h3>
 
 TP=8 cross-node MNNVL path when one GB200 tray is not enough HBM.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-pro`.
+# Prepare model cache and model assets using setup manifests in recipes/deepseek-v4/deepseek-v4-pro.
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/deploy.yaml -n ${NAMESPACE}
-# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
 ```
-
-<h3 id="deploy-vllm-disagg-gb200">Deploy: vLLM disagg GB200</h3>
+<h3 id="deploy-vllm-disagg-gb200">vLLM disagg GB200</h3>
 
 Only V4-Pro path with benchmark instructions checked in today.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-pro`.
+# Prepare model cache and model assets using setup manifests in recipes/deepseek-v4/deepseek-v4-pro.
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/perf.yaml -n ${NAMESPACE}
 ```
-
-<h3 id="deploy-sglang-agg-b200">Deploy: SGLang agg B200</h3>
+<h3 id="deploy-sglang-agg-b200">SGLang agg B200</h3>
 
 TP=8 SGLang path with MXFP4 MoE via FlashInfer and EAGLE MTP.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-pro`.
+# Prepare model cache and model assets using setup manifests in recipes/deepseek-v4/deepseek-v4-pro.
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/sglang/agg/deploy.yaml -n ${NAMESPACE}
-# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
 ```
-
-<h3 id="deploy-sglang-agg-gb200">Deploy: SGLang agg GB200</h3>
+<h3 id="deploy-sglang-agg-gb200">SGLang agg GB200</h3>
 
 GB200 SGLang aggregate path present in manifests but not benchmarked.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-pro`.
+# Prepare model cache and model assets using setup manifests in recipes/deepseek-v4/deepseek-v4-pro.
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/sglang/agg-gb200/deploy.yaml -n ${NAMESPACE}
-# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
 ```
-
-<h3 id="deploy-sglang-disagg-b200">Deploy: SGLang disagg B200</h3>
+<h3 id="deploy-sglang-disagg-b200">SGLang disagg B200</h3>
 
 Cluster-specific SGLang disagg path; keep as deploy-only until benchmark YAML lands.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-pro`.
+# Prepare model cache and model assets using setup manifests in recipes/deepseek-v4/deepseek-v4-pro.
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/sglang/disagg-b200/deploy.yaml -n ${NAMESPACE}
-# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
 ```
-
-<h3 id="deploy-sglang-disagg-gb200">Deploy: SGLang disagg GB200</h3>
+<h3 id="deploy-sglang-disagg-gb200">SGLang disagg GB200</h3>
 
 GB200 SGLang disagg path with cluster-specific notes.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-pro`.
+# Prepare model cache and model assets using setup manifests in recipes/deepseek-v4/deepseek-v4-pro.
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/sglang/disagg-gb200/deploy.yaml -n ${NAMESPACE}
-# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
 ```
 
 
-<h2 id="benchmark-evidence">Benchmark Evidence</h2>
+## Smoke Test
 
-<div className="dynamo-evidence-grid">
-<div>
-<span>Benchmark asset</span>
-<strong>At least one perf.yaml</strong>
-<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+<div id="smoke-test"></div>
+
+Run a small request before starting the benchmark. Replace the service name if your deployment exposes a different frontend.
+
+```bash
+export NAMESPACE=your-namespace
+kubectl port-forward svc/<frontend-service> 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-ai/DeepSeek-V4-Pro","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+<h3>vLLM agg B200</h3>
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark instructions placeholder</strong>
+<p>No perf.yaml is checked in for this recipe target yet. Add the AIPerf command, traffic shape, request count, concurrency, and artifact path when the benchmark lands.</p>
 </div>
-<div>
-<span>Results asset</span>
-<strong>Placeholder required</strong>
-<p>Expected results should be added once benchmark artifacts are available.</p>
+<h3>vLLM agg GB200</h3>
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark instructions placeholder</strong>
+<p>No perf.yaml is checked in for this recipe target yet. Add the AIPerf command, traffic shape, request count, concurrency, and artifact path when the benchmark lands.</p>
 </div>
-<div>
-<span>Comparison safety</span>
-<strong>Alternative Recipe Set</strong>
-<p>Rows are alternatives; avoid ranking across different traffic or hardware shapes.</p>
+<h3>vLLM disagg GB200</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile --model deepseek-ai/DeepSeek-V4-Pro --endpoint-type chat --endpoint /v1/chat/completions --url http://<frontend>:8000 --streaming --synthetic-input-tokens-mean <isl> --output-tokens-mean <osl> --concurrency <from perf.yaml: <concurrency>> --request-count <from perf.yaml> --extra-inputs ignore_eos:true
+```
+
+```bash
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/perf.yaml -n ${NAMESPACE}
+```
+<h3>SGLang agg B200</h3>
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark instructions placeholder</strong>
+<p>No perf.yaml is checked in for this recipe target yet. Add the AIPerf command, traffic shape, request count, concurrency, and artifact path when the benchmark lands.</p>
 </div>
+<h3>SGLang agg GB200</h3>
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark instructions placeholder</strong>
+<p>No perf.yaml is checked in for this recipe target yet. Add the AIPerf command, traffic shape, request count, concurrency, and artifact path when the benchmark lands.</p>
 </div>
+<h3>SGLang disagg B200</h3>
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark instructions placeholder</strong>
+<p>No perf.yaml is checked in for this recipe target yet. Add the AIPerf command, traffic shape, request count, concurrency, and artifact path when the benchmark lands.</p>
+</div>
+<h3>SGLang disagg GB200</h3>
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark instructions placeholder</strong>
+<p>No perf.yaml is checked in for this recipe target yet. Add the AIPerf command, traffic shape, request count, concurrency, and artifact path when the benchmark lands.</p>
+</div>
+
+
+## Expected Performance
+
+<div className="dynamo-placeholder-note">
+<strong>Expected performance placeholder</strong>
+<p>The vLLM disaggregated GB200 path includes a perf.yaml for an 8K/1K concurrency sweep. Expected results are placeholders until the README publishes numeric output.</p>
+</div>
+
+## Related Benchmarks
+
+No feature benchmark page is linked yet. If this recipe later becomes part of a comparison, link that benchmark here and keep this page focused on the runnable recipe target.
+
 
 ## Notes
 
-- First launch can take 60-90 minutes depending on backend and hardware.
-- The GB200 vLLM paths rely on ComputeDomain/MNNVL placement; keep those prerequisites in front of users.
+- The page is organized as a deployment target matrix, not a benchmark comparison.
+- The GB200 vLLM paths rely on ComputeDomain/MNNVL placement.
 
-## Source Assets
+## Source
 
 - Source README: [recipes/deepseek-v4/deepseek-v4-pro/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro)
-- Ground-truth inventory: [recipe-asset-inventory.csv](https://github.com/ai-dynamo/dynamo/blob/codex/recipes-fern-prototype-v2/docs/recipes/recipe-asset-inventory.csv)
+- vLLM agg B200: [recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/b200/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/b200/deploy.yaml)
+- vLLM agg GB200: [recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/deploy.yaml)
+- vLLM disagg GB200: [recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/deploy.yaml) and [recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/perf.yaml)
+- SGLang agg B200: [recipes/deepseek-v4/deepseek-v4-pro/sglang/agg/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/sglang/agg/deploy.yaml)
+- SGLang agg GB200: [recipes/deepseek-v4/deepseek-v4-pro/sglang/agg-gb200/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/sglang/agg-gb200/deploy.yaml)
+- SGLang disagg B200: [recipes/deepseek-v4/deepseek-v4-pro/sglang/disagg-b200/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/sglang/disagg-b200/deploy.yaml)
+- SGLang disagg GB200: [recipes/deepseek-v4/deepseek-v4-pro/sglang/disagg-gb200/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/sglang/disagg-gb200/deploy.yaml)

@@ -1,0 +1,94 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3-VL Embedding Cache A/B"
+subtitle: "How much does enabling the vLLM multimodal embedding cache improve repeated-image traffic on one GB200 worker?"
+---
+
+<div className="dynamo-benchmark-hero">
+<div>
+<p className="dynamo-recipe-eyebrow">Simple A/B test</p>
+<h2>Multimodal embedding cache</h2>
+<p>How much does enabling the vLLM multimodal embedding cache improve repeated-image traffic on one GB200 worker?</p>
+<div className="dynamo-hero-actions">
+<a href="#arms">Compared arms</a>
+<a href="#results">Results</a>
+<a href="#reproduce">Reproduce</a>
+<a href="/dynamo/dev/resources/recipes/qwen3-vl-30b">Related recipe</a>
+</div>
+</div>
+<div className="dynamo-benchmark-facts">
+<div><span>Model</span><strong>Qwen/Qwen3-VL-30B-A3B-Instruct-FP8</strong></div>
+<div><span>Traffic</span><strong>1,000 single-turn multimodal requests with one image per request, image pool 200, 80% image reuse</strong></div>
+<div><span>Metric focus</span><strong>Output TPS, TTFT, ITL, and request latency</strong></div>
+</div>
+</div>
+
+## Benchmark Question
+
+How much does enabling the vLLM multimodal embedding cache improve repeated-image traffic on one GB200 worker?
+
+<div className="dynamo-comparison-brief">
+<div>
+<span>Held constant</span>
+<strong>Model, vLLM runtime, one GB200 worker, generated dataset, request count, and output-token settings.</strong>
+</div>
+<div>
+<span>How to use this</span>
+<strong>Inspect the performance claim here, then open the related recipe for the deployment target.</strong>
+</div>
+</div>
+
+## Compared Arms
+
+<div id="arms"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Arm</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role treatment">Treatment</em></td>
+<td><strong>Embedding cache ON</strong><span>DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>Embedding cache OFF</strong><span>Set DYN_MULTIMODAL_EMBEDDING_CACHE_GB=0 and CACHE_MODE=cache_off</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Results
+
+<div id="results"></div>
+
+| Metric | Cache ON | Cache OFF | Delta |
+| --- | ---: | ---: | ---: |
+| Output TPS | 3,575.6 tok/s | 3,072.3 tok/s | +16.4% |
+| TTFT avg | 526.0 ms | 727.5 ms | -27.7% |
+| TTFT p50 | 356.8 ms | 510.8 ms | -30.1% |
+| ITL avg | 14.1 ms | 15.5 ms | -8.8% |
+| Request latency avg | 2,630.0 ms | 3,035.7 ms | -13.4% |
+
+## Reproduce
+
+<div id="reproduce"></div>
+
+The `perf.yaml` files wrap the AIPerf command below. Run each arm in isolation unless the source README says the benchmark can run side by side.
+
+```bash
+aiperf profile --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 --input-file qwen3_vl_1000req_1img_pool200.jsonl --custom-dataset-type single_turn --url http://qwen3-vl-agg-frontend:8000 --streaming --request-count 1000 --concurrency 64 --extra-inputs max_tokens:150 --extra-inputs min_tokens:150 --extra-inputs ignore_eos:true
+```
+
+```bash
+export NAMESPACE=your-namespace
+# Pick one arm from the table above, deploy it, wait for readiness, then apply its perf.yaml.
+kubectl apply -f <arm>/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f <arm>/perf.yaml -n ${NAMESPACE}
+```
+
+## Related Recipe
+
+The recipe-facing deployment target is here: [Qwen/Qwen3-VL-30B-A3B-Instruct-FP8](/dynamo/dev/resources/recipes/qwen3-vl-30b).

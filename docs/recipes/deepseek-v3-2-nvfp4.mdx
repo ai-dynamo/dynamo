@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: DeepSeek V3.2 NVFP4
-subtitle: Compare TensorRT-LLM aggregated round-robin with disaggregated KV routing and WideEP on 32x GB200.
+title: "DeepSeek V3.2 NVFP4"
+subtitle: "TensorRT-LLM disaggregated KV-router recipe with WideEP on GB200."
 ---
 
 <div className="dynamo-model-detail-hero">
@@ -10,194 +10,131 @@ subtitle: Compare TensorRT-LLM aggregated round-robin with disaggregated KV rout
 <div className="dynamo-model-title-lockup">
 <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
 <div>
-<p className="dynamo-recipe-eyebrow">NVIDIA checkpoint / TensorRT-LLM / GB200</p>
-<h2>Compare TensorRT-LLM aggregated round-robin with disaggregated KV routing and WideEP on 32x GB200.</h2>
+<p className="dynamo-recipe-eyebrow">NVIDIA checkpoint / DeepSeek / TRT-LLM / 32x GB200</p>
+<h2>TensorRT-LLM disaggregated KV-router recipe with WideEP on GB200.</h2>
 </div>
 </div>
-<p>
-This source recipe is a <strong>comparison set</strong>. The table below shows each
-deployable variant, its role in the recipe set, and the benchmark evidence available today.
-</p>
+<p>Use the GB200 WideEP disaggregated recipe for long-context coding traces. The related benchmark compares it with the aggregated round-robin control.</p>
 <div className="dynamo-hero-actions">
-<a href="#recipe-set">Recipe set</a>
-<a href="#benchmark-evidence">Benchmark</a>
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
 <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4">Source</a>
 </div>
 </div>
 
 <div className="dynamo-recommendation-card">
-<span>Comparison Set</span>
-<strong>Verified</strong>
-<p>Does disaggregated KV-aware routing with WideEP improve latency and goodput against an aggregated round-robin control?</p>
+<span>Primary target</span>
+<strong>Disagg + KV router + WideEP</strong>
+<p>Tests KV-aware routing, P/D split, and WideEP together on the target trace.</p>
 <div className="dynamo-recommendation-facts">
-<div>
-<span>Model</span>
-<strong>nvidia/DeepSeek-V3.2-NVFP4</strong>
-</div>
-<div>
-<span>Traffic</span>
-<strong>10,000 requests / 39,186 avg ISL / 344 avg OSL / about 44% KV hit rate</strong>
-</div>
-<div>
-<span>Shape</span>
-<strong>Comparison set</strong>
-</div>
+<div><span>Model</span><strong>nvidia/DeepSeek-V3.2-NVFP4</strong></div>
+<div><span>Traffic</span><strong>39K avg ISL coding trace</strong></div>
+<div><span>Technique</span><strong>Disaggregated prefill/decode; KV-aware routing; WideEP</strong></div>
 </div>
 </div>
 </div>
 
-## Comparison Set
+## Recipe Targets
 
-<div className="dynamo-comparison-brief" id="recipe-set">
-<div>
-<span>Question</span>
-<strong>Does disaggregated KV-aware routing with WideEP improve latency and goodput against an aggregated round-robin control?</strong>
-</div>
-<div>
-<span>Held constant</span>
-<strong>Model, TensorRT-LLM runtime, 32x GB200 target, synthetic coding trace, and TTFT/ITL thresholds.</strong>
-</div>
-</div>
+<div id="recipe-targets"></div>
 
 <div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table">
-<thead>
-<tr>
-<th>Variant</th>
-<th>Role</th>
-<th>Runtime</th>
-<th>Hardware</th>
-<th>Traffic</th>
-<th></th>
-</tr>
-</thead>
-<tbody>
-<tr className="recommended">
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr className="recommended">
 <td><strong>Disagg + KV router + WideEP</strong><span>Tests KV-aware routing, P/D split, and WideEP together on the target trace.</span></td>
-<td><em className="role recommended">Recommended treatment</em></td>
 <td>TRT-LLM</td>
 <td>32x GB200</td>
 <td>39K avg ISL coding trace</td>
-<td><a href="#deploy-disagg--kv-router--wideep">Deploy</a></td>
-</tr><tr>
-<td><strong>Aggregated round-robin</strong><span>Keeps DEP8 and hardware constant while removing the P/D split and KV-aware routing.</span></td>
-<td><em className="role control">Control</em></td>
-<td>TRT-LLM</td>
-<td>32x GB200</td>
-<td>Same fixed-schedule trace</td>
-<td><a href="#deploy-aggregated-round-robin">Deploy</a></td>
-</tr>
-</tbody>
+<td>Disaggregated prefill/decode; KV-aware routing; WideEP</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
 </table>
 </div>
 
-## When to Use
-
-Use this page when your deployment decision starts with `nvidia/DeepSeek-V3.2-NVFP4` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
-
-## Results Placeholder
-
-<div className="dynamo-placeholder-note">
-<strong>Benchmark results are not checked in yet</strong>
-<p>The README links a result artifact but does not provide a numeric table. This page therefore preserves the comparison and leaves an expected-results placeholder.</p>
-</div>
-
-| Placeholder | What should be filled in |
-| --- | --- |
-| TTFT | KV-aware routing should reduce redundant prefill work on shared long prefixes. |
-| ITL | P/D separation should isolate decode from prefill interference. |
-| Goodput | Compare requests satisfying TTFT 20s and ITL 50ms. |
-
-## Before You Run
+## Prerequisites
 
 <div className="dynamo-prereq-grid">
-<div>
-<span>Hardware</span>
-<strong>32x GB200 across 8 nodes</strong>
-</div>
-<div>
-<span>Placement</span>
-<strong>ComputeDomain for MNNVL</strong>
-</div>
-<div>
-<span>Runtime</span>
-<strong>TensorRT-LLM</strong>
-</div>
-<div>
-<span>Dataset</span>
-<strong>Mooncake-derived synthetic coding trace</strong>
-</div>
-<div>
-<span>Traffic</span>
-<strong>39K avg ISL / 344 avg OSL</strong>
-</div>
-<div>
-<span>Goodput target</span>
-<strong>TTFT 20s / ITL 50ms</strong>
-</div>
+<div><span>Hardware</span><strong>32x GB200 with MNNVL placement</strong></div>
+<div><span>Runtime</span><strong>TensorRT-LLM Dynamo runtime</strong></div>
+<div><span>Dataset</span><strong>Mooncake-derived coding trace</strong></div>
+<div><span>Traffic</span><strong>39K avg input tokens; 344 avg output tokens</strong></div>
+<div><span>Goodput target</span><strong>TTFT 20s / ITL 50ms</strong></div>
+<div><span>Setup assets</span><strong>ComputeDomain, model-cache, and model-download manifests</strong></div>
 </div>
 
 <Warning>
-Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
+Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests.
 </Warning>
 
-## Deploy
+## Deployment Instructions
 
-<h3 id="deploy-disagg--kv-router--wideep">Deploy: Disagg + KV router + WideEP</h3>
+<div id="deploy"></div>
+
+<h3 id="deploy-disagg-kv-router-wideep">Disagg + KV router + WideEP</h3>
 
 Tests KV-aware routing, P/D split, and WideEP together on the target trace.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v32-fp4`.
+# Prepare model cache and model assets using setup manifests in recipes/deepseek-v32-fp4.
 kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-aggregated-round-robin">Deploy: Aggregated round-robin</h3>
 
-Keeps DEP8 and hardware constant while removing the P/D split and KV-aware routing.
+## Smoke Test
+
+<div id="smoke-test"></div>
+
+Run a small request before starting the benchmark. Replace the service name if your deployment exposes a different frontend.
 
 ```bash
 export NAMESPACE=your-namespace
+kubectl port-forward svc/disagg-kv-dsv32-nvfp4-frontend 8000:8000 -n ${NAMESPACE}
 
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/DeepSeek-V3.2-NVFP4","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
 
-# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v32-fp4`.
-kubectl apply -f recipes/deepseek-v32-fp4/trtllm/agg-round-robin/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/deepseek-v32-fp4/trtllm/agg-round-robin/perf.yaml -n ${NAMESPACE}
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+<h3>Disagg + KV router + WideEP</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile -m nvidia/DeepSeek-V3.2-NVFP4 --tokenizer nvidia/DeepSeek-V3.2-NVFP4 --input-file <trace>.jsonl --custom-dataset-type mooncake_trace --fixed-schedule --url http://<frontend>:8000 --streaming --goodput "time_to_first_token:20000 inter_token_latency:50"
+```
+
+```bash
+kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
 ```
 
 
-<h2 id="benchmark-evidence">Benchmark Evidence</h2>
+## Expected Performance
 
-<div className="dynamo-evidence-grid">
-<div>
-<span>Benchmark asset</span>
-<strong>At least one perf.yaml</strong>
-<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+<div className="dynamo-placeholder-note">
+<strong>Expected performance placeholder</strong>
+<p>The checked-in perf.yaml can reproduce the trace replay, but the README does not yet include numeric results. Fill in latency, goodput, and TPS/GPU once artifacts are published.</p>
 </div>
-<div>
-<span>Results asset</span>
-<strong>Placeholder required</strong>
-<p>Expected results should be added once benchmark artifacts are available.</p>
-</div>
-<div>
-<span>Comparison safety</span>
-<strong>Comparison Set</strong>
-<p>Rows are comparable only when the page says the workload is held constant.</p>
-</div>
-</div>
+
+## Related Benchmarks
+
+- [DeepSeek V3.2 WideEP routing A/B](/dynamo/dev/resources/benchmarks/deepseek-v3-2-wideep-routing)
+
 
 ## Notes
 
-- Throughput is fixed by the replay schedule; latency and goodput are the comparison signals.
-- Numeric result placeholders remain until the source recipe includes benchmark tables or artifacts.
+- The aggregated round-robin manifest is a control arm for the benchmark page.
+- The recipe page keeps only the deployable target that matches the source recommendation.
 
-## Source Assets
+## Source
 
 - Source README: [recipes/deepseek-v32-fp4/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4)
-- Ground-truth inventory: [recipe-asset-inventory.csv](https://github.com/ai-dynamo/dynamo/blob/codex/recipes-fern-prototype-v2/docs/recipes/recipe-asset-inventory.csv)
+- Disagg + KV router + WideEP: [recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml) and [recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml)

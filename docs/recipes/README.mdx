@@ -1,548 +1,222 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Recipes
-subtitle: Pick a model, choose a validated Dynamo serving technique, and run the matching benchmark.
+title: "Recipes"
+subtitle: "Pick a model, choose the hardware/runtime target, and deploy the matching Dynamo recipe."
 ---
 
-## Browse by Model
-
-Start with the model you want to deploy. Each card shows the runtime, hardware target, serving
-technique, workload shape, and evidence available for the Dynamo recipe.
+Start with the model, runtime, hardware, and workload you need to run. Use [Benchmarks](/dynamo/dev/resources/benchmarks) when you want to compare a feature or topology under controlled traffic.
 
 <form className="dynamo-recipe-catalog-shell">
-  <input className="dynamo-filter-input" type="radio" name="provider-filter" id="provider-all" defaultChecked />
-  <input className="dynamo-filter-input" type="radio" name="provider-filter" id="provider-nvidia" />
-  <input className="dynamo-filter-input" type="radio" name="provider-filter" id="provider-qwen" />
-  <input className="dynamo-filter-input" type="radio" name="provider-filter" id="provider-deepseek" />
-  <input className="dynamo-filter-input" type="radio" name="provider-filter" id="provider-moonshot" />
-  <input className="dynamo-filter-input" type="radio" name="provider-filter" id="provider-meta" />
-  <input className="dynamo-filter-input" type="radio" name="provider-filter" id="provider-openai" />
-
-  <input className="dynamo-filter-input" type="radio" name="runtime-filter" id="runtime-all" defaultChecked />
-  <input className="dynamo-filter-input" type="radio" name="runtime-filter" id="runtime-vllm" />
-  <input className="dynamo-filter-input" type="radio" name="runtime-filter" id="runtime-trtllm" />
-  <input className="dynamo-filter-input" type="radio" name="runtime-filter" id="runtime-sglang" />
-
-  <input className="dynamo-filter-input" type="radio" name="hardware-filter" id="hardware-all" defaultChecked />
-  <input className="dynamo-filter-input" type="radio" name="hardware-filter" id="hardware-h100" />
-  <input className="dynamo-filter-input" type="radio" name="hardware-filter" id="hardware-h200" />
-  <input className="dynamo-filter-input" type="radio" name="hardware-filter" id="hardware-gb200" />
-  <input className="dynamo-filter-input" type="radio" name="hardware-filter" id="hardware-b200" />
-
-  <input className="dynamo-filter-input" type="radio" name="technique-filter" id="technique-all" defaultChecked />
-  <input className="dynamo-filter-input" type="radio" name="technique-filter" id="technique-aggregated" />
-  <input className="dynamo-filter-input" type="radio" name="technique-filter" id="technique-disaggregated" />
-  <input className="dynamo-filter-input" type="radio" name="technique-filter" id="technique-kv-routing" />
-  <input className="dynamo-filter-input" type="radio" name="technique-filter" id="technique-expert-parallel" />
-  <input className="dynamo-filter-input" type="radio" name="technique-filter" id="technique-spec-decoding" />
-  <input className="dynamo-filter-input" type="radio" name="technique-filter" id="technique-embedding-cache" />
-
-  <input className="dynamo-filter-input" type="radio" name="workload-filter" id="workload-all" defaultChecked />
-  <input className="dynamo-filter-input" type="radio" name="workload-filter" id="workload-agentic-coding" />
-  <input className="dynamo-filter-input" type="radio" name="workload-filter" id="workload-long-context-reuse" />
-  <input className="dynamo-filter-input" type="radio" name="workload-filter" id="workload-multimodal-reuse" />
-  <input className="dynamo-filter-input" type="radio" name="workload-filter" id="workload-static-generation" />
-  <input className="dynamo-filter-input" type="radio" name="workload-filter" id="workload-long-output" />
-  <input className="dynamo-filter-input" type="radio" name="workload-filter" id="workload-deployment-only" />
+<input className="dynamo-filter-input" type="radio" id="provider-all" name="provider" defaultChecked />
+<input className="dynamo-filter-input" type="radio" id="provider-nvidia" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-qwen" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-deepseek" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-moonshot" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-meta" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-openai" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-zai" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="runtime-all" name="runtime" defaultChecked />
+<input className="dynamo-filter-input" type="radio" id="runtime-vllm" name="runtime" />
+<input className="dynamo-filter-input" type="radio" id="runtime-trtllm" name="runtime" />
+<input className="dynamo-filter-input" type="radio" id="runtime-sglang" name="runtime" />
+<input className="dynamo-filter-input" type="radio" id="runtime-dynamo" name="runtime" />
+<input className="dynamo-filter-input" type="radio" id="hardware-all" name="hardware" defaultChecked />
+<input className="dynamo-filter-input" type="radio" id="hardware-h100" name="hardware" />
+<input className="dynamo-filter-input" type="radio" id="hardware-h200" name="hardware" />
+<input className="dynamo-filter-input" type="radio" id="hardware-gb200" name="hardware" />
+<input className="dynamo-filter-input" type="radio" id="hardware-b200" name="hardware" />
+<input className="dynamo-filter-input" type="radio" id="technique-all" name="technique" defaultChecked />
+<input className="dynamo-filter-input" type="radio" id="technique-aggregated" name="technique" />
+<input className="dynamo-filter-input" type="radio" id="technique-disaggregated" name="technique" />
+<input className="dynamo-filter-input" type="radio" id="technique-kv-routing" name="technique" />
+<input className="dynamo-filter-input" type="radio" id="technique-expert-parallel" name="technique" />
+<input className="dynamo-filter-input" type="radio" id="technique-spec-decoding" name="technique" />
+<input className="dynamo-filter-input" type="radio" id="technique-embedding-cache" name="technique" />
+<input className="dynamo-filter-input" type="radio" id="technique-frontend-decoding" name="technique" />
+<input className="dynamo-filter-input" type="radio" id="workload-all" name="workload" defaultChecked />
+<input className="dynamo-filter-input" type="radio" id="workload-agentic-coding" name="workload" />
+<input className="dynamo-filter-input" type="radio" id="workload-long-context-reuse" name="workload" />
+<input className="dynamo-filter-input" type="radio" id="workload-multimodal-reuse" name="workload" />
+<input className="dynamo-filter-input" type="radio" id="workload-static-generation" name="workload" />
+<input className="dynamo-filter-input" type="radio" id="workload-long-output" name="workload" />
+<input className="dynamo-filter-input" type="radio" id="workload-deployment-only" name="workload" />
 
 <div className="dynamo-recipe-browser" aria-label="Dynamo model recipe browser">
   <div className="dynamo-recipe-browser-header">
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
       <h3>15 model families</h3>
-      <p>Filter recipes by the model, serving technique, and traffic shape you need to run.</p>
+      <p>Filter by provider, runtime, hardware, serving technique, and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>48</strong>
-      <span>assessed variants</span>
+      <strong>39</strong>
+      <span>Recipe targets</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
   </div>
 
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Provider</span>
-    <div className="dynamo-filter-options">
-      <label className="dynamo-recipe-chip" htmlFor="provider-all">All</label>
-      <label className="dynamo-recipe-chip" htmlFor="provider-nvidia">NVIDIA</label>
-      <label className="dynamo-recipe-chip" htmlFor="provider-qwen">Qwen</label>
-      <label className="dynamo-recipe-chip" htmlFor="provider-deepseek">DeepSeek</label>
-      <label className="dynamo-recipe-chip" htmlFor="provider-moonshot">Moonshot</label>
-      <label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label>
-      <label className="dynamo-recipe-chip" htmlFor="provider-openai">OpenAI</label>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Runtime</span>
-    <div className="dynamo-filter-options">
-      <label className="dynamo-recipe-chip" htmlFor="runtime-all">All</label>
-      <label className="dynamo-recipe-chip" htmlFor="runtime-vllm">vLLM</label>
-      <label className="dynamo-recipe-chip" htmlFor="runtime-trtllm">TensorRT-LLM</label>
-      <label className="dynamo-recipe-chip" htmlFor="runtime-sglang">SGLang</label>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Hardware</span>
-    <div className="dynamo-filter-options">
-      <label className="dynamo-recipe-chip" htmlFor="hardware-all">All</label>
-      <label className="dynamo-recipe-chip" htmlFor="hardware-h100">H100</label>
-      <label className="dynamo-recipe-chip" htmlFor="hardware-h200">H200</label>
-      <label className="dynamo-recipe-chip" htmlFor="hardware-gb200">GB200</label>
-      <label className="dynamo-recipe-chip" htmlFor="hardware-b200">B200</label>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Technique</span>
-    <div className="dynamo-filter-options">
-      <label className="dynamo-recipe-chip" htmlFor="technique-all">All</label>
-      <label className="dynamo-recipe-chip" htmlFor="technique-aggregated">Aggregated</label>
-      <label className="dynamo-recipe-chip" htmlFor="technique-disaggregated">Disaggregated</label>
-      <label className="dynamo-recipe-chip" htmlFor="technique-kv-routing">KV routing</label>
-      <label className="dynamo-recipe-chip" htmlFor="technique-expert-parallel">Expert parallel</label>
-      <label className="dynamo-recipe-chip" htmlFor="technique-spec-decoding">Spec decoding</label>
-      <label className="dynamo-recipe-chip" htmlFor="technique-embedding-cache">Embedding cache</label>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Workload type</span>
-    <div className="dynamo-filter-options">
-      <label className="dynamo-recipe-chip" htmlFor="workload-all">All</label>
-      <label className="dynamo-recipe-chip" htmlFor="workload-agentic-coding">Agentic coding</label>
-      <label className="dynamo-recipe-chip" htmlFor="workload-long-context-reuse">Long-context reuse</label>
-      <label className="dynamo-recipe-chip" htmlFor="workload-multimodal-reuse">Multimodal reuse</label>
-      <label className="dynamo-recipe-chip" htmlFor="workload-static-generation">Static ISL/OSL</label>
-      <label className="dynamo-recipe-chip" htmlFor="workload-long-output">Long output</label>
-      <label className="dynamo-recipe-chip" htmlFor="workload-deployment-only">Deployment only</label>
-    </div>
-  </div>
+<div className="dynamo-filter-row"><span className="dynamo-recipe-label">Provider</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="provider-all">All</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-nvidia">NVIDIA</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-qwen">Qwen</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-deepseek">DeepSeek</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-moonshot">Moonshot</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-openai">OpenAI</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-zai">Z.AI</label></div></div>
+<div className="dynamo-filter-row"><span className="dynamo-recipe-label">Runtime</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="runtime-all">All</label>
+<label className="dynamo-recipe-chip" htmlFor="runtime-vllm">vLLM</label>
+<label className="dynamo-recipe-chip" htmlFor="runtime-trtllm">TensorRT-LLM</label>
+<label className="dynamo-recipe-chip" htmlFor="runtime-sglang">SGLang</label>
+<label className="dynamo-recipe-chip" htmlFor="runtime-dynamo">Dynamo</label></div></div>
+<div className="dynamo-filter-row"><span className="dynamo-recipe-label">Hardware</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="hardware-all">All</label>
+<label className="dynamo-recipe-chip" htmlFor="hardware-h100">H100</label>
+<label className="dynamo-recipe-chip" htmlFor="hardware-h200">H200</label>
+<label className="dynamo-recipe-chip" htmlFor="hardware-gb200">GB200</label>
+<label className="dynamo-recipe-chip" htmlFor="hardware-b200">B200</label></div></div>
+<div className="dynamo-filter-row"><span className="dynamo-recipe-label">Technique</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="technique-all">All</label>
+<label className="dynamo-recipe-chip" htmlFor="technique-aggregated">Aggregated</label>
+<label className="dynamo-recipe-chip" htmlFor="technique-disaggregated">Disaggregated</label>
+<label className="dynamo-recipe-chip" htmlFor="technique-kv-routing">KV routing</label>
+<label className="dynamo-recipe-chip" htmlFor="technique-expert-parallel">Expert parallel</label>
+<label className="dynamo-recipe-chip" htmlFor="technique-spec-decoding">Spec decoding</label>
+<label className="dynamo-recipe-chip" htmlFor="technique-embedding-cache">Embedding cache</label>
+<label className="dynamo-recipe-chip" htmlFor="technique-frontend-decoding">Frontend decoding</label></div></div>
+<div className="dynamo-filter-row"><span className="dynamo-recipe-label">Workload</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="workload-all">All</label>
+<label className="dynamo-recipe-chip" htmlFor="workload-agentic-coding">Agentic coding</label>
+<label className="dynamo-recipe-chip" htmlFor="workload-long-context-reuse">Long-context reuse</label>
+<label className="dynamo-recipe-chip" htmlFor="workload-multimodal-reuse">Multimodal reuse</label>
+<label className="dynamo-recipe-chip" htmlFor="workload-static-generation">Static ISL/OSL</label>
+<label className="dynamo-recipe-chip" htmlFor="workload-long-output">Long output</label>
+<label className="dynamo-recipe-chip" htmlFor="workload-deployment-only">Deployment only</label></div></div>
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
-  <div
-    className="dynamo-model-card"
-    data-recipe-card
-    data-provider="qwen"
-    data-runtime="vllm"
-    data-hardware="h200"
-    data-technique="aggregated disaggregated kv-routing"
-    data-workload="long-context-reuse"
-    data-search="qwen qwen3 32b vllm h200 mooncake trace kv router disaggregated aggregated"
-  >
-    <a className="dynamo-model-card-link" href="/dynamo/dev/resources/recipes/qwen3-32b">
-      <div className="dynamo-model-card-top">
-        <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-        <div>
-          <h3>Qwen3-32B</h3>
-          <p>Qwen</p>
-        </div>
-        <span className="dynamo-recipe-status verified">Verified</span>
-      </div>
-      <p className="dynamo-model-summary">Mooncake trace comparison for aggregated round-robin vs disaggregated KV routing on 16x H200.</p>
-      <div className="dynamo-model-tags">
-        <span>vLLM</span>
-        <span>16x H200</span>
-        <span>Trace replay</span>
-        <span>KV routing</span>
-      </div>
-    </a>
-  </div>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/deepseek-v3-2-nvfp4"
-    data-recipe-card
-    data-provider="nvidia deepseek"
-    data-runtime="trtllm"
-    data-hardware="gb200"
-    data-technique="aggregated disaggregated kv-routing expert-parallel"
-    data-workload="long-context-reuse"
-    data-search="deepseek v3.2 nvfp4 nvidia checkpoint tensorrt-llm trtllm gb200 wideep kv routing coding trace"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
-      <div>
-        <h3>DeepSeek V3.2 NVFP4</h3>
-        <p>NVIDIA checkpoint</p>
-      </div>
-      <span className="dynamo-recipe-status verified">Verified</span>
-    </div>
-    <p className="dynamo-model-summary">32x GB200 WideEP recipe for a Mooncake-derived coding trace with 39K average input tokens.</p>
-    <div className="dynamo-model-tags">
-      <span>TRT-LLM</span>
-      <span>32x GB200</span>
-      <span>Trace replay</span>
-      <span>WideEP</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/qwen3-vl-30b"
-    data-recipe-card
-    data-provider="qwen"
-    data-runtime="vllm"
-    data-hardware="gb200"
-    data-technique="aggregated embedding-cache"
-    data-workload="multimodal-reuse"
-    data-search="qwen3 vl 30b a3b fp8 multimodal image reuse embedding cache vllm gb200"
-  >
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-32b" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing" data-workload="long-context-reuse static-generation deployment-only">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-      <div>
-        <h3>Qwen3-VL-30B</h3>
-        <p>Qwen</p>
-      </div>
-      <span className="dynamo-recipe-status verified">Verified</span>
+      <div><h3>Qwen3-32B</h3><p>Qwen</p></div>
     </div>
-    <p className="dynamo-model-summary">Image-reuse benchmark for vLLM embedding cache with 1,000 multimodal requests.</p>
-    <div className="dynamo-model-tags">
-      <span>vLLM</span>
-      <span>GB200</span>
-      <span>Multimodal</span>
-      <span>Embedding cache</span>
-    </div>
+    <p className="dynamo-model-summary">Disaggregated vLLM recipe for Mooncake-style conversation traces on 16x H200, plus a separate KVBM deploy target.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>16x H200</span><span>Long-context reuse</span><span>Related benchmark</span></div>
   </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/kimi-k2-5"
-    data-recipe-card
-    data-provider="moonshot nvidia"
-    data-runtime="trtllm"
-    data-hardware="gb200"
-    data-technique="aggregated disaggregated kv-routing spec-decoding"
-    data-workload="agentic-coding long-context-reuse"
-    data-search="kimi k2.5 nvfp4 moonshot nvidia trtllm gb200 agentic coding eagle3 kv router kv offload"
-  >
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/deepseek-v3-2-nvfp4" data-recipe-card data-provider="deepseek" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated kv-routing expert-parallel" data-workload="long-context-reuse static-generation">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek V3.2 NVFP4</h3><p>NVIDIA checkpoint / DeepSeek</p></div>
+    </div>
+    <p className="dynamo-model-summary">32x GB200 TensorRT-LLM recipe with P/D split, KV-aware routing, and WideEP for long-context coding traces.</p>
+    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>32x GB200</span><span>Long-context reuse</span><span>Related benchmark</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-vl-30b" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 gb200" data-technique="aggregated embedding-cache" data-workload="multimodal-reuse">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3-VL-30B</h3><p>Qwen</p></div>
+    </div>
+    <p className="dynamo-model-summary">Single-GB200 vLLM recipe for repeated-image multimodal traffic with embedding cache enabled.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>1x GB200</span><span>Multimodal reuse</span><span>Related benchmark</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/kimi-k2-5" data-recipe-card data-provider="moonshot" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
-      <div>
-        <h3>Kimi-K2.5 NVFP4</h3>
-        <p>Moonshot / NVIDIA</p>
-      </div>
-      <span className="dynamo-recipe-status verified">Verified</span>
+      <div><h3>Kimi-K2.5 NVFP4</h3><p>Moonshot / NVIDIA</p></div>
     </div>
-    <p className="dynamo-model-summary">Agentic coding trace across four TensorRT-LLM variants: KV routing, Eagle3, and disaggregation.</p>
-    <div className="dynamo-model-tags">
-      <span>TRT-LLM</span>
-      <span>24x GB200</span>
-      <span>Agentic trace</span>
-      <span>Eagle3</span>
-    </div>
+    <p className="dynamo-model-summary">24x GB200 TensorRT-LLM recipe combining disaggregation, KV-aware routing, Eagle3, and KV offload for agentic coding traces.</p>
+    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>24x GB200</span><span>Agentic coding trace</span><span>Related benchmark</span></div>
   </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/deepseek-r1"
-    data-recipe-card
-    data-provider="deepseek"
-    data-runtime="trtllm vllm sglang"
-    data-hardware="h200 gb200"
-    data-technique="disaggregated expert-parallel"
-    data-workload="static-generation"
-    data-search="deepseek r1 trtllm vllm sglang h200 gb200 wideep static isl osl"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
-      <div>
-        <h3>DeepSeek-R1</h3>
-        <p>DeepSeek</p>
-      </div>
-      <span className="dynamo-recipe-status preview">Preview</span>
-    </div>
-    <p className="dynamo-model-summary">Large MoE deployment family; benchmarked GB200 TensorRT-LLM shape uses 1K input / 1K output.</p>
-    <div className="dynamo-model-tags">
-      <span>TRT-LLM</span>
-      <span>36x GB200</span>
-      <span>Static shape</span>
-      <span>WideEP</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/deepseek-v4-pro"
-    data-recipe-card
-    data-provider="deepseek"
-    data-runtime="vllm sglang"
-    data-hardware="b200 gb200"
-    data-technique="aggregated disaggregated expert-parallel spec-decoding"
-    data-workload="static-generation"
-    data-search="deepseek v4 pro vllm sglang b200 gb200 disaggregated expert parallel eagle static 8k 1k"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
-      <div>
-        <h3>DeepSeek-V4-Pro</h3>
-        <p>DeepSeek</p>
-      </div>
-      <span className="dynamo-recipe-status preview">Experimental</span>
-    </div>
-    <p className="dynamo-model-summary">Day-0 V4-Pro variants; benchmarked GB200 disaggregation sweeps 8K input / 1K output.</p>
-    <div className="dynamo-model-tags">
-      <span>vLLM</span>
-      <span>16x GB200</span>
-      <span>Static sweep</span>
-      <span>P/D split</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/deepseek-v4-flash"
-    data-recipe-card
-    data-provider="deepseek"
-    data-runtime="vllm sglang"
-    data-hardware="b200 gb200"
-    data-technique="aggregated expert-parallel spec-decoding"
-    data-workload="deployment-only"
-    data-search="deepseek v4 flash vllm sglang b200 gb200 deployment only eagle expert parallel"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
-      <div>
-        <h3>DeepSeek-V4-Flash</h3>
-        <p>DeepSeek</p>
-      </div>
-      <span className="dynamo-recipe-status deployment">Deploy only</span>
-    </div>
-    <p className="dynamo-model-summary">Four aggregated deploy variants for vLLM and SGLang across 4x B200 or 4x GB200.</p>
-    <div className="dynamo-model-tags">
-      <span>vLLM</span>
-      <span>SGLang</span>
-      <span>4x GPU</span>
-      <span>No perf YAML</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/gpt-oss-120b"
-    data-recipe-card
-    data-provider="openai"
-    data-runtime="trtllm"
-    data-hardware="gb200 b200"
-    data-technique="aggregated disaggregated expert-parallel"
-    data-workload="static-generation long-output"
-    data-search="gpt oss 120b openai trtllm gb200 blackwell static generation long output"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/openai.webp" alt="" />
-      <div>
-        <h3>GPT-OSS-120B</h3>
-        <p>OpenAI</p>
-      </div>
-      <span className="dynamo-recipe-status verified">Verified</span>
-    </div>
-    <p className="dynamo-model-summary">Blackwell TensorRT-LLM aggregate and P/D variants with short-prompt and long-context shapes.</p>
-    <div className="dynamo-model-tags">
-      <span>TRT-LLM</span>
-      <span>GB200</span>
-      <span>Static shape</span>
-      <span>P/D split</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/llama-3-3-70b"
-    data-recipe-card
-    data-provider="meta"
-    data-runtime="vllm"
-    data-hardware="h100 h200"
-    data-technique="aggregated disaggregated"
-    data-workload="static-generation"
-    data-search="llama 3.3 70b fp8 meta redhat vllm h100 h200 aggregated disaggregated static 8k 1k"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/meta-llama.webp" alt="" />
-      <div>
-        <h3>Llama-3.3-70B</h3>
-        <p>Meta / Red Hat</p>
-      </div>
-      <span className="dynamo-recipe-status preview">Preview</span>
-    </div>
-    <p className="dynamo-model-summary">FP8 vLLM variants spanning aggregated, single-node disaggregated, and multi-node disaggregated layouts.</p>
-    <div className="dynamo-model-tags">
-      <span>vLLM</span>
-      <span>H100/H200</span>
-      <span>8K/1K</span>
-      <span>FP8</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/nemotron-3-super-fp8"
-    data-recipe-card
-    data-provider="nvidia"
-    data-runtime="vllm trtllm sglang"
-    data-hardware="h100 h200"
-    data-technique="aggregated disaggregated kv-routing"
-    data-workload="deployment-only"
-    data-search="nemotron 3 super fp8 nvidia vllm sglang trtllm h100 h200 deployment only kv routing mamba"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
-      <div>
-        <h3>Nemotron-3-Super FP8</h3>
-        <p>NVIDIA</p>
-      </div>
-      <span className="dynamo-recipe-status deployment">Deploy only</span>
-    </div>
-    <p className="dynamo-model-summary">Hybrid Mamba/Attention/MoE deploy recipes across vLLM, SGLang, and TensorRT-LLM.</p>
-    <div className="dynamo-model-tags">
-      <span>Multi-runtime</span>
-      <span>4x H100/H200</span>
-      <span>Reasoning</span>
-      <span>No perf YAML</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/nemotron-3-nano-omni"
-    data-recipe-card
-    data-provider="nvidia"
-    data-runtime="vllm"
-    data-hardware="h100 h200 b200 gb200"
-    data-technique="aggregated kv-routing"
-    data-workload="deployment-only"
-    data-search="nemotron 3 nano omni nvfp4 nvidia vllm multimodal deployment only prefix hash kv routing"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
-      <div>
-        <h3>Nemotron 3 Nano Omni</h3>
-        <p>NVIDIA</p>
-      </div>
-      <span className="dynamo-recipe-status deployment">Deploy only</span>
-    </div>
-    <p className="dynamo-model-summary">Single-GPU vLLM deployment for text, image, video, and audio with prefix-hash routing.</p>
-    <div className="dynamo-model-tags">
-      <span>vLLM</span>
-      <span>1 GPU</span>
-      <span>Multimodal</span>
-      <span>No perf YAML</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/qwen3-235b-a22b-fp8"
-    data-recipe-card
-    data-provider="qwen"
-    data-runtime="trtllm"
-    data-hardware="h100 h200 b200"
-    data-technique="aggregated disaggregated kv-routing expert-parallel"
-    data-workload="static-generation"
-    data-search="qwen3 235b a22b fp8 trtllm hopper blackwell b200 h100 h200 moe kv routing static"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-      <div>
-        <h3>Qwen3-235B-A22B FP8</h3>
-        <p>Qwen</p>
-      </div>
-      <span className="dynamo-recipe-status preview">Preview</span>
-    </div>
-    <p className="dynamo-model-summary">MoE TensorRT-LLM variants for Hopper and Blackwell with 4K input / 200 output benchmarks.</p>
-    <div className="dynamo-model-tags">
-      <span>TRT-LLM</span>
-      <span>16x GPU</span>
-      <span>MoE</span>
-      <span>Static shape</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/qwen3-32b-fp8"
-    data-recipe-card
-    data-provider="qwen"
-    data-runtime="vllm trtllm"
-    data-hardware="h100 h200"
-    data-technique="aggregated disaggregated"
-    data-workload="static-generation"
-    data-search="qwen3 32b fp8 vllm trtllm h100 h200 a100 disaggregated static isl osl"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-      <div>
-        <h3>Qwen3-32B FP8</h3>
-        <p>Qwen</p>
-      </div>
-      <span className="dynamo-recipe-status preview">Preview</span>
-    </div>
-    <p className="dynamo-model-summary">FP8 recipe set with TensorRT-LLM aggregated/disaggregated and vLLM disaggregated variants.</p>
-    <div className="dynamo-model-tags">
-      <span>vLLM</span>
-      <span>TRT-LLM</span>
-      <span>FP8</span>
-      <span>Static shape</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/qwen3-6-35b"
-    data-recipe-card
-    data-provider="qwen"
-    data-runtime="vllm"
-    data-hardware="h100 gb200"
-    data-technique="embedding-cache"
-    data-workload="multimodal-reuse"
-    data-search="qwen3.6 35b a3b fp8 vllm frontend decoding embedding cache h100 gb200 multimodal sliding window"
-  >
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-      <div>
-        <h3>Qwen3.6-35B-A3B FP8</h3>
-        <p>Qwen</p>
-      </div>
-      <span className="dynamo-recipe-status verified">Verified</span>
-    </div>
-    <p className="dynamo-model-summary">Three-way benchmark for vanilla vLLM, Dynamo frontend decoding, and embedding cache.</p>
-    <div className="dynamo-model-tags">
-      <span>vLLM</span>
-      <span>H100/GB200</span>
-      <span>Multimodal</span>
-      <span>Embedding cache</span>
-    </div>
-  </a>
-
-  <a
-    className="dynamo-model-card"
-    href="/dynamo/dev/resources/recipes/glm-5-nvfp4"
-    data-recipe-card
-    data-provider="nvidia zai"
-    data-runtime="sglang"
-    data-hardware="gb200"
-    data-technique="disaggregated expert-parallel spec-decoding"
-    data-workload="static-generation long-output"
-    data-search="glm 5 nvfp4 nvidia zai sglang gb200 disaggregated eagle long output 1k 8k"
-  >
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/glm-5-nvfp4" data-recipe-card data-provider="zai" data-runtime="sglang" data-hardware="b200 gb200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../assets/img/recipes/providers/zai-org.webp" alt="" />
-      <div>
-        <h3>GLM-5 NVFP4</h3>
-        <p>NVIDIA / Z.AI</p>
-      </div>
-      <span className="dynamo-recipe-status verified">Verified</span>
+      <div><h3>GLM-5 NVFP4</h3><p>NVIDIA / Z.AI</p></div>
     </div>
-    <p className="dynamo-model-summary">SGLang P/D recipe on GB200 with EAGLE speculative decoding and a 1K input / 8K output run.</p>
-    <div className="dynamo-model-tags">
-      <span>SGLang</span>
-      <span>20x GB200</span>
-      <span>Long output</span>
-      <span>EAGLE</span>
+    <p className="dynamo-model-summary">20x GB200 SGLang P/D recipe for 1K input / 8K output traffic with EAGLE speculative decoding.</p>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>20x GB200</span><span>Long output / static ISL-OSL</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/gpt-oss-120b" data-recipe-card data-provider="openai" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/openai.webp" alt="" />
+      <div><h3>GPT-OSS-120B</h3><p>OpenAI</p></div>
     </div>
+    <p className="dynamo-model-summary">TensorRT-LLM GB200 recipe pair organized by traffic target rather than as an agg-vs-disagg benchmark.</p>
+    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>4x GB200</span><span>Static ISL-OSL</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/deepseek-r1" data-recipe-card data-provider="deepseek" data-runtime="sglang trtllm vllm" data-hardware="b200 gb200 h200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation deployment-only">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek-R1</h3><p>DeepSeek</p></div>
+    </div>
+    <p className="dynamo-model-summary">DeepSeek-R1 recipe set spanning backend and hardware targets, with benchmark coverage for TensorRT-LLM WideEP on GB200.</p>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>16x H200</span><span>Deployment only</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/deepseek-v4-pro" data-recipe-card data-provider="deepseek" data-runtime="sglang vllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation long-output deployment-only">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek-V4-Pro</h3><p>DeepSeek</p></div>
+    </div>
+    <p className="dynamo-model-summary">Day-0 V4-Pro recipe matrix across vLLM/SGLang and B200/GB200 targets.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>8x B200</span><span>Deployment only</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/deepseek-v4-flash" data-recipe-card data-provider="deepseek" data-runtime="sglang vllm" data-hardware="b200 gb200" data-technique="aggregated expert-parallel" data-workload="deployment-only">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek-V4-Flash</h3><p>DeepSeek</p></div>
+    </div>
+    <p className="dynamo-model-summary">Deploy-only V4-Flash recipe set across vLLM/SGLang and B200/GB200 aggregate targets.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>4x B200</span><span>Deployment only</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/llama-3-3-70b" data-recipe-card data-provider="meta" data-runtime="vllm" data-hardware="h100 h200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/meta-llama.webp" alt="" />
+      <div><h3>Llama-3.3-70B FP8</h3><p>Meta / Red Hat</p></div>
+    </div>
+    <p className="dynamo-model-summary">Llama FP8 topology recipe set for 8K input / 1K output traffic on H100/H200.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>4x H100/H200</span><span>Long output / static ISL-OSL</span><span>Related benchmark</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/nemotron-3-nano-omni" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="gpu" data-technique="aggregated" data-workload="deployment-only">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
+      <div><h3>Nemotron 3 Nano Omni</h3><p>NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">Single-GPU multimodal deployment recipe for Nemotron 3 Nano Omni with custom runtime image requirements.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>1 GPU</span><span>Deployment only</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/nemotron-3-super-fp8" data-recipe-card data-provider="nvidia" data-runtime="sglang trtllm vllm" data-hardware="h100 h200" data-technique="aggregated disaggregated kv-routing expert-parallel" data-workload="deployment-only">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
+      <div><h3>Nemotron-3-Super FP8</h3><p>NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">Nemotron-3-Super backend recipe set for 4x H100/H200 targets with hybrid-cache caveats.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>4x H100/H200</span><span>Deployment only</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-235b-a22b-fp8" data-recipe-card data-provider="qwen" data-runtime="trtllm" data-hardware="b200 h100 h200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3-235B-A22B FP8</h3><p>Qwen</p></div>
+    </div>
+    <p className="dynamo-model-summary">16-GPU TensorRT-LLM recipe matrix for Hopper/Blackwell and aggregate/P-D serving.</p>
+    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>16x H100/H200</span><span>Static ISL-OSL</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-32b-fp8" data-recipe-card data-provider="qwen" data-runtime="trtllm vllm" data-hardware="gpu" data-technique="aggregated disaggregated" data-workload="static-generation">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3-32B FP8</h3><p>Qwen</p></div>
+    </div>
+    <p className="dynamo-model-summary">FP8 recipe set spanning TensorRT-LLM aggregate, TensorRT-LLM P/D, and vLLM P/D targets.</p>
+    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>2x GPU</span><span>Static ISL-OSL</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-6-35b" data-recipe-card data-provider="qwen" data-runtime="dynamo vllm" data-hardware="b200 gb200 h100" data-technique="embedding-cache frontend-decoding" data-workload="multimodal-reuse">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3.6-35B-A3B FP8</h3><p>Qwen</p></div>
+    </div>
+    <p className="dynamo-model-summary">Single-GPU multimodal recipe using Dynamo frontend decoding plus an 8 GiB embedding cache.</p>
+    <div className="dynamo-model-tags"><span>Dynamo + vLLM</span><span>1x H100 or GB200</span><span>Multimodal reuse</span><span>Related benchmark</span></div>
   </a>
 </div>
 
 <p className="dynamo-recipe-empty" data-empty-state hidden>No recipes match the selected filters.</p>
 </form>
+
+## Related Benchmarks
+
+Use [Benchmarks](/dynamo/dev/resources/benchmarks) when your question starts with a feature or performance claim, such as KV routing, embedding cache, speculative decoding, or topology. Recipe pages link back to benchmark pages whenever a recipe came from a comparison or feature-stack run.

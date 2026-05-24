@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Llama-3.3-70B FP8
-subtitle: Compare vLLM aggregate and disaggregated Llama-3.3-70B FP8 shapes on H100/H200.
+title: "Llama-3.3-70B FP8"
+subtitle: "vLLM topology recipes for aggregate, single-node P/D, and multi-node P/D serving."
 ---
 
 <div className="dynamo-model-detail-hero">
@@ -10,215 +10,189 @@ subtitle: Compare vLLM aggregate and disaggregated Llama-3.3-70B FP8 shapes on H
 <div className="dynamo-model-title-lockup">
 <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/meta-llama.webp" alt="" />
 <div>
-<p className="dynamo-recipe-eyebrow">Meta / Red Hat / vLLM / H100 or H200</p>
-<h2>Compare vLLM aggregate and disaggregated Llama-3.3-70B FP8 shapes on H100/H200.</h2>
+<p className="dynamo-recipe-eyebrow">Meta / Red Hat / vLLM / 8x H100/H200</p>
+<h2>vLLM topology recipes for aggregate, single-node P/D, and multi-node P/D serving.</h2>
 </div>
 </div>
-<p>
-This source recipe is a <strong>comparison set</strong>. The table below shows each
-deployable variant, its role in the recipe set, and the benchmark evidence available today.
-</p>
+<p>Choose a topology/capacity target and compare normalized TPS/GPU on the related benchmark page.</p>
 <div className="dynamo-hero-actions">
-<a href="#recipe-set">Recipe set</a>
-<a href="#benchmark-evidence">Benchmark</a>
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
 <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b">Source</a>
 </div>
 </div>
 
 <div className="dynamo-recommendation-card">
-<span>Comparison Set</span>
-<strong>Preview</strong>
-<p>How do aggregate, single-node disaggregated, and multi-node disaggregated vLLM shapes differ for the same 8K/1K static benchmark?</p>
+<span>Primary target</span>
+<strong>vLLM disagg single-node</strong>
+<p>P/D split within one node; compare latency against aggregate baseline.</p>
 <div className="dynamo-recommendation-facts">
-<div>
-<span>Model</span>
-<strong>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</strong>
-</div>
-<div>
-<span>Traffic</span>
-<strong>Synthetic static ISL 8192 / OSL 1024 / 16 concurrency per GPU</strong>
-</div>
-<div>
-<span>Shape</span>
-<strong>Comparison set</strong>
-</div>
+<div><span>Model</span><strong>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</strong></div>
+<div><span>Traffic</span><strong>Same static shape</strong></div>
+<div><span>Technique</span><strong>Disaggregated prefill/decode</strong></div>
 </div>
 </div>
 </div>
 
-## Comparison Set
+## Recipe Targets
 
-<div className="dynamo-comparison-brief" id="recipe-set">
-<div>
-<span>Question</span>
-<strong>How do aggregate, single-node disaggregated, and multi-node disaggregated vLLM shapes differ for the same 8K/1K static benchmark?</strong>
-</div>
-<div>
-<span>Held constant</span>
-<strong>Model, vLLM runtime, H100/H200 family, ISL=8192, OSL=1024, and concurrency-per-GPU=16.</strong>
-</div>
-</div>
+<div id="recipe-targets"></div>
 
 <div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table">
-<thead>
-<tr>
-<th>Variant</th>
-<th>Role</th>
-<th>Runtime</th>
-<th>Hardware</th>
-<th>Traffic</th>
-<th></th>
-</tr>
-</thead>
-<tbody>
-<tr className="recommended">
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr>
 <td><strong>vLLM aggregated</strong><span>Single-node TP4 baseline and smallest hardware footprint.</span></td>
-<td><em className="role baseline">Baseline</em></td>
 <td>vLLM</td>
 <td>4x H100/H200</td>
 <td>8K ISL / 1K OSL</td>
-<td><a href="#deploy-vllm-aggregated">Deploy</a></td>
-</tr><tr>
+<td>Aggregated serving</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/perf.yaml">perf.yaml</a></td>
+</tr><tr className="recommended">
 <td><strong>vLLM disagg single-node</strong><span>P/D split within one node; compare latency against aggregate baseline.</span></td>
-<td><em className="role treatment">Treatment</em></td>
 <td>vLLM</td>
 <td>8x H100/H200</td>
 <td>Same static shape</td>
-<td><a href="#deploy-vllm-disagg-single-node">Deploy</a></td>
+<td>Disaggregated prefill/decode</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml">perf.yaml</a></td>
 </tr><tr>
 <td><strong>vLLM disagg multi-node</strong><span>Two-node disaggregated capacity shape.</span></td>
-<td><em className="role scale-out">Scale-out treatment</em></td>
 <td>vLLM</td>
 <td>16x H100/H200</td>
 <td>Same static shape</td>
-<td><a href="#deploy-vllm-disagg-multi-node">Deploy</a></td>
-</tr>
-</tbody>
+<td>Disaggregated prefill/decode</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
 </table>
 </div>
 
-## When to Use
-
-Use this page when your deployment decision starts with `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
-
-## Results Placeholder
-
-<div className="dynamo-placeholder-note">
-<strong>Benchmark results are not checked in yet</strong>
-<p>All three rows have perf.yaml files, but the README does not include numeric expected results. The page keeps a placeholder for the three-way comparison.</p>
-</div>
-
-| Placeholder | What should be filled in |
-| --- | --- |
-| Aggregate result placeholder | Report throughput, TTFT, ITL, request latency, and errors for the 4-GPU TP4 baseline. |
-| Single-node disagg placeholder | Report the same metrics for the 8-GPU P/D split. |
-| Multi-node disagg placeholder | Report the same metrics for the 16-GPU two-node P/D split. |
-
-## Before You Run
+## Prerequisites
 
 <div className="dynamo-prereq-grid">
-<div>
-<span>Hardware</span>
-<strong>H100 or H200</strong>
-</div>
-<div>
-<span>Runtime</span>
-<strong>vLLM</strong>
-</div>
-<div>
-<span>Quantization</span>
-<strong>FP8 dynamic</strong>
-</div>
-<div>
-<span>Traffic</span>
-<strong>8K ISL / 1K OSL</strong>
-</div>
-<div>
-<span>Concurrency</span>
-<strong>16 per GPU</strong>
-</div>
-<div>
-<span>Accessory</span>
-<strong>GAIE manifests are integration notes</strong>
-</div>
+<div><span>Hardware</span><strong>H100/H200 family</strong></div>
+<div><span>Runtime</span><strong>vLLM</strong></div>
+<div><span>Traffic</span><strong>8K ISL / 1K OSL</strong></div>
+<div><span>Concurrency</span><strong>16 per GPU</strong></div>
+<div><span>Benchmark readout</span><strong>Normalize TPS/GPU</strong></div>
+<div><span>Optional assets</span><strong>GAIE manifests are integration artifacts</strong></div>
 </div>
 
 <Warning>
-Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
+Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests.
 </Warning>
 
-## Deploy
+## Deployment Instructions
 
-<h3 id="deploy-vllm-aggregated">Deploy: vLLM aggregated</h3>
+<div id="deploy"></div>
+
+<h3 id="deploy-vllm-aggregated">vLLM aggregated</h3>
 
 Single-node TP4 baseline and smallest hardware footprint.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/llama-3-70b`.
+# Prepare model cache and model assets using setup manifests in recipes/llama-3-70b.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/llama-3-70b/vllm/agg/perf.yaml -n ${NAMESPACE}
 ```
-
-<h3 id="deploy-vllm-disagg-single-node">Deploy: vLLM disagg single-node</h3>
+<h3 id="deploy-vllm-disagg-single-node">vLLM disagg single-node</h3>
 
 P/D split within one node; compare latency against aggregate baseline.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/llama-3-70b`.
+# Prepare model cache and model assets using setup manifests in recipes/llama-3-70b.
 kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml -n ${NAMESPACE}
 ```
-
-<h3 id="deploy-vllm-disagg-multi-node">Deploy: vLLM disagg multi-node</h3>
+<h3 id="deploy-vllm-disagg-multi-node">vLLM disagg multi-node</h3>
 
 Two-node disaggregated capacity shape.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/llama-3-70b`.
+# Prepare model cache and model assets using setup manifests in recipes/llama-3-70b.
 kubectl apply -f recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
+```
+
+
+## Smoke Test
+
+<div id="smoke-test"></div>
+
+Run a small request before starting the benchmark. Replace the service name if your deployment exposes a different frontend.
+
+```bash
+export NAMESPACE=your-namespace
+kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+<h3>vLLM aggregated</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --endpoint-type chat --endpoint /v1/chat/completions --url http://<frontend>:8000 --streaming --synthetic-input-tokens-mean <isl> --output-tokens-mean <osl> --concurrency <from perf.yaml: <concurrency>> --request-count <from perf.yaml> --extra-inputs ignore_eos:true
+```
+
+```bash
+kubectl apply -f recipes/llama-3-70b/vllm/agg/perf.yaml -n ${NAMESPACE}
+```
+<h3>vLLM disagg single-node</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --endpoint-type chat --endpoint /v1/chat/completions --url http://<frontend>:8000 --streaming --synthetic-input-tokens-mean <isl> --output-tokens-mean <osl> --concurrency <from perf.yaml: <concurrency>> --request-count <from perf.yaml> --extra-inputs ignore_eos:true
+```
+
+```bash
+kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml -n ${NAMESPACE}
+```
+<h3>vLLM disagg multi-node</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --endpoint-type chat --endpoint /v1/chat/completions --url http://<frontend>:8000 --streaming --synthetic-input-tokens-mean <isl> --output-tokens-mean <osl> --concurrency <from perf.yaml: <concurrency>> --request-count <from perf.yaml> --extra-inputs ignore_eos:true
+```
+
+```bash
 kubectl apply -f recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml -n ${NAMESPACE}
 ```
 
 
-<h2 id="benchmark-evidence">Benchmark Evidence</h2>
+## Expected Performance
 
-<div className="dynamo-evidence-grid">
-<div>
-<span>Benchmark asset</span>
-<strong>At least one perf.yaml</strong>
-<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+<div className="dynamo-placeholder-note">
+<strong>Expected performance placeholder</strong>
+<p>All three topology targets include perf.yaml, but the README does not publish numeric results. Fill in output TPS, TPS/GPU, TTFT, ITL, and error rate after running the sweep.</p>
 </div>
-<div>
-<span>Results asset</span>
-<strong>Placeholder required</strong>
-<p>Expected results should be added once benchmark artifacts are available.</p>
-</div>
-<div>
-<span>Comparison safety</span>
-<strong>Comparison Set</strong>
-<p>Rows are comparable only when the page says the workload is held constant.</p>
-</div>
-</div>
+
+## Related Benchmarks
+
+- [Llama-3.3-70B topology benchmark](/dynamo/dev/resources/benchmarks/llama-3-70b-topology)
+
 
 ## Notes
 
+- GPU counts differ by target, so compare total throughput and TPS/GPU.
 - GAIE manifests are optional integration artifacts, not separate recipe variants.
-- The README is thin; this page avoids claims beyond the manifest and perf YAML.
 
-## Source Assets
+## Source
 
 - Source README: [recipes/llama-3-70b/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b)
-- Ground-truth inventory: [recipe-asset-inventory.csv](https://github.com/ai-dynamo/dynamo/blob/codex/recipes-fern-prototype-v2/docs/recipes/recipe-asset-inventory.csv)
+- vLLM aggregated: [recipes/llama-3-70b/vllm/agg/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/deploy.yaml) and [recipes/llama-3-70b/vllm/agg/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/perf.yaml)
+- vLLM disagg single-node: [recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml) and [recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml)
+- vLLM disagg multi-node: [recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml) and [recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml)

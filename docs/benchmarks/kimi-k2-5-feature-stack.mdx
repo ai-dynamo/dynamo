@@ -1,0 +1,103 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Kimi-K2.5 Feature-Stack Benchmark"
+subtitle: "How much throughput and interactivity do we gain as KV routing, Eagle3, disaggregation, and KV offload are composed?"
+---
+
+<div className="dynamo-benchmark-hero">
+<div>
+<p className="dynamo-recipe-eyebrow">Consolidated benchmark</p>
+<h2>KV routing, Eagle3, P/D split, and KV offload composition</h2>
+<p>How much throughput and interactivity do we gain as KV routing, Eagle3, disaggregation, and KV offload are composed?</p>
+<div className="dynamo-hero-actions">
+<a href="#arms">Compared arms</a>
+<a href="#results">Results</a>
+<a href="#reproduce">Reproduce</a>
+<a href="/dynamo/dev/resources/recipes/kimi-k2-5">Related recipe</a>
+</div>
+</div>
+<div className="dynamo-benchmark-facts">
+<div><span>Model</span><strong>nvidia/Kimi-K2.5-NVFP4</strong></div>
+<div><span>Traffic</span><strong>AIPerf agentic coding trace, one-hour Mooncake-format replay, long-context multi-session traffic</strong></div>
+<div><span>Metric focus</span><strong>tok/s/user, tok/s/GPU, TTFT 5s / ITL 10ms goodput</strong></div>
+</div>
+</div>
+
+## Benchmark Question
+
+How much throughput and interactivity do we gain as KV routing, Eagle3, disaggregation, and KV offload are composed?
+
+<div className="dynamo-comparison-brief">
+<div>
+<span>Held constant</span>
+<strong>Model, TensorRT-LLM runtime, GB200 benchmark cluster, agentic coding trace, one-hour duration, and goodput thresholds.</strong>
+</div>
+<div>
+<span>How to use this</span>
+<strong>Inspect the performance claim here, then open the related recipe for the deployment target.</strong>
+</div>
+</div>
+
+## Compared Arms
+
+<div id="arms"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Arm</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role winner">Winner</em></td>
+<td><strong>Disagg + Eagle + KV router + offload</strong><span>Recommended recipe target</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role step">Step</em></td>
+<td><strong>Agg + Eagle + KV router</strong><span>Routing plus speculation</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role step">Step</em></td>
+<td><strong>Agg + Eagle + round-robin</strong><span>Speculation without KV-aware routing</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>Agg + round-robin</strong><span>No Eagle, no P/D split</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/trtllm/agg-round-robin/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/trtllm/agg-round-robin/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Results
+
+<div id="results"></div>
+
+| Arm | tok/s/user avg | tok/s/GPU | Interpretation |
+| --- | ---: | ---: | --- |
+| Disagg + Eagle + KV routing + offload | ~130 | ~5,400 | Best benchmarked point |
+| Agg + Eagle + KV routing | ~85 | ~4,400 | Keeps routing and Eagle |
+| Agg + Eagle + round-robin | ~95 | ~4,000 | Isolates routing effect |
+| Agg + round-robin | ~105 | ~1,700 | Base control without Eagle |
+
+## Reproduce
+
+<div id="reproduce"></div>
+
+The `perf.yaml` files wrap the AIPerf command below. Run each arm in isolation unless the source README says the benchmark can run side by side.
+
+```bash
+aiperf profile -m nvidia/Kimi-K2.5-NVFP4 --tokenizer nvidia/Kimi-K2.5-NVFP4 --input-file /model-cache/traces/agent_trace_data/dataset.jsonl --custom-dataset-type mooncake_trace --url http://<frontend>:8000 --streaming --concurrency <24-or-32> --benchmark-duration 3600 --goodput "time_to_first_token:5000 inter_token_latency:10"
+```
+
+```bash
+export NAMESPACE=your-namespace
+# Pick one arm from the table above, deploy it, wait for readiness, then apply its perf.yaml.
+kubectl apply -f <arm>/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f <arm>/perf.yaml -n ${NAMESPACE}
+```
+
+## Related Recipe
+
+The recipe-facing deployment target is here: [nvidia/Kimi-K2.5-NVFP4](/dynamo/dev/resources/recipes/kimi-k2-5).

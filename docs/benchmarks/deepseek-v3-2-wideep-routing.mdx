@@ -1,0 +1,91 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "DeepSeek V3.2 WideEP Routing A/B"
+subtitle: "Does disaggregated KV-aware routing with WideEP improve latency and goodput against an aggregated round-robin GB200 control?"
+---
+
+<div className="dynamo-benchmark-hero">
+<div>
+<p className="dynamo-recipe-eyebrow">Simple A/B test</p>
+<h2>KV-aware routing + WideEP + P/D split</h2>
+<p>Does disaggregated KV-aware routing with WideEP improve latency and goodput against an aggregated round-robin GB200 control?</p>
+<div className="dynamo-hero-actions">
+<a href="#arms">Compared arms</a>
+<a href="#results">Results</a>
+<a href="#reproduce">Reproduce</a>
+<a href="/dynamo/dev/resources/recipes/deepseek-v3-2-nvfp4">Related recipe</a>
+</div>
+</div>
+<div className="dynamo-benchmark-facts">
+<div><span>Model</span><strong>nvidia/DeepSeek-V3.2-NVFP4</strong></div>
+<div><span>Traffic</span><strong>Mooncake-derived coding trace: 39K avg ISL, 344 avg OSL, roughly 44% KV reuse</strong></div>
+<div><span>Metric focus</span><strong>TTFT, ITL, goodput at TTFT 20s / ITL 50ms, and TPS/GPU</strong></div>
+</div>
+</div>
+
+## Benchmark Question
+
+Does disaggregated KV-aware routing with WideEP improve latency and goodput against an aggregated round-robin GB200 control?
+
+<div className="dynamo-comparison-brief">
+<div>
+<span>Held constant</span>
+<strong>Model, TensorRT-LLM runtime, 32x GB200 target, trace replay, and goodput thresholds.</strong>
+</div>
+<div>
+<span>How to use this</span>
+<strong>Inspect the performance claim here, then open the related recipe for the deployment target.</strong>
+</div>
+</div>
+
+## Compared Arms
+
+<div id="arms"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Arm</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role treatment">Treatment</em></td>
+<td><strong>Disaggregated KV router + WideEP</strong><span>P/D split, KV-aware routing, WideEP</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>Aggregated round-robin</strong><span>Aggregate serving with round-robin routing</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4/trtllm/agg-round-robin/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4/trtllm/agg-round-robin/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Results
+
+<div id="results"></div>
+
+<div className="dynamo-placeholder-note">
+<strong>Expected results placeholder</strong>
+<p>Both arms include perf.yaml, but numeric result tables are not checked in yet. Publish latency and TPS/GPU for both arms once artifacts are available.</p>
+</div>
+
+## Reproduce
+
+<div id="reproduce"></div>
+
+The `perf.yaml` files wrap the AIPerf command below. Run each arm in isolation unless the source README says the benchmark can run side by side.
+
+```bash
+aiperf profile -m nvidia/DeepSeek-V3.2-NVFP4 --tokenizer nvidia/DeepSeek-V3.2-NVFP4 --input-file <trace>.jsonl --custom-dataset-type mooncake_trace --fixed-schedule --url http://<frontend>:8000 --streaming --goodput "time_to_first_token:20000 inter_token_latency:50"
+```
+
+```bash
+export NAMESPACE=your-namespace
+# Pick one arm from the table above, deploy it, wait for readiness, then apply its perf.yaml.
+kubectl apply -f <arm>/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f <arm>/perf.yaml -n ${NAMESPACE}
+```
+
+## Related Recipe
+
+The recipe-facing deployment target is here: [nvidia/DeepSeek-V3.2-NVFP4](/dynamo/dev/resources/recipes/deepseek-v3-2-nvfp4).

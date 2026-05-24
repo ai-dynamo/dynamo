@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Qwen3-32B
-subtitle: Compare vLLM aggregated round-robin against disaggregated KV routing on 16x H200.
+title: "Qwen3-32B"
+subtitle: "Disaggregated vLLM serving with KV-aware routing for long-context prefix reuse."
 ---
 
 <div className="dynamo-model-detail-hero">
@@ -10,214 +10,155 @@ subtitle: Compare vLLM aggregated round-robin against disaggregated KV routing o
 <div className="dynamo-model-title-lockup">
 <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
 <div>
-<p className="dynamo-recipe-eyebrow">Qwen / vLLM / H200</p>
-<h2>Compare vLLM aggregated round-robin against disaggregated KV routing on 16x H200.</h2>
+<p className="dynamo-recipe-eyebrow">Qwen / vLLM / 16x H200</p>
+<h2>Disaggregated vLLM serving with KV-aware routing for long-context prefix reuse.</h2>
 </div>
 </div>
-<p>
-This source recipe is a <strong>comparison set</strong>. The table below shows each
-deployable variant, its role in the recipe set, and the benchmark evidence available today.
-</p>
+<p>Start here for Qwen3-32B prefix-reuse traffic: use the disaggregated KV-router target for the trace-backed deployment, or the single-GPU KVBM target for deployment mechanics.</p>
 <div className="dynamo-hero-actions">
-<a href="#recipe-set">Recipe set</a>
-<a href="#benchmark-evidence">Benchmark</a>
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
 <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b">Source</a>
 </div>
 </div>
 
 <div className="dynamo-recommendation-card">
-<span>Comparison Set</span>
-<strong>Verified</strong>
-<p>Does disaggregated KV-aware routing reduce latency versus aggregated round-robin for a Mooncake conversation trace with repeated prefixes?</p>
+<span>Primary target</span>
+<strong>Disagg + KV router</strong>
+<p>Best candidate when prefix reuse is high enough for KV-aware routing to matter.</p>
 <div className="dynamo-recommendation-facts">
-<div>
-<span>Model</span>
-<strong>Qwen/Qwen3-32B</strong>
-</div>
-<div>
-<span>Traffic</span>
-<strong>12,035 avg ISL / 343 avg OSL / 36.64% cache efficiency</strong>
-</div>
-<div>
-<span>Shape</span>
-<strong>Comparison set</strong>
-</div>
+<div><span>Model</span><strong>Qwen/Qwen3-32B</strong></div>
+<div><span>Traffic</span><strong>12K avg ISL conversation trace</strong></div>
+<div><span>Technique</span><strong>Disaggregated prefill/decode; KV-aware routing</strong></div>
 </div>
 </div>
 </div>
 
-## Comparison Set
+## Recipe Targets
 
-<div className="dynamo-comparison-brief" id="recipe-set">
-<div>
-<span>Question</span>
-<strong>Does disaggregated KV-aware routing reduce latency versus aggregated round-robin for a Mooncake conversation trace with repeated prefixes?</strong>
-</div>
-<div>
-<span>Held constant</span>
-<strong>Model, vLLM runtime, 16x H200 hardware, Mooncake trace replay, and goodput target.</strong>
-</div>
-</div>
+<div id="recipe-targets"></div>
 
 <div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table">
-<thead>
-<tr>
-<th>Variant</th>
-<th>Role</th>
-<th>Runtime</th>
-<th>Hardware</th>
-<th>Traffic</th>
-<th></th>
-</tr>
-</thead>
-<tbody>
-<tr className="recommended">
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr className="recommended">
 <td><strong>Disagg + KV router</strong><span>Best candidate when prefix reuse is high enough for KV-aware routing to matter.</span></td>
-<td><em className="role recommended">Recommended treatment</em></td>
 <td>vLLM</td>
 <td>16x H200</td>
 <td>12K avg ISL conversation trace</td>
-<td><a href="#deploy-disagg--kv-router">Deploy</a></td>
+<td>Disaggregated prefill/decode; KV-aware routing</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml">perf.yaml</a></td>
 </tr><tr>
-<td><strong>Aggregated round-robin</strong><span>Control run that removes P/D split and KV-aware routing while holding model and traffic constant.</span></td>
-<td><em className="role control">Control</em></td>
-<td>vLLM</td>
-<td>16x H200</td>
-<td>Same fixed-schedule trace</td>
-<td><a href="#deploy-aggregated-round-robin">Deploy</a></td>
-</tr><tr className="deploy-only">
 <td><strong>Aggregated + KVBM</strong><span>Use for KVBM deployment mechanics; do not include in the trace comparison until a perf.yaml exists.</span></td>
-<td><em className="role deploy-only">Deploy-only sibling</em></td>
 <td>vLLM</td>
 <td>1x H200 or B200</td>
 <td>Functional deploy validation</td>
-<td><a href="#deploy-aggregated--kvbm">Deploy</a></td>
-</tr>
-</tbody>
+<td>Aggregated serving</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml">deploy.yaml</a><br /><span>benchmark placeholder</span></td>
+</tr></tbody>
 </table>
 </div>
 
-## When to Use
-
-Use this page when your deployment decision starts with `Qwen/Qwen3-32B` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
-
-## Results Placeholder
-
-<div className="dynamo-placeholder-note">
-<strong>Benchmark results are not checked in yet</strong>
-<p>The README includes a result plot but no machine-readable numeric results table. Keep the comparison explicit and use the placeholder below until benchmark artifacts are checked in beside the recipe.</p>
-</div>
-
-| Placeholder | What should be filled in |
-| --- | --- |
-| TTFT | KV-aware routing should reduce prefill compute when cache-compatible requests land on the right worker. |
-| ITL | Prefill/decode separation should reduce decode interruption from long prompts. |
-| Total request latency | Combined signal for KV routing plus P/D separation on the trace. |
-
-## Before You Run
+## Prerequisites
 
 <div className="dynamo-prereq-grid">
-<div>
-<span>Hardware</span>
-<strong>16x H200 across 2 nodes</strong>
-</div>
-<div>
-<span>Runtime</span>
-<strong>vLLM</strong>
-</div>
-<div>
-<span>Dataset</span>
-<strong>Mooncake conversation trace</strong>
-</div>
-<div>
-<span>Traffic</span>
-<strong>12,031 requests over about 59 minutes</strong>
-</div>
-<div>
-<span>Goodput target</span>
-<strong>TTFT 2s / ITL 25ms</strong>
-</div>
-<div>
-<span>Deploy-only sibling</span>
-<strong>KVBM single-GPU example</strong>
-</div>
+<div><span>Hardware</span><strong>16x H200 for the benchmarked P/D recipe</strong></div>
+<div><span>Runtime</span><strong>vLLM Dynamo runtime</strong></div>
+<div><span>Dataset</span><strong>Mooncake conversation trace</strong></div>
+<div><span>Traffic</span><strong>12,031 requests; 12K avg input tokens</strong></div>
+<div><span>Goodput target</span><strong>TTFT 2s / ITL 25ms</strong></div>
+<div><span>Setup assets</span><strong>model-cache/cache.yaml and model-download.yaml</strong></div>
 </div>
 
 <Warning>
-Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
+Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests.
 </Warning>
 
-## Deploy
+## Deployment Instructions
 
-<h3 id="deploy-disagg--kv-router">Deploy: Disagg + KV router</h3>
+<div id="deploy"></div>
+
+<h3 id="deploy-disagg-kv-router">Disagg + KV router</h3>
 
 Best candidate when prefix reuse is high enough for KV-aware routing to matter.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-32b`.
+# Prepare model cache and model assets using setup manifests in recipes/qwen3-32b.
 kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
 ```
-
-<h3 id="deploy-aggregated-round-robin">Deploy: Aggregated round-robin</h3>
-
-Control run that removes P/D split and KV-aware routing while holding model and traffic constant.
-
-```bash
-export NAMESPACE=your-namespace
-
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-32b`.
-kubectl apply -f recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/qwen3-32b/vllm/agg-round-robin/perf.yaml -n ${NAMESPACE}
-```
-
-<h3 id="deploy-aggregated--kvbm">Deploy: Aggregated + KVBM</h3>
+<h3 id="deploy-aggregated-kvbm">Aggregated + KVBM</h3>
 
 Use for KVBM deployment mechanics; do not include in the trace comparison until a perf.yaml exists.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-32b`.
+# Prepare model cache and model assets using setup manifests in recipes/qwen3-32b.
 kubectl apply -f recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml -n ${NAMESPACE}
-# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
 ```
 
 
-<h2 id="benchmark-evidence">Benchmark Evidence</h2>
+## Smoke Test
 
-<div className="dynamo-evidence-grid">
-<div>
-<span>Benchmark asset</span>
-<strong>At least one perf.yaml</strong>
-<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+<div id="smoke-test"></div>
+
+Run a small request before starting the benchmark. Replace the service name if your deployment exposes a different frontend.
+
+```bash
+export NAMESPACE=your-namespace
+kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-32B","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+<h3>Disagg + KV router</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile -m Qwen/Qwen3-32B --input-file conversation_trace.jsonl --custom-dataset-type mooncake_trace --fixed-schedule --url http://<frontend>:8000 --streaming --goodput "time_to_first_token:2000 inter_token_latency:25"
+```
+
+```bash
+kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
+```
+<h3>Aggregated + KVBM</h3>
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark instructions placeholder</strong>
+<p>No perf.yaml is checked in for this recipe target yet. Add the AIPerf command, traffic shape, request count, concurrency, and artifact path when the benchmark lands.</p>
 </div>
-<div>
-<span>Results asset</span>
-<strong>Placeholder required</strong>
-<p>Expected results should be added once benchmark artifacts are available.</p>
+
+
+## Expected Performance
+
+<div className="dynamo-placeholder-note">
+<strong>Expected performance placeholder</strong>
+<p>The source README describes expected TTFT and ITL improvements and includes a plot, but does not yet check in a numeric result table. Keep the expected performance section as a placeholder until the benchmark artifacts are attached.</p>
 </div>
-<div>
-<span>Comparison safety</span>
-<strong>Comparison Set</strong>
-<p>Rows are comparable only when the page says the workload is held constant.</p>
-</div>
-</div>
+
+## Related Benchmarks
+
+- [Qwen3-32B KV routing A/B](/dynamo/dev/resources/benchmarks/qwen3-32b-kv-routing)
+
 
 ## Notes
 
-- The KVBM sibling remains visible, but its role is explicitly deploy-only so it cannot be mistaken for a benchmark arm.
-- Benchmark results should be promoted from placeholder to numeric table when the trace artifacts are checked in.
+- The aggregated round-robin manifest is a benchmark control and now lives on the related benchmark page, not in the recipe selector.
+- The KVBM path stays visible because it targets a different deployment shape and has no perf.yaml yet.
 
-## Source Assets
+## Source
 
 - Source README: [recipes/qwen3-32b/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b)
-- Ground-truth inventory: [recipe-asset-inventory.csv](https://github.com/ai-dynamo/dynamo/blob/codex/recipes-fern-prototype-v2/docs/recipes/recipe-asset-inventory.csv)
+- Disagg + KV router: [recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml) and [recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml)
+- Aggregated + KVBM: [recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml)

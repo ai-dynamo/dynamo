@@ -1,0 +1,91 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3-32B KV Routing A/B"
+subtitle: "Does disaggregated KV-aware routing reduce TTFT and ITL on multi-turn prefix-reuse traffic compared with aggregated round-robin routing?"
+---
+
+<div className="dynamo-benchmark-hero">
+<div>
+<p className="dynamo-recipe-eyebrow">Simple A/B test</p>
+<h2>KV-aware routing + prefill/decode split</h2>
+<p>Does disaggregated KV-aware routing reduce TTFT and ITL on multi-turn prefix-reuse traffic compared with aggregated round-robin routing?</p>
+<div className="dynamo-hero-actions">
+<a href="#arms">Compared arms</a>
+<a href="#results">Results</a>
+<a href="#reproduce">Reproduce</a>
+<a href="/dynamo/dev/resources/recipes/qwen3-32b">Related recipe</a>
+</div>
+</div>
+<div className="dynamo-benchmark-facts">
+<div><span>Model</span><strong>Qwen/Qwen3-32B</strong></div>
+<div><span>Traffic</span><strong>Mooncake conversation trace: 12,031 requests, 12K avg ISL, 343 avg OSL, 36.64% cache efficiency</strong></div>
+<div><span>Metric focus</span><strong>TTFT, ITL, total request latency, and goodput at TTFT 2s / ITL 25ms</strong></div>
+</div>
+</div>
+
+## Benchmark Question
+
+Does disaggregated KV-aware routing reduce TTFT and ITL on multi-turn prefix-reuse traffic compared with aggregated round-robin routing?
+
+<div className="dynamo-comparison-brief">
+<div>
+<span>Held constant</span>
+<strong>Model, vLLM runtime, 16x H200 target, Mooncake fixed trace, and goodput thresholds.</strong>
+</div>
+<div>
+<span>How to use this</span>
+<strong>Inspect the performance claim here, then open the related recipe for the deployment target.</strong>
+</div>
+</div>
+
+## Compared Arms
+
+<div id="arms"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Arm</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role treatment">Treatment</em></td>
+<td><strong>Disaggregated KV router</strong><span>P/D split with KV-aware routing</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>Aggregated round-robin</strong><span>Aggregate workers with round-robin routing</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/agg-round-robin/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Results
+
+<div id="results"></div>
+
+<div className="dynamo-placeholder-note">
+<strong>Expected results placeholder</strong>
+<p>The source README includes expected directional improvements and a plot, but no numeric table. Add benchmark artifacts before publishing exact deltas.</p>
+</div>
+
+## Reproduce
+
+<div id="reproduce"></div>
+
+The `perf.yaml` files wrap the AIPerf command below. Run each arm in isolation unless the source README says the benchmark can run side by side.
+
+```bash
+aiperf profile -m Qwen/Qwen3-32B --input-file conversation_trace.jsonl --custom-dataset-type mooncake_trace --fixed-schedule --url http://<frontend>:8000 --streaming --goodput "time_to_first_token:2000 inter_token_latency:25"
+```
+
+```bash
+export NAMESPACE=your-namespace
+# Pick one arm from the table above, deploy it, wait for readiness, then apply its perf.yaml.
+kubectl apply -f <arm>/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f <arm>/perf.yaml -n ${NAMESPACE}
+```
+
+## Related Recipe
+
+The recipe-facing deployment target is here: [Qwen/Qwen3-32B](/dynamo/dev/resources/recipes/qwen3-32b).

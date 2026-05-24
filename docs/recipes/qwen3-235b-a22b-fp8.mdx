@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Qwen3-235B-A22B FP8
-subtitle: Choose TensorRT-LLM Hopper or Blackwell, aggregate or disaggregated, for Qwen3-235B-A22B FP8.
+title: "Qwen3-235B-A22B FP8"
+subtitle: "TensorRT-LLM MoE recipes split by hardware architecture and aggregate/P-D target."
 ---
 
 <div className="dynamo-model-detail-hero">
@@ -10,235 +10,218 @@ subtitle: Choose TensorRT-LLM Hopper or Blackwell, aggregate or disaggregated, f
 <div className="dynamo-model-title-lockup">
 <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
 <div>
-<p className="dynamo-recipe-eyebrow">Qwen / TensorRT-LLM / Hopper or Blackwell</p>
-<h2>Choose TensorRT-LLM Hopper or Blackwell, aggregate or disaggregated, for Qwen3-235B-A22B FP8.</h2>
+<p className="dynamo-recipe-eyebrow">Qwen / TRT-LLM / 16x B100/B200</p>
+<h2>TensorRT-LLM MoE recipes split by hardware architecture and aggregate/P-D target.</h2>
 </div>
 </div>
-<p>
-This source recipe is an <strong>alternative recipe set</strong>. The table below shows each
-deployable variant, its role in the recipe set, and the benchmark evidence available today.
-</p>
+<p>Choose Hopper or Blackwell and aggregate or disaggregated serving for the same 4K/200 static benchmark shape.</p>
 <div className="dynamo-hero-actions">
-<a href="#recipe-set">Recipe set</a>
-<a href="#benchmark-evidence">Benchmark</a>
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
 <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8">Source</a>
 </div>
 </div>
 
 <div className="dynamo-recommendation-card">
-<span>Alternative Recipe Set</span>
-<strong>Preview</strong>
-<p>Which TensorRT-LLM variant matches the hardware architecture and desired aggregate/P-D serving mode?</p>
+<span>Primary target</span>
+<strong>Aggregated Blackwell</strong>
+<p>Use on Blackwell; DEEPGEMM MoE backend.</p>
 <div className="dynamo-recommendation-facts">
-<div>
-<span>Model</span>
-<strong>Qwen/Qwen3-235B-A22B-FP8</strong>
-</div>
-<div>
-<span>Traffic</span>
-<strong>Synthetic static ISL 4000 / OSL 200 / 32 total concurrency</strong>
-</div>
-<div>
-<span>Shape</span>
-<strong>Alternative recipe set</strong>
-</div>
+<div><span>Model</span><strong>Qwen/Qwen3-235B-A22B-FP8</strong></div>
+<div><span>Traffic</span><strong>Same static shape</strong></div>
+<div><span>Technique</span><strong>Aggregated serving; Expert parallel / MoE</strong></div>
 </div>
 </div>
 </div>
 
-## Alternative Recipe Set
+## Recipe Targets
 
-<div className="dynamo-comparison-brief" id="recipe-set">
-<div>
-<span>Question</span>
-<strong>Which TensorRT-LLM variant matches the hardware architecture and desired aggregate/P-D serving mode?</strong>
-</div>
-<div>
-<span>Held constant</span>
-<strong>Same model, TensorRT-LLM backend, 16-GPU size, ISL=4000, OSL=200, and concurrency-per-GPU=2. Hardware-specific MoE backend differs.</strong>
-</div>
-</div>
+<div id="recipe-targets"></div>
 
 <div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table">
-<thead>
-<tr>
-<th>Variant</th>
-<th>Role</th>
-<th>Runtime</th>
-<th>Hardware</th>
-<th>Traffic</th>
-<th></th>
-</tr>
-</thead>
-<tbody>
-<tr>
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr>
 <td><strong>Aggregated Hopper</strong><span>Use on Hopper; default MoE backend.</span></td>
-<td><em className="role hardware">Hardware alternative</em></td>
 <td>TRT-LLM</td>
 <td>16x H100/H200</td>
 <td>4K ISL / 200 OSL</td>
-<td><a href="#deploy-aggregated-hopper">Deploy</a></td>
+<td>Aggregated serving; Expert parallel / MoE</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml">perf.yaml</a></td>
 </tr><tr className="recommended">
 <td><strong>Aggregated Blackwell</strong><span>Use on Blackwell; DEEPGEMM MoE backend.</span></td>
-<td><em className="role hardware">Hardware alternative</em></td>
 <td>TRT-LLM</td>
 <td>16x B100/B200</td>
 <td>Same static shape</td>
-<td><a href="#deploy-aggregated-blackwell">Deploy</a></td>
+<td>Aggregated serving; Expert parallel / MoE</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml">perf.yaml</a></td>
 </tr><tr>
 <td><strong>Disaggregated Hopper</strong><span>Use to test P/D separation on Hopper.</span></td>
-<td><em className="role technique">Technique alternative</em></td>
 <td>TRT-LLM</td>
 <td>16x H100/H200</td>
 <td>Same static shape</td>
-<td><a href="#deploy-disaggregated-hopper">Deploy</a></td>
+<td>Aggregated serving; Disaggregated prefill/decode</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml">perf.yaml</a></td>
 </tr><tr>
 <td><strong>Disaggregated Blackwell</strong><span>Use to test P/D separation on Blackwell with the required MoE backend.</span></td>
-<td><em className="role technique">Technique alternative</em></td>
 <td>TRT-LLM</td>
 <td>16x B100/B200</td>
 <td>Same static shape</td>
-<td><a href="#deploy-disaggregated-blackwell">Deploy</a></td>
-</tr>
-</tbody>
+<td>Aggregated serving; Disaggregated prefill/decode; Expert parallel / MoE</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
 </table>
 </div>
 
-## When to Use
-
-Use this page when your deployment decision starts with `Qwen/Qwen3-235B-A22B-FP8` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
-
-## Results Placeholder
-
-<div className="dynamo-placeholder-note">
-<strong>Benchmark results are not checked in yet</strong>
-<p>All four rows have perf.yaml files, but the README does not include numeric expected results. Results should be reported per hardware architecture.</p>
-</div>
-
-| Placeholder | What should be filled in |
-| --- | --- |
-| Hopper aggregate/disagg placeholders | Report throughput, TTFT, ITL, request latency, and errors for H100/H200 runs. |
-| Blackwell aggregate/disagg placeholders | Report the same metrics for B100/B200 runs; do not mix with Hopper due to backend differences. |
-
-## Before You Run
+## Prerequisites
 
 <div className="dynamo-prereq-grid">
-<div>
-<span>Hardware</span>
-<strong>16x H100/H200 or 16x B100/B200</strong>
-</div>
-<div>
-<span>Runtime</span>
-<strong>TensorRT-LLM</strong>
-</div>
-<div>
-<span>Parallelism</span>
-<strong>TP4 x EP4 family</strong>
-</div>
-<div>
-<span>Traffic</span>
-<strong>4K ISL / 200 OSL</strong>
-</div>
-<div>
-<span>Hopper MoE</span>
-<strong>default backend</strong>
-</div>
-<div>
-<span>Blackwell MoE</span>
-<strong>DEEPGEMM backend</strong>
-</div>
+<div><span>Hardware</span><strong>16x H100/H200 or B100/B200</strong></div>
+<div><span>Runtime</span><strong>TensorRT-LLM</strong></div>
+<div><span>Traffic</span><strong>4K ISL / 200 OSL</strong></div>
+<div><span>Concurrency</span><strong>2 per GPU</strong></div>
+<div><span>MoE backend</span><strong>Architecture-specific Hopper vs Blackwell settings</strong></div>
+<div><span>Benchmark coverage</span><strong>perf.yaml on all four targets</strong></div>
 </div>
 
 <Warning>
-Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
+Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests.
 </Warning>
 
-## Deploy
+## Deployment Instructions
 
-<h3 id="deploy-aggregated-hopper">Deploy: Aggregated Hopper</h3>
+<div id="deploy"></div>
+
+<h3 id="deploy-aggregated-hopper">Aggregated Hopper</h3>
 
 Use on Hopper; default MoE backend.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-235b-a22b-fp8`.
+# Prepare model cache and model assets using setup manifests in recipes/qwen3-235b-a22b-fp8.
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml -n ${NAMESPACE}
 ```
-
-<h3 id="deploy-aggregated-blackwell">Deploy: Aggregated Blackwell</h3>
+<h3 id="deploy-aggregated-blackwell">Aggregated Blackwell</h3>
 
 Use on Blackwell; DEEPGEMM MoE backend.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-235b-a22b-fp8`.
+# Prepare model cache and model assets using setup manifests in recipes/qwen3-235b-a22b-fp8.
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml -n ${NAMESPACE}
 ```
-
-<h3 id="deploy-disaggregated-hopper">Deploy: Disaggregated Hopper</h3>
+<h3 id="deploy-disaggregated-hopper">Disaggregated Hopper</h3>
 
 Use to test P/D separation on Hopper.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-235b-a22b-fp8`.
+# Prepare model cache and model assets using setup manifests in recipes/qwen3-235b-a22b-fp8.
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
-kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml -n ${NAMESPACE}
 ```
-
-<h3 id="deploy-disaggregated-blackwell">Deploy: Disaggregated Blackwell</h3>
+<h3 id="deploy-disaggregated-blackwell">Disaggregated Blackwell</h3>
 
 Use to test P/D separation on Blackwell with the required MoE backend.
 
 ```bash
 export NAMESPACE=your-namespace
 
-
-# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-235b-a22b-fp8`.
+# Prepare model cache and model assets using setup manifests in recipes/qwen3-235b-a22b-fp8.
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml -n ${NAMESPACE}
-# Run the benchmark for this variant.
+```
+
+
+## Smoke Test
+
+<div id="smoke-test"></div>
+
+Run a small request before starting the benchmark. Replace the service name if your deployment exposes a different frontend.
+
+```bash
+export NAMESPACE=your-namespace
+kubectl port-forward svc/<frontend-service> 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-235B-A22B-FP8","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+<h3>Aggregated Hopper</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile --model Qwen/Qwen3-235B-A22B-FP8 --endpoint-type chat --endpoint /v1/chat/completions --url http://<frontend>:8000 --streaming --synthetic-input-tokens-mean <isl> --output-tokens-mean <osl> --concurrency <from perf.yaml: <concurrency>> --request-count <from perf.yaml> --extra-inputs ignore_eos:true
+```
+
+```bash
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml -n ${NAMESPACE}
+```
+<h3>Aggregated Blackwell</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile --model Qwen/Qwen3-235B-A22B-FP8 --endpoint-type chat --endpoint /v1/chat/completions --url http://<frontend>:8000 --streaming --synthetic-input-tokens-mean <isl> --output-tokens-mean <osl> --concurrency <from perf.yaml: <concurrency>> --request-count <from perf.yaml> --extra-inputs ignore_eos:true
+```
+
+```bash
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml -n ${NAMESPACE}
+```
+<h3>Disaggregated Hopper</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile --model Qwen/Qwen3-235B-A22B-FP8 --endpoint-type chat --endpoint /v1/chat/completions --url http://<frontend>:8000 --streaming --synthetic-input-tokens-mean <isl> --output-tokens-mean <osl> --concurrency <from perf.yaml: <concurrency>> --request-count <from perf.yaml> --extra-inputs ignore_eos:true
+```
+
+```bash
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml -n ${NAMESPACE}
+```
+<h3>Disaggregated Blackwell</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile --model Qwen/Qwen3-235B-A22B-FP8 --endpoint-type chat --endpoint /v1/chat/completions --url http://<frontend>:8000 --streaming --synthetic-input-tokens-mean <isl> --output-tokens-mean <osl> --concurrency <from perf.yaml: <concurrency>> --request-count <from perf.yaml> --extra-inputs ignore_eos:true
+```
+
+```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml -n ${NAMESPACE}
 ```
 
 
-<h2 id="benchmark-evidence">Benchmark Evidence</h2>
+## Expected Performance
 
-<div className="dynamo-evidence-grid">
-<div>
-<span>Benchmark asset</span>
-<strong>At least one perf.yaml</strong>
-<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+<div className="dynamo-placeholder-note">
+<strong>Expected performance placeholder</strong>
+<p>All four targets include perf.yaml for the 4K/200 static shape, but the README does not publish expected results. Add TPS, TPS/GPU, TTFT, ITL, and error rate for each hardware/technique target.</p>
 </div>
-<div>
-<span>Results asset</span>
-<strong>Placeholder required</strong>
-<p>Expected results should be added once benchmark artifacts are available.</p>
-</div>
-<div>
-<span>Comparison safety</span>
-<strong>Alternative Recipe Set</strong>
-<p>Rows are alternatives; avoid ranking across different traffic or hardware shapes.</p>
-</div>
-</div>
+
+## Related Benchmarks
+
+No feature benchmark page is linked yet. If this recipe later becomes part of a comparison, link that benchmark here and keep this page focused on the runnable recipe target.
+
 
 ## Notes
 
-- This is primarily a hardware-choice page; Hopper and Blackwell require separate MoE backend handling.
-- The Blackwell aggregate row is subtly highlighted as the likely modern default, but owners may choose to remove that recommendation.
+- This is primarily a hardware-choice page.
+- Hopper and Blackwell require separate MoE backend handling.
 
-## Source Assets
+## Source
 
 - Source README: [recipes/qwen3-235b-a22b-fp8/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8)
-- Ground-truth inventory: [recipe-asset-inventory.csv](https://github.com/ai-dynamo/dynamo/blob/codex/recipes-fern-prototype-v2/docs/recipes/recipe-asset-inventory.csv)
+- Aggregated Hopper: [recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml) and [recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml)
+- Aggregated Blackwell: [recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml) and [recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml)
+- Disaggregated Hopper: [recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml) and [recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml)
+- Disaggregated Blackwell: [recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml) and [recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml)

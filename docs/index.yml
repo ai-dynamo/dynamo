@@ -92,6 +92,30 @@ navigation:
           - page: Qwen3.6-35B-A3B FP8
             slug: qwen3-6-35b
             path: recipes/qwen3-6-35b.mdx
+      - section: Benchmarks
+        path: benchmarks/README.mdx
+        contents:
+          - page: Qwen3-32B KV Routing
+            slug: qwen3-32b-kv-routing
+            path: benchmarks/qwen3-32b-kv-routing.mdx
+          - page: DeepSeek V3.2 WideEP Routing
+            slug: deepseek-v3-2-wideep-routing
+            path: benchmarks/deepseek-v3-2-wideep-routing.mdx
+          - page: Qwen3-VL Embedding Cache
+            slug: qwen3-vl-embedding-cache
+            path: benchmarks/qwen3-vl-embedding-cache.mdx
+          - page: Kimi-K2.5 Feature Stack
+            slug: kimi-k2-5-feature-stack
+            path: benchmarks/kimi-k2-5-feature-stack.mdx
+          - page: Qwen3.6 Frontend And Cache
+            slug: qwen3-6-35b-feature-stack
+            path: benchmarks/qwen3-6-35b-feature-stack.mdx
+          - page: Llama-3.3-70B Topology
+            slug: llama-3-70b-topology
+            path: benchmarks/llama-3-70b-topology.mdx
+          - page: KV Router A/B Testing Guide
+            slug: kv-router-ab-testing
+            path: benchmarks/kv-router-ab-testing.md
       - page: Glossary
         path: reference/glossary.md
 
@@ -528,9 +552,6 @@ navigation:
         contents:
           - page: Speculative Decoding with vLLM
             path: features/speculative-decoding/speculative-decoding-vllm.md
-      # -- Benchmarks --
-      - page: KV Router A/B Testing
-        path: benchmarks/kv-router-ab-testing.md
       # -- Simulation with Mocker --
       - page: Simulation with Mocker
         path: mocker/mocker.md
