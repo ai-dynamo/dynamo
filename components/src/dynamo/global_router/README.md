@@ -283,9 +283,33 @@ The preprocessor forwards `nvext.router` to the backend as the typed `router` fi
 5. Local router forwards to a worker that handles both prefill and decode
 6. Tokens stream back through the chain
 
+## Common Pitfalls (bare-process / shared etcd+NATS)
+
+These bite when wiring the global router by hand outside Kubernetes (on K8s, DGD-per-namespace
+isolation hides most of them):
+
+- **Discovery merges same-named workers across namespaces → frontend silently bypasses the global
+  router.** Frontend model discovery is *global* over the shared etcd/NATS; `--namespace` only sets a
+  component's *own* namespace, it does **not** scope what the frontend discovers. If your pool workers
+  register the same model name as the public-facing model, the frontend discovers them directly and
+  routes to them, never reaching the global router — you'll see a fast (~ms) `500 bootstrap_info is
+  required` because the request skipped the bootstrap-setup step. **Fix:** give the pool workers a
+  distinct `--served-model-name` per pool so they don't merge into the public model.
+- **The local router's `--endpoint` must match where the backend actually registers.** It is
+  backend-specific (e.g. workers register under `prefill` / `backend`), not a free-form string. A
+  mismatch surfaces only as a runtime connection failure, not a config error.
+- **Disagg workers need `--host 0.0.0.0`.** Otherwise the prefill bootstrap server binds `127.0.0.1`
+  while advertising the node IP, and the decode side's NIXL KV transfer fails with "connection refused."
+- **The global router raises at init if a pool's local router isn't up yet.** Bring up pool routers
+  before the global router (there is no readiness gating / retry today).
+
 ## Example
 
-See `examples/global_planner/` for a complete example with:
+For a runnable **bare-process** example (no Kubernetes, CPU-only mocker pools), see
+`examples/global_planner/local/` — `./launch.sh` brings up two aggregated mocker pools, their local
+routers, the global router, and a frontend, and `./client.sh` shows SLA-based pool selection.
+
+See `examples/global_planner/` for the Kubernetes example with:
 - Global router configuration
 - Local router setup for each pool
 - Mocker workers for testing

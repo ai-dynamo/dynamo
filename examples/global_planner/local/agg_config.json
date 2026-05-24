@@ -1,0 +1,16 @@
+{
+  "mode": "agg",
+  "enable_priority_retry": false,
+  "num_agg_pools": 2,
+  "agg_pool_dynamo_namespaces": ["agg_pool_0", "agg_pool_1"],
+  "agg_pool_selection_strategy": {
+    "ttft_min_ms": 0,
+    "ttft_max_ms": 1000,
+    "ttft_resolution": 2,
+    "itl_min_ms": 0,
+    "itl_max_ms": 1000,
+    "itl_resolution": 1,
+    "agg_pool_mapping": [[0], [1]],
+    "priority_overrides": []
+  }
+}

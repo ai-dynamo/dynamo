@@ -8,10 +8,15 @@ SPDX-License-Identifier: Apache-2.0
 Examples demonstrating **GlobalPlanner** — the centralized scaling execution layer that
 enforces shared scaling policy across multiple DGDs.
 
+> **Just want to see the Global Router route across pools locally?** See
+> [`local/`](./local/) for a GPU-free, bare-process example (mocker pools, no Kubernetes) you can
+> run with `./launch.sh` + `./client.sh`.
+
 ## Example Manifests
 
 | File | Pattern | Backend | Description |
 |------|---------|---------|-------------|
+| `local/` (dir) | Bare-process, multi-pool | Mocker | **No K8s, CPU-only.** GlobalRouter + frontend + 2 agg mocker pools as local processes |
 | `global-planner-gpu-budget.yaml` | Multi-model, GPU budget | vLLM | 2 independent model DGDs + 1 control DGD with `--max-total-gpus` |
 | `global-planner-vllm-test.yaml` | Single-endpoint, multi-pool | vLLM | 1 Frontend + GlobalRouter + GlobalPlanner, 2 prefill pools (TP1, TP2) + 1 decode pool |
 | `global-planner-mocker-test.yaml` | Single-endpoint, multi-pool | Mocker | Same as above with Mocker workers; GlobalPlanner in `--no-operation` mode |
