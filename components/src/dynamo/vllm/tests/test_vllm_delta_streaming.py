@@ -194,6 +194,31 @@ async def test_generate_tokens_reads_delta_aligned_logprobs_from_zero_offset():
 
 
 @pytest.mark.asyncio
+async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
+    first_logprobs = [
+        {7: SimpleNamespace(logprob=-0.7, rank=1, decoded_token="a")},
+    ]
+    second_logprobs = [
+        {8: SimpleNamespace(logprob=-0.8, rank=1, decoded_token="b")},
+        {9: SimpleNamespace(logprob=-0.9, rank=1, decoded_token="c")},
+    ]
+    responses = [
+        _request_output([_output([7], logprobs=first_logprobs)]),
+        _request_output(
+            [_output([8, 9], finish_reason="length", logprobs=second_logprobs)]
+        ),
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses)
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[7], [8, 9]]
+    assert [chunk["log_probs"] for chunk in chunks] == [[-0.7], [-0.8, -0.9]]
+    assert [
+        [entry[0]["token_id"] for entry in chunk["top_logprobs"]] for chunk in chunks
+    ] == [[7], [8, 9]]
+
+
+@pytest.mark.asyncio
 async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
     pytest.importorskip("vllm.usage.usage_lib")
     from dynamo.vllm.llm_engine import VllmLLMEngine
