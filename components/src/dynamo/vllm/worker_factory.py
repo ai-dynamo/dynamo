@@ -343,32 +343,13 @@ class WorkerFactory:
         )
         handler.add_temp_dir(prometheus_temp_dir)
 
-        # ModelExpress v2 receiver-side polling.
-        # The trainer publishes weights to the MX server with no trigger
-        # RPC, so each worker process watches the MX server itself and
-        # refits whenever a newer version appears. We start the poller
-        # on every TP rank via collective_rpc so each engine-core worker
-        # has its own background thread + per-rank MxV2RefitReceiver. The
-        # poller targets MxRefitWorkerExtension.start_mx_refit_poller,
-        # which the worker_extension_cls injection wires onto the Worker
-        # class at vLLM startup (see main.py:setup_vllm_engine).
-        if mx_refit_enabled:
-            mx_server_url = os.environ.get(
-                "MODEL_EXPRESS_URL", "modelexpress-server:8001"
-            )
-            try:
-                await engine_client.collective_rpc(
-                    "start_mx_refit_poller",
-                    kwargs={
-                        "mx_config": {"mx_server_url": mx_server_url},
-                        "poll_interval_s": 5.0,
-                    },
-                )
-                logger.info("[mx-refit] receiver-side poller started on all ranks")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[mx-refit] failed to start receiver-side poller: %s", exc
-                )
+        # ModelExpress v2 refit driver: the trainer POSTs synchronously to
+        # /engine/update_weights_via_mx on each worker (registered below).
+        # The receiver-side polling thread is gone — it was the workaround
+        # for not having a trainer driver, but it had a silent stale-weights
+        # failure mode (DEBUGGING_POSTMORTEM §15) and races the synchronous
+        # path. MxRefitWorkerExtension.start_mx_refit_poller is kept on
+        # the extension class but no longer invoked.
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
         consolidator_enabled = False
@@ -736,6 +717,22 @@ class WorkerFactory:
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+
+        # MX refit cycle: trainer-driven pause → update → flush → resume,
+        # POST'd to /engine/<route> over HTTP on each worker's system port.
+        # Gated on DYN_MX_REFIT_ENABLED so the routes are inert when MX
+        # isn't in use.
+        if os.environ.get("DYN_MX_REFIT_ENABLED") == "1":
+            runtime.register_engine_route(
+                "pause_generation", handler.pause_generation
+            )
+            runtime.register_engine_route(
+                "resume_generation", handler.resume_generation
+            )
+            runtime.register_engine_route("flush_cache", handler.flush_cache)
+            runtime.register_engine_route(
+                "update_weights_via_mx", handler.update_weights_via_mx_engine
+            )
 
         logger.info(
             "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep, /engine/start_profile, /engine/stop_profile"

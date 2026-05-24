@@ -905,6 +905,61 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.error(f"Failed to wake up engine: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def pause_generation(self, body: dict | None = None) -> dict:
+        """Stop accepting new generate requests and quiesce in-flight ones.
+
+        Lighter than ``sleep``: keeps the model resident in GPU memory but
+        prevents new requests from racing weight mutations. Used by the
+        trainer-driven MX refit cycle:
+        ``pause → update_weights_via_mx → flush_cache → resume``.
+        """
+        try:
+            await self.engine_client.pause_generation()
+            return {"status": "ok", "message": "Engine paused"}
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to pause generation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def resume_generation(self, body: dict | None = None) -> dict:
+        """Resume accepting new generate requests after a pause.
+
+        Counterpart to :meth:`pause_generation`. The trainer's refit cycle
+        calls this in a ``finally`` block so the worker re-enters service
+        even if the refit itself errored.
+        """
+        try:
+            await self.engine_client.resume_generation()
+            return {"status": "ok", "message": "Engine resumed"}
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to resume generation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def flush_cache(self, body: dict | None = None) -> dict:
+        """Invalidate the engine's prefix cache.
+
+        Called after a weight refit to drop cache entries whose stored
+        outputs reflect the OLD weights. Without this, subsequent prefix
+        cache hits would return stale logits.
+        """
+        try:
+            await self.engine_client.reset_prefix_cache()
+            return {"status": "ok", "message": "Prefix cache flushed"}
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to flush prefix cache: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def update_weights_via_mx_engine(self, body: dict | None = None) -> dict:
+        """Adapter: expose ``update_weights_via_mx`` as a unary engine route.
+
+        ``update_weights_via_mx`` is registered with the Dynamo Endpoint
+        layer as an async generator (``yield {status: ...}``). The system
+        server's ``register_engine_route`` expects a coroutine returning a
+        dict. This adapter consumes the first yielded value and returns it.
+        """
+        async for response in self.update_weights_via_mx(body):
+            return response or {"status": "ok"}
+        return {"status": "ok"}
+
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
 
