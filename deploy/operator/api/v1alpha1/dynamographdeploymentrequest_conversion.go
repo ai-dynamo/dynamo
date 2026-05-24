@@ -35,7 +35,7 @@
 //     downgrade compatibility, in legacyAnnDGDR* annotations.
 //   - v1beta1-only spec fields such as Hardware, Workload Concurrency/RequestRate,
 //     SLA E2ELatency, Overrides.DGD, hub-only ProfilingJob leaves, disabled Mocker,
-//     and SearchStrategy are saved sparsely in annDGDRSpec.
+//     SearchStrategy, and Features.InferenceGateway are saved sparsely in annDGDRSpec.
 //
 // Status follows the same rules: common fields are converted from live source,
 // alpha-only status is saved in annDGDRStatus and legacy annotations, and

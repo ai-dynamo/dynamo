@@ -89,3 +89,39 @@ Map the enum to the EPP env the note documented (`DYN_OVERLAP_SCORE_WEIGHT`, `DY
   (load-dominant) is the lever; Phase-4 wires the planner↔EPP loop and tests new-replica utilization.
 - **HTTPRoute as unstructured** trades a typed dep for weaker compile-time checking — acceptable for the
   spike; revisit if the operator later needs richer gateway-api types.
+
+---
+
+## Design principles to follow (sttts + tmonty12) — and corrections to the above
+
+Reviewed how **sttts** (apimachinery/conversion) and **tmonty12 / T. Montfort** (operator
+correctness) write operator code; conforming this plan:
+
+**From sttts (API discipline):**
+- **Conversion-first.** v1beta1 is the DGDR hub; `Features.InferenceGateway` is a v1beta1-only field →
+  must round-trip via sparse `annDGDRSpec` and be covered by `dynamographdeploymentrequest_legacy_fuzz_test.go`.
+  *Done:* added it to the v1beta1-only list in `v1alpha1/dynamographdeploymentrequest_conversion.go`'s
+  header contract. *Still required:* `make generate` (deepcopy) + run the conversion + fuzz tests; per
+  `api/AGENTS.md`/`CONVERSION.md` an API change is incomplete without them.
+- Typed conversion fns named after the type; constants centralized in `internal/consts/consts.go`;
+  downgrade-compat annotations with `TODO(...)`+removal-version markers.
+
+**From tmonty12 (operator correctness) — these change the plan:**
+- **CORRECTION: emit the HTTPRoute (and Gateway) as TYPED objects, not `unstructured`.** He adds typed
+  APIs (#9767/#9768) and avoids unstructured. → add `sigs.k8s.io/gateway-api` to the operator module and
+  use typed `HTTPRoute`; pay the dep cost rather than weaken type-safety.
+- **Gate the feature as experimental first.** New/risky APIs go under an `experimental` surface
+  (cf. `spec.experimental.kvTransferPolicy`, `DynamoGraphDeploymentExperimentalSpec`). Mark
+  `InferenceGateway` experimental until the planner↔EPP loop is proven.
+- **Minimal, generated RBAC, both modes.** Emitting InferencePool/HTTPRoute/Gateway needs new verbs →
+  add the *least-privilege* rules to `config/rbac/role.yaml` **and** a dedicated helm template that works
+  in cluster-wide **and** `namespaceRestriction.enabled=true` modes (cf. #9879 `topology-label-rbac.yaml`).
+- **Tight watch predicates.** The DGD reconcile should enqueue EPP/HTTPRoute work only when actionable
+  (EPP component added/changed, InferenceGateway toggled), not on every pod event.
+- **Test-paired + envtest.** Every new file gets a `_test.go`; validate exactly as his PRs do:
+  `make manifests` · `KUBEBUILDER_ASSETS=… go test ./internal/controller ./internal/dynamo ./cmd` ·
+  `go vet ./...` · `helm template … --show-only <new rbac>.yaml`.
+- **Conventional, scoped commits** (`feat(operator): …`), conversion+tests **in the same PR**.
+
+**Net correction to §3:** drop the `unstructured` HTTPRoute; use typed gateway-api + minimal RBAC +
+experimental gating + tight predicates + envtest, conversion & fuzz landed together.
