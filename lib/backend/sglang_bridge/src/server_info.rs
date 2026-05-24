@@ -21,19 +21,16 @@ pub struct SglangServerInfo {
     /// SGLang's own `--disaggregation-mode`. `"null"` (the SGLang default)
     /// and missing both map to `Aggregated`.
     pub disaggregation_mode: Option<DisaggregationMode>,
-    /// Parsed `--kv-events-config` if the publisher is `zmq`. `None` otherwise.
-    /// Mirrors what `dynamo.sglang`'s Python publisher reads off `server_args`.
+    /// Parsed `--kv-events-config`; `None` when SGLang was launched
+    /// without zmq KV events.
     pub kv_events: Option<KvEventsConfig>,
 }
 
-/// SGLang's `KVEventsConfig` (subset). Constructed from the
-/// `--kv-events-config` JSON string surfaced via `GetServerInfo`.
+/// Subset of SGLang's `KVEventsConfig` the bridge cares about. DP rank N
+/// connects at `base_port + N` (see [`offset_endpoint_port`]).
 #[derive(Debug, Clone)]
 pub struct KvEventsConfig {
-    /// ZMQ PUB endpoint template, e.g. `tcp://*:5557`. DP rank 0 binds here;
-    /// rank N binds at `port + N` (see [`offset_endpoint_port`]).
     pub endpoint: String,
-    /// ZMQ topic filter. Empty string matches all.
     pub topic: String,
 }
 
@@ -85,62 +82,41 @@ pub fn parse_server_info(json_info: &str) -> SglangServerInfo {
     }
 }
 
-/// Parse the JSON-encoded `--kv-events-config`. Returns `None` for the
-/// SGLang default (`publisher: "null"`) or any malformed input — we treat
-/// "no usable config" the same as "feature off" rather than failing start.
+/// Returns `None` for the SGLang default (`publisher: "null"`) or any
+/// malformed input — treat "no usable config" the same as "feature off"
+/// rather than failing start.
 fn parse_kv_events_config(raw: &str) -> Option<KvEventsConfig> {
-    let v: serde_json::Value = match serde_json::from_str(raw) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, raw = %raw, "kv_events_config is not valid JSON");
-            return None;
-        }
-    };
-    match v.get("publisher").and_then(|p| p.as_str()) {
-        Some("zmq") => {}
-        Some(other) => {
-            tracing::info!(publisher = %other, "kv_events publisher != zmq; KV routing disabled");
-            return None;
-        }
-        None => return None,
+    let v: serde_json::Value = serde_json::from_str(raw)
+        .inspect_err(|e| tracing::warn!(error = %e, raw, "kv_events_config invalid JSON"))
+        .ok()?;
+    let publisher = v.get("publisher").and_then(|p| p.as_str())?;
+    if publisher != "zmq" {
+        tracing::info!(publisher, "kv_events publisher != zmq; KV routing disabled");
+        return None;
     }
-    let endpoint = v
-        .get("endpoint")
-        .and_then(|e| e.as_str())
-        .filter(|s| !s.is_empty())?
-        .to_string();
-    let topic = v
-        .get("topic")
-        .and_then(|t| t.as_str())
-        .unwrap_or("")
-        .to_string();
-    Some(KvEventsConfig { endpoint, topic })
+    Some(KvEventsConfig {
+        endpoint: v.get("endpoint").and_then(|e| e.as_str())?.to_string(),
+        topic: v
+            .get("topic")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
 }
 
 /// Mirror of SGLang's `ZmqEventPublisher.offset_endpoint_port`. DP rank N
-/// publishes at base_port + N; subscribers connect to the same offset.
-/// `tcp://*:5557` + rank 1 → `tcp://*:5558`.
-pub fn offset_endpoint_port(endpoint: &str, dp_rank: u32) -> Option<String> {
+/// connects at `base_port + N`. `tcp://*:5557` + rank 1 → `tcp://*:5558`.
+/// The bridge always shares a pod with SGLang, so we only need `tcp://`.
+pub(crate) fn offset_endpoint_port(endpoint: &str, dp_rank: u32) -> Option<String> {
     if dp_rank == 0 {
         return Some(endpoint.to_string());
     }
-    if endpoint.contains("inproc") {
-        return Some(format!("{endpoint}_dp{dp_rank}"));
-    }
-    if !endpoint.contains("tcp") {
+    if !endpoint.starts_with("tcp://") {
         return None;
     }
     let (base, port) = endpoint.rsplit_once(':')?;
     let port: u16 = port.parse().ok()?;
     Some(format!("{base}:{}", port as u32 + dp_rank))
-}
-
-/// Replace `*` host with a connectable address. The bridge runs in the same
-/// pod as SGLang (loopback gRPC, per the architecture in PR #9402), so
-/// `127.0.0.1` is the right substitution — no IPv6 / multi-host concerns
-/// like the multi-node `dynamo.sglang` Python publisher handles.
-pub fn rewrite_zmq_host_for_loopback(endpoint: &str) -> String {
-    endpoint.replacen("*", "127.0.0.1", 1)
 }
 
 #[cfg(test)]
@@ -222,20 +198,7 @@ mod tests {
         assert_eq!(offset_endpoint_port("tcp://*:5557", 0).as_deref(), Some("tcp://*:5557"));
         assert_eq!(offset_endpoint_port("tcp://*:5557", 1).as_deref(), Some("tcp://*:5558"));
         assert_eq!(offset_endpoint_port("tcp://*:5557", 4).as_deref(), Some("tcp://*:5561"));
-        assert_eq!(
-            offset_endpoint_port("inproc://cache", 2).as_deref(),
-            Some("inproc://cache_dp2"),
-        );
-        // Bad scheme → None.
         assert!(offset_endpoint_port("udp://x:5557", 1).is_none());
-        // Bad port → None.
         assert!(offset_endpoint_port("tcp://*:notaport", 1).is_none());
-    }
-
-    #[test]
-    fn rewrite_zmq_host_replaces_wildcard() {
-        assert_eq!(rewrite_zmq_host_for_loopback("tcp://*:5557"), "tcp://127.0.0.1:5557");
-        // Idempotent on already-resolved endpoints.
-        assert_eq!(rewrite_zmq_host_for_loopback("tcp://127.0.0.1:5557"), "tcp://127.0.0.1:5557");
     }
 }
