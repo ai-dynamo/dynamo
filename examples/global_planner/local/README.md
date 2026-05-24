@@ -62,6 +62,11 @@ Which pool served a request is shown in `logs/global_router.log`.
 - **Bring pool routers up before the global router** — it errors at init if a pool's local router isn't registered yet.
 - **agg vs disagg**: this example uses `mode: "agg"`. For disaggregated pools (separate prefill/decode),
   use a `mode: "disagg"` config; note the SGLang/TRT-LLM bootstrap paths are backend-dependent (see the global_router README).
+- **This demo routes by config grid, not measured performance.** The two mocker pools are identical, so
+  pool selection here is purely the `agg_pool_mapping` × SLA grid — it demonstrates the *control plane*,
+  not a perf/cost win. A real benefit requires pools tuned differently (e.g. TP1 vs TP4), ISL-diverse
+  traffic, and an SLA in the band where the cheaper pool meets short prompts but not long ones; with
+  identical pools or a uniform workload, routing changes nothing observable.
 
 ## Note on verification
 

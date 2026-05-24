@@ -285,8 +285,9 @@ The preprocessor forwards `nvext.router` to the backend as the typed `router` fi
 
 ## Common Pitfalls (bare-process / shared etcd+NATS)
 
-These bite when wiring the global router by hand outside Kubernetes (on K8s, DGD-per-namespace
-isolation hides most of them):
+These bite when wiring the global router by hand outside Kubernetes. (K8s avoids the shared-discovery
+merge below via DGD-per-namespace isolation, but introduces its own traps — see
+[Kubernetes-specific pitfalls](#kubernetes-specific-pitfalls).)
 
 - **Discovery merges same-named workers across namespaces → frontend silently bypasses the global
   router.** Frontend model discovery is *global* over the shared etcd/NATS; `--namespace` only sets a
@@ -300,8 +301,32 @@ isolation hides most of them):
   mismatch surfaces only as a runtime connection failure, not a config error.
 - **Disagg workers need `--host 0.0.0.0`.** Otherwise the prefill bootstrap server binds `127.0.0.1`
   while advertising the node IP, and the decode side's NIXL KV transfer fails with "connection refused."
+- **Disagg prefill workers need an explicit `--kv-transfer-config`.** Recent vLLM removed the
+  `--connector` default and deprecates `--is-prefill-worker`; a prefill worker now exits at startup with
+  a `ValueError` unless you pass `--disaggregation-mode prefill --kv-transfer-config
+  '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`.
 - **The global router raises at init if a pool's local router isn't up yet.** Bring up pool routers
   before the global router (there is no readiness gating / retry today).
+
+## Kubernetes-specific pitfalls
+
+DGD-per-namespace isolation removes the shared-discovery merge above, but the operator adds its own:
+
+- **Workers run under a hashed namespace suffix — all three routing hops must use it.** The operator
+  gives each worker pool a spec-hash serving namespace `<base>-<workerhash>` (e.g.
+  `myns-prefill-0-81790195`). The global router config's `*_pool_dynamo_namespaces` **and** each local
+  router's `--endpoint` must reference the **suffixed** namespace, not the base — base names fail at
+  runtime with `no endpoints available to route work` / `no instances found for endpoint`. (The local
+  router registers `router.generate` in *its* `--endpoint`'s namespace, so the global router only finds
+  it when both are suffixed.) **The suffix re-hashes on any worker spec change** (editing args,
+  resources, etc.), silently desyncing a pinned router config — re-read the DGD's
+  `nvidia.com/current-worker-hash` annotation after such edits.
+- **Air-gapped / offline model card.** The frontend and global router both fetch the model's HF card;
+  in an offline cluster set `HF_HUB_OFFLINE=1` and mount the cache, or the fetch hangs / returns
+  `429 Too Many Requests`.
+- **Python/`_core` ABI skew.** A mismatched `dynamo` Python vs compiled `_core` (e.g. top-of-tree
+  Python overlaid on an older runtime image) surfaces as `KvRouterConfig` keyword errors or an
+  `AttributeError` on router metric names (e.g. `router has no attribute 'KV_HIT_RATE'`). Use a matched pair.
 
 ## Example
 
