@@ -193,17 +193,6 @@ func ToAlphaCheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity) *v1alpha1.
 	return dst
 }
 
-// ToAlphaGPUMemoryService converts a v1beta1 GPU memory service config into
-// the controller's v1alpha1 compatibility shape.
-func ToAlphaGPUMemoryService(src *v1beta1.GPUMemoryServiceSpec) *v1alpha1.GPUMemoryServiceSpec {
-	if src == nil {
-		return nil
-	}
-	dst := &v1alpha1.GPUMemoryServiceSpec{}
-	v1alpha1.ConvertToGPUMemoryServiceSpec(src, dst)
-	return dst
-}
-
 // ToBetaSharedMemorySize converts the v1alpha1 shared-memory compatibility
 // shape into the v1beta1 scalar field.
 func ToBetaSharedMemorySize(src *v1alpha1.SharedMemorySpec) *resource.Quantity {
