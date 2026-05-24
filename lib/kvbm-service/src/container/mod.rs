@@ -81,10 +81,7 @@ pub trait ServiceContainer: Send + Sync {
     /// pinned regions. The default impl drops the lease, which releases
     /// it back to the pool — appropriate for containers that don't manage
     /// host memory directly.
-    async fn on_resources_attached(
-        &self,
-        _lease: PoolLease,
-    ) -> Result<(), ContainerError> {
+    async fn on_resources_attached(&self, _lease: PoolLease) -> Result<(), ContainerError> {
         Ok(())
     }
 }

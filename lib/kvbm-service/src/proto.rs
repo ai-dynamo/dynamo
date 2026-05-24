@@ -14,7 +14,7 @@ pub mod v1 {
 pub use v1::{
     Accepted, Event, Heartbeat, KvbmInstance, LayoutMode, MlaPlaceholder, RegisterRequest,
     RegistrationInstance, ServerShutdownInitiated, ServerShutdownTimedOut, ServiceMode, event,
-    layout_mode, registration_instance,
     kvbm_service_client::KvbmServiceClient,
     kvbm_service_server::{KvbmService as KvbmServiceTrait, KvbmServiceServer},
+    layout_mode, registration_instance,
 };

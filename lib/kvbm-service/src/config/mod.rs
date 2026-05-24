@@ -92,10 +92,7 @@ impl ServiceConfig {
         // CLI overrides last — only insert keys where the caller supplied Some.
         let mut cli_map = serde_json::Map::new();
         if let Some(v) = &cli.http_addr {
-            cli_map.insert(
-                "http_addr".into(),
-                serde_json::Value::String(v.to_string()),
-            );
+            cli_map.insert("http_addr".into(), serde_json::Value::String(v.to_string()));
         }
         if let Some(v) = &cli.uds_path {
             cli_map.insert("uds_path".into(), serde_json::to_value(v).unwrap());
@@ -108,8 +105,7 @@ impl ServiceConfig {
         }
 
         if !cli_map.is_empty() {
-            figment =
-                figment.merge(Serialized::defaults(serde_json::Value::Object(cli_map)));
+            figment = figment.merge(Serialized::defaults(serde_json::Value::Object(cli_map)));
         }
 
         let cfg: ServiceConfig = figment.extract()?;

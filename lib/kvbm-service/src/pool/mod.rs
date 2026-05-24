@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use dynamo_memory::{
     HugepageInfo, MmappedPinnedOptions, NumaNode, NumaNodeView, Resources,
-    nixl::{NixlAgent, NixlBackendConfig, NixlRegisterExt},
+    nixl::{NixlAgent, NixlBackendConfig, NixlRegisterExt, is_stub as nixl_is_stub},
     numa::worker_pool::NumaWorkerPool,
     resources::CgroupInfo,
 };
@@ -137,10 +137,7 @@ impl HostMemoryPool {
             );
         }
 
-        let total_host_memory: u64 = host_nodes
-            .iter()
-            .filter_map(|n| n.total_bytes)
-            .sum();
+        let total_host_memory: u64 = host_nodes.iter().filter_map(|n| n.total_bytes).sum();
         let raw_per_node = compute_per_node_sizes(&config.sizing, &host_nodes)?;
         let (per_node_bytes, capped) =
             cap_by_cgroup_memory(raw_per_node, resources.cgroup.memory_max);
@@ -163,8 +160,7 @@ impl HostMemoryPool {
             );
         }
         for node in &host_nodes {
-            if let (Some(req), Some(total)) =
-                (per_node_bytes.get(&node.node.0), node.total_bytes)
+            if let (Some(req), Some(total)) = (per_node_bytes.get(&node.node.0), node.total_bytes)
                 && *req as f64 > 0.9 * total as f64
             {
                 tracing::warn!(
@@ -194,21 +190,37 @@ impl HostMemoryPool {
         // silently accept register_memory and produce slabs whose handle
         // looks valid but cannot satisfy remote pulls. Refuse to start in
         // that configuration unless the operator explicitly opts in.
-        let has_dram_backend = backend_config.has_backend("UCX")
-            || backend_config.has_backend("POSIX");
-        if !has_dram_backend && !config.allow_no_nixl_backends {
-            return Err(ServiceError::InvalidArgument(
-                "no NIXL DRAM backend configured (set DYN_KVBM_NIXL_BACKEND_UCX=true \
-                 or DYN_KVBM_NIXL_BACKEND_POSIX=true). Slabs without a backend would \
+        //
+        // Stub mode (nixl_sys linked without real libs) is another route
+        // to "no NIXL functionality" — also requires the explicit opt-in,
+        // and additionally forces slabs to local-only because we can't
+        // even build an agent.
+        let stub = nixl_is_stub();
+        let has_dram_backend =
+            backend_config.has_backend("UCX") || backend_config.has_backend("POSIX");
+        let can_build_agent = !stub && has_dram_backend;
+        if !can_build_agent && !config.allow_no_nixl_backends {
+            return Err(ServiceError::InvalidArgument(format!(
+                "no usable NIXL DRAM transport ({}). Slabs without a backend would \
                  be unreachable from remote workers. Set \
-                 PoolConfig::allow_no_nixl_backends = true to override for testing."
-                    .into(),
-            ));
+                 PoolConfig::allow_no_nixl_backends = true to override for local-only use.",
+                if stub {
+                    "nixl_sys is in stub mode (no real NIXL libs linked)".to_string()
+                } else {
+                    "no DRAM backend configured (set DYN_KVBM_NIXL_BACKEND_UCX=true \
+                     or DYN_KVBM_NIXL_BACKEND_POSIX=true)"
+                        .to_string()
+                },
+            )));
         }
-        if !has_dram_backend {
+        let build_agents = can_build_agent;
+        if !build_agents {
             tracing::warn!(
-                "HostMemoryPool: no NIXL DRAM backend configured \
-                 (allow_no_nixl_backends=true); slabs are local-only"
+                "HostMemoryPool: building slabs without NIXL agents \
+                 (stub={}, has_dram_backend={}); slabs are local-only and \
+                 not reachable from remote workers",
+                stub,
+                has_dram_backend,
             );
         }
         let mut slabs: Vec<Arc<NodeSlab>> = Vec::with_capacity(host_nodes.len());
@@ -228,6 +240,7 @@ impl HostMemoryPool {
                 instance_id,
                 node.node,
                 size,
+                build_agents,
             )?;
             slabs.push(Arc::new(slab));
         }
@@ -253,7 +266,7 @@ impl HostMemoryPool {
                 slab.numa_node().0,
                 slab.size_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
                 slab.hugepage_tier(),
-                slab.agent_name(),
+                slab.agent_name().unwrap_or("(local-only)"),
             );
         }
 
@@ -318,7 +331,11 @@ impl HostMemoryPool {
             instance_id: self.instance_id.clone(),
             leased: self.inner.lock().leased,
             total_bytes,
-            slabs: self.slabs.iter().map(|s| NodeSlabSnapshot::from(&**s)).collect(),
+            slabs: self
+                .slabs
+                .iter()
+                .map(|s| NodeSlabSnapshot::from(&**s))
+                .collect(),
             hugepage_default_size_bytes: self.hugepage_info.default_size_bytes,
             thp_enabled: self.hugepage_info.thp_enabled.to_string(),
         }
@@ -326,14 +343,15 @@ impl HostMemoryPool {
 }
 
 /// Build one slab end-to-end: allocate the mmap'd pinned storage on the
-/// target NUMA node, build a dedicated NIXL agent, register the storage,
-/// wrap into [`NodeSlab`].
+/// target NUMA node, and — if `build_agent` is true — build a dedicated
+/// NIXL agent and register the storage with it.
 fn allocate_slab(
     backend_config: &NixlBackendConfig,
     config: &PoolConfig,
     instance_id: &str,
     node: NumaNode,
     size: usize,
+    build_agent: bool,
 ) -> ServiceResult<NodeSlab> {
     let opt = MmappedPinnedOptions {
         size,
@@ -344,37 +362,25 @@ fn allocate_slab(
     };
     let storage = NumaWorkerPool::global()
         .allocate_mmap_pinned_on_node(opt)
-        .map_err(|e| {
-            ServiceError::Internal(format!(
-                "allocate slab on node {}: {}",
-                node.0, e
-            ))
-        })?;
+        .map_err(|e| ServiceError::Internal(format!("allocate slab on node {}: {}", node.0, e)))?;
 
     let tier = storage.hugepage_tier();
     let mapped_len = storage.mapped_len();
 
+    if !build_agent {
+        return Ok(NodeSlab::new_local(storage, node, mapped_len, tier));
+    }
+
     let agent_name = format!("kvbm-svc:{instance_id}:n{}", node.0);
-    let agent =
-        NixlAgent::from_nixl_backend_config(&agent_name, backend_config.clone()).map_err(
-            |e| ServiceError::Internal(format!("build NixlAgent {agent_name}: {e:?}")),
-        )?;
+    let agent = NixlAgent::from_nixl_backend_config(&agent_name, backend_config.clone())
+        .map_err(|e| ServiceError::Internal(format!("build NixlAgent {agent_name}: {e:?}")))?;
 
-    let registered = storage
-        .register(&agent, None)
-        .map_err(|_storage| {
-            ServiceError::Internal(format!(
-                "register slab with NIXL agent {agent_name} failed"
-            ))
-        })?;
+    let registered = storage.register(&agent, None).map_err(|_storage| {
+        ServiceError::Internal(format!("register slab with NIXL agent {agent_name} failed"))
+    })?;
 
-    Ok(NodeSlab::new(
-        registered,
-        agent,
-        node,
-        mapped_len,
-        tier,
-        agent_name,
+    Ok(NodeSlab::new_registered(
+        registered, agent, node, mapped_len, tier, agent_name,
     ))
 }
 
@@ -396,8 +402,7 @@ fn nodes_allowed_by_cgroup<'a>(
         Some(m) if !m.is_empty() => m,
         _ => return host_nodes,
     };
-    let allowed: std::collections::HashSet<u32> =
-        mems.iter().map(|&n| n as u32).collect();
+    let allowed: std::collections::HashSet<u32> = mems.iter().map(|&n| n as u32).collect();
     host_nodes
         .into_iter()
         .filter(|n| allowed.contains(&n.node.0))
@@ -467,16 +472,14 @@ fn compute_per_node_sizes(
             let totals: Vec<(u32, u64)> = host_nodes
                 .iter()
                 .map(|n| {
-                    n.total_bytes
-                        .map(|t| (n.node.0, t))
-                        .ok_or_else(|| {
-                            ServiceError::Internal(format!(
-                                "node {} has no MemTotal reading; Total sizing needs \
+                    n.total_bytes.map(|t| (n.node.0, t)).ok_or_else(|| {
+                        ServiceError::Internal(format!(
+                            "node {} has no MemTotal reading; Total sizing needs \
                                  per-node capacity. Set PoolSizing::PerNode or Explicit \
                                  instead.",
-                                n.node.0
-                            ))
-                        })
+                            n.node.0
+                        ))
+                    })
                 })
                 .collect::<ServiceResult<_>>()?;
             let total_sum: u64 = totals.iter().map(|(_, t)| *t).sum();
@@ -492,8 +495,7 @@ fn compute_per_node_sizes(
                 let share = if i == last_idx {
                     bytes.saturating_sub(assigned)
                 } else {
-                    let v =
-                        ((*bytes as f64) * (*t as f64) / (total_sum as f64)).floor() as u64;
+                    let v = ((*bytes as f64) * (*t as f64) / (total_sum as f64)).floor() as u64;
                     assigned = assigned.saturating_add(v);
                     v
                 };
@@ -561,11 +563,8 @@ mod tests {
         let n0 = node(0, vec![0], Some(100));
         let n1 = node(1, vec![1], Some(50));
         let nodes = vec![&n0, &n1];
-        let out = compute_per_node_sizes(
-            &PoolSizing::PerNode { bytes_per_node: 64 },
-            &nodes,
-        )
-        .unwrap();
+        let out =
+            compute_per_node_sizes(&PoolSizing::PerNode { bytes_per_node: 64 }, &nodes).unwrap();
         assert_eq!(out.get(&0).copied(), Some(64));
         assert_eq!(out.get(&1).copied(), Some(64));
     }
@@ -576,11 +575,7 @@ mod tests {
         let n1 = node(1, vec![1], Some(300));
         let nodes = vec![&n0, &n1];
         // 400 total bytes split proportionally to 100/300 -> 100 + 300
-        let out = compute_per_node_sizes(
-            &PoolSizing::Total { bytes: 400 },
-            &nodes,
-        )
-        .unwrap();
+        let out = compute_per_node_sizes(&PoolSizing::Total { bytes: 400 }, &nodes).unwrap();
         assert_eq!(out.get(&0).copied(), Some(100));
         assert_eq!(out.get(&1).copied(), Some(300));
         let total: u64 = out.values().sum();
@@ -712,9 +707,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(0u32, 32);
         // missing node 1 → error
-        assert!(
-            compute_per_node_sizes(&PoolSizing::Explicit(map.clone()), &nodes).is_err()
-        );
+        assert!(compute_per_node_sizes(&PoolSizing::Explicit(map.clone()), &nodes).is_err());
         map.insert(1u32, 64);
         let out = compute_per_node_sizes(&PoolSizing::Explicit(map), &nodes).unwrap();
         assert_eq!(out.get(&0).copied(), Some(32));

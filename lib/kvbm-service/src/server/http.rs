@@ -127,7 +127,14 @@ async fn ready(State(state): State<HttpState>) -> Response {
     let uds_ok = state.uds_path.read().is_some();
 
     if allocator_ok && uds_ok {
-        (StatusCode::OK, Json(ReadyBody { ready: true, reason: None })).into_response()
+        (
+            StatusCode::OK,
+            Json(ReadyBody {
+                ready: true,
+                reason: None,
+            }),
+        )
+            .into_response()
     } else {
         let reason = if !uds_ok {
             "gRPC socket not yet bound"
@@ -151,9 +158,7 @@ async fn metrics(State(state): State<HttpState>) -> Response {
             let mut resp = (StatusCode::OK, body).into_response();
             resp.headers_mut().insert(
                 header::CONTENT_TYPE,
-                HeaderValue::from_static(
-                    "text/plain; version=0.0.4; charset=utf-8",
-                ),
+                HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
             );
             resp
         }
@@ -287,12 +292,17 @@ mod tests {
     async fn metrics_content_type() {
         let state = test_state();
         let (addr, cancel) = bound_addr(state).await;
-        let resp = reqwest::get(format!("http://{addr}/metrics")).await.unwrap();
+        let resp = reqwest::get(format!("http://{addr}/metrics"))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         let ct = resp.headers()[reqwest::header::CONTENT_TYPE]
             .to_str()
             .unwrap();
-        assert!(ct.contains("version=0.0.4"), "unexpected content-type: {ct}");
+        assert!(
+            ct.contains("version=0.0.4"),
+            "unexpected content-type: {ct}"
+        );
         cancel.cancel();
     }
 

@@ -284,7 +284,11 @@ mod tests {
             }),
         };
         let err = svc.register(Request::new(bad_req)).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument, "unexpected: {err}");
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "unexpected: {err}"
+        );
     }
 
     #[tokio::test]

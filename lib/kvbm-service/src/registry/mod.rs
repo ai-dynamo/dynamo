@@ -640,7 +640,8 @@ mod tests {
         let entry = r
             .try_register(instance, client_id.into())
             .expect("try_register");
-        r.commit_register(entry.id, noop()).expect("commit_register");
+        r.commit_register(entry.id, noop())
+            .expect("commit_register");
         entry
     }
 
@@ -662,9 +663,7 @@ mod tests {
     fn rejects_different_key() {
         let r = fresh(8);
         r.try_register(kvbm(4, "llm-a"), "c1".into()).unwrap();
-        let err = r
-            .try_register(kvbm(4, "llm-b"), "c2".into())
-            .unwrap_err();
+        let err = r.try_register(kvbm(4, "llm-b"), "c2".into()).unwrap_err();
         assert!(matches!(err, ServiceError::KeyConflict(_)));
     }
 

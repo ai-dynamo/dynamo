@@ -36,8 +36,11 @@ impl ServiceMetrics {
     pub fn new() -> Self {
         let registry = Arc::new(Registry::new());
 
-        let capacity_slots =
-            IntGauge::new("kvbm_service_capacity_slots", "Total slot capacity (num GPUs)").unwrap();
+        let capacity_slots = IntGauge::new(
+            "kvbm_service_capacity_slots",
+            "Total slot capacity (num GPUs)",
+        )
+        .unwrap();
         let used_slots = IntGauge::new(
             "kvbm_service_used_slots",
             "Slots reserved by currently registered clients",
@@ -100,8 +103,12 @@ impl ServiceMetrics {
             .register(Box::new(unregister_total.clone()))
             .unwrap();
         registry.register(Box::new(reset_total.clone())).unwrap();
-        registry.register(Box::new(pool_bytes_total.clone())).unwrap();
-        registry.register(Box::new(pool_slabs_total.clone())).unwrap();
+        registry
+            .register(Box::new(pool_bytes_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(pool_slabs_total.clone()))
+            .unwrap();
 
         Self {
             registry,

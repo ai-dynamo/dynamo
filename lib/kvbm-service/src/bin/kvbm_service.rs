@@ -45,8 +45,7 @@ async fn main() -> anyhow::Result<()> {
     // Always build the host-memory pool — the binary is the production
     // entry point and the `/v1/pool` snapshot is part of the contract.
     // Tests that don't want a pool call `KvbmService::start` directly.
-    let service =
-        KvbmService::start_with_pool(cfg, Arc::new(NoopContainer)).await?;
+    let service = KvbmService::start_with_pool(cfg, Arc::new(NoopContainer)).await?;
     tracing::info!(
         http_addr = %service.http_addr,
         uds_path = %service.uds_path.display(),

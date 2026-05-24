@@ -41,9 +41,7 @@ fn different_model_name_conflicts() {
 fn different_block_size_conflicts() {
     let r = Registry::new(8, ServiceMetrics::new());
     r.try_register(kvbm("llm", 64, 0), "c1".into()).unwrap();
-    let err = r
-        .try_register(kvbm("llm", 32, 0), "c2".into())
-        .unwrap_err();
+    let err = r.try_register(kvbm("llm", 32, 0), "c2".into()).unwrap_err();
     assert!(matches!(err, ServiceError::KeyConflict(_)));
 }
 
@@ -60,9 +58,7 @@ fn different_layout_bytes_conflict() {
 #[test]
 fn reset_after_last_detach_accepts_new_key() {
     let r = Registry::new(8, ServiceMetrics::new());
-    let entry = r
-        .try_register(kvbm("llm-a", 64, 0), "c1".into())
-        .unwrap();
+    let entry = r.try_register(kvbm("llm-a", 64, 0), "c1".into()).unwrap();
     r.commit_register(entry.id, noop()).unwrap();
     assert!(r.unregister(entry.id));
     // After the last detach, a completely different key should now be accepted.

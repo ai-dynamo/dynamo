@@ -279,10 +279,7 @@ fn publish_pool_metrics(metrics: &ServiceMetrics, pool: &HostMemoryPool) {
             .pool_bytes_total
             .with_label_values(&[node.as_str(), tier])
             .set(slab.size_bytes() as i64);
-        metrics
-            .pool_slabs_total
-            .with_label_values(&[tier])
-            .inc();
+        metrics.pool_slabs_total.with_label_values(&[tier]).inc();
     }
 }
 

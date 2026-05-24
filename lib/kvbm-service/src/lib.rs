@@ -46,5 +46,7 @@ pub use crate::mode::ServiceMode;
 pub use crate::pool::{
     HostMemoryPool, NodeSlab, NodeSlabSnapshot, PoolConfig, PoolLease, PoolSizing, PoolSnapshot,
 };
-pub use crate::registry::{NoopLifecycle, Registry, RegistrationId, RegistrationKey, StreamLifecycle};
+pub use crate::registry::{
+    NoopLifecycle, RegistrationId, RegistrationKey, Registry, StreamLifecycle,
+};
 pub use crate::server::KvbmService;

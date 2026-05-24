@@ -176,7 +176,8 @@ mod tests {
     #[tokio::test]
     async fn shutdown_initiated_carries_grace() {
         let (lc, mut stream, _token) = make_lifecycle();
-        lc.send_shutdown_initiated(Some(Duration::from_secs(90))).await;
+        lc.send_shutdown_initiated(Some(Duration::from_secs(90)))
+            .await;
         let ev = stream.next().await.unwrap().unwrap();
         let proto::event::Kind::ServerShutdownInitiated(body) = ev.kind.unwrap() else {
             panic!("expected ServerShutdownInitiated");
@@ -206,7 +207,10 @@ mod tests {
         };
         assert_eq!(body.grace_period_ms, 60_000);
         // The sender was taken+dropped; the receiver yields None on next poll.
-        assert!(stream.next().await.is_none(), "stream must close after timed-out event");
+        assert!(
+            stream.next().await.is_none(),
+            "stream must close after timed-out event"
+        );
         // And the cancellation token was fired so any sibling tasks
         // (watcher, heartbeat) drop their sender clones too.
         assert!(token.is_cancelled());

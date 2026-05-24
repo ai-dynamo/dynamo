@@ -24,7 +24,7 @@ use kvbm_service::container::{ContainerError, ServiceContainer};
 use kvbm_service::instance::RegistrationInstance;
 use kvbm_service::metrics::ServiceMetrics;
 use kvbm_service::proto::v1::kvbm_service_server::KvbmServiceServer;
-use kvbm_service::registry::{Registry, RegistrationId};
+use kvbm_service::registry::{RegistrationId, Registry};
 use kvbm_service::server::grpc::KvbmServiceGrpc;
 use parking_lot::Mutex;
 use tempfile::TempDir;
@@ -141,9 +141,15 @@ async fn shutdown_broadcasts_initiated_to_every_client() {
 
     // Two attached clients sharing the same key.
     let mut client_a = KvbmServiceClient::connect_uds(&h.uds).await.unwrap();
-    let mut handle_a = client_a.register("c-a", make_instance("llm")).await.unwrap();
+    let mut handle_a = client_a
+        .register("c-a", make_instance("llm"))
+        .await
+        .unwrap();
     let mut client_b = KvbmServiceClient::connect_uds(&h.uds).await.unwrap();
-    let mut handle_b = client_b.register("c-b", make_instance("llm")).await.unwrap();
+    let mut handle_b = client_b
+        .register("c-b", make_instance("llm"))
+        .await
+        .unwrap();
 
     assert_eq!(h.container.registers.load(Ordering::SeqCst), 2);
     assert_eq!(h.registry.snapshot().used_slots, 4);
@@ -294,7 +300,10 @@ async fn register_during_drain_returns_unavailable() {
 async fn timed_out_force_closes_stragglers() {
     let h = Harness::spawn().await;
     let mut client = KvbmServiceClient::connect_uds(&h.uds).await.unwrap();
-    let mut handle = client.register("stuck", make_instance("llm")).await.unwrap();
+    let mut handle = client
+        .register("stuck", make_instance("llm"))
+        .await
+        .unwrap();
 
     let registry = h.registry.clone();
     let container = h.container.clone();
@@ -343,7 +352,10 @@ async fn timed_out_force_closes_stragglers() {
         other => panic!("expected ServerShutdownTimedOut, got {other:?}"),
     }
     // And the stream closes.
-    assert!(handle.next().await.is_none(), "stream must close after TimedOut");
+    assert!(
+        handle.next().await.is_none(),
+        "stream must close after TimedOut"
+    );
 
     let timed_out = coord.await.unwrap();
     assert!(timed_out, "coordinator must report timeout");

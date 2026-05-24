@@ -14,9 +14,7 @@
 use std::time::Duration;
 
 use dynamo_memory::HugepageMode;
-use kvbm_service::{
-    HostMemoryPool, KvbmService, PoolConfig, PoolSizing, ServiceConfig,
-};
+use kvbm_service::{HostMemoryPool, KvbmService, PoolConfig, PoolSizing, ServiceConfig};
 
 const SMALL_SLAB_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -35,8 +33,8 @@ fn small_pool_config() -> PoolConfig {
 
 #[tokio::test]
 async fn pool_allocates_one_slab_per_host_memory_node() {
-    let pool = HostMemoryPool::new(&small_pool_config(), "test-instance")
-        .expect("HostMemoryPool::new");
+    let pool =
+        HostMemoryPool::new(&small_pool_config(), "test-instance").expect("HostMemoryPool::new");
     let snapshot = pool.snapshot();
 
     assert!(
@@ -47,14 +45,22 @@ async fn pool_allocates_one_slab_per_host_memory_node() {
 
     for slab in &snapshot.slabs {
         assert_eq!(slab.size_bytes, SMALL_SLAB_BYTES);
-        assert!(
-            slab.agent_name.starts_with("kvbm-svc:test-instance:n"),
-            "unexpected agent name {}",
-            slab.agent_name,
-        );
+        // Agent name is Some when nixl_sys has a working DRAM backend
+        // (we'd be in the `Registered` SlabStorage variant) and None on
+        // stub-mode hosts where the pool falls back to local-only slabs.
+        // When present, it must follow the documented format.
+        if let Some(name) = &slab.agent_name {
+            assert!(
+                name.starts_with("kvbm-svc:test-instance:n"),
+                "unexpected agent name {name}",
+            );
+        }
     }
 
-    assert_eq!(snapshot.total_bytes, SMALL_SLAB_BYTES * (snapshot.slabs.len() as u64));
+    assert_eq!(
+        snapshot.total_bytes,
+        SMALL_SLAB_BYTES * (snapshot.slabs.len() as u64)
+    );
 }
 
 #[tokio::test]
@@ -68,12 +74,9 @@ async fn http_v1_pool_returns_snapshot() {
         pool: small_pool_config(),
     };
 
-    let svc = KvbmService::start_with_pool(
-        cfg,
-        std::sync::Arc::new(kvbm_service::NoopContainer),
-    )
-    .await
-    .expect("start_with_pool");
+    let svc = KvbmService::start_with_pool(cfg, std::sync::Arc::new(kvbm_service::NoopContainer))
+        .await
+        .expect("start_with_pool");
     let http = svc.http_addr;
 
     let body: serde_json::Value = reqwest::get(format!("http://{http}/v1/pool"))
@@ -108,7 +111,9 @@ async fn http_v1_pool_503_without_pool() {
     let svc = KvbmService::start(cfg).await.expect("start");
     let http = svc.http_addr;
 
-    let resp = reqwest::get(format!("http://{http}/v1/pool")).await.unwrap();
+    let resp = reqwest::get(format!("http://{http}/v1/pool"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 503);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().is_some());
