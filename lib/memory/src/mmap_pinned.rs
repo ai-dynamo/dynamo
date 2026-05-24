@@ -300,9 +300,8 @@ impl Drop for HostRegisterGuard {
         if let Err(e) = self.ctx.bind_to_thread() {
             tracing::warn!("bind CUDA context for cuMemHostUnregister: {:?}", e);
         }
-        let cu = unsafe {
-            cudarc::driver::sys::cuMemHostUnregister(self.ptr as *mut std::ffi::c_void)
-        };
+        let cu =
+            unsafe { cudarc::driver::sys::cuMemHostUnregister(self.ptr as *mut std::ffi::c_void) };
         if let Err(e) = cu.result() {
             tracing::warn!("cuMemHostUnregister({:#x}): {:?}", self.ptr, e);
         }
@@ -357,13 +356,7 @@ fn mmap_anon_thp(size: usize) -> Result<MmapGuard> {
     let len = round_up(size, system_page_size());
     let g = do_mmap(len, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, 0)?;
     // Best-effort hint; ignore failures (e.g. THP disabled at boot).
-    let _ = unsafe {
-        libc::madvise(
-            g.ptr as *mut libc::c_void,
-            g.len,
-            libc::MADV_HUGEPAGE,
-        )
-    };
+    let _ = unsafe { libc::madvise(g.ptr as *mut libc::c_void, g.len, libc::MADV_HUGEPAGE) };
     Ok(g)
 }
 
@@ -431,10 +424,7 @@ fn mbind_to_node(addr: usize, len: usize, node: NumaNode) -> std::result::Result
         )
     };
     if r != 0 {
-        return Err(format!(
-            "mbind: {}",
-            std::io::Error::last_os_error()
-        ));
+        return Err(format!("mbind: {}", std::io::Error::last_os_error()));
     }
     Ok(())
 }
@@ -469,7 +459,9 @@ fn system_page_size() -> usize {
 }
 
 fn default_hugepage_size() -> usize {
-    crate::hugepage::HugepageInfo::discover().default_size_bytes.max(2 * 1024 * 1024)
+    crate::hugepage::HugepageInfo::discover()
+        .default_size_bytes
+        .max(2 * 1024 * 1024)
 }
 
 fn round_up(size: usize, page: usize) -> usize {

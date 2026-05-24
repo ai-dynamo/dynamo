@@ -269,7 +269,6 @@ pub struct CgroupInfo {
     pub container_hint: Option<String>,
 }
 
-
 impl Resources {
     /// Discover the host resources using [`SlicingMode::AssumeAllBusy`].
     pub fn discover() -> Self {
@@ -329,9 +328,7 @@ impl Resources {
 
     /// Iterate GPUs attached to the given NUMA node.
     pub fn gpus_on_node(&self, node: NumaNode) -> impl Iterator<Item = &GpuView> {
-        self.gpus
-            .iter()
-            .filter(move |g| g.numa_node == Some(node))
+        self.gpus.iter().filter(move |g| g.numa_node == Some(node))
     }
 
     /// Iterate NUMA nodes that the host-memory pool may target.
@@ -502,10 +499,7 @@ fn compute_resources_from_inputs(
                             .get(pci)
                             .cloned()
                             .unwrap_or_else(|| all_slices.get(pci).cloned().unwrap_or_default());
-                        slice_map.insert(
-                            pci.clone(),
-                            (slice, SliceSource::Numa(NumaNode(*node))),
-                        );
+                        slice_map.insert(pci.clone(), (slice, SliceSource::Numa(NumaNode(*node))));
                     }
                 }
                 _ => {
@@ -622,7 +616,11 @@ fn slice_evenly(cpus: &[usize], pcis: &[String]) -> HashMap<String, Vec<usize>> 
     }
     for (i, pci) in sorted_pcis.iter().enumerate() {
         let start = i * chunk;
-        let end = if i == n - 1 { cpus.len() } else { start + chunk };
+        let end = if i == n - 1 {
+            cpus.len()
+        } else {
+            start + chunk
+        };
         out.insert((*pci).clone(), cpus[start..end].to_vec());
     }
     out
@@ -818,7 +816,10 @@ fn detect_container_hint() -> Option<String> {
     if let Ok(s) = std::fs::read_to_string("/proc/1/cgroup") {
         for marker in &["/docker/", "/kubepods", "/containerd", "/lxc/", "/podman/"] {
             if s.contains(marker) {
-                return Some(format!("PID 1 cgroup matches '{}'", marker.trim_matches('/')));
+                return Some(format!(
+                    "PID 1 cgroup matches '{}'",
+                    marker.trim_matches('/')
+                ));
             }
         }
     }
@@ -907,7 +908,11 @@ fn available_parallelism_range() -> Vec<usize> {
 
 impl std::fmt::Display for Resources {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let visible_count = self.gpus.iter().filter(|g| g.cuda_ordinal.is_some()).count();
+        let visible_count = self
+            .gpus
+            .iter()
+            .filter(|g| g.cuda_ordinal.is_some())
+            .count();
         writeln!(f, "Dynamo Resources Inspection")?;
         writeln!(f, "===========================")?;
         writeln!(f, "NUMA enabled:           {}", self.numa_enabled)?;
@@ -918,7 +923,11 @@ impl std::fmt::Display for Resources {
             self.gpus.len(),
             visible_count
         )?;
-        writeln!(f, "Host CPUs:              [{}]", compact_range(&self.host_cpus))?;
+        writeln!(
+            f,
+            "Host CPUs:              [{}]",
+            compact_range(&self.host_cpus)
+        )?;
         writeln!(
             f,
             "Process-allowed CPUs:   [{}]",
@@ -998,11 +1007,7 @@ impl std::fmt::Display for Resources {
             }
         }
 
-        let orphans: Vec<&GpuView> = self
-            .gpus
-            .iter()
-            .filter(|g| g.numa_node.is_none())
-            .collect();
+        let orphans: Vec<&GpuView> = self.gpus.iter().filter(|g| g.numa_node.is_none()).collect();
         if !orphans.is_empty() {
             writeln!(f)?;
             writeln!(f, "Unaffinitized GPUs (numa_node=-1)")?;
@@ -1211,9 +1216,7 @@ mod tests {
 
     #[test]
     fn more_gpus_than_cpus_gives_all_to_everyone() {
-        let pcis: Vec<String> = (0..5)
-            .map(|i| format!("0000:0{}:00.0", i))
-            .collect();
+        let pcis: Vec<String> = (0..5).map(|i| format!("0000:0{}:00.0", i)).collect();
         let cpus = vec![0, 1, 2];
         let slices = slice_evenly(&cpus, &pcis);
         for p in &pcis {
@@ -1242,7 +1245,12 @@ mod tests {
 
     #[test]
     fn parse_v2_cpu_max_handles_max_and_numbers() {
-        assert!(parse_cgroup_v2_cpu_max("max 100000").unwrap().quota_us.is_none());
+        assert!(
+            parse_cgroup_v2_cpu_max("max 100000")
+                .unwrap()
+                .quota_us
+                .is_none()
+        );
         let q = parse_cgroup_v2_cpu_max("200000 100000").unwrap();
         assert_eq!(q.quota_us, Some(200000));
         assert_eq!(q.period_us, 100000);
@@ -1266,9 +1274,15 @@ mod tests {
 
     #[test]
     fn slice_source_display_strings() {
-        assert_eq!(format_slice_source(SliceSource::Numa(NumaNode(0))), "numa(0)");
+        assert_eq!(
+            format_slice_source(SliceSource::Numa(NumaNode(0))),
+            "numa(0)"
+        );
         assert_eq!(format_slice_source(SliceSource::HostCpuset), "host-cpuset");
-        assert_eq!(format_slice_source(SliceSource::NoAffinityBucket), "no-affinity-bucket");
+        assert_eq!(
+            format_slice_source(SliceSource::NoAffinityBucket),
+            "no-affinity-bucket"
+        );
         assert_eq!(
             format_slice_source(SliceSource::EmptyNumaNodeFallback),
             "empty-numa-node-fallback"
@@ -1347,7 +1361,11 @@ Node 0 Active:         200000000 kB
         assert_eq!(r.nodes.len(), 6);
 
         let host: Vec<u32> = r.host_memory_nodes().map(|n| n.node.0).collect();
-        assert_eq!(host, vec![0, 1], "host-memory pool must target only Grace nodes");
+        assert_eq!(
+            host,
+            vec![0, 1],
+            "host-memory pool must target only Grace nodes"
+        );
 
         // The four HBM nodes must classify as gpu-mem and be excluded.
         let gpu_mem: Vec<u32> = r
@@ -1374,10 +1392,7 @@ Node 0 Active:         200000000 kB
     /// GPUs in topology. Host-memory pool targets both.
     #[test]
     fn role_classification_x86_2socket() {
-        let topology = build_topology(&[
-            (0, (0..32).collect()),
-            (1, (32..64).collect()),
-        ]);
+        let topology = build_topology(&[(0, (0..32).collect()), (1, (32..64).collect())]);
         let mut node_mem: HashMap<u32, u64> = HashMap::new();
         node_mem.insert(0, 128 * 1024 * 1024 * 1024);
         node_mem.insert(1, 128 * 1024 * 1024 * 1024);
@@ -1398,15 +1413,8 @@ Node 0 Active:         200000000 kB
         assert_eq!(r.nodes.len(), 2);
         let host: Vec<u32> = r.host_memory_nodes().map(|n| n.node.0).collect();
         assert_eq!(host, vec![0, 1]);
-        assert!(
-            r.nodes
-                .iter()
-                .all(|n| n.role == NumaNodeRole::HostCpu)
-        );
-        assert_eq!(
-            r.total_host_memory_bytes(),
-            Some(256 * 1024 * 1024 * 1024)
-        );
+        assert!(r.nodes.iter().all(|n| n.role == NumaNodeRole::HostCpu));
+        assert_eq!(r.total_host_memory_bytes(), Some(256 * 1024 * 1024 * 1024));
     }
 
     /// Reserved variant exists for hand-built fixtures / external consumers

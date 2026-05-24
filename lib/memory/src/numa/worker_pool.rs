@@ -393,9 +393,7 @@ impl NumaWorkerPool {
                 }
                 MmappedPinnedStorage::allocate(opt)
             })
-            .map_err(|e| {
-                StorageError::AllocationFailed(format!("spawn mmap worker: {}", e))
-            })?;
+            .map_err(|e| StorageError::AllocationFailed(format!("spawn mmap worker: {}", e)))?;
         handle
             .join()
             .map_err(|_| StorageError::AllocationFailed("mmap worker panicked".into()))?

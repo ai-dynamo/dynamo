@@ -118,11 +118,10 @@ impl HugepageInfo {
         let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
         let default_size_bytes = parse_hugepagesize(&meminfo).unwrap_or(0);
 
-        let thp_enabled =
-            match fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled") {
-                Ok(s) => parse_thp_enabled(&s),
-                Err(_) => ThpMode::Unknown,
-            };
+        let thp_enabled = match fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled") {
+            Ok(s) => parse_thp_enabled(&s),
+            Err(_) => ThpMode::Unknown,
+        };
 
         let pools = read_system_hugepage_pools();
         let per_node = read_per_node_hugepages();
@@ -296,7 +295,10 @@ fn read_hugepage_pools_dir(dir: &Path, with_resv: bool) -> Vec<HugepagePool> {
             Some(n) => n.to_string(),
             None => continue,
         };
-        let kb_part = match name.strip_prefix("hugepages-").and_then(|s| s.strip_suffix("kB")) {
+        let kb_part = match name
+            .strip_prefix("hugepages-")
+            .and_then(|s| s.strip_suffix("kB"))
+        {
             Some(p) => p,
             None => continue,
         };
@@ -360,18 +362,12 @@ Hugetlb:         2097152 kB
 
     #[test]
     fn parse_thp_enabled_always_active() {
-        assert_eq!(
-            parse_thp_enabled("[always] madvise never"),
-            ThpMode::Always
-        );
+        assert_eq!(parse_thp_enabled("[always] madvise never"), ThpMode::Always);
     }
 
     #[test]
     fn parse_thp_enabled_never_active() {
-        assert_eq!(
-            parse_thp_enabled("always madvise [never]"),
-            ThpMode::Never
-        );
+        assert_eq!(parse_thp_enabled("always madvise [never]"), ThpMode::Never);
     }
 
     #[test]
