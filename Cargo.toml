@@ -24,6 +24,8 @@ members = [
     "lib/kvbm-physical",
     "lib/kvbm-protocols",
     "lib/kvbm-runtime",
+    "lib/kvbm-service",
+    "lib/kvbm-client",
     "lib/protocols",
     "lib/parsers",
     "lib/bench",
@@ -74,6 +76,8 @@ kvbm-observability = { path = "lib/kvbm-observability", version = "1.2.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.2.0" }
 kvbm-protocols = { path = "lib/kvbm-protocols", version = "1.2.0" }
 kvbm-runtime = { path = "lib/kvbm-runtime", version = "1.2.0" }
+kvbm-service = { path = "lib/kvbm-service", version = "1.2.0" }
+kvbm-client = { path = "lib/kvbm-client", version = "1.2.0" }
 
 # velo — pinned to versions matching the local clone (`~/repos/velo`)
 # overridden via the workspace `[patch.crates-io]` block below. The
@@ -152,6 +156,13 @@ tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] 
 tower-http = { version = "0.6", features = ["trace"] }
 axum = { version = "=0.8.4", features = ["macros", "ws"] }
 axum-core = { version = "0.5.2" }
+tonic = { version = "0.13" }
+tonic-build = { version = "0.13" }
+prost = { version = "0.13" }
+prost-types = { version = "0.13" }
+figment = { version = "0.10", features = ["env", "toml"] }
+clap = { version = "4", features = ["derive", "env"] }
+tower = { version = "0.5" }
 hyper = { version = "=1.7.0" }
 hyper-util = { version = "=0.1.17" }
 mio = { version = "=1.1.1" }
