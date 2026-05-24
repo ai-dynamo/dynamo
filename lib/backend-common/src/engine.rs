@@ -10,20 +10,97 @@
 //! Object-safety: every instance method takes `&self`. `Arc<dyn LLMEngine>` is
 //! the handle `Worker` drives the lifecycle through.
 
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use tokio::sync::watch;
 
 use crate::error::DynamoError;
 
+pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
-pub use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+pub use dynamo_llm::protocols::common::preprocessor::{
+    BootstrapInfo, PrefillResult, PreprocessedRequest,
+};
 pub use dynamo_llm::protocols::common::{
     FinishReason, OutputOptions, SamplingOptions, StopConditions,
 };
 pub use dynamo_protocols::types::CompletionUsage;
 pub use dynamo_runtime::engine::AsyncEngineContext;
+
+/// Per-request handle wrapping the runtime context. `Deref`s to
+/// `dyn AsyncEngineContext` so engine code uses it transparently.
+pub struct GenerateContext {
+    inner: Arc<dyn AsyncEngineContext>,
+    /// Decode-mode first-token signal. `Some` only on decode-mode requests;
+    /// `None` otherwise.
+    first_token: Option<watch::Sender<bool>>,
+    metadata: BTreeMap<String, String>,
+}
+
+impl GenerateContext {
+    pub fn new(
+        inner: Arc<dyn AsyncEngineContext>,
+        first_token: Option<watch::Sender<bool>>,
+    ) -> Self {
+        Self {
+            inner,
+            first_token,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_metadata(
+        inner: Arc<dyn AsyncEngineContext>,
+        first_token: Option<watch::Sender<bool>>,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            inner,
+            first_token,
+            metadata,
+        }
+    }
+
+    /// Clone the underlying runtime context Arc — for spawned tasks
+    /// outliving `generate`'s scope.
+    pub fn inner_arc(&self) -> Arc<dyn AsyncEngineContext> {
+        self.inner.clone()
+    }
+
+    /// Fire the first-token signal. Idempotent; no-op on non-decode
+    /// requests. Engines normally don't need this — the framework
+    /// auto-fires on the first non-empty chunk. Use only when first-token
+    /// is observable via a side channel before the main stream yields.
+    pub fn notify_first_token(&self) {
+        if let Some(tx) = &self.first_token {
+            let _ = tx.send(true);
+        }
+    }
+
+    /// Framework-internal: borrow the underlying Sender for cross-boundary
+    /// threading (PyO3 mirrors this handle into Python's `Context` so
+    /// `notify_first_token()` fires the same signal). Rust engines should
+    /// call [`notify_first_token`](Self::notify_first_token) instead.
+    pub fn first_token_sender(&self) -> Option<&watch::Sender<bool>> {
+        self.first_token.as_ref()
+    }
+
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        &self.metadata
+    }
+}
+
+impl Deref for GenerateContext {
+    type Target = dyn AsyncEngineContext;
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
 
 /// Registration metadata returned by [`LLMEngine::start`].
 ///
@@ -52,6 +129,36 @@ pub struct EngineConfig {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Number of data-parallel ranks this worker hosts. Defaults to 1.
+    /// The router uses this to enumerate per-rank load when scoring.
+    pub data_parallel_size: Option<u32>,
+    /// Global index of the first DP rank this worker hosts. Defaults to 0.
+    /// Non-zero only under multi-worker DP layouts where each worker owns a
+    /// sub-range (e.g. vLLM hybrid/external LB, SGLang DP-attention across
+    /// multiple nodes). The router enumerates ranks
+    /// `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    pub data_parallel_start_rank: Option<u32>,
+    /// Bootstrap host this prefill worker advertises to decode peers.
+    ///
+    /// Only meaningful for backends with a Dynamo-level host/port
+    /// handshake (today: SGLang). Backends whose KV transport is
+    /// internal — TRT-LLM uses TRT-LLM's transceiver, vLLM uses vLLM's
+    /// `NixlConnector` — should leave this `None`.
+    ///
+    /// Engines that do use it set this in `start()` after the engine
+    /// has resolved its bootstrap address (SGLang reads
+    /// `tokenizer_manager.server_args.disaggregation_bootstrap_port`).
+    /// When both `bootstrap_host` and `bootstrap_port` are `Some`,
+    /// `Worker` publishes them via
+    /// `ModelRuntimeConfig::disaggregated_endpoint` so the frontend's
+    /// `PrefillRouter` can take its optimised "Bootstrap path" (route
+    /// decode concurrent with prefill instead of waiting for prefill
+    /// to drain).
+    pub bootstrap_host: Option<String>,
+    /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
+    pub bootstrap_port: Option<u16>,
+    /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
+    pub runtime_data: HashMap<String, serde_json::Value>,
 }
 
 /// Inference engine trait.
@@ -70,12 +177,21 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// calls. `Worker` will register the model and begin serving immediately.
     /// Use interior mutability for any state allocated here.
     ///
+    /// `worker_id` is an opaque, runtime-allocated unique identifier for
+    /// this worker. It is stable from `start()` onward for the worker's
+    /// lifetime and unique across replicas in the cluster. Engines that
+    /// need a per-worker key for cluster-wide bookkeeping (e.g. TRT-LLM's
+    /// 10-bit `disagg_machine_id` snowflake field) should derive it from
+    /// this value rather than hashing host/pid or asking operators for a
+    /// CLI override. The internal mechanism (discovery instance ID) is
+    /// not part of the contract — engines should treat it as opaque.
+    ///
     /// `start()` is async and may take minutes for real backends (e.g.
     /// compiling a model graph on an accelerator). Emit
     /// `tracing::info!` checkpoints so operators see progress — this
     /// call is otherwise a silent window between process launch and
     /// endpoint serving.
-    async fn start(&self) -> Result<EngineConfig, DynamoError>;
+    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>;
 
     /// Yield streaming response chunks for a single request.
     ///
@@ -108,7 +224,7 @@ pub trait LLMEngine: Send + Sync + 'static {
     async fn generate(
         &self,
         request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
+        ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>;
 
     /// Abort an in-flight request (optional, default no-op).
@@ -141,8 +257,187 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Release all engine resources. Called once on shutdown.
+    /// Release all engine resources. Called exactly once.
+    ///
+    /// `Worker` guarantees:
+    ///
+    /// * `cleanup` runs after [`start`](LLMEngine::start) succeeded
+    ///   *and* on shutdown — the common case.
+    /// * `cleanup` also runs after `start` raised, on the partial
+    ///   state the engine may have allocated before failing (inner
+    ///   LLM handle, sockets, background tasks). Implementations
+    ///   **must** be null-safe: guard each resource with an `is
+    ///   None` / `Option::is_some` check so a partially constructed
+    ///   engine can be released without panic.
+    /// * `cleanup` is **not** called when `start` was never invoked
+    ///   (pre-start shutdown via SIGTERM during distributed runtime
+    ///   construction). Engines whose constructors allocate
+    ///   resources must release them via `Drop` rather than rely on
+    ///   `cleanup`.
+    ///
+    /// `cleanup` must also be idempotent: a second call after a
+    /// successful first call must return `Ok(())` without re-entering
+    /// teardown (NCCL groups and similar fail noisily on double-free).
     async fn cleanup(&self) -> Result<(), DynamoError>;
+
+    /// KV event sources advertised by this engine, one per dp_rank.
+    /// Empty by default (engine opts out of KV-aware routing).
+    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        Ok(Vec::new())
+    }
+
+    /// Wire up Prometheus surfaces. Called once by `Worker` after
+    /// [`start`](LLMEngine::start) succeeds. Default returns an empty
+    /// [`MetricsBindings`] (no per-rank gauges, no foreign callbacks).
+    ///
+    /// Two things an engine can produce here:
+    /// 1. Bridge a vendor-prefixed registry (`vllm:*`, `sglang:*`,
+    ///    `trtllm_*`, `lmcache:*`) into the runtime's `/metrics` output
+    ///    via [`EngineMetrics::add_expfmt_callback`](crate::metrics::EngineMetrics::add_expfmt_callback)
+    ///    on `ctx.metrics`. Side-effect only.
+    /// 2. Declare `dp_ranks` in [`MetricsBindings`] to opt into the
+    ///    per-rank `dynamo_component_*` gauges + KV router signal. The
+    ///    framework constructs a
+    ///    [`SnapshotPublisher`](crate::snapshot_publisher::SnapshotPublisher)
+    ///    sized to those ranks and hands it back via
+    ///    [`MetricsBindings::on_publisher_ready`]. Stash the `Arc` and
+    ///    call `publisher.publish(rank, snap)` from your stat-logger
+    ///    thread thereafter — event-driven, no polling.
+    ///
+    /// Framework-owned lifecycle gauges (cleanup_time, drain_time,
+    /// model_load_time) are emitted by `Worker` independent of this
+    /// method — they do NOT require the engine to opt in.
+    ///
+    /// Errors abort startup; `cleanup` runs on the partial state. Do not
+    /// retain `ctx.metrics` past return.
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        Ok(MetricsBindings::default())
+    }
+
+    /// Canary payload registered with the runtime's `HealthCheckManager`.
+    /// `Worker` calls this once after [`start`](LLMEngine::start). Returning
+    /// `Ok(None)` (default) disables active probing — the endpoint then
+    /// relies on the activity-driven notifier. Operator overrides
+    /// (`DYN_HEALTH_CHECK_PAYLOAD` env / `WorkerConfig`) take precedence
+    /// and fully replace this value when set.
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        Ok(None)
+    }
+}
+
+/// Marker key stamped on canary payloads. Handlers may inspect it to branch
+/// probe-specific behavior (e.g. skip a synthetic first-yield that would
+/// mask a hung engine rank). Re-exported to Python via
+/// `lib/bindings/python/src/dynamo/health_check.py`.
+pub const HEALTH_CHECK_KEY: &str = "_HEALTH_CHECK";
+
+/// Invoked once with a freshly-built publisher; engine drives `publish`
+/// from its own thread thereafter.
+pub type OnPublisherReady =
+    Box<dyn FnOnce(Arc<KvEventPublisher>) -> Result<(), DynamoError> + Send + 'static>;
+
+/// KV event source descriptor. Two flavors: subscribe to an engine-provided
+/// ZMQ PUB, or hand a publisher to the engine and let it drive `publish`
+/// from its own thread (for engines whose event API blocks the caller).
+pub enum KvEventSource {
+    Zmq {
+        endpoint: String,
+        topic: String,
+        dp_rank: u32,
+    },
+    Push {
+        on_ready: OnPublisherReady,
+        dp_rank: u32,
+    },
+}
+
+impl KvEventSource {
+    /// Data-parallel rank this source publishes for.
+    pub fn dp_rank(&self) -> u32 {
+        match self {
+            KvEventSource::Zmq { dp_rank, .. } | KvEventSource::Push { dp_rank, .. } => *dp_rank,
+        }
+    }
+}
+
+/// Worker-level metrics snapshot consumed by the KV router.
+///
+/// `kv_used_blocks` is the primary load signal the router scores against.
+/// `Option` because the engine may not have a snapshot yet on the first few
+/// ticks after `start()`; `Worker` skips the publish call in that case.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Metrics {
+    /// Number of KV blocks currently occupied across all in-flight requests.
+    pub kv_used_blocks: Option<u64>,
+}
+
+/// Rich per-rank snapshot driving both the router-input signal and the
+/// per-rank `dynamo_component_*` gauges.
+///
+/// Engines call
+/// [`SnapshotPublisher::publish`](crate::snapshot_publisher::SnapshotPublisher::publish)
+/// with a fresh `ComponentSnapshot` from their stat-logger thread —
+/// event-driven, no polling. The publisher atomically updates both
+/// consumers inline (Rust gauges + NATS router signal).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ComponentSnapshot {
+    pub kv_used_blocks: u64,
+    pub kv_total_blocks: u64,
+    /// Fractional cache usage, 0.0..1.0.
+    pub gpu_cache_usage: f32,
+    /// Fractional prefix cache hit rate, 0.0..1.0.
+    ///
+    /// Tri-state:
+    /// - `Some(x)`: engine measured a hit rate this interval (publish as gauge).
+    /// - `None`: no data yet OR engine has no prefix cache. The
+    ///   gauge is NOT updated — distinguishes "0% hits" (which is a
+    ///   legitimate measurement) from "we never measured."
+    ///
+    /// Each backend computes from its native counters
+    /// (vLLM: `PrefixCacheStats.hits/queries`,
+    ///  SGLang: `kv_metrics.cache_hit_rate_perc`,
+    ///  TRT-LLM: `kv_stats["cacheHitRate"]`).
+    pub kv_cache_hit_rate: Option<f32>,
+    pub dp_rank: u32,
+}
+
+/// Context handed to [`LLMEngine::setup_metrics`].
+pub struct MetricsCtx<'a> {
+    pub model: &'a str,
+    pub component: &'a str,
+    pub model_load_time_seconds: f64,
+    /// Use this to bridge a vendor-prefixed Prometheus registry into the
+    /// runtime's `/metrics` output via `add_expfmt_callback`. Do NOT
+    /// retain past the call's return.
+    pub metrics: &'a crate::metrics::EngineMetrics,
+}
+
+/// Invoked once with a freshly-built [`SnapshotPublisher`]; engine drives
+/// `publish(rank, snapshot)` from its own stat-logger threads thereafter.
+///
+/// Mirror of [`OnPublisherReady`] for the KV-event Push flavor — same
+/// "framework constructs, engine writes" handoff pattern.
+pub type OnSnapshotPublisherReady = Box<
+    dyn FnOnce(Arc<crate::snapshot_publisher::SnapshotPublisher>) -> Result<(), DynamoError>
+        + Send
+        + 'static,
+>;
+
+/// What an engine returns from [`LLMEngine::setup_metrics`].
+///
+/// - `dp_ranks`: the data-parallel ranks this engine will publish
+///   snapshots for. Stable for the engine's lifetime. Empty = opt out.
+/// - `on_publisher_ready`: invoked exactly once with the constructed
+///   `SnapshotPublisher`. Engine stashes it and calls
+///   `publisher.publish(rank, snap)` from its stat-logger thereafter.
+///
+/// Foreign-registry expfmt callbacks (vLLM/SGLang/TRT-LLM vendor metrics)
+/// are wired as a side effect on `ctx.metrics` in `setup_metrics` — they
+/// don't flow through this struct.
+#[derive(Default)]
+pub struct MetricsBindings {
+    pub dp_ranks: Vec<u32>,
+    pub on_publisher_ready: Option<OnSnapshotPublisherReady>,
 }
 
 /// Non-terminal chunk constructor. Terminal chunks come from upstream

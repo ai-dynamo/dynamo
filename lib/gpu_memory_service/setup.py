@@ -53,7 +53,6 @@ setup(
     license="Apache-2.0",
     python_requires=">=3.10",
     install_requires=[
-        "msgpack>=1.0",
         "uvloop>=0.21.0",
     ],
     extras_require={
@@ -81,6 +80,7 @@ setup(
         "gpu_memory_service.integrations.trtllm",
         "gpu_memory_service.integrations.vllm",
         "gpu_memory_service.snapshot",
+        "gpu_memory_service.snapshot.backends",
     ],
     package_dir={
         "gpu_memory_service": ".",
@@ -100,6 +100,7 @@ setup(
         "gpu_memory_service.integrations.trtllm": "integrations/trtllm",
         "gpu_memory_service.integrations.vllm": "integrations/vllm",
         "gpu_memory_service.snapshot": "snapshot",
+        "gpu_memory_service.snapshot.backends": "snapshot/backends",
     },
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],

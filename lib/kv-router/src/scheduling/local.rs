@@ -15,8 +15,10 @@ use super::prefill_load::PrefillLoadEstimator;
 use super::queue::SchedulerQueue;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks,
 };
+use crate::protocols::RoutingConstraints;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
@@ -62,10 +64,46 @@ where
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
+        queue_depth_tiers: crate::scheduling::config::RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         policy: S,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Self {
+        Self::new_with_overload_provider(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            queue_depth_tiers,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            None,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_overload_provider(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        queue_depth_tiers: crate::scheduling::config::RouterQueueDepthTiers,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -106,14 +144,16 @@ where
             });
         }
 
-        let queue = Arc::new(SchedulerQueue::new(
+        let queue = Arc::new(SchedulerQueue::new_with_overload_provider(
             Arc::clone(&slots),
             workers_with_configs,
             threshold_frac,
+            queue_depth_tiers,
             block_size,
             selector,
             policy,
             prefill_load_estimator,
+            overloaded_worker_provider,
         ));
         let (queue_updates, _) = watch::channel(());
         let queue_remote_updates = Arc::clone(&queue);
@@ -185,6 +225,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
         shared_cache_hits: Option<crate::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -201,6 +242,7 @@ where
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens,
+            routing_constraints,
             router_config_override: router_config_override.cloned(),
             update_states,
             lora_name,
@@ -392,6 +434,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
+            crate::scheduling::config::RouterQueueDepthTiers::unbounded_cap(),
             64,
             DefaultWorkerSelector::new(None, "test"),
             FcfsPolicy,
@@ -457,6 +500,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -501,6 +545,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -545,6 +590,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -590,6 +636,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -613,6 +660,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -657,6 +705,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -680,6 +729,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -738,6 +788,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -761,6 +812,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -818,6 +870,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -841,6 +894,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -896,6 +950,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -996,6 +1051,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -1094,6 +1150,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await

@@ -71,8 +71,19 @@ fn build_block_regex(config: &DsmlParserConfig) -> anyhow::Result<Regex> {
     Ok(Regex::new(&block_pattern)?)
 }
 
-/// Parse DSML formatted tool calls from a message
-/// Returns (parsed_tool_calls, normal_text_content)
+/// Parse DSML formatted tool calls from a message.
+///
+/// Returns `(parsed_tool_calls, normal_text_content)`. `normal_text` is the
+/// text BEFORE the first `<｜DSML｜tool_calls>` / `<｜DSML｜function_calls>`
+/// start marker. Text between blocks, after the last block, and any
+/// back-to-back-block content are all dropped — matching upstream vLLM
+/// (`vllm/tool_parsers/deepseek_v4_tool_parser.py` and the V3.2 sibling),
+/// which compute `content = model_output[:content_end]` where
+/// `content_end = model_output.find(self.tool_call_start_token)`.
+///
+/// Per `tests/parity/README.md`: vLLM and SGLang both drop trailing text
+/// after the wrapper across XML-style families; this aligns Dynamo to that
+/// behavior. Cases: PARSER.batch.{2.b, 2.c, 8.b, 8.c, 8.d}.
 pub fn try_tool_call_parse_dsml(
     message: &str,
     config: &DsmlParserConfig,
@@ -94,10 +105,17 @@ pub fn try_tool_call_parse_dsml(
     let block_regex = build_block_regex(config)?;
     let tool_calls = extract_tool_calls_with_regex(trimmed, &block_regex, config)?;
 
+    // Whether or not invokes parsed, normal_text is the prefix before the
+    // first block_start — mirrors vLLM's success path. On no-invokes the
+    // markup-leak warning still fires for the diagnostic trail.
+    let pre_block_text = start_idx
+        .map(|idx| trimmed[..idx].to_string())
+        .unwrap_or_default();
+
     if tool_calls.is_empty() {
         // A block-start was detected but no valid invokes parsed. Do NOT leak
-        // the DSML markup back to the client; return only the pre-block text
-        // and emit a diagnostic with a prefix of the failed block.
+        // the DSML markup back to the client; emit a diagnostic with a prefix
+        // of the failed block.
         //
         // Note: an unterminated block-start here means `block_regex` finds no
         // match at all, so any valid block *after* the unterminated one is
@@ -106,22 +124,35 @@ pub fn try_tool_call_parse_dsml(
             let failed = &trimmed[idx..];
             let prefix: String = failed.chars().take(120).collect();
             tracing::warn!(
-                "DSML tool_calls block parsed no invokes; suppressing markup. prefix={:?}",
+                why = "no_invokes_parsed",
+                stripped_bytes = failed.len(),
+                "DSML strip (recovery): block_start detected but extract_tool_calls returned 0 invokes; suppressing all bytes from block_start onward so tool-call markup never bleeds into normal_text. preview={:?}",
                 prefix
             );
         }
-        let pre_block_text = start_idx
-            .map(|idx| trimmed[..idx].to_string())
-            .unwrap_or_default();
         return Ok((vec![], Some(pre_block_text)));
     }
 
-    // Preserve inter-block and trailing text: strip every complete block span
-    // from the trimmed input rather than slicing up to the first start token.
-    // Without this we silently lose text between and after multiple blocks.
-    let normal_text = block_regex.replace_all(trimmed, "").to_string();
+    // Success path: prefix-only contract — everything from the first block_start
+    // onward (the block(s) themselves plus any inter-block / trailing narration)
+    // is stripped from normal_text. Mirrors vLLM's
+    // `content = model_output[:content_end]`.
+    if let Some(idx) = start_idx {
+        let stripped = &trimmed[idx..];
+        if !stripped.is_empty() {
+            let preview: String = stripped.chars().take(120).collect();
+            tracing::debug!(
+                why = "prefix_only_contract",
+                n_calls = tool_calls.len(),
+                kept_prefix_bytes = pre_block_text.len(),
+                stripped_bytes = stripped.len(),
+                "DSML strip (success): kept prefix before first block_start; dropped parsed-block(s) + any inter-block / trailing narration. preview={:?}",
+                preview
+            );
+        }
+    }
 
-    Ok((tool_calls, Some(normal_text)))
+    Ok((tool_calls, Some(pre_block_text)))
 }
 
 /// Extract all tool calls matched by `block_regex` from the DSML formatted text.
@@ -275,6 +306,12 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // DEPRECATED(parser-fixture-duplicate): Legacy V4 coverage manifest.
+    // The blackbox case mapping now lives in the YAML parser fixtures under
+    // tests/parity/parser/fixtures/deepseek_v4/ and the taxonomy in
+    // lib/parsers/PARSER_CASES.md; keep this temporarily as a pointer while
+    // the duplicate Rust tests are being retired.
+    //
     // DeepSeek V4 coverage (see lib/parsers/PARSER_CASES.md for PARSER.* taxonomy).
     //
     // Covered by the V4 tests below (or by a shared DSML generic test):
@@ -366,6 +403,7 @@ mod tests {
         assert_eq!(&text[pos..], "more");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.yaml.
     #[test] // PARSER.batch.1
     fn test_parse_single_tool_call_string_param() {
         let input = r#"<｜DSML｜function_calls>
@@ -394,6 +432,7 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1, PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml, tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.yaml.
     #[test] // PARSER.batch.1, PARSER.batch.7
     fn test_parse_single_tool_call_mixed_params() {
         let input = r#"<｜DSML｜function_calls>
@@ -413,6 +452,7 @@ mod tests {
         assert_eq!(args["topn"], 10);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.2.yaml.
     #[test] // PARSER.batch.2
     fn test_parse_multiple_tool_calls() {
         let input = r#"<｜DSML｜function_calls>
@@ -440,6 +480,7 @@ mod tests {
     }
 
     /// `PARSER.batch.2` multi-calls + `PARSER.batch.8` interleaved-text (prefix text before the block).
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.c, PARSER.batch.8.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.2.yaml, tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.2, PARSER.fmt.3 — V4 variant
     fn test_parse_deepseek_v4_multiple_tool_calls() {
         let input = r#"Let's check this. <｜DSML｜tool_calls>
@@ -473,6 +514,7 @@ mod tests {
     }
 
     /// `PARSER.batch.6` — empty args (no-parameter invoke).
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.6.yaml.
     #[test] // PARSER.batch.6, PARSER.fmt.3 — V4 variant
     fn test_parse_deepseek_v4_no_parameters() {
         let input = r#"<｜DSML｜tool_calls>
@@ -490,6 +532,7 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.8
     fn test_parse_with_normal_text() {
         let input = r#"Here's the result: <｜DSML｜function_calls>
@@ -537,6 +580,7 @@ mod tests {
         assert_eq!(normal, Some(input.to_string()));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_json_parameter_value() {
         let input = r#"<｜DSML｜function_calls>
@@ -555,6 +599,7 @@ mod tests {
         assert_eq!(args["config"]["count"], 42);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_array_parameter_value() {
         let input = r#"<｜DSML｜function_calls>
@@ -573,6 +618,7 @@ mod tests {
         assert_eq!(args["items"][2], 3);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_boolean_parameters() {
         let input = r#"<｜DSML｜function_calls>
@@ -591,6 +637,7 @@ mod tests {
         assert_eq!(args["disabled"], false);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_number_parameters() {
         let input = r#"<｜DSML｜function_calls>
@@ -611,6 +658,7 @@ mod tests {
         assert_eq!(args["negative"], -100);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_mixed_types_realistic() {
         // Realistic example based on test data
@@ -633,6 +681,7 @@ mod tests {
         assert_eq!(args["source"], "web");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_nested_object_parameter() {
         let input = r#"<｜DSML｜function_calls>
@@ -653,6 +702,7 @@ mod tests {
         assert_eq!(args["settings"]["endpoints"][0], "a");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.b in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_empty_string_parameter() {
         let input = r#"<｜DSML｜function_calls>
@@ -772,10 +822,10 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_block_preserves_inter_and_trailing_text() {
+    fn test_multi_block_drops_inter_and_trailing_text() {
         // Two complete DSML blocks with text before, between, and after.
-        // Both blocks must be parsed AND the inter-block / trailing text must
-        // survive in normal_content.
+        // Both blocks must be parsed; only the pre-block prefix survives in
+        // normal_content — matches vLLM (drops inter / trailing).
         let input = "pre <｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"a\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> middle <｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"b\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> tail";
 
         let config = get_v4_test_config();
@@ -785,12 +835,7 @@ mod tests {
         assert_eq!(calls[1].function.name, "b");
 
         let normal = normal.unwrap();
-        assert!(
-            normal.contains(" middle "),
-            "inter-block text lost: {:?}",
-            normal
-        );
-        assert!(normal.contains(" tail"), "trailing text lost: {:?}", normal);
+        assert_eq!(normal, "pre ", "only pre-block text survives: {:?}", normal);
         assert!(
             !normal.contains("<｜DSML｜"),
             "normal_content leaked DSML markup: {:?}",
@@ -821,29 +866,18 @@ mod tests {
             "outer invoke name is matched first (non-greedy)"
         );
 
+        // After alignment to vLLM, normal_text is the prefix BEFORE the first
+        // block_start only — trailing text after the block is dropped.
         let normal = normal.unwrap();
-        assert!(
-            normal.starts_with("pre"),
-            "pre-block text must survive: {:?}",
-            normal
-        );
-        assert!(
-            normal.contains(" tail"),
-            "trailing text must survive: {:?}",
-            normal
-        );
+        assert_eq!(normal, "pre ", "only pre-block text survives: {:?}", normal);
         assert!(
             !normal.contains("<｜DSML｜tool_calls>"),
             "normal_content leaked block_start: {:?}",
             normal
         );
-        assert!(
-            !normal.contains("</｜DSML｜tool_calls>"),
-            "normal_content leaked block_end: {:?}",
-            normal
-        );
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a, PARSER.batch.9 in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml, tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.yaml.
     #[test] // PARSER.batch.7, PARSER.batch.9
     fn test_parse_null_parameter() {
         let input = r#"<｜DSML｜function_calls>
@@ -882,6 +916,7 @@ mod tests {
     /// into `normal_text` when block-start appears but no invokes parse —
     /// it returns the pre-block text only (empty here, since the input
     /// starts with the block-start fence). The call is still dropped.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.5, PARSER.fmt.3 — V4 variant
     fn test_parse_deepseek_v4_missing_end_token() {
         // Start fence + complete invoke, but no </｜DSML｜tool_calls>.
@@ -913,6 +948,7 @@ mod tests {
     /// absence of the closing fence prevents the block regex from matching.
     /// All calls are dropped. If the parser ever gains partial-block
     /// recovery, this test will fail and force an intentional update.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a, PARSER.batch.5.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.2.yaml, tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.2, PARSER.batch.5, PARSER.fmt.3
     fn test_parse_deepseek_v4_missing_end_token_multiple_calls() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -938,6 +974,7 @@ mod tests {
     /// (unwrap_or_else → Value::String). Pin the fallback so removing it
     /// (which would cause the whole call to 500 on ragged-edge JSON) is a
     /// deliberate change.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4, PARSER.fmt.3
     fn test_parse_deepseek_v4_malformed_json_value_falls_back_to_string() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -962,6 +999,7 @@ mod tests {
     /// `PARSER.batch.4` — malformed invoke (missing `</｜DSML｜invoke>` but block fences
     /// intact). The invoke regex requires its own close tag, so the call is
     /// silently dropped. Pin the behavior.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4, PARSER.fmt.3
     fn test_parse_deepseek_v4_missing_invoke_close_drops_call() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -986,6 +1024,7 @@ mod tests {
     /// TODO(PARSER.batch.4) — BUG, NEEDS FIX: parser silently loses the parameter
     /// and ships an under-specified call to the user. The fix should keep
     /// the raw value up to `</｜DSML｜invoke>`. Flip this test once fixed.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4, PARSER.fmt.3
     fn test_parse_deepseek_v4_missing_parameter_close_loses_param() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -1016,6 +1055,7 @@ mod tests {
     /// silently dropped — caller receives wrong args for A and never sees
     /// B at all. Fix: anchor on `<｜DSML｜invoke name=` to re-sync between
     /// invokes. Flip this test once fixed.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4, PARSER.fmt.3
     fn test_parse_deepseek_v4_middle_invoke_truncation_corrupts_next() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -1065,6 +1105,7 @@ mod tests {
     /// `<think>...</think>` before the DSML block; the tool parser is
     /// concerned only with the DSML, but normal text must round-trip
     /// the reasoning markup verbatim for the reasoning parser to pick up.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.8
     fn test_parse_reasoning_plus_tool_v4() {
         let input = "<think>Let me check the weather.</think>\
@@ -1136,6 +1177,7 @@ mod tests {
 
     /// `PARSER.batch.9` — empty / null content variants. Pin behavior on truly
     /// empty bytes and whitespace-only inputs.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.yaml.
     #[test] // PARSER.batch.9
     fn test_parse_empty_and_whitespace_inputs_v4() {
         let config = get_v4_test_config();
@@ -1159,6 +1201,7 @@ mod tests {
 
     /// `PARSER.batch.10` — duplicate calls (same invoke name twice in one block).
     /// Universal gap noted in the test taxonomy; first DSML coverage.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.yaml.
     #[test] // PARSER.batch.10
     fn test_parse_duplicate_invokes_same_name_v4() {
         let input = "<｜DSML｜tool_calls>\n\

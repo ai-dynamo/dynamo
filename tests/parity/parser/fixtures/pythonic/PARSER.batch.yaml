@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: pythonic
+model_label: Llama 4 (pythonic fmt)
 mode: batch
 cases:
   PARSER.batch.1:
     description: Single tool call (happy path)
     model_text: '[get_weather(location="NYC")]'
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -16,16 +17,184 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-  PARSER.batch.2:
-    description: Multiple tool calls (parallel)
-    model_text: '[get_weather(location="NYC"), get_time(timezone="EST")]'
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  PARSER.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
     tools:
-    - *id001
+    - *id002
+    expected:
+      dynamo: &id003
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm: *id003
+      sglang: *id003
+  PARSER.batch.9.a:
+    description: Empty model text
+    model_text: ''
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
+      sglang:
+        calls: []
+        normal_text: '   '
+  PARSER.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: '[get_weather(location="NYC"), get_weather(location="LA")]'
+    tools:
+    - *id002
+    expected:
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id005
+      sglang: *id005
+  PARSER.batch.30.a:
+    description: Pythonic call separator `,` inside one argument string value
+    ref: dynamo
+    model_text: '[run_query(sql="SELECT a, SELECT b")]'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        normal_text: ''
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        normal_text: ''
+  PARSER.batch.30.b:
+    description: Pythonic/list structural delimiters `}` and `]` inside one argument string value
+    ref: dynamo
+    model_text: '[run_query(sql="SELECT value WHERE note has brace } and bracket ]")]'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        normal_text: ''
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        normal_text: ''
+  PARSER.batch.30.c:
+    description: Tool-call marker-looking `[get_time ...]` text inside one argument string value
+    ref: dynamo
+    model_text: '[run_query(sql="literal [get_time marker] stays text")]'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: literal [get_time marker] stays text
+        normal_text: ''
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: literal [get_time marker] stays text
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: literal [get_time marker] stays text
+        normal_text: ''
+  PARSER.batch.31.a:
+    description: Multi-call Pythonic list with call separator `,` inside the first argument string
+    ref: dynamo
+    model_text: '[run_query(sql="SELECT a, SELECT b"), get_time(timezone="EST")]'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
     - name: get_time
       parameters:
         type: object
@@ -33,93 +202,140 @@ cases:
           timezone:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
-  PARSER.batch.3:
-    description: No tool call (plain text)
-    model_text: Hello, how can I help you today?
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+  PARSER.batch.31.b:
+    description: Multi-call response with structural delimiters inside one argument string value
+    ref: dynamo
+    model_text: '[run_query(sql="SELECT value WHERE note has brace } and bracket ]"), get_time(timezone="EST")]'
     tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: Hello, how can I help you today?
-  PARSER.batch.4:
-    description: Malformed (missing closing bracket)
-    model_text: '[get_weather(location="NYC"'
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: '[get_weather(location="NYC"'
-  PARSER.batch.5:
-    description: Missing closing `]` end marker
-    model_text: '[get_weather(location="NYC")'
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: '[get_weather(location="NYC")'
-  PARSER.batch.6:
-    description: Empty args (no-arg call)
-    model_text: '[get_time()]'
-    tools:
-    - name: get_time
-      parameters:
-        type: object
-        properties: {}
-    expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
-  PARSER.batch.7:
-    description: Complex args (nested dict + array)
-    model_text: '[process_data(items=[1, 2, 3], config={"nested": True})]'
-    tools:
-    - name: process_data
+    - name: run_query
       parameters:
         type: object
         properties:
-          items:
-            type: array
-          config:
-            type: object
+          sql:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
     expected:
-      calls:
-      - name: process_data
-        arguments:
-          items:
-          - 1
-          - 2
-          - 3
-          config:
-            nested: true
-      normal_text: ''
-  PARSER.batch.9:
-    description: Empty input
-    model_text: ''
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+  PARSER.batch.13.a:
+    description: Unknown-only call under default behavior
+    ref: originated from https://github.com/sgl-project/sglang/blob/612785ffdcaf35552f1ed433a981d596ca9fe900/test/registered/unit/function_call/test_function_call_parser.py#L3147
+    model_text: '[unknown_tool(location="NYC")]'
     tools:
-    - *id001
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      calls: []
-      normal_text: ''
-  PARSER.batch.10:
-    description: Duplicate calls (same name twice)
-    model_text: '[get_weather(location="NYC"), get_weather(location="LA")]'
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang PythonicDetector drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls in one response
+    ref: dynamo
+    model_text: '[get_weather(location="NYC"), unknown_tool(location="LA")]'
     tools:
-    - *id001
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+        reason: SGLang PythonicDetector drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.

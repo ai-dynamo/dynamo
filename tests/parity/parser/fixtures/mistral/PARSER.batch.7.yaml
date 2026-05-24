@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: mistral
+mode: batch
+cases:
+  PARSER.batch.7.a:
+    description: Standard scalar types
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "book_flight", "arguments": {"destination": "Paris", "passengers": 2, "first_class":
+      true}}][/TOOL_CALLS]'
+    tools:
+    - name: book_flight
+      parameters:
+        type: object
+        properties:
+          destination:
+            type: string
+          passengers:
+            type: integer
+          first_class:
+            type: boolean
+    expected:
+      dynamo: &id001
+        calls:
+        - name: book_flight
+          arguments:
+            destination: Paris
+            first_class: true
+            passengers: 2
+        normal_text: ''
+      vllm: *id001
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.7.b:
+    description: Unicode + escaped chars
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "Tōkyō \"central\""}}][/TOOL_CALLS]'
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id002
+        calls:
+        - name: get_weather
+          arguments:
+            location: Tōkyō "central"
+        normal_text: ''
+      vllm: *id002
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.7.c:
+    description: Schema mismatch — string value where schema declares integer
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "set_temperature", "arguments": {"celsius": "20"}}][/TOOL_CALLS]'
+    tools:
+    - name: set_temperature
+      parameters:
+        type: object
+        properties:
+          celsius:
+            type: integer
+    expected:
+      dynamo: &id003
+        calls:
+        - name: set_temperature
+          arguments:
+            celsius: '20'
+        normal_text: ''
+      vllm: *id003
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.7.d:
+    description: Nested object + array
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "process_data", "arguments": {"items": [1,2,3], "config": {"nested": true}}}][/TOOL_CALLS]'
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          items:
+            type: array
+          config:
+            type: object
+    expected:
+      dynamo: &id004
+        calls:
+        - name: process_data
+          arguments:
+            items:
+            - 1
+            - 2
+            - 3
+            config:
+              nested: true
+        normal_text: ''
+      vllm: *id004
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.7.e:
+    description: Large / deep JSON-edge argument payload
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "process_data", "arguments": {"payload": {"regions": [{"name": "west", "scores": [1,
+      2, 3]}, {"name": "east", "scores": [4, 5, 6]}], "flags": {"enabled": true, "retry": null}, "empty": {}}}}][/TOOL_CALLS]'
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          payload:
+            type: object
+    expected:
+      dynamo:
+        calls:
+        - name: process_data
+          arguments:
+            payload:
+              regions:
+              - name: west
+                scores:
+                - 1
+                - 2
+                - 3
+              - name: east
+                scores:
+                - 4
+                - 5
+                - 6
+              flags:
+                enabled: true
+                retry: null
+              empty: {}
+        normal_text: ''
+      vllm:
+        calls:
+        - name: process_data
+          arguments:
+            payload:
+              regions:
+              - name: west
+                scores:
+                - 1
+                - 2
+                - 3
+              - name: east
+                scores:
+                - 4
+                - 5
+                - 6
+              flags:
+                enabled: true
+                retry: null
+              empty: {}
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.7.f:
+    description: Numeric precision edge test 7.f — not yet authored for this family
+    reason: Numeric precision edge test 7.f not yet authored for mistral; Qwen3-Coder coverage is provided by qwen3_coder 7.f.

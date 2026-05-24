@@ -7,6 +7,7 @@ from typing import Awaitable, Callable
 
 import sglang as sgl
 
+from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
@@ -17,6 +18,7 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import EmbeddingWorkerHandler
+from dynamo.sglang.request_handlers.embedding.metrics import init_embedding_metrics
 
 
 async def init_embedding(
@@ -41,6 +43,26 @@ async def init_embedding(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+
+    # Wire ``dynamo_embedding_*`` histograms to the worker's /metrics
+    # endpoint via a dedicated CollectorRegistry — the default Prometheus
+    # global registry is not exposed by the Dynamo SGLang publisher.
+    # Done AFTER engine init (and after setup_sgl_metrics) so the lazy
+    # ``prometheus_client`` import in metrics.py doesn't interfere with
+    # SGLang's multiprocess Prometheus setup.
+    from prometheus_client import CollectorRegistry
+
+    embedding_metrics_registry = CollectorRegistry()
+    register_engine_metrics_callback(
+        endpoint=generate_endpoint,
+        registry=embedding_metrics_registry,
+        metric_prefix_filters=["dynamo_embedding_"],
+        namespace_name=dynamo_args.namespace,
+        component_name=dynamo_args.component,
+        endpoint_name=dynamo_args.endpoint,
+        model_name=server_args.served_model_name,
+    )
+    init_embedding_metrics(embedding_metrics_registry)
 
     ready_event = asyncio.Event()
 

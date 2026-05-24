@@ -6,10 +6,10 @@ mode: batch
 cases:
   PARSER.batch.8.a:
     description: Narration before tool call only
-    ref: inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L194
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L194
     model_text: I will check the weather. <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,61 +17,82 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm: *id001
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+        reason: preserves whitespace before tool-call wrapper start
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
     model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|> Let me know if you need more.
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: Let me know if you need more.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: None
+      dynamo: &id003
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
     model_text: I will check the weather. <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|> Let me know if
       you need more.
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.  Let me know if you need more.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: 'I will check the weather.'
+      dynamo: &id004
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm: *id004
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+        reason: preserves pre-tool-call whitespace and drops trailing normal_text after tool-call wrapper end
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
     model_text: I will check the weather. <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|> Then check LA weather.
       <|tool_call>call:get_weather{location:<|"|>LA<|"|>}<tool_call|>
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: I will check the weather.  Then check LA weather.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_weather', 'arguments': {'location': 'LA'}}]
-    #   normal_text: 'I will check the weather.'
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: I will check the weather.
+      vllm: *id005
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: 'I will check the weather. '
+        reason: preserves pre-tool-call whitespace and drops trailing normal_text after tool-call wrapper end

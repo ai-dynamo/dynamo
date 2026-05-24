@@ -101,6 +101,10 @@ impl NvExtProvider for NvCreateChatCompletionRequest {
     fn raw_prompt(&self) -> Option<String> {
         None
     }
+
+    fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        Some(&self.unsupported_fields)
+    }
 }
 
 /// Implements `AnnotationsProvider` for `NvCreateChatCompletionRequest`,
@@ -114,12 +118,6 @@ impl AnnotationsProvider for NvCreateChatCompletionRequest {
     }
 
     /// Checks whether a specific annotation exists in the request.
-    ///
-    /// # Arguments
-    /// * `annotation` - A string slice representing the annotation to check.
-    ///
-    /// # Returns
-    /// `true` if the annotation exists, `false` otherwise.
     fn has_annotation(&self, annotation: &str) -> bool {
         self.nvext
             .as_ref()
@@ -264,6 +262,10 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     fn get_skip_special_tokens(&self) -> Option<bool> {
         self.common.skip_special_tokens
     }
+
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        self.common.prompt_logprobs
+    }
 }
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,
@@ -294,7 +296,14 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.token_ids())
+        // Token IDs may be provided in the standard OpenAI `stop` array.
+        if let Some(ids) = self.inner.stop.as_ref().and_then(|stop| stop.token_ids()) {
+            return Some(ids);
+        }
+        // Also accept top-level `stop_token_ids` from passthrough clients.
+        self.unsupported_fields
+            .get("stop_token_ids")
+            .and_then(|v| serde_json::from_value::<Vec<crate::types::TokenIdType>>(v.clone()).ok())
     }
 
     /// Returns a reference to the optional `NvExt` extension, if available.
@@ -326,7 +335,8 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     }
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
-        None
+        // Top-level `prompt_logprobs` is carried through CommonExt.
+        self.common.prompt_logprobs
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
@@ -359,6 +369,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // validate::validate_max_tokens(self.inner.max_tokens)?; // warning depricated field
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
+        super::nvext::validate_completion_token_ids_single_choice(
+            self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
         // none for modalities
         // none for prediction
         // none for audio
@@ -510,14 +524,81 @@ mod tests {
             serde_json::from_value(scalar_token_id_stop);
         assert!(result.is_err());
 
-        let unsupported_stop_token_ids = json!({
+        // `stop_token_ids` is accepted and plumbed by the provider trait.
+        let whitelisted_stop_token_ids = json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
             "stop_token_ids": [576]
         });
         let request: NvCreateChatCompletionRequest =
-            serde_json::from_value(unsupported_stop_token_ids)
+            serde_json::from_value(whitelisted_stop_token_ids)
                 .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop_token_ids(), Some(vec![576]));
+        assert!(
+            ValidateRequest::validate(&request).is_ok(),
+            "stop_token_ids must be accepted via PASSTHROUGH_EXTRA_FIELDS"
+        );
+
+        let invalid_stop_token_ids = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": "bad"
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(invalid_stop_token_ids).expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request).expect_err("invalid stop_token_ids");
+        assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn test_passthrough_token_constraints_validate() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "allowed_token_ids": [10, 11],
+            "bad_words_token_ids": [[12, 13]]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert_eq!(
+            request.unsupported_fields.get("allowed_token_ids"),
+            Some(&serde_json::json!([10, 11]))
+        );
+        assert_eq!(
+            request.unsupported_fields.get("bad_words_token_ids"),
+            Some(&serde_json::json!([[12, 13]]))
+        );
+        assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
+    fn test_completion_token_ids_rejected_for_multi_choice() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "n": 2,
+            "nvext": {
+                "extra_fields": ["completion_token_ids"]
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
+        assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    #[test]
+    fn test_truncate_prompt_tokens_rejected_until_supported() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "truncate_prompt_tokens": 2
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
         assert!(ValidateRequest::validate(&request).is_err());
     }
 }

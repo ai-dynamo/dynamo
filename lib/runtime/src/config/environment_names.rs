@@ -303,6 +303,33 @@ pub mod llm {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
+    /// Enable the LoRA allocation controller (set to "true" to enable)
+    pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
+
+    /// LoRA allocation algorithm ("hrw" or "random")
+    pub const DYN_LORA_ALLOCATION_ALGORITHM: &str = "DYN_LORA_ALLOCATION_ALGORITHM";
+
+    /// LoRA allocation controller recompute interval in seconds
+    pub const DYN_LORA_ALLOCATION_TIMESTEP_SECS: &str = "DYN_LORA_ALLOCATION_TIMESTEP_SECS";
+
+    /// Ticks to wait before scaling down a LoRA's replicas
+    pub const DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS: &str =
+        "DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS";
+
+    /// Multiplier for the load estimator's rate window relative to the controller timestep.
+    pub const DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER: &str =
+        "DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER";
+
+    /// Number of counter buckets per second in the BucketedRateCounter.
+    pub const DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND: &str =
+        "DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND";
+
+    /// Load predictor type: "none" (raw counts) or "ema" (exponential moving average).
+    pub const DYN_LORA_ALLOCATION_PREDICTOR_TYPE: &str = "DYN_LORA_ALLOCATION_PREDICTOR_TYPE";
+
+    /// EMA smoothing factor (alpha) for the EMA predictor. Range [0.0, 1.0].
+    pub const DYN_LORA_ALLOCATION_EMA_ALPHA: &str = "DYN_LORA_ALLOCATION_EMA_ALPHA";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -350,6 +377,11 @@ pub mod llm {
 
     /// Agent trace configuration
     pub mod agent_trace {
+        /// Master switch. Truthy enables tracing with defaults for sinks,
+        /// output path, and the ZMQ tool-event endpoint; other variables below
+        /// override individual knobs.
+        pub const DYN_AGENT_TRACE: &str = "DYN_AGENT_TRACE";
+
         /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
         pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
 
@@ -397,6 +429,13 @@ pub mod model {
 
         /// Model Express cache path
         pub const MODEL_EXPRESS_CACHE_PATH: &str = "MODEL_EXPRESS_CACHE_PATH";
+
+        /// Disable shared-storage mode for the Model Express client. When set,
+        /// the client streams model files from the server over gRPC instead of
+        /// relying on a shared filesystem path. Required when the Model Express
+        /// server and worker pods do not share a filesystem (e.g. RWO PVCs,
+        /// cross-namespace deployments). Set to "1" or "true" to enable.
+        pub const MODEL_EXPRESS_NO_SHARED_STORAGE: &str = "MODEL_EXPRESS_NO_SHARED_STORAGE";
     }
 
     /// Hugging Face configuration
@@ -598,6 +637,14 @@ mod tests {
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_LORA_ALLOCATION_ENABLED,
+            llm::DYN_LORA_ALLOCATION_ALGORITHM,
+            llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
+            llm::DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS,
+            llm::DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER,
+            llm::DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND,
+            llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
+            llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
@@ -608,6 +655,7 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE,
             llm::agent_trace::DYN_AGENT_TRACE_SINKS,
             llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
             llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
@@ -621,6 +669,7 @@ mod tests {
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
+            model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE,
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,

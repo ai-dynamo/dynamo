@@ -43,11 +43,15 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
+    MediaDecoder,
+    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     register_model,
 )
 from dynamo.runtime import DistributedRuntime
@@ -62,18 +66,6 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerFactory,
 )
 from dynamo.trtllm.utils.trtllm_utils import deep_update
-
-# Optional imports for Rust frontend media decoding support
-MediaDecoder: type | None = None
-MediaFetcher: type | None = None
-try:
-    from dynamo.llm import MediaDecoder, MediaFetcher
-
-    MEDIA_DECODER_AVAILABLE = True
-except ImportError:
-    MediaDecoder = None
-    MediaFetcher = None
-    MEDIA_DECODER_AVAILABLE = False
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
@@ -518,6 +510,9 @@ async def init_llm_worker(
         attention_dp_size = engine.get_attention_dp_size()
         runtime_config.data_parallel_size = attention_dp_size
 
+        # Set topology and KV transfer policy for topology-aware routing
+        apply_topology_config(runtime_config)
+
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
             f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
@@ -617,12 +612,6 @@ async def init_llm_worker(
         media_decoder = None
         media_fetcher = None
         if config.frontend_decoding:
-            if not MEDIA_DECODER_AVAILABLE:
-                raise RuntimeError(
-                    "--frontend-decoding requires MediaDecoder support. "
-                    "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
-                )
-            assert MediaDecoder is not None and MediaFetcher is not None
             media_decoder = MediaDecoder()
             media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
             media_fetcher = MediaFetcher()
@@ -632,9 +621,21 @@ async def init_llm_worker(
             media_fetcher.allow_direct_port(allow_internal)
 
         # Register the model with runtime config
-        # Encode workers do NOT register - they're internal workers only
-        # Prefill and decode workers register - frontend detects their role via ModelType
+        # Encode workers do NOT register - they're internal workers only.
+        # Prefill and decode workers register
         if config.disaggregation_mode != DisaggregationMode.ENCODE:
+            if config.disaggregation_mode == DisaggregationMode.PREFILL:
+                worker_type = WorkerType.Prefill
+                needs_set: list[WorkerType] = [WorkerType.Decode]
+            elif config.disaggregation_mode == DisaggregationMode.DECODE:
+                worker_type = WorkerType.Decode
+                needs_set = [WorkerType.Prefill]
+            else:
+                # AGGREGATED ("prefill_and_decode")
+                worker_type = WorkerType.Aggregated
+                needs_set = []
+            needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
             await register_model(
                 model_input,
                 model_type,
@@ -647,6 +648,8 @@ async def init_llm_worker(
                 custom_template_path=config.custom_jinja_template,
                 media_decoder=media_decoder,
                 media_fetcher=media_fetcher,
+                worker_type=worker_type,
+                needs=needs,
             )
 
         health_check_payload = TrtllmHealthCheckPayload(

@@ -121,6 +121,12 @@ daemonset:
   # Affinity rules
   affinity: {}
 
+  # Init container configuration
+  initContainer:
+    # Busybox image for seccomp profile deployment
+    image: busybox:latest
+
+# Seccomp profile configuration
 # CRIU can't checkpoint io_uring; this gates the block-iouring ConfigMap and
 # the initContainer that writes the profile. Set to false on RHCOS 9.6+, which
 # already blocks io_uring at the kernel.

@@ -35,6 +35,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 pub fn warning_counter(target_prefixes: &'static [&'static str]) -> Arc<AtomicUsize> {
     static COUNTER: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
 
@@ -52,10 +53,12 @@ pub fn warning_counter(target_prefixes: &'static [&'static str]) -> Arc<AtomicUs
         .clone()
 }
 
+#[allow(dead_code)]
 pub fn reset_warning_count(counter: &Arc<AtomicUsize>) {
     counter.store(0, Ordering::Relaxed);
 }
 
+#[allow(dead_code)]
 pub fn fixture_path(file_name: &str) -> anyhow::Result<String> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("testdata")

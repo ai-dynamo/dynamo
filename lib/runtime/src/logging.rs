@@ -47,7 +47,9 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{filter::Directive, fmt};
 
-use crate::config::{disable_ansi_logging, jsonl_logging_enabled, span_events_enabled};
+use crate::config::{
+    disable_ansi_logging, env_is_truthy, jsonl_logging_enabled, span_events_enabled,
+};
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
 use axum::http;
@@ -90,8 +92,6 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::environment_names::logging as env_logging;
-
-use dynamo_config::env_is_truthy;
 
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";
@@ -1052,6 +1052,14 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             (provider, None, None)
         };
 
+        // Register the provider globally so direct OTel API users
+        // (`opentelemetry::global::tracer(...)`) hit the same exporter as
+        // the tracing-opentelemetry bridge below. Without this, ad-hoc
+        // OTel spans created via `global::tracer()` go to the default
+        // no-op provider and are silently dropped.
+        // Cheap — `SdkTracerProvider` is Arc-shared internally.
+        opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+
         // Get a tracer from the provider
         let tracer = tracer_provider.tracer(service_name.clone());
 
@@ -1085,6 +1093,16 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     } else {
+        // Caller asked for OTLP export but the OTel layer is only installed on
+        // the JSONL path — surface the misconfig instead of silently dropping
+        // traces.
+        if otlp_exporter_enabled() {
+            eprintln!(
+                "WARNING: OTEL_EXPORT_ENABLED=1 has no effect without DYN_LOGGING_JSONL=1. \
+                 OTel layers and OTLP exporter are not installed. Set DYN_LOGGING_JSONL=1 \
+                 to enable trace/log export."
+            );
+        }
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))

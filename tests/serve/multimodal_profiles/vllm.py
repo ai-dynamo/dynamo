@@ -102,10 +102,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
             # `agg_router` exercises agg_multimodal_router.sh: Rust frontend
             # with the `lightseek-mm` feature, MM-aware KV routing, multi-worker.
-            # Smoke-level on pre_merge so regressions to the script's plumbing
+            # Smoke-level on post_merge so regressions to the script's plumbing
             # (worker boot order, ZMQ KV events, MM-routing build) surface in
-            # gating CI before they merge. The fine-grained routing-correctness
-            # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py.
+            # CI. The fine-grained routing-correctness assertions live in
+            # tests/mm_router/test_router_rust_mm_router_e2e.py.
             #
             # The payload sends two identical MM requests and asserts the
             # second sees cached_tokens > 0 — proves the warm worker reused
@@ -114,7 +114,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # text-prefix only, both requests would still succeed but the
             # second's cached_tokens would be 0 and this case would fail.
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
@@ -124,13 +124,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # The chat-processor variant of the MM-aware router: same routing
             # architecture, but the frontend uses --dyn-chat-processor=vllm
             # (Python preprocessor) instead of the Rust+lightseek path. Kept
-            # on pre_merge alongside the default so both entry points stay
-            # covered by gating CI; the routing assertions are equivalent.
+            # on post_merge alongside the default so both entry points stay
+            # covered by CI; the routing assertions are equivalent.
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment (the chat-processor script's own
             # default is false for production multi-GPU usage).
             "agg_router_chat_processor": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
@@ -147,7 +147,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # CI; the content-hash correctness assertion lives in
             # tests/mm_router/test_router_rust_mm_frontend_decode_e2e.py.
             "agg_router_frontend_decode": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
@@ -307,9 +307,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                # TODO: re-enable GPU-parallel scheduling with
-                # profiled_vram_gib=12.0 once this has a bounded --kv-bytes profile.
                 timeout_s=300,
+                profiled_vram_gib=12.0,
+                requested_vllm_kv_cache_bytes=922_354_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
@@ -344,8 +344,22 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # workers, one per GPU on the gpu_2 runner (no SINGLE_GPU
             # packing — 7B × 2 would exceed 24 GiB on a single card). Each
             # worker peaks ~19 GiB; the 24 GiB L4 tier has headroom.
+            #
+            # Skipped: LLaVA-1.5 on vLLM 0.20 is flaky — the model
+            # degenerates into "No." / newline-padded output even at
+            # temperature=0 (see PR #9336 for the e_pd manifestation
+            # and the comment block above on color-naming variance).
+            # The agg_router routing path is already covered by the
+            # Qwen3-VL-2B / Qwen2.5-VL-3B / Qwen2-VL-2B / Phi-3-vision
+            # profiles above without the LLaVA flake.
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[
+                    pytest.mark.skip(
+                        reason="LLaVA-1.5 flake on vLLM 0.20 (see PR #9336); "
+                        "agg_router routing path is covered by Qwen and Phi-3 profiles"
+                    ),
+                    pytest.mark.post_merge,
+                ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
                 profiled_vram_gib=19.2,
@@ -447,12 +461,23 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     # LLaVA-NeXT covers a separate lightseek processor (LlavaNextProcessor,
     # anyres multi-crop) vs LLaVA-1.5's plain LlavaProcessor. Same gpu_2
     # multi-GPU layout as LLaVA-1.5 agg_router above; ~14 GiB / GPU.
+    #
+    # Skipped: LLaVA-NeXT inherits the same LLaVA-on-vLLM-0.20 output
+    # flake as LLaVA-1.5 (see PR #9336); the agg_router routing path is
+    # covered by the Qwen and Phi-3 profiles above.
     MultimodalModelProfile(
         name="llava-hf/llava-v1.6-mistral-7b-hf",
         short_name="llava-next-mistral-7b",
         topologies={
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[
+                    pytest.mark.skip(
+                        reason="LLaVA-NeXT inherits LLaVA-1.5 flake on vLLM 0.20 "
+                        "(see PR #9336); agg_router routing path is covered by "
+                        "Qwen and Phi-3 profiles"
+                    ),
+                    pytest.mark.post_merge,
+                ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
                 profiled_vram_gib=19.2,

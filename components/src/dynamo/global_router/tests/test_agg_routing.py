@@ -384,6 +384,38 @@ class TestAggConfigValidation:
         with pytest.raises(ValueError, match="itl_min_ms.*must be less than"):
             config.validate()
 
+    def test_agg_priorities_default_to_pool_order(self):
+        config = GlobalRouterConfig(
+            mode="agg",
+            num_agg_pools=2,
+            agg_pool_dynamo_namespaces=["a", "b"],
+            agg_pool_selection_strategy=_make_agg_strategy(),
+        )
+        config.validate()
+        assert config.agg_pool_priorities == [0, 1]
+
+    def test_invalid_agg_pool_priorities_length(self):
+        config = GlobalRouterConfig(
+            mode="agg",
+            num_agg_pools=2,
+            agg_pool_dynamo_namespaces=["a", "b"],
+            agg_pool_priorities=[0],
+            agg_pool_selection_strategy=_make_agg_strategy(),
+        )
+        with pytest.raises(ValueError, match="agg_pool_priorities length"):
+            config.validate()
+
+    def test_invalid_agg_pool_priority_type(self):
+        config = GlobalRouterConfig(
+            mode="agg",
+            num_agg_pools=2,
+            agg_pool_dynamo_namespaces=["a", "b"],
+            agg_pool_priorities=[0, False],
+            agg_pool_selection_strategy=_make_agg_strategy(),
+        )
+        with pytest.raises(ValueError, match="agg_pool_priorities\\[1\\]"):
+            config.validate()
+
 
 # --- Config loading tests ---
 
@@ -423,6 +455,17 @@ class TestLoadAggConfig:
         config = load_config(config_path)
 
         assert config.agg_pool_selection_strategy.priority_overrides == []
+
+    def test_agg_config_with_priority_retry(self, tmp_path):
+        config_data = _agg_base_config(
+            enable_priority_retry=True,
+            agg_pool_priorities=[5, 0],
+        )
+        config_path = _write_config(tmp_path, config_data)
+        config = load_config(config_path)
+
+        assert config.enable_priority_retry is True
+        assert config.agg_pool_priorities == [5, 0]
 
     def test_unknown_mode_in_config(self, tmp_path):
         config_data = {"mode": "invalid"}
