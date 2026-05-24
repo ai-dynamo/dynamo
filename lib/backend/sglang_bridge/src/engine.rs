@@ -31,10 +31,11 @@ use crate::server_info::parse_server_info;
 /// finishes loading weights — so the connect itself is fast; this just
 /// guards against a misconfigured endpoint.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bound on how long `start()` waits for SGLang's `HealthCheck` to flip
-/// from `Starting` to healthy. Weight load + CUDA graph capture for a
-/// 70B model on H100 typically lands around 60-90s; 120s leaves headroom.
-const SCHEDULER_READY_TIMEOUT: Duration = Duration::from_secs(120);
+/// Cap on the exponential backoff between HealthCheck polls during startup.
+const HEALTH_BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// Emit an info-level "still waiting" log once per this many HealthCheck
+/// failures so ops can see the bridge is alive and waiting on SGLang.
+const HEALTH_LOG_EVERY_N_ATTEMPTS: u32 = 20;
 
 pub struct SglangBridge {
     grpc_endpoint: String,
@@ -88,26 +89,54 @@ impl LLMEngine for SglangBridge {
             .map_err(|e| backend_error(format!("connect {}: {e}", self.grpc_endpoint)))?;
         let mut client = SglangServiceClient::new(channel);
 
-        let started = tokio::time::Instant::now();
+        // Wait for SGLang's scheduler to finish loading weights. We don't cap
+        // this with a wall-clock — model load time is workload-dependent (small
+        // models load in seconds; multi-100B models from cold HF cache can take
+        // tens of minutes). Lifecycle ownership belongs to the operator: k8s
+        // liveness probes / SIGTERM / `ctx.stopped()` will cancel this loop.
+        //
+        // What still fails fast:
+        //  - any non-transient gRPC Status (Unimplemented / InvalidArgument /
+        //    PermissionDenied etc.) — wrong proto or misconfigured endpoint.
+        //  - the underlying tonic Channel dying — sglang process gone.
+        // What we retry forever (with backoff):
+        //  - `Status::Unavailable` and transport-level transient errors —
+        //    sglang still starting / momentarily restarting.
+        //  - `Ok { healthy: false }` — sglang scheduler reports "Starting".
         let mut backoff = Duration::from_millis(500);
+        let mut attempts: u32 = 0;
         loop {
-            if client
-                .health_check(HealthCheckRequest {})
-                .await
-                .map_err(|e| backend_error(format!("HealthCheck: {e}")))?
-                .into_inner()
-                .healthy
-            {
-                break;
-            }
-            if started.elapsed() > SCHEDULER_READY_TIMEOUT {
-                return Err(backend_error(format!(
-                    "SGLang HealthCheck unhealthy for {}s",
-                    SCHEDULER_READY_TIMEOUT.as_secs()
-                )));
+            attempts = attempts.saturating_add(1);
+            match client.health_check(HealthCheckRequest {}).await {
+                Ok(resp) => {
+                    if resp.into_inner().healthy {
+                        break;
+                    }
+                    if attempts.is_multiple_of(HEALTH_LOG_EVERY_N_ATTEMPTS) {
+                        tracing::info!(
+                            endpoint = %self.grpc_endpoint,
+                            attempts,
+                            "waiting for SGLang scheduler to report healthy"
+                        );
+                    }
+                }
+                Err(status) if is_transient_health_error(&status) => {
+                    if attempts.is_multiple_of(HEALTH_LOG_EVERY_N_ATTEMPTS) {
+                        tracing::info!(
+                            endpoint = %self.grpc_endpoint,
+                            attempts,
+                            code = ?status.code(),
+                            "waiting for SGLang gRPC server (transient: {})",
+                            status.message()
+                        );
+                    }
+                }
+                Err(status) => {
+                    return Err(backend_error(format!("HealthCheck: {status}")));
+                }
             }
             tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_secs(5));
+            backoff = (backoff * 2).min(HEALTH_BACKOFF_MAX);
         }
 
         let model_info = client
@@ -411,6 +440,19 @@ fn build_health_check_payload() -> serde_json::Value {
         "eos_token_ids": [],
         "annotations": [],
     })
+}
+
+/// Classify a `tonic::Status` from the startup `HealthCheck` loop.
+///
+/// Transient (keep waiting): `Unavailable` covers tonic's "channel not
+/// connected yet / peer reset / temporarily refused" cases. SGLang's gRPC
+/// server may bind its port early but reject calls until the scheduler is
+/// up, which surfaces as Unavailable.
+///
+/// Fatal (give up): everything else is either a proto mismatch or a real
+/// engine failure that retrying won't fix.
+fn is_transient_health_error(status: &tonic::Status) -> bool {
+    matches!(status.code(), tonic::Code::Unavailable)
 }
 
 fn invalid_arg(msg: impl Into<String>) -> DynamoError {
