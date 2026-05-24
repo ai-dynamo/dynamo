@@ -151,6 +151,29 @@ async def test_generate_tokens_keeps_final_empty_delta_chunk_for_usage():
 
 
 @pytest.mark.asyncio
+async def test_generate_tokens_ignores_logprobs_on_empty_final_delta_chunk():
+    logprobs = [
+        {7: SimpleNamespace(logprob=-0.7, rank=1, decoded_token="a")},
+    ]
+    responses = [
+        _request_output([_output([1, 2])], prompt_token_ids=[10]),
+        _request_output(
+            [_output([], finish_reason="length", logprobs=logprobs)],
+            prompt_token_ids=[10],
+        ),
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses)
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[1, 2], []]
+    assert "log_probs" not in chunks[-1]
+    assert "top_logprobs" not in chunks[-1]
+    assert chunks[-1]["finish_reason"] == "length"
+    assert chunks[-1]["completion_usage"]["completion_tokens"] == 2
+    assert chunks[-1]["completion_usage"]["total_tokens"] == 3
+
+
+@pytest.mark.asyncio
 async def test_generate_tokens_tracks_interleaved_output_indexes_independently():
     responses = [
         _request_output([_output([1], index=0), _output([10, 11], index=1)]),

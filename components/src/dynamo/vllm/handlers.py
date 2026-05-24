@@ -2026,8 +2026,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if output.logprobs is None:
             return None, None
 
+        token_ids = list(output.token_ids or [])
+        if not token_ids or num_output_tokens_so_far >= len(token_ids):
+            return None, None
+
         # Get logprobs for new tokens only
         new_logprobs = output.logprobs[num_output_tokens_so_far:]
+        new_token_ids = token_ids[num_output_tokens_so_far:]
+        new_logprobs = new_logprobs[: len(new_token_ids)]
         if not new_logprobs:
             return None, None
 
@@ -2039,11 +2045,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 continue
 
             # Get the actual token_id that was generated at this position
-            actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
+            actual_token_id = new_token_ids[token_idx]
 
             # Extract log probability for the selected token
             # vLLM guarantees the selected token is always in the logprobs dict
-            selected_logprob = token_logprobs_dict[actual_token_id]
+            selected_logprob = token_logprobs_dict.get(actual_token_id)
+            if selected_logprob is None:
+                continue
             log_probs.append(float(selected_logprob.logprob))
 
             # Build top_logprobs list for this token position
