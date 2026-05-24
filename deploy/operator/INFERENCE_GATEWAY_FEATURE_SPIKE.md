@@ -158,16 +158,41 @@ experimental gating + tight predicates + envtest, conversion & fuzz landed toget
   (absent ⇒ InferencePool still created, no route — safe for hand-authored EPP DGDs).
 - Validated: `go build ./...` · `go vet ./internal/... ./cmd/...` · `go test ./internal/dynamo/epp/...` — green.
 
-**DGDR→DGD injection (profiler, Python) — scoped, NOT yet implemented (deliberately):**
-- Insertion point: `utils/dgd_generation.py::assemble_final_config` → add `add_inference_gateway_to_config`
-  gated on `is_inference_gateway_enabled(dgdr)`, mirroring the Planner path (`add_planner_to_config`).
-- Must emit (canonical shape = `examples/backends/vllm/deploy/gaie/v1beta1/agg.yaml`):
-  1. an `Epp` component (`type: epp`) with a full `eppConfig.config` **EndpointPickerConfig**
-     (`disagg-profile-handler` + `label-filter` + `max-score-picker` + `dyn-decode-scorer`,
-     **agg vs disagg differ**), EPP image + `DYN_MODEL_NAME`/`DYN_KV_CACHE_BLOCK_SIZE` env;
-  2. `frontendSidecar` on the decode/agg worker (frontend `--router-mode direct`);
-  3. DGD annotation `nvidia.com/inference-gateway-name` (drives the reconcile hook above);
-  4. `RoutingProfile` → EPP scorer weights / env.
-- Unit-testable without a cluster (mirror `tests/unit/test_dgd_generation_planner_sla.py`).
-- **Deferred deliberately:** hand-building the EndpointPickerConfig (the routing brain) + the
-  routingProfile mapping is error-prone and warrants its own careful pass + review — not a tail-end rush.
+## Phase-2 update — DGDR→DGD producer IMPLEMENTED + unit-tested
+
+This is the piece that makes `inferenceGateway.enabled: true` actually emit the
+GAIE resources end-to-end (the consumer of the annotation the reconcile hook reads).
+**Lives on the stacked branch `feat/dgdr-inference-gateway-producer` (off PR #9910), not in #9910 itself.**
+
+**`profiler/utils/profile_common.py`:**
+- `EPP_IMAGE_NAME` + `derive_epp_image()` (mirrors `derive_planner_image`).
+- `is_inference_gateway_enabled(dgdr)` feature gate (mirrors `is_planner_enabled`).
+
+**`profiler/utils/dgd_generation.py` — `add_inference_gateway_to_config(dgdr, config_dict)`**,
+wired into `assemble_final_config` (gated on `is_inference_gateway_enabled`). Mutates the
+v1alpha1 services-dict DGD in place:
+  1. **`Epp` service** (`componentType: epp`) with inline `eppConfig.config` **EndpointPickerConfig**,
+     built agg-vs-disagg from worker `subComponentType` (`disagg-profile-handler` + `label-filter`(s)
+     + `max-score-picker` + `dyn-decode-scorer` [+ `prefill-filter`/`dyn-prefill-scorer` for disagg]);
+     EPP image via `derive_epp_image`; env `DYN_MODEL_NAME` / `DYN_ENFORCE_DISAGG` /
+     `DYN_KV_CACHE_BLOCK_SIZE` (block size read from worker `--block-size`, else agg/disagg default).
+  2. **`frontendSidecar`** (`-m dynamo.frontend --router-mode direct`) added to **every** worker; the
+     standalone `Frontend` service is dropped (gateway+EPP now own routing).
+  3. **Annotation** `nvidia.com/inference-gateway-name` set when `gatewayName` is supplied (drives the
+     reconcile hook). No name ⇒ EPP InferencePool only, no HTTPRoute (logged) — the operator does not
+     yet create a Gateway from `gatewayClassName`.
+  4. **`RoutingProfile` is now a real consumer** — maps to Dynamo KV-router env knobs the EPP's FFI
+     scorer reads (`lib/bindings/c/src/lib.rs`): `throughput` → high
+     `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` (1.0) + low `DYN_ROUTER_PREFILL_LOAD_SCALE` (0.5) [pack onto
+     cache-warm workers]; `latency` → 0.5 / 2.0 [spread to cut queueing]; `balanced` → router defaults
+     (no env). Magnitudes are initial heuristics, not tuned.
+- Also gated the vLLM self-benchmark step on `planner` (its only consumer) so an IGW-only deployment
+  doesn't spuriously set `DYN_BENCHMARK_MODE`.
+
+**Tests:** `tests/unit/test_dgd_generation_inference_gateway.py` — 13 cases (agg/disagg EPP config,
+routing-profile env, sidecar conversion + Frontend removal, annotation handoff, disabled = no-op).
+All green; no regression in the existing profiler unit suite.
+
+**Still deferred:** controller envtest for the reconcile hook; real-silicon EPP e2e (needs the
+`epp-image` + GPUs); cross-namespace gateway via a DGDR field (operator supports it, DGDR doesn't
+expose a gateway namespace yet); operator-side Gateway *creation* from `gatewayClassName`.

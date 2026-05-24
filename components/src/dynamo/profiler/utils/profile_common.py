@@ -48,6 +48,10 @@ BACKEND_IMAGE_NAMES: dict[str, str] = {
 
 PLANNER_IMAGE_NAME = "dynamo-planner"
 
+# Image-name component of the published Dynamo EPP (Endpoint Picker Plugin)
+# image, used when fronting a generated deployment with the inference gateway.
+EPP_IMAGE_NAME = "epp-image"
+
 
 def _replace_image_name(image_ref: str, new_name: str) -> str:
     """Replace the image name component in a Docker image reference.
@@ -68,6 +72,11 @@ def _replace_image_name(image_ref: str, new_name: str) -> str:
 def derive_planner_image(profiler_image: str) -> str:
     """Derive the planner service image from the profiler image reference."""
     return _replace_image_name(profiler_image, PLANNER_IMAGE_NAME)
+
+
+def derive_epp_image(profiler_image: str) -> str:
+    """Derive the EPP service image from the profiler image reference."""
+    return _replace_image_name(profiler_image, EPP_IMAGE_NAME)
 
 
 def derive_backend_image(profiler_image: str, backend: str) -> str:
@@ -196,6 +205,15 @@ def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
         dgdr.features is not None
         and dgdr.features.mocker is not None
         and dgdr.features.mocker.enabled is True
+    )
+
+
+def is_inference_gateway_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR opts into the GAIE inference-gateway integration."""
+    return (
+        dgdr.features is not None
+        and dgdr.features.inferenceGateway is not None
+        and dgdr.features.inferenceGateway.enabled is True
     )
 
 

@@ -39,7 +39,9 @@ from dynamo.planner.config.planner_config import (
 from dynamo.profiler.utils.config import DgdPlannerServiceConfig, set_argument_value
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
+    derive_epp_image,
     derive_planner_image,
+    is_inference_gateway_enabled,
     is_mocker_enabled,
     is_planner_enabled,
     needs_profile_data,
@@ -58,6 +60,22 @@ PLANNER_PROFILE_DATA_PREFIX = "planner-profile-data"
 # Well-known mount paths inside pods
 PROFILE_DATA_MOUNT = f"{get_workspace_dir()}/profiling_results"
 PLANNER_CONFIG_MOUNT = f"{get_workspace_dir()}/planner_config"
+
+# --- Inference-gateway (GAIE/EPP) injection ------------------------------
+# Service key for the injected Endpoint Picker Plugin component.
+EPP_SERVICE_NAME = "Epp"
+# Annotation the DGD controller reads to emit the HTTPRoute (mirrors
+# deploy/operator/internal/consts.KubeAnnotationInferenceGatewayName).
+INFERENCE_GATEWAY_NAME_ANNOTATION = "nvidia.com/inference-gateway-name"
+# Pod label the EPP label-filter selects on to separate prefill/decode pools.
+DYNAMO_SUB_COMPONENT_LABEL = "nvidia.com/dynamo-sub-component-type"
+# Each worker runs a direct-mode frontend sidecar so the gateway can route
+# straight to it; the EPP (not a standalone frontend) picks the endpoint.
+FRONTEND_SIDECAR_ARGS = ["-m", "dynamo.frontend", "--router-mode", "direct"]
+# KV-cache block size advertised to the EPP when it cannot be inferred from
+# worker args (aggregated vs disaggregated defaults, matching dynamo-gaie).
+DEFAULT_EPP_KV_BLOCK_SIZE_AGG = 128
+DEFAULT_EPP_KV_BLOCK_SIZE_DISAGG = 16
 
 
 def _make_cm_name(prefix: str) -> str:
@@ -101,9 +119,10 @@ def assemble_final_config(
 
     mocker = is_mocker_enabled(dgdr)
     planner = is_planner_enabled(dgdr)
+    igw = is_inference_gateway_enabled(dgdr)
     profile = needs_profile_data(dgdr)
 
-    if not mocker and not planner:
+    if not mocker and not planner and not igw:
         return dgd_config
 
     # Save picked config for auditing
@@ -119,9 +138,10 @@ def assemble_final_config(
         base = dgd_config
 
     # Step 2: for vLLM deployments, turn on the per-worker self-benchmark so
-    # the get_perf_metrics endpoint is available to the planner. Mocker
-    # workers don't use DYN_BENCHMARK_MODE, so skip when mocker is active.
-    if not mocker and resolved_backend == "vllm":
+    # the get_perf_metrics endpoint is available to the planner. Gated on the
+    # planner (its only consumer): mocker workers don't use DYN_BENCHMARK_MODE,
+    # and an inference-gateway-only deployment shouldn't benchmark either.
+    if planner and not mocker and resolved_backend == "vllm":
         enable_vllm_benchmark_mode(base)
 
     # Steps 3-4: layer features, collecting ConfigMaps
@@ -145,6 +165,15 @@ def assemble_final_config(
         profile_cm = add_profile_data_to_config(base, output_dir, mocker_enabled=mocker)
         if profile_cm:
             config_maps.append(profile_cm)
+
+    # Step 5: front the deployment with the GAIE inference gateway (EPP). This
+    # mutates `base` in place (adds the Epp service + frontend sidecars, drops
+    # the standalone Frontend) and is what makes `inferenceGateway.enabled` emit
+    # the InferencePool + HTTPRoute on the operator side. No ConfigMap is needed
+    # here: the EPP config is inlined under eppConfig.config and the operator
+    # materializes the ConfigMap itself.
+    if igw:
+        add_inference_gateway_to_config(dgdr, base)
 
     if config_maps:
         return config_maps + [base]
@@ -457,6 +486,270 @@ def add_planner_to_config(
     config_dict["spec"]["services"]["Planner"] = planner_dict
 
     return planner_config_cm
+
+
+# ---------------------------------------------------------------------------
+# Inference gateway (GAIE / EPP)
+# ---------------------------------------------------------------------------
+
+
+def _is_disaggregated(services: dict) -> bool:
+    """True when any worker service is a prefill worker (disagg topology)."""
+    for svc in services.values():
+        if not isinstance(svc, dict):
+            continue
+        if (
+            svc.get("subComponentType") == "prefill"
+            or svc.get("componentType") == "prefill"
+        ):
+            return True
+    return False
+
+
+def _worker_service_names(services: dict) -> list[str]:
+    """Names of the inference worker services (excludes frontend/planner/epp)."""
+    workers = []
+    for name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        ctype = svc.get("componentType")
+        if ctype in ("frontend", "planner", "epp"):
+            continue
+        if ctype == "worker" or svc.get("subComponentType") in (
+            "prefill",
+            "decode",
+            "agg",
+        ):
+            workers.append(name)
+    return workers
+
+
+def _extract_block_size(services: dict, default: int) -> int:
+    """Read ``--block-size`` from any worker's main-container args, else *default*.
+
+    Worker args may be a flat token list or a single shell-string element, so
+    both forms are tokenized before scanning.
+    """
+    for svc in services.values():
+        if not isinstance(svc, dict):
+            continue
+        mc = svc.get("extraPodSpec", {}).get("mainContainer", {})
+        tokens: list[str] = []
+        for arg in mc.get("args", []) or []:
+            tokens.extend(str(arg).split())
+        for i, tok in enumerate(tokens):
+            if tok == "--block-size" and i + 1 < len(tokens):
+                try:
+                    return int(tokens[i + 1])
+                except ValueError:
+                    pass
+            if tok.startswith("--block-size="):
+                try:
+                    return int(tok.split("=", 1)[1])
+                except ValueError:
+                    pass
+    return default
+
+
+def _routing_profile_router_env(routing_profile) -> list[dict]:
+    """Map a ``RoutingProfile`` preset to Dynamo KV-router env knobs.
+
+    The EPP scorer (``dyn-decode-scorer`` / ``dyn-prefill-scorer``) delegates
+    endpoint selection to the Dynamo KV router via FFI, and that router reads
+    these env vars on the EPP container (see ``lib/bindings/c/src/lib.rs``):
+
+    * ``DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`` in ``[0, 1]`` (default ``1.0``) —
+      credit for device-local prefix-cache overlap; higher packs requests onto
+      cache-warm workers.
+    * ``DYN_ROUTER_PREFILL_LOAD_SCALE`` >= ``0`` (default ``1.0``) — how
+      strongly prefill load penalizes a worker; higher spreads load to cut
+      queueing.
+
+    ``balanced`` leaves the router at its defaults (no env emitted). The
+    magnitudes here are initial heuristics, not tuned constants.
+    """
+    profile = getattr(routing_profile, "value", routing_profile)
+    if profile == "throughput":
+        # Maximize KV-cache reuse and tolerate load -> pack onto warm workers.
+        return [
+            {"name": "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "value": "1.0"},
+            {"name": "DYN_ROUTER_PREFILL_LOAD_SCALE", "value": "0.5"},
+        ]
+    if profile == "latency":
+        # De-emphasize reuse and penalize loaded workers -> spread, cut queueing.
+        return [
+            {"name": "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "value": "0.5"},
+            {"name": "DYN_ROUTER_PREFILL_LOAD_SCALE", "value": "2.0"},
+        ]
+    return []
+
+
+def _build_epp_endpoint_picker_config(disaggregated: bool) -> dict:
+    """Build the EndpointPickerConfig, mirroring the dynamo-gaie presets.
+
+    Aggregated: a single ``decode`` profile whose label-filter allows unlabeled
+    pods (no prefill profile, so the decode scorer runs with full KV overlap).
+    Disaggregated: separate ``prefill`` and ``decode`` profiles, each filtered
+    to its sub-component label and scored by the matching dyn scorer.
+    """
+    plugins: list[dict] = [
+        {"type": "disagg-profile-handler"},
+        {
+            "name": "decode-filter",
+            "type": "label-filter",
+            "parameters": {
+                "label": DYNAMO_SUB_COMPONENT_LABEL,
+                "validValues": ["decode"],
+                # No prefill profile in agg, so accept unlabeled pods.
+                "allowsNoLabel": not disaggregated,
+            },
+        },
+        {"name": "picker", "type": "max-score-picker"},
+        {"name": "dyn-decode", "type": "dyn-decode-scorer"},
+    ]
+    scheduling_profiles: list[dict] = [
+        {
+            "name": "decode",
+            "plugins": [
+                {"pluginRef": "decode-filter", "weight": 1},
+                {"pluginRef": "dyn-decode", "weight": 1},
+                {"pluginRef": "picker", "weight": 1},
+            ],
+        }
+    ]
+
+    if disaggregated:
+        plugins.insert(
+            2,
+            {
+                "name": "prefill-filter",
+                "type": "label-filter",
+                "parameters": {
+                    "label": DYNAMO_SUB_COMPONENT_LABEL,
+                    "validValues": ["prefill"],
+                    "allowsNoLabel": False,
+                },
+            },
+        )
+        plugins.append({"name": "dyn-prefill", "type": "dyn-prefill-scorer"})
+        scheduling_profiles.insert(
+            0,
+            {
+                "name": "prefill",
+                "plugins": [
+                    {"pluginRef": "prefill-filter", "weight": 1},
+                    {"pluginRef": "dyn-prefill", "weight": 1},
+                    {"pluginRef": "picker", "weight": 1},
+                ],
+            },
+        )
+
+    return {"plugins": plugins, "schedulingProfiles": scheduling_profiles}
+
+
+def add_inference_gateway_to_config(dgdr, config_dict: dict) -> None:
+    """Front the generated DGD with the GAIE inference gateway (EPP), in place.
+
+    Transforms a router-style deployment (standalone Frontend + workers) into
+    the GAIE topology the operator expects:
+
+      1. Inject an ``Epp`` service carrying the EndpointPickerConfig (agg vs
+         disagg, inferred from worker sub-component types), the EPP image, and
+         the routing-profile router knobs.
+      2. Give every worker a direct-mode frontend sidecar and drop the
+         standalone ``Frontend`` service, so the gateway routes straight to the
+         workers and the EPP picks the endpoint.
+      3. Set the ``nvidia.com/inference-gateway-name`` annotation when a gateway
+         name is supplied -- the signal the DGD controller gates on to emit the
+         HTTPRoute binding the model to the EPP InferencePool.
+
+    See ``deploy/operator/internal/dynamo/epp`` for the operator side.
+    """
+    igw = dgdr.features.inferenceGateway
+    spec = config_dict.setdefault("spec", {})
+    services = spec.setdefault("services", {})
+
+    disaggregated = _is_disaggregated(services)
+    block_size = _extract_block_size(
+        services,
+        DEFAULT_EPP_KV_BLOCK_SIZE_DISAGG
+        if disaggregated
+        else DEFAULT_EPP_KV_BLOCK_SIZE_AGG,
+    )
+
+    worker_names = _worker_service_names(services)
+
+    # Reuse a worker's image-pull secret for the EPP and the sidecars.
+    env_from_secret = None
+    for name in worker_names:
+        ref = services[name].get("envFromSecret")
+        if ref:
+            env_from_secret = ref
+            break
+
+    # --- 1. Epp service -----------------------------------------------------
+    epp_env = [
+        {"name": "DYN_KV_CACHE_BLOCK_SIZE", "value": str(block_size)},
+        {"name": "DYN_MODEL_NAME", "value": dgdr.model},
+        {"name": "DYN_ENFORCE_DISAGG", "value": "true" if disaggregated else "false"},
+    ]
+    epp_env.extend(_routing_profile_router_env(igw.routingProfile))
+
+    main_container: dict = {"env": epp_env}
+    if dgdr.image:
+        main_container["image"] = derive_epp_image(dgdr.image)
+
+    epp_service: dict = {
+        "componentType": "epp",
+        "replicas": 1,
+        "extraPodSpec": {"mainContainer": main_container},
+        "eppConfig": {"config": _build_epp_endpoint_picker_config(disaggregated)},
+    }
+    if env_from_secret:
+        epp_service["envFromSecret"] = env_from_secret
+    services[EPP_SERVICE_NAME] = epp_service
+
+    # --- 2. frontend sidecars + drop the standalone Frontend ----------------
+    frontend_image = None
+    for name in list(services.keys()):
+        svc = services[name]
+        if isinstance(svc, dict) and svc.get("componentType") == "frontend":
+            frontend_image = (
+                svc.get("extraPodSpec", {}).get("mainContainer", {}).get("image")
+            )
+            del services[name]
+
+    for name in worker_names:
+        svc = services[name]
+        if "frontendSidecar" in svc:
+            continue
+        sidecar_image = frontend_image or svc.get("extraPodSpec", {}).get(
+            "mainContainer", {}
+        ).get("image")
+        sidecar: dict = {"args": list(FRONTEND_SIDECAR_ARGS)}
+        if sidecar_image:
+            sidecar["image"] = sidecar_image
+        if svc.get("envFromSecret"):
+            sidecar["envFromSecret"] = svc["envFromSecret"]
+        svc["frontendSidecar"] = sidecar
+
+    # --- 3. annotation handoff so the operator emits the HTTPRoute ----------
+    if igw.gatewayName:
+        metadata = config_dict.setdefault("metadata", {})
+        annotations = metadata.setdefault("annotations", {})
+        annotations[INFERENCE_GATEWAY_NAME_ANNOTATION] = igw.gatewayName
+        logger.info(
+            "Inference gateway enabled: EPP injected (%s), HTTPRoute will bind to "
+            "Gateway %r.",
+            "disaggregated" if disaggregated else "aggregated",
+            igw.gatewayName,
+        )
+    else:
+        logger.warning(
+            "inferenceGateway.gatewayName is not set: emitting the EPP InferencePool "
+            "but no HTTPRoute. The operator does not yet create a Gateway from "
+            "gatewayClassName; set gatewayName to attach to an existing Gateway."
+        )
 
 
 def add_profile_data_to_config(
