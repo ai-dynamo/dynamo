@@ -141,3 +141,33 @@ correctness) write operator code; conforming this plan:
 
 **Net correction to §3:** drop the `unstructured` HTTPRoute; use typed gateway-api + minimal RBAC +
 experimental gating + tight predicates + envtest, conversion & fuzz landed together.
+
+
+---
+
+## Phase-1b update (this pass) — reconcile hook DONE + validated; injection scoped
+
+**Reconcile hook — implemented + validated on Go 1.25.0:**
+- `cmd/main.go`: register core gateway-api scheme `gatewayv1.Install(crdScheme)` (only `gaiev1` was
+  registered — typed HTTPRoute sync would have failed at runtime without this; caught pre-build).
+- `internal/consts/consts.go`: `KubeAnnotationInferenceGatewayName` — profiler→operator handoff
+  (same pattern as `nvidia.com/current-worker-hash`).
+- `internal/dynamo/epp/httproute.go`: `GenerateHTTPRoute(dgd, eppConfig, gatewayName string)`
+  (refactored to take the gateway name from the annotation, not the DGDR type).
+- `reconcileEPPResources`: step 2.5 emits the HTTPRoute via `SyncResource` when the annotation is set
+  (absent ⇒ InferencePool still created, no route — safe for hand-authored EPP DGDs).
+- Validated: `go build ./...` · `go vet ./internal/... ./cmd/...` · `go test ./internal/dynamo/epp/...` — green.
+
+**DGDR→DGD injection (profiler, Python) — scoped, NOT yet implemented (deliberately):**
+- Insertion point: `utils/dgd_generation.py::assemble_final_config` → add `add_inference_gateway_to_config`
+  gated on `is_inference_gateway_enabled(dgdr)`, mirroring the Planner path (`add_planner_to_config`).
+- Must emit (canonical shape = `examples/backends/vllm/deploy/gaie/v1beta1/agg.yaml`):
+  1. an `Epp` component (`type: epp`) with a full `eppConfig.config` **EndpointPickerConfig**
+     (`disagg-profile-handler` + `label-filter` + `max-score-picker` + `dyn-decode-scorer`,
+     **agg vs disagg differ**), EPP image + `DYN_MODEL_NAME`/`DYN_KV_CACHE_BLOCK_SIZE` env;
+  2. `frontendSidecar` on the decode/agg worker (frontend `--router-mode direct`);
+  3. DGD annotation `nvidia.com/inference-gateway-name` (drives the reconcile hook above);
+  4. `RoutingProfile` → EPP scorer weights / env.
+- Unit-testable without a cluster (mirror `tests/unit/test_dgd_generation_planner_sla.py`).
+- **Deferred deliberately:** hand-building the EndpointPickerConfig (the routing brain) + the
+  routingProfile mapping is error-prone and warrants its own careful pass + review — not a tail-end rush.

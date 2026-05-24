@@ -61,6 +61,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	rbacv1 "k8s.io/api/rbac/v1"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 type Reason string
@@ -1958,6 +1959,22 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	if err != nil {
 		logger.Error(err, "Failed to sync EPP InferencePool")
 		return fmt.Errorf("failed to sync EPP InferencePool: %w", err)
+	}
+
+	// 2.5. Reconcile the HTTPRoute binding the InferencePool to a Gateway, when the
+	// profiler set the inference-gateway annotation (features.inferenceGateway enabled).
+	// Absent the annotation, the EPP InferencePool is still created but no route is
+	// emitted (e.g. hand-authored EPP DGDs that wire their own gateway).
+	if gatewayName := dgd.Annotations[consts.KubeAnnotationInferenceGatewayName]; gatewayName != "" {
+		httpRoute := epp.GenerateHTTPRoute(dgd, eppService.EPPConfig, gatewayName)
+		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*gatewayv1.HTTPRoute, bool, error) {
+			return httpRoute, false, nil
+		})
+		if err != nil {
+			logger.Error(err, "Failed to sync EPP HTTPRoute")
+			return fmt.Errorf("failed to sync EPP HTTPRoute: %w", err)
+		}
+		logger.Info("Reconciled EPP HTTPRoute", "gateway", gatewayName)
 	}
 
 	// 3. Reconcile service mesh resources (e.g., Istio DestinationRule).

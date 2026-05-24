@@ -29,12 +29,12 @@ const (
 // parentRef -> the Gateway, single rule with a PathPrefix("/") match and a
 // backendRef to the InferencePool (inference.networking.k8s.io).
 //
-// The route is only generated when the InferenceGateway feature is enabled; the
-// caller (reconcileEPPResources) gates on that.
+// The route is only generated when the inference-gateway annotation carries a
+// gateway name; the caller (reconcileEPPResources) gates on that.
 func GenerateHTTPRoute(
 	dgd *v1beta1.DynamoGraphDeployment,
 	eppConfig *v1beta1.EPPConfig,
-	igw *v1beta1.InferenceGatewayFeature,
+	gatewayName string,
 ) *gatewayv1.HTTPRoute {
 	poolName := GetPoolName(dgd.Name, eppConfig)
 	poolNamespace := GetPoolNamespace(dgd.Namespace, eppConfig)
@@ -42,7 +42,7 @@ func GenerateHTTPRoute(
 	parent := gatewayv1.ParentReference{
 		Group: ptr.To(gatewayv1.Group(gatewayAPIGroup)),
 		Kind:  ptr.To(gatewayv1.Kind("Gateway")),
-		Name:  gatewayv1.ObjectName(igw.GatewayName),
+		Name:  gatewayv1.ObjectName(gatewayName),
 	}
 	// Default the Gateway's namespace to the pool's when not cross-namespace.
 	parent.Namespace = ptr.To(gatewayv1.Namespace(poolNamespace))

@@ -83,6 +83,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -162,6 +163,7 @@ func initCRDSchemes() {
 	utilruntime.Must(istioclientsetscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(gaiev1.Install(crdScheme))
+	utilruntime.Must(gatewayv1.Install(crdScheme))
 	//+kubebuilder:scaffold:scheme
 }
 

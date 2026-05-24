@@ -17,9 +17,7 @@ func TestGenerateHTTPRouteBindsPoolToGateway(t *testing.T) {
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "ns"},
 	}
-	igw := &v1beta1.InferenceGatewayFeature{Enabled: true, GatewayName: "my-gw"}
-
-	route := GenerateHTTPRoute(dgd, nil, igw)
+	route := GenerateHTTPRoute(dgd, nil, "my-gw")
 
 	if route.Name != "graph-route" || route.Namespace != "ns" {
 		t.Fatalf("route meta = %s/%s, want ns/graph-route", route.Namespace, route.Name)

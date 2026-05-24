@@ -45,6 +45,11 @@ const (
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
+	// KubeAnnotationInferenceGatewayName is set by the profiler on a generated DGD
+	// when features.inferenceGateway is enabled; it names the Gateway the operator
+	// should bind the EPP InferencePool to via a generated HTTPRoute. Empty/unset
+	// means no HTTPRoute is emitted (the EPP InferencePool is still created).
+	KubeAnnotationInferenceGatewayName = "nvidia.com/inference-gateway-name"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
