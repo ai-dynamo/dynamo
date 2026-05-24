@@ -1887,7 +1887,7 @@ svg.card-icon{
 
 .dynamo-benchmark-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
     margin: 24px 0 28px;
 }
@@ -1895,7 +1895,7 @@ svg.card-icon{
 .dynamo-benchmark-card {
     display: flex;
     flex-direction: column;
-    min-height: 260px;
+    min-height: 340px;
     padding: 16px;
     color: var(--pst-color-text-base);
     text-decoration: none;
@@ -1915,25 +1915,229 @@ svg.card-icon{
     text-transform: uppercase;
 }
 
+.dynamo-benchmark-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 72px;
+    margin-bottom: 10px;
+}
+
+.dynamo-feature-sprite {
+    position: absolute;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+}
+
+.dynamo-feature-symbol-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+}
+
+.dynamo-feature-symbol {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 46px;
+    border: 1px solid color-mix(in srgb, var(--nv-color-green) 55%, var(--border, var(--grayscale-a5)));
+    border-radius: 12px;
+    background:
+        linear-gradient(135deg, color-mix(in srgb, var(--nv-color-green) 12%, transparent), transparent 58%),
+        var(--nv-color-bg-default);
+    color: var(--pst-color-text-base);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    overflow: hidden;
+}
+
+.dark .dynamo-feature-symbol {
+    background:
+        linear-gradient(135deg, color-mix(in srgb, var(--nv-color-green) 16%, transparent), transparent 58%),
+        var(--nv-dark-grey-1);
+}
+
+.dynamo-feature-symbol::before,
+.dynamo-feature-symbol::after {
+    content: "";
+    position: absolute;
+    opacity: 0.55;
+    display: none;
+}
+
+.dynamo-feature-icon {
+    position: relative;
+    z-index: 1;
+    width: 34px;
+    height: 34px;
+    color: var(--pst-color-text-base);
+    overflow: visible;
+}
+
+.dark .dynamo-feature-icon {
+    color: var(--pst-color-text-base);
+}
+
+.feature-kv::before {
+    width: 30px;
+    height: 2px;
+    background: var(--nv-color-green);
+    transform: rotate(-28deg);
+}
+
+.feature-kv::after {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    box-shadow: -14px 8px 0 var(--nv-color-green), 12px -8px 0 var(--nv-color-green), 12px 10px 0 var(--nv-color-green);
+    background: var(--nv-color-green);
+}
+
+.feature-pd::before {
+    width: 28px;
+    height: 26px;
+    border-left: 2px solid var(--nv-color-green);
+    border-right: 2px solid var(--nv-color-green);
+    border-radius: 8px;
+}
+
+.feature-pd::after {
+    width: 30px;
+    height: 2px;
+    background: var(--nv-color-green);
+}
+
+.feature-ep::before {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    box-shadow: -11px -9px 0 var(--nv-color-green), 0 -9px 0 var(--nv-color-green), 11px -9px 0 var(--nv-color-green), -11px 9px 0 var(--nv-color-green), 0 9px 0 var(--nv-color-green), 11px 9px 0 var(--nv-color-green);
+    background: var(--nv-color-green);
+}
+
+.feature-sp::before {
+    width: 13px;
+    height: 28px;
+    background: var(--nv-color-green);
+    clip-path: polygon(58% 0, 100% 0, 58% 42%, 100% 42%, 28% 100%, 42% 55%, 0 55%);
+}
+
+.feature-ec::before {
+    width: 26px;
+    height: 18px;
+    border: 2px solid var(--nv-color-green);
+    border-radius: 5px;
+    box-shadow: 5px 5px 0 color-mix(in srgb, var(--nv-color-green) 45%, transparent);
+}
+
+.feature-of::before {
+    width: 28px;
+    height: 16px;
+    border: 2px solid var(--nv-color-green);
+    border-top: 0;
+    border-radius: 0 0 7px 7px;
+}
+
+.feature-of::after {
+    width: 18px;
+    height: 2px;
+    background: var(--nv-color-green);
+    transform: translateY(-11px);
+}
+
+.feature-fd::before {
+    width: 26px;
+    height: 18px;
+    border: 2px solid var(--nv-color-green);
+    border-radius: 9px;
+}
+
+.feature-fd::after {
+    width: 20px;
+    height: 2px;
+    background: var(--nv-color-green);
+    box-shadow: 0 -6px 0 var(--nv-color-green), 0 6px 0 var(--nv-color-green);
+}
+
+.feature-mn::before {
+    width: 26px;
+    height: 22px;
+    border-top: 2px solid var(--nv-color-green);
+    border-bottom: 2px solid var(--nv-color-green);
+    transform: rotate(35deg);
+}
+
+.feature-mn::after {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--nv-color-green);
+    box-shadow: -13px -10px 0 var(--nv-color-green), 13px -10px 0 var(--nv-color-green), -13px 10px 0 var(--nv-color-green), 13px 10px 0 var(--nv-color-green);
+}
+
+.feature-gpu::before {
+    width: 26px;
+    height: 22px;
+    border: 2px solid var(--nv-color-green);
+    border-radius: 5px;
+}
+
+.feature-gpu::after {
+    width: 17px;
+    height: 13px;
+    border: 1px solid var(--nv-color-green);
+    border-radius: 3px;
+}
+
+.feature-ab::before {
+    width: 30px;
+    height: 24px;
+    border-left: 2px solid var(--nv-color-green);
+    border-right: 2px solid var(--nv-color-green);
+}
+
+.feature-ab::after {
+    width: 30px;
+    height: 2px;
+    background: var(--nv-color-green);
+    transform: rotate(-18deg);
+}
+
 .dynamo-benchmark-model {
     display: grid;
-    grid-template-columns: 42px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: 38px minmax(0, 1fr);
+    gap: 8px;
     align-items: center;
-    margin-bottom: 14px;
+    flex: 0 1 210px;
+    min-width: 0;
+    padding: 8px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    background: var(--nv-color-bg-default);
+}
+
+.dark .dynamo-benchmark-model {
+    background: var(--nv-dark-grey-1);
 }
 
 .dynamo-benchmark-model .dynamo-model-logo {
-    width: 42px;
-    height: 42px;
-    border-radius: 10px;
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
 }
 
 .dynamo-benchmark-model strong {
     display: block;
     margin: 0;
     color: var(--pst-color-text-base);
-    font-size: 17px;
+    font-size: 15px;
     line-height: 1.2;
     overflow-wrap: break-word;
 }
@@ -1953,14 +2157,16 @@ svg.card-icon{
 }
 
 .dynamo-benchmark-card h2 {
-    margin: 0 0 8px;
+    margin: 0 0 6px;
     font-size: 18px;
     line-height: 1.25;
 }
 
 .dynamo-benchmark-card p {
-    margin: 0 0 12px;
+    margin: 0 0 10px;
     color: var(--pst-color-text-muted);
+    font-size: 14px;
+    line-height: 1.45;
 }
 
 .dynamo-benchmark-card small {
@@ -1972,7 +2178,8 @@ svg.card-icon{
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    margin: auto 0 12px;
+    margin: auto 0 10px;
+    padding-top: 8px;
 }
 
 .dynamo-feature-chip {
@@ -2179,6 +2386,7 @@ svg.card-icon{
     .dynamo-selected-facts,
     .dynamo-comparison-brief,
     .dynamo-evidence-grid,
+    .dynamo-benchmark-grid,
     .dynamo-benchmark-index,
     .dynamo-benchmark-hero {
         grid-template-columns: 1fr;
@@ -2225,5 +2433,36 @@ svg.card-icon{
 
     .dynamo-benchmark-hero {
         padding: 16px;
+    }
+
+    .dynamo-benchmark-card {
+        min-height: 0;
+        gap: 10px;
+    }
+
+    .dynamo-benchmark-card-head {
+        flex-direction: column;
+        min-height: 0;
+    }
+
+    .dynamo-feature-symbol-row,
+    .dynamo-benchmark-model,
+    .dynamo-benchmark-kind,
+    .dynamo-benchmark-card h2,
+    .dynamo-benchmark-card p,
+    .dynamo-feature-chip-row,
+    .dynamo-benchmark-meta {
+        grid-column: 1;
+        grid-row: auto;
+    }
+
+    .dynamo-feature-symbol-row {
+        margin-bottom: 2px;
+    }
+
+    .dynamo-benchmark-model {
+        flex-basis: auto;
+        width: 100%;
+        max-width: 100%;
     }
 }

@@ -7,11 +7,84 @@ subtitle: "Start with the feature or performance claim you want to inspect."
 
 Benchmarks evaluate Dynamo features under controlled traffic. Each page states the question, compares configurations, shows how to reproduce the run, and links to the recipe target when one deployment should be used directly.
 
+<svg className="dynamo-feature-sprite" aria-hidden="true">
+<symbol id="dynamo-icon-kv" viewBox="0 0 48 48">
+<circle cx="22" cy="24" r="4" fill="#76B900" />
+<path d="M18 24H9M26 21L36 13M26 27L36 35" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+<rect x="34" y="7" width="9" height="9" rx="2" stroke="currentColor" strokeWidth="3" fill="none" />
+<rect x="34" y="31" width="9" height="9" rx="2" stroke="currentColor" strokeWidth="3" fill="none" />
+<rect x="5" y="20" width="8" height="8" rx="2" stroke="#76B900" strokeWidth="3" fill="none" />
+</symbol>
+<symbol id="dynamo-icon-pd" viewBox="0 0 48 48">
+<rect x="7" y="9" width="15" height="15" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
+<rect x="26" y="24" width="15" height="15" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
+<path d="M22 17C30 17 29 27 35 27" stroke="#76B900" strokeWidth="3" strokeLinecap="round" fill="none" />
+<path d="M32 23L36 27L32 31" stroke="#76B900" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+<path d="M11 30H20M11 35H20" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+</symbol>
+<symbol id="dynamo-icon-ep" viewBox="0 0 48 48">
+<circle cx="24" cy="24" r="4" fill="#76B900" />
+<path d="M24 20V10M24 28V38M20 22L11 16M28 22L37 16M20 26L11 32M28 26L37 32" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+<g fill="none" stroke="#76B900" strokeWidth="3"><circle cx="24" cy="8" r="3" /><circle cx="24" cy="40" r="3" /><circle cx="9" cy="15" r="3" /><circle cx="39" cy="15" r="3" /><circle cx="9" cy="33" r="3" /><circle cx="39" cy="33" r="3" /></g>
+</symbol>
+<symbol id="dynamo-icon-ec" viewBox="0 0 48 48">
+<rect x="7" y="10" width="16" height="15" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
+<path d="M10 22L15 17L19 21" stroke="#76B900" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+<path d="M24 18H39M24 24H39M24 30H39" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+<path d="M31 14V34" stroke="#76B900" strokeWidth="3" strokeLinecap="round" />
+<path d="M19 32C24 36 33 36 38 32" stroke="#76B900" strokeWidth="3" strokeLinecap="round" fill="none" />
+</symbol>
+<symbol id="dynamo-icon-sp" viewBox="0 0 48 48">
+<path d="M9 15H19M9 24H24M9 33H19" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+<path d="M28 8L20 25H29L24 40L40 20H31L36 8Z" fill="#76B900" />
+<path d="M34 34L38 38L44 29" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+</symbol>
+<symbol id="dynamo-icon-of" viewBox="0 0 48 48">
+<rect x="7" y="9" width="15" height="15" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
+<rect x="8" y="33" width="32" height="8" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
+<path d="M25 17H35V30" stroke="#76B900" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+<path d="M31 27L35 31L39 27" stroke="#76B900" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+<path d="M21 36H27" stroke="#76B900" strokeWidth="3" strokeLinecap="round" />
+</symbol>
+<symbol id="dynamo-icon-fd" viewBox="0 0 48 48">
+<rect x="6" y="12" width="17" height="24" rx="4" stroke="currentColor" strokeWidth="3" fill="none" />
+<circle cx="14.5" cy="24" r="3.5" fill="#76B900" />
+<path d="M23 24H31M31 14H40M31 24H40M31 34H40" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+<path d="M28 14V34" stroke="#76B900" strokeWidth="3" strokeLinecap="round" />
+</symbol>
+<symbol id="dynamo-icon-mn" viewBox="0 0 48 48">
+<rect x="7" y="8" width="12" height="12" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
+<rect x="29" y="8" width="12" height="12" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
+<rect x="7" y="28" width="12" height="12" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
+<rect x="29" y="28" width="12" height="12" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
+<path d="M19 14H29M19 34H29M13 20V28M35 20V28M18 19L30 29M30 19L18 29" stroke="#76B900" strokeWidth="3" strokeLinecap="round" />
+</symbol>
+<symbol id="dynamo-icon-gpu" viewBox="0 0 48 48">
+<path d="M8 39H41" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+<rect x="10" y="24" width="5" height="15" rx="1" fill="#76B900" />
+<rect x="18" y="17" width="5" height="22" rx="1" stroke="currentColor" strokeWidth="3" fill="none" />
+<rect x="27" y="10" width="5" height="29" rx="1" fill="#76B900" />
+<rect x="36" y="20" width="5" height="19" rx="1" stroke="currentColor" strokeWidth="3" fill="none" />
+<rect x="8" y="7" width="12" height="10" rx="2" stroke="currentColor" strokeWidth="3" fill="none" />
+</symbol>
+<symbol id="dynamo-icon-ab" viewBox="0 0 48 48">
+<circle cx="10" cy="24" r="4" fill="#76B900" />
+<path d="M14 24C20 24 20 14 27 14H39M14 24C20 24 20 34 27 34H39" stroke="currentColor" strokeWidth="3" strokeLinecap="round" fill="none" />
+<path d="M34 10L40 14L34 18M34 30L40 34L34 38" stroke="#76B900" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+</symbol>
+</svg>
+
 <div className="dynamo-benchmark-grid">
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/qwen3-32b-kv-routing">
+<div className="dynamo-benchmark-card-head">
+<div className="dynamo-feature-symbol-row">
+<span className="dynamo-feature-symbol feature-kv" aria-label="KV routing"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
+<span className="dynamo-feature-symbol feature-pd" aria-label="Prefill/decode split"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span>
+</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
 <div><strong>Qwen3-32B</strong><small>Qwen/Qwen3-32B</small></div>
+</div>
 </div>
 <span className="dynamo-benchmark-kind">A/B test</span>
 <h2>KV-aware routing + prefill/decode split</h2>
@@ -23,9 +96,16 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <div className="dynamo-benchmark-meta"><span>Mooncake prefix reuse</span><span>16x H200</span></div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/deepseek-v3-2-wideep-routing">
+<div className="dynamo-benchmark-card-head">
+<div className="dynamo-feature-symbol-row">
+<span className="dynamo-feature-symbol feature-kv" aria-label="KV routing"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
+<span className="dynamo-feature-symbol feature-ep" aria-label="WideEP"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ep" /></svg></span>
+<span className="dynamo-feature-symbol feature-pd" aria-label="Prefill/decode split"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span>
+</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
 <div><strong>DeepSeek V3.2 NVFP4</strong><small>nvidia/DeepSeek-V3.2-NVFP4</small></div>
+</div>
 </div>
 <span className="dynamo-benchmark-kind">A/B test</span>
 <h2>KV-aware routing + WideEP + P/D split</h2>
@@ -38,9 +118,14 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <div className="dynamo-benchmark-meta"><span>Long-context coding trace</span><span>32x GB200</span></div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/qwen3-vl-embedding-cache">
+<div className="dynamo-benchmark-card-head">
+<div className="dynamo-feature-symbol-row">
+<span className="dynamo-feature-symbol feature-ec" aria-label="Embedding cache"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ec" /></svg></span>
+</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
 <div><strong>Qwen3-VL-30B</strong><small>Qwen/Qwen3-VL-30B-A3B-Instruct-FP8</small></div>
+</div>
 </div>
 <span className="dynamo-benchmark-kind">A/B test</span>
 <h2>Multimodal embedding cache</h2>
@@ -51,25 +136,39 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <div className="dynamo-benchmark-meta"><span>80% image reuse</span><span>1x GB200</span></div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/kimi-k2-5-feature-stack">
+<div className="dynamo-benchmark-card-head">
+<div className="dynamo-feature-symbol-row">
+<span className="dynamo-feature-symbol feature-kv" aria-label="KV routing"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
+<span className="dynamo-feature-symbol feature-sp" aria-label="Speculative decoding"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-sp" /></svg></span>
+<span className="dynamo-feature-symbol feature-pd" aria-label="Prefill/decode split"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span>
+<span className="dynamo-feature-symbol feature-of" aria-label="KV offload"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-of" /></svg></span>
+</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
 <div><strong>Kimi-K2.5 NVFP4</strong><small>nvidia/Kimi-K2.5-NVFP4</small></div>
 </div>
+</div>
 <span className="dynamo-benchmark-kind">Feature composition</span>
-<h2>KV routing, Eagle3, P/D split, and KV offload composition</h2>
+<h2>KV routing, speculative decoding, P/D split, and KV offload composition</h2>
 <p>How much throughput and interactivity do we gain as KV routing, Eagle3, disaggregation, and KV offload are composed?</p>
 <div className="dynamo-feature-chip-row">
 <span className="dynamo-feature-chip"><b>KV</b> KV routing</span>
-<span className="dynamo-feature-chip"><b>SP</b> Eagle3</span>
+<span className="dynamo-feature-chip"><b>SP</b> Speculative decoding (Eagle3)</span>
 <span className="dynamo-feature-chip"><b>P/D</b> Prefill/decode split</span>
 <span className="dynamo-feature-chip"><b>OF</b> KV offload</span>
 </div>
 <div className="dynamo-benchmark-meta"><span>Agentic coding trace</span><span>24x GB200</span></div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/qwen3-6-35b-feature-stack">
+<div className="dynamo-benchmark-card-head">
+<div className="dynamo-feature-symbol-row">
+<span className="dynamo-feature-symbol feature-fd" aria-label="Frontend decoding"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-fd" /></svg></span>
+<span className="dynamo-feature-symbol feature-ec" aria-label="Embedding cache"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ec" /></svg></span>
+</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
 <div><strong>Qwen3.6-35B-A3B FP8</strong><small>Qwen/Qwen3.6-35B-A3B-FP8</small></div>
+</div>
 </div>
 <span className="dynamo-benchmark-kind">Feature composition</span>
 <h2>Dynamo frontend decoding plus multimodal embedding cache</h2>
@@ -81,9 +180,16 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <div className="dynamo-benchmark-meta"><span>Multimodal sliding window</span><span>1x H100 or GB200</span></div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/llama-3-70b-topology">
+<div className="dynamo-benchmark-card-head">
+<div className="dynamo-feature-symbol-row">
+<span className="dynamo-feature-symbol feature-pd" aria-label="Prefill/decode split"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span>
+<span className="dynamo-feature-symbol feature-mn" aria-label="Multi-node topology"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-mn" /></svg></span>
+<span className="dynamo-feature-symbol feature-gpu" aria-label="Throughput per GPU"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-gpu" /></svg></span>
+</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/meta-llama.webp" alt="" />
 <div><strong>Llama-3.3-70B FP8</strong><small>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</small></div>
+</div>
 </div>
 <span className="dynamo-benchmark-kind">Topology benchmark</span>
 <h2>Aggregate vs single-node P/D vs multi-node P/D topology</h2>
@@ -96,9 +202,15 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <div className="dynamo-benchmark-meta"><span>8K ISL / 1K OSL</span><span>4-16 GPUs</span></div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/kv-router-ab-testing">
+<div className="dynamo-benchmark-card-head">
+<div className="dynamo-feature-symbol-row">
+<span className="dynamo-feature-symbol feature-kv" aria-label="KV routing"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
+<span className="dynamo-feature-symbol feature-ab" aria-label="A/B experiment setup"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ab" /></svg></span>
+</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
 <div><strong>KV Router guide</strong><small>Reusable benchmark procedure</small></div>
+</div>
 </div>
 <span className="dynamo-benchmark-kind">Hands-on guide</span>
 <h2>General KV Router A/B setup</h2>
