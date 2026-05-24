@@ -192,40 +192,53 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
         fi; \
     fi
 
-# Copy UCX and NIXL libraries for dev stage compilation.
-# The upstream SGLang runtime image doesn't include NIXL, but cargo build needs to link against
-# -lnixl, -lnixl_build, and -lnixl_common. Runtime stage doesn't need this since it uses pre-built
-# wheels, but dev stage needs it for maturin develop and cargo build from source.
-# - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
-# - vllm/trtllm/none: NIXL/UCX are already present in runtime (no-op).
+# Copy the full NIXL SDK + UCX/libfabric/gdrcopy from wheel_builder so the dev
+# image can recompile nixl-sys from source. nixl-sys's build.rs needs
+# $NIXL_PREFIX/include (C API headers) and $NIXL_PREFIX/lib*/libnixl{,_build,_common}.so.
+# - vllm: upstream runtime ships nixl as a pip wheel (.so only, no headers) — this fills the gap.
+# - sglang: upstream lmsysorg/sglang runtime ships no NIXL at all.
+# - trtllm/dynamo: runtime already COPYed $NIXL_PREFIX from wheel_builder; cp -rn is a no-op.
 ARG TARGETARCH
 RUN --mount=from=wheel_builder,target=/wheel_builder \
-    if [ "${FRAMEWORK}" = "sglang" ]; then \
-        if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
-            mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
-            cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
-            cp -r /wheel_builder/usr/local/ucx /usr/local/; \
-            cp -r /wheel_builder/usr/local/libfabric /usr/local/; \
-            cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
-            cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
-            echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
-        fi; \
-    fi
+    set -eux; \
+    mkdir -p /opt/nvidia /opt/intel /usr/local /usr/include /usr/lib64 /etc/ld.so.conf.d; \
+    if [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
+        cp -rn /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
+    fi; \
+    if [ -d /wheel_builder/opt/intel/intel_nixl ]; then \
+        cp -rn /wheel_builder/opt/intel/intel_nixl /opt/intel/; \
+    fi; \
+    if [ -d /wheel_builder/usr/local/ucx ]; then \
+        cp -rn /wheel_builder/usr/local/ucx /usr/local/; \
+    fi; \
+    if [ -d /wheel_builder/usr/local/libfabric ]; then \
+        cp -rn /wheel_builder/usr/local/libfabric /usr/local/; \
+    fi; \
+    if [ -f /wheel_builder/usr/include/gdrapi.h ]; then \
+        cp -n /wheel_builder/usr/include/gdrapi.h /usr/include/; \
+    fi; \
+    if ls /wheel_builder/usr/lib64/libgdrapi.so* >/dev/null 2>&1; then \
+        cp -n /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
+        echo "/usr/lib64" > /etc/ld.so.conf.d/gdrcopy.conf; \
+    fi; \
+    ldconfig
 
 {% if device == "xpu" %}
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
-{% elif framework == "vllm" %}
-# Reuse the stable symlink created by the upstream vLLM runtime stage so dev
-# builds do not hardcode a CUDA-specific `.nixl_cu*` directory.
-ENV NIXL_PREFIX=/opt/dynamo/nixl \
-    NIXL_LIB_DIR=/opt/dynamo/nixl \
-    NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
+{% elif device == "cpu" %}
+# CPU NIXL meson install lands under lib/x86_64-linux-gnu (Debian convention),
+# matching wheel_builder.Dockerfile's `device == "cpu"` branch. No CUDA env on CPU images.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
 {% else %}
-# NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
-# For trtllm/none: this resets the same values already set in runtime.
-# For sglang: this sets them after copying NIXL from wheel_builder above.
+# Dev always points NIXL_PREFIX at the wheel_builder-installed tree so nixl-sys
+# build.rs can find both headers ($NIXL_PREFIX/include) and link libs ($NIXL_PREFIX/lib64).
+# For vllm this overrides the runtime's /opt/dynamo/nixl pip-wheel symlink, which
+# contains the .so but no C++ headers. Runtime `import nixl` still resolves through
+# the installed pip wheel regardless of this env var.
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
