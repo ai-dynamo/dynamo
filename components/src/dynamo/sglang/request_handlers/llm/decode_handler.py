@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Optional
 
 import pybase64
@@ -38,6 +39,7 @@ _TOP_LOGPROBS_UNSUPPORTED_MSG = (
 _REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY = "remote_kv_reuse_plan"
 _REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY = "remote_kv_reuse_no_plan_reason"
 _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV = "DYN_SHARED_HICACHE_SOURCE_ENDPOINTS"
+_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV = "DYN_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE"
 _SHARED_HICACHE_SOURCE_MEDIUM = "CPU_PINNED"
 
 
@@ -113,18 +115,54 @@ def _extract_remote_kv_reuse_plan(
 
 
 def _shared_hicache_source_endpoints() -> dict[str, str]:
+    endpoints: dict[str, str] = {}
     raw = os.environ.get(_SHARED_HICACHE_SOURCE_ENDPOINTS_ENV)
-    if not raw:
-        return {}
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        logging.warning("Invalid %s=%r", _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV, raw)
-        return {}
-    if not isinstance(value, dict):
-        logging.warning("%s must be a JSON object", _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV)
-        return {}
-    return {str(k): str(v) for k, v in value.items() if v is not None}
+    if raw:
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            logging.warning("Invalid %s=%r", _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV, raw)
+        else:
+            if isinstance(value, dict):
+                endpoints.update(
+                    {str(k): str(v) for k, v in value.items() if v is not None}
+                )
+            else:
+                logging.warning(
+                    "%s must be a JSON object", _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV
+                )
+
+    file_path = os.environ.get(_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV)
+    if file_path:
+        try:
+            value = json.loads(Path(file_path).read_text())
+        except FileNotFoundError:
+            pass
+        except json.JSONDecodeError:
+            logging.warning(
+                "Invalid JSON in %s=%s",
+                _SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV,
+                file_path,
+            )
+        except OSError as exc:
+            logging.warning(
+                "Could not read %s=%s: %s",
+                _SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV,
+                file_path,
+                exc,
+            )
+        else:
+            if isinstance(value, dict):
+                endpoints.update(
+                    {str(k): str(v) for k, v in value.items() if v is not None}
+                )
+            else:
+                logging.warning(
+                    "%s file must contain a JSON object",
+                    _SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV,
+                )
+
+    return endpoints
 
 
 def _to_shared_hicache_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
