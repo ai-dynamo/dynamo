@@ -193,6 +193,12 @@ v1alpha1 services-dict DGD in place:
 routing-profile env, sidecar conversion + Frontend removal, annotation handoff, disabled = no-op).
 All green; no regression in the existing profiler unit suite.
 
-**Still deferred:** controller envtest for the reconcile hook; real-silicon EPP e2e (needs the
-`epp-image` + GPUs); cross-namespace gateway via a DGDR field (operator supports it, DGDR doesn't
-expose a gateway namespace yet); operator-side Gateway *creation* from `gatewayClassName`.
+**Controller coverage (this pass):** `dynamographdeployment_epp_route_test.go` — fake-client tests of
+`reconcileEPPResources` itself (the repo's dominant controller-test style; the Ginkgo envtest suite
+lacks the gateway-api/gaie CRDs). Asserts: annotation set ⇒ HTTPRoute emitted, bound to the named
+(cross-namespace) Gateway, and owner-referenced by the DGD; annotation absent ⇒ InferencePool created
+but no HTTPRoute. Green on Go 1.25.0.
+
+**Still deferred:** real-silicon EPP e2e (needs the `epp-image` + GPUs); cross-namespace gateway via a
+DGDR field (operator supports it, DGDR doesn't expose a gateway namespace yet); operator-side Gateway
+*creation* from `gatewayClassName`.
