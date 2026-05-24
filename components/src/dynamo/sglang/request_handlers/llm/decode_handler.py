@@ -34,6 +34,8 @@ _TOP_LOGPROBS_UNSUPPORTED_MSG = (
     "Track the upstream fix at https://github.com/sgl-project/sglang/pull/24447."
 )
 
+_REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY = "remote_kv_reuse_plan"
+
 
 def _top_logprobs_allowed() -> bool:
     """Return True if the DYN_SGL_ALLOW_TOP_LOGPROBS escape hatch is enabled."""
@@ -91,6 +93,19 @@ def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
         for token_id in (request.get("stop_token_ids") or [])
         if isinstance(token_id, int) and not isinstance(token_id, bool)
     }
+
+
+def _extract_remote_kv_reuse_plan(
+    request: Dict[str, Any], extra_args: Any
+) -> Optional[Dict[str, Any]]:
+    plan = request.get(_REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY)
+    if isinstance(plan, dict):
+        return plan
+    if isinstance(extra_args, dict):
+        plan = extra_args.get(_REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY)
+        if isinstance(plan, dict):
+            return plan
+    return None
 
 
 def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -422,6 +437,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
+        extra_args = request.get("extra_args")
+        remote_kv_reuse_plan = _extract_remote_kv_reuse_plan(request, extra_args)
+        if remote_kv_reuse_plan is not None:
+            logging.debug(
+                "Forwarding remote_kv_reuse_plan to SGLang: plan_id=%s extra_arg_keys=%s",
+                remote_kv_reuse_plan.get("plan_id"),
+                sorted(extra_args.keys()) if isinstance(extra_args, dict) else None,
+            )
+        elif isinstance(extra_args, dict) and (
+            "remote_kv_reuse_no_plan_reason" in extra_args
+            or _REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY in extra_args
+        ):
+            logging.debug(
+                "Received router KV reuse extra_args without plan: keys=%s",
+                sorted(extra_args.keys()),
+            )
 
         output_options = request.get("output_options", {})
         return_tokens_as_token_ids = bool(
@@ -466,6 +497,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                extra_args=extra_args,
+                remote_kv_reuse_plan=remote_kv_reuse_plan,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
@@ -511,6 +544,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                extra_args=extra_args,
+                remote_kv_reuse_plan=remote_kv_reuse_plan,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
