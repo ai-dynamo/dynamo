@@ -18,7 +18,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -740,3 +740,75 @@ def _load_agg_config(data: dict, mode: str) -> GlobalRouterConfig:
 
     logger.info(f"Loaded agg config: {config.num_agg_pools} agg pools")
     return config
+
+
+# ---------------------------------------------------------------------------
+# Grid construction from profiler curves (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def build_isl_latency_grid(
+    pool_latency_curves: List[Callable[[float], float]],
+    pool_costs: List[float],
+    *,
+    size_min: float,
+    size_max: float,
+    size_resolution: int,
+    latency_min_ms: float,
+    latency_max_ms: float,
+    latency_resolution: int,
+) -> List[List[int]]:
+    """Build the (size x latency) -> pool-index grid from per-pool latency curves.
+
+    This is the bridge from the DGDR profiler's per-pool interpolation curves
+    (TTFT-vs-ISL, produced in profiler/interpolation.py) to the grid that both
+    the standalone Global Router (PrefillPoolSelectionStrategy.select_pool) and
+    the EPP ``pool-selector`` plugin consume. Producing one grid here keeps the
+    gateway and standalone routing paths in parity (goal.md Phase 3).
+
+    Selection rule (the cost-efficiency objective from goal.md design note #1):
+    for each (size, latency-target) cell, route to the **cheapest** pool whose
+    predicted latency at that size meets the target; if no pool meets it, route
+    to the **fastest** pool (lowest predicted latency) so the request still goes
+    somewhere sensible.
+
+    Args:
+        pool_latency_curves: one callable per pool mapping size (ISL, or context
+            length) -> predicted latency in ms (TTFT or ITL). Indexed by pool.
+        pool_costs: relative cost per pool (e.g. GPUs: TP1=1, TP2=2, TP4=4),
+            same length/order as pool_latency_curves. Lower = preferred.
+        size_min/size_max/size_resolution: size-axis grid (cells use the band
+            midpoint as the representative size).
+        latency_min_ms/latency_max_ms/latency_resolution: latency-target axis.
+
+    Returns:
+        mapping[size_idx][latency_idx] = pool index, shaped
+        size_resolution x latency_resolution (the format GridSelectionStrategy /
+        the EPP pool-selector expect).
+    """
+    if not pool_latency_curves:
+        raise ValueError("need at least one pool latency curve")
+    if len(pool_latency_curves) != len(pool_costs):
+        raise ValueError("pool_latency_curves and pool_costs length mismatch")
+
+    size_step = (size_max - size_min) / size_resolution
+    latency_step = (latency_max_ms - latency_min_ms) / latency_resolution
+
+    mapping: List[List[int]] = []
+    for s in range(size_resolution):
+        size_mid = size_min + (s + 0.5) * size_step
+        predicted = [curve(size_mid) for curve in pool_latency_curves]
+        row: List[int] = []
+        for t in range(latency_resolution):
+            # Upper edge of the latency band is the strictest target it must meet.
+            target = latency_min_ms + (t + 1) * latency_step
+            meeting = [i for i, lat in enumerate(predicted) if lat <= target]
+            if meeting:
+                # cheapest pool that meets the SLA
+                pool_idx = min(meeting, key=lambda i: pool_costs[i])
+            else:
+                # nobody meets it -> fastest (lowest predicted latency)
+                pool_idx = min(range(len(predicted)), key=lambda i: predicted[i])
+            row.append(pool_idx)
+        mapping.append(row)
+    return mapping
