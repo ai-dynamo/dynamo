@@ -1,0 +1,146 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Stage 3 · Disaggregate Prefill and Decode"
+subtitle: Split the two phases of inference into independent worker pools so each scales on its own hardware — Dynamo's flagship capability.
+---
+
+<Note>
+**Well-Lit Path · Stage 3 of 4.** Previous: [Stage 2 — Add KV-Aware Routing](/dynamo/dev/well-lit-paths/kv-routing).
+</Note>
+
+## What you'll have at the end
+
+A service where **prefill** (processing the prompt) and **decode** (generating tokens) run on **separate workers**, with KV cache streamed between them over [NIXL](https://github.com/ai-dynamo/nixl). Each phase scales independently, which is how Dynamo reaches up to **7x higher throughput per GPU** at datacenter scale.
+
+## Prerequisites
+
+- Finished [Stage 2](/dynamo/dev/well-lit-paths/kv-routing).
+- **2+ GPUs** (one prefill, one decode in this walkthrough).
+- **~30 minutes.**
+
+## Why split the two phases
+
+A single LLM request has two phases with opposite hardware appetites:
+
+- **Prefill** reads the whole prompt at once. It's **compute-bound** — it wants raw FLOPs and runs in one big burst.
+- **Decode** emits one token at a time, each step re-reading the KV cache. It's **memory-bandwidth-bound** and **latency-sensitive** — it wants to run uninterrupted.
+
+When both run on the same worker, a long prompt's prefill stalls everyone else's decode, and you can't add prefill capacity without also paying for decode (and vice versa). **Disaggregated serving** puts them in separate pools so you can size each independently — more prefill workers for long-prompt workloads, more decode workers for high-concurrency generation — and a big prefill burst never blocks token streaming.
+
+```text
+                      ┌──▶  Prefill pool   ──(KV cache via NIXL)──┐
+ Frontend ──route──▶  │     compute-bound                        ▼
+                      └──────────────────────────────▶  Decode pool  ──▶ tokens
+                                                        bandwidth-bound
+```
+
+## Step 1 — Keep etcd and NATS running
+
+Same coordination services as Stage 2. If they aren't already up:
+
+```bash
+docker compose -f dev/docker-compose.yml up -d
+```
+
+## Step 2 — Launch a disaggregated topology
+
+This starts a frontend, one **decode** worker (GPU 0), and one **prefill** worker (GPU 1). The `kv-transfer-config` wires both to the NIXL connector so prefill can hand its KV cache to decode.
+
+<Tabs>
+  <Tab title="vLLM" language="vllm">
+    ```bash
+    # Frontend
+    python3 -m dynamo.frontend --http-port 8000 &
+
+    # Decode worker (GPU 0)
+    DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+      --model Qwen/Qwen3-8B \
+      --disaggregation-mode decode \
+      --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+
+    # Prefill worker (GPU 1)
+    DYN_SYSTEM_PORT=8082 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+      --model Qwen/Qwen3-8B \
+      --disaggregation-mode prefill \
+      --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+      --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+    ```
+    <Tip>
+    The repo ships this exact topology as a script: `examples/backends/vllm/launch/disagg.sh`. Add KV routing on top with `disagg_router.sh`.
+    </Tip>
+  </Tab>
+  <Tab title="SGLang" language="sglang">
+    SGLang disaggregation uses its own prefill/decode flags and bootstrap. Follow the validated walkthrough:
+
+    **→ [SGLang Disaggregation guide](/dynamo/dev/backends/sg-lang/disaggregation)**
+
+    The ready-to-run scripts live in `examples/backends/sglang/launch/`.
+  </Tab>
+  <Tab title="TensorRT-LLM" language="trtllm">
+    TensorRT-LLM disaggregation (including KV cache transfer and multinode) is covered in its backend guide:
+
+    **→ [TensorRT-LLM Reference Guide](/dynamo/dev/backends/tensor-rt-llm)**
+
+    The ready-to-run scripts live in `examples/backends/trtllm/launch/`.
+  </Tab>
+</Tabs>
+
+## Step 3 — Verify it works
+
+From the client's side, nothing changed — it's the same OpenAI endpoint:
+
+```bash
+curl -sf http://localhost:8000/health && echo " OK"
+
+curl -s localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-8B",
+       "messages": [{"role": "user", "content": "Explain prefill vs decode in two sentences."}],
+       "max_tokens": 64}' | jq -r '.choices[0].message.content'
+```
+
+Behind the scenes the request now flows prompt → prefill worker → KV cache over NIXL → decode worker → your tokens. Watch the two workers' logs to see prefill hand off to decode.
+
+## Compose it with routing
+
+Stages 2 and 3 stack: run a KV router **in front of** disaggregated pools and you get cache-aware placement *and* independent prefill/decode scaling — the compounding gains Dynamo is built for. The `disagg_router.sh` example wires both together.
+
+## Picking the right shape is its own problem — let a tool do it
+
+How many prefill vs. decode workers? What parallelism? Aggregated or disaggregated for *your* model and traffic? Sweeping this by hand takes days. **[AIConfigurator](https://github.com/ai-dynamo/aiconfigurator)** answers it in seconds:
+
+```bash
+pip3 install aiconfigurator
+
+aiconfigurator cli default \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 --system h200_sxm \
+  --backend vllm --backend-version 0.12.0 \
+  --isl 4000 --osl 500 --ttft 600 --tpot 16.67 \
+  --save-dir ./results
+```
+
+It compares aggregated vs. disaggregated for your SLA and emits ready-to-deploy configs — including the Kubernetes manifests you'll use in Stage 4.
+
+## You now have a disaggregated service
+
+This is the full single-node Dynamo architecture: routed, disaggregated, cache-aware. Everything past here is about running it **reliably and at scale**, which means Kubernetes.
+
+> [!TIP]
+> **Stop here if** a single node (or a hand-managed set of nodes) meets your needs and you're comfortable operating the processes yourself. **Continue to Stage 4 when** you need this to survive node failures, autoscale to traffic, and be deployed declaratively — i.e., production.
+
+<CardGroup cols={2}>
+  <Card title="Next · Stage 4 — Go to Production on Kubernetes" icon="regular cubes" href="/dynamo/dev/well-lit-paths/production">
+    Deploy the same topology to a cluster, with autoscaling and observability.
+  </Card>
+  <Card title="Go deeper · Disaggregated Serving" icon="regular arrows-split-up-and-left" href="/dynamo/dev/user-guides/disaggregated-serving">
+    Architecture, AIConfigurator workflow, and tuning.
+  </Card>
+</CardGroup>
+
+## Go deeper
+
+- [Disaggregated Serving (design)](/dynamo/dev/design-docs/disaggregated-serving) — how prefill/decode separation works internally.
+- [Tuning Disaggregated Performance](../performance/tuning.md) — squeezing out the last gains.
+- [NIXL](https://github.com/ai-dynamo/nixl) — the data-transfer layer moving KV cache between workers.

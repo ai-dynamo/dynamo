@@ -1,0 +1,129 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Stage 1 · Run a Real Model as a Service"
+subtitle: Stand up a persistent, OpenAI-compatible endpoint serving a model you actually care about — and understand the two pieces that make it work.
+---
+
+<Note>
+**Well-Lit Path · Stage 1 of 4.** Previous: [Stage 0 — Hello World](/dynamo/dev/getting-started/quickstart). This stage assumes you've already gotten one request answered.
+</Note>
+
+## What you'll have at the end
+
+A running OpenAI-compatible service — a **frontend** on port 8000 and a **worker** serving a real model (Qwen3-8B) — that you can point any OpenAI client at. This is the foundation every later stage builds on.
+
+## Prerequisites
+
+- Finished [Stage 0](/dynamo/dev/getting-started/quickstart) (so you have a container or a local install).
+- **1 GPU** with enough memory for an 8B model (~16 GB+); 2 GPUs if you want tensor parallelism.
+- **~15 minutes.**
+- For gated models (Llama, etc.): an `HF_TOKEN` and an accepted model license. Qwen3-8B used here is open, so no token is needed.
+
+## The mental model: frontend + worker
+
+Dynamo splits serving into two processes, and understanding this split is most of the battle:
+
+- The **frontend** is the OpenAI-compatible HTTP server. It owns the API surface (`/v1/chat/completions`, `/v1/models`, `/health`), tokenization, and request routing. It holds **no model weights**.
+- A **worker** loads the model into a backend engine (vLLM, SGLang, or TensorRT-LLM) and does the actual token generation. It registers itself with the frontend on startup.
+
+One frontend can serve many workers (that's Stage 2). For now, one of each.
+
+```text
+ OpenAI client ──HTTP──▶  Frontend (:8000)  ──▶  Worker (Qwen3-8B on GPU 0)
+                          OpenAI API, routing      vLLM / SGLang / TRT-LLM engine
+```
+
+## Step 1 — Start the frontend
+
+In your container (or activated local environment):
+
+```bash
+python3 -m dynamo.frontend --http-port 8000 --discovery-backend file
+```
+
+<Tip>
+`--discovery-backend file` keeps everything on one node with no etcd/NATS — perfect for a single-node service. You'll graduate to cluster-native discovery in Stage 4. To run the frontend and worker in one terminal, append `> frontend.log 2>&1 &` to background it.
+</Tip>
+
+## Step 2 — Start a worker with a real model
+
+Pick your backend. Each command loads `Qwen/Qwen3-8B` — swap in any model your hardware can hold.
+
+<Tabs>
+  <Tab title="vLLM" language="vllm">
+    ```bash
+    python3 -m dynamo.vllm \
+      --model Qwen/Qwen3-8B \
+      --discovery-backend file \
+      --kv-events-config '{"enable_kv_cache_events": false}'
+    ```
+  </Tab>
+  <Tab title="SGLang" language="sglang">
+    ```bash
+    python3 -m dynamo.sglang \
+      --model-path Qwen/Qwen3-8B \
+      --discovery-backend file
+    ```
+  </Tab>
+  <Tab title="TensorRT-LLM" language="trtllm">
+    ```bash
+    python3 -m dynamo.trtllm \
+      --model-path Qwen/Qwen3-8B \
+      --discovery-backend file
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+**Gated model?** For Llama, Kimi, Qwen-VL, and other gated weights, run `export HF_TOKEN=hf_…` first and accept the model card's license on huggingface.co. Qwen3-8B is open and needs neither.
+</Warning>
+
+The worker downloads weights on first launch (this can take a few minutes), loads them onto the GPU, then registers with the frontend. When you see it report ready, you have a service.
+
+## Step 3 — Verify it works
+
+```bash
+curl -sf http://localhost:8000/health && echo " OK"
+```
+
+Once you see `OK`, send a real request:
+
+<CodeBlocks>
+```bash title="Request"
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-8B",
+       "messages": [{"role": "user", "content": "In one sentence, what is disaggregated serving?"}],
+       "max_tokens": 64}'
+```
+
+```bash title="List models"
+curl -s localhost:8000/v1/models | jq '.data[].id'
+```
+</CodeBlocks>
+
+Because the endpoint is OpenAI-compatible, the official OpenAI SDKs work unchanged — point `base_url` at `http://localhost:8000/v1` and you're done.
+
+## You now have a real inference service
+
+That's a genuinely useful milestone: a stable endpoint, a real model, standard API. Most application developers need nothing more than this.
+
+> [!TIP]
+> **Stop here if** you're serving one model to moderate traffic on a single node and latency is fine. **Continue to Stage 2 when** you want to run multiple workers and your traffic shares prefixes (RAG context, system prompts, multi-turn chat, agents) — that's where routing starts paying off.
+
+<CardGroup cols={2}>
+  <Card title="Next · Stage 2 — Add KV-Aware Routing" icon="regular route" href="/dynamo/dev/well-lit-paths/kv-routing">
+    Run several workers behind one frontend and route by cache overlap.
+  </Card>
+  <Card title="Go deeper · Frontend Guide" icon="regular bolt" href="/dynamo/dev/components/frontend">
+    Multi-model serving, OpenAI-compat details, configuration reference.
+  </Card>
+</CardGroup>
+
+## Go deeper
+
+- [Local Installation](/dynamo/dev/getting-started/local-installation) — install paths, system deps, backend-specific notes.
+- [Frontend Configuration Reference](/dynamo/dev/components/frontend/configuration-reference) — every frontend flag.
+- [Health Checks](/dynamo/dev/user-guides/observability-local/health-checks) — liveness and readiness for production probes.
+- [Backends](/dynamo/dev/backends/v-llm) — per-engine reference guides (vLLM, SGLang, TensorRT-LLM).

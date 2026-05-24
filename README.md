@@ -104,6 +104,8 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 
 ## Quick Start
 
+> **New to Dynamo?** Follow the **[Well-Lit Path](https://docs.nvidia.com/dynamo/well-lit-paths)** — a tested, end-to-end journey from your first request to a production service, one stage at a time (real service → KV routing → disaggregation → Kubernetes). The fast paths below get you a single response; the path takes you the rest of the way.
+
 ### Option A: Container (fastest)
 
 ```bash

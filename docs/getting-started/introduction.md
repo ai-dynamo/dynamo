@@ -149,7 +149,9 @@ Dynamo provides built-in metrics, distributed tracing, and logging for monitorin
 
 ## What's Next?
 
-Explore the following resources to go deeper:
+**New here? Follow the [Well-Lit Path](../path/README.mdx)** -- the tested, end-to-end journey from your first request to a production inference service, one stage at a time (real service → KV routing → disaggregation → Kubernetes). It's the fastest way to go from zero to a deployment that scales.
+
+Or explore specific topics to go deeper:
 
 - [Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) -- Compose disaggregated serving, routing, and offloading
 - [KV Cache-Aware Routing](../components/router/router-guide.md) -- Configure smart request routing

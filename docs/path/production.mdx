@@ -1,0 +1,142 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Stage 4 · Go to Production on Kubernetes"
+subtitle: Take the topology you built locally to a cluster — deploy it declaratively, let it autoscale to your SLA, and make it observable and fault-tolerant.
+---
+
+<Note>
+**Well-Lit Path · Stage 4 of 4.** Previous: [Stage 3 — Disaggregate Prefill and Decode](/dynamo/dev/well-lit-paths/disaggregated). This stage is self-contained for Kubernetes, but it lands best once Stages 1–3 have made the concepts concrete.
+</Note>
+
+## What you'll have at the end
+
+The same routed, disaggregated service from Stage 3 — but running on Kubernetes as a declarative deployment that **autoscales to an SLA**, **survives worker failures**, and **exports metrics, logs, and traces**. You describe the model, hardware, and latency targets in one manifest; Dynamo profiles, configures, and deploys it.
+
+## Prerequisites
+
+- A **Kubernetes cluster (v1.24+)** with GPU nodes, plus [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) and [Helm](https://helm.sh/docs/intro/install/) (v3+).
+- The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed (the only hard prerequisite — see the [Installation Guide](/dynamo/dev/kubernetes-deployment/deployment-guide/installation-guide) for a one-liner).
+- A HuggingFace token if any model is gated.
+
+## What changes when you go to Kubernetes
+
+Locally you ran processes by hand. On a cluster, three things take that over:
+
+- The **Dynamo Operator** turns a single custom resource into the right set of frontend, prefill, and decode pods.
+- The **DynamoGraphDeploymentRequest (DGDR)** is your entrypoint: you state *what* (model + hardware + SLA), it profiles your workload, picks a config, and creates the running deployment.
+- The **Planner** watches live traffic and scales prefill/decode pools to hold your SLA — the autoscaling you couldn't get from hand-launched processes.
+
+## Step 1 — Create the HuggingFace secret
+
+```bash
+export HF_TOKEN=<your-hf-token>
+kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="$HF_TOKEN"
+```
+
+## Step 2 — Install the Dynamo Platform
+
+```bash
+export NAMESPACE=dynamo-system
+helm install dynamo-platform \
+  oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
+  --version "1.0.2" \
+  --namespace "$NAMESPACE" --create-namespace
+```
+
+```bash
+kubectl get pods -n $NAMESPACE
+# Expect dynamo-operator-*, etcd-*, and nats-* pods Running
+```
+
+> [!NOTE]
+> Check [Release Artifacts](/dynamo/dev/resources/release-artifacts) for the current chart and image versions before you deploy.
+
+## Step 3 — Deploy with one manifest (zero-config)
+
+Describe the model, backend, and SLA. AIConfigurator profiles it, the Planner optimizes the topology, and Dynamo deploys — no hand-written worker configs.
+
+```yaml
+# my-model.yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: my-model
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: auto          # let the profiler choose vllm / sglang / trtllm
+  sla:
+    ttft: 200.0          # ms — time to first token
+    itl: 20.0            # ms — inter-token latency
+  autoApply: true
+```
+
+```bash
+kubectl apply -f my-model.yaml -n $NAMESPACE
+
+# Watch it move Pending → Profiling → Deploying → Deployed
+kubectl get dgdr my-model -n $NAMESPACE -w
+```
+
+## Step 4 — Send a request
+
+```bash
+FRONTEND_SVC=$(kubectl get svc -n $NAMESPACE -o name | grep frontend | head -1)
+kubectl port-forward "$FRONTEND_SVC" 8000:8000 -n $NAMESPACE &
+
+curl -s localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-0.6B",
+       "messages": [{"role": "user", "content": "Hello from Kubernetes!"}],
+       "max_tokens": 50}' | jq
+```
+
+You now have the full topology — frontend, routing, and (for larger models) disaggregated prefill/decode — running as managed Kubernetes workloads.
+
+## The production checklist
+
+Getting traffic answered is the start. These are the deep-dives that make a deployment production-grade — each is a focused guide you can adopt incrementally:
+
+<CardGroup cols={2}>
+  <Card title="Autoscale to your SLA · Planner" icon="regular gauge-high" href="/dynamo/dev/components/planner/planner-guide">
+    Scale prefill and decode pools automatically to hold TTFT/ITL targets as traffic shifts.
+  </Card>
+  <Card title="Right-size the config · AIConfigurator" icon="regular sliders" href="/dynamo/dev/user-guides/disaggregated-serving">
+    Profile model + hardware + SLA to find the optimal topology before you burn GPU-hours.
+  </Card>
+  <Card title="See what's happening · Observability" icon="regular chart-line" href="/dynamo/dev/user-guides/observability-local/metrics">
+    Prometheus metrics, Grafana dashboards, structured logging, and distributed tracing.
+  </Card>
+  <Card title="Survive failures · Fault Tolerance" icon="regular heart-pulse" href="/dynamo/dev/user-guides/fault-tolerance/request-migration">
+    In-flight request migration, health checks, graceful shutdown, and load shedding.
+  </Card>
+  <Card title="Scale across nodes · Grove + Multinode" icon="regular network-wired" href="/dynamo/dev/kubernetes-deployment/multinode/multinode-deployments">
+    Topology-aware gang scheduling for multi-node, disaggregated deployments (NVL72).
+  </Card>
+  <Card title="Cloud-specific setup" icon="regular cloud" href="/dynamo/dev/kubernetes-deployment/deployment-guide/installation-guide">
+    EKS, AKS, and GKE guides — RDMA/EFA, storage, and spot capacity.
+  </Card>
+</CardGroup>
+
+## Skip the guesswork — start from a recipe
+
+For popular models, **[production-tested recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** give you a complete, benchmarked `deploy.yaml` (and a `perf.yaml` to reproduce the numbers). Start from the closest one and adapt:
+
+| Model | Framework | Mode | Recipe |
+|:---|:---|:---|:---|
+| Llama-3-70B | vLLM | Aggregated | [llama-3-70b/vllm/agg](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg) |
+| Qwen3-32B-FP8 | TensorRT-LLM | Disaggregated | [qwen3-32b-fp8/trtllm/disagg](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b-fp8/trtllm) |
+| DeepSeek-R1 | SGLang | Disagg WideEP | [deepseek-r1/sglang](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-r1) |
+
+## You've walked the whole path
+
+From one `curl` against a container to an autoscaling, observable, fault-tolerant inference service on Kubernetes. That's the well-lit path — and the deep-dive docs are there whenever you want to go off-road.
+
+<CardGroup cols={2}>
+  <Card title="Kubernetes Deployment Guide" icon="regular cubes" href="/dynamo/dev/kubernetes-deployment/deployment-guide/quickstart">
+    The complete K8s reference — operator, DGDR, models, discovery.
+  </Card>
+  <Card title="Overall Architecture" icon="regular sitemap" href="/dynamo/dev/design-docs/overall-architecture">
+    How every piece you just deployed fits together.
+  </Card>
+</CardGroup>

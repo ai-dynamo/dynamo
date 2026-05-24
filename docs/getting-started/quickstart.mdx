@@ -7,6 +7,10 @@ subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in abou
 
 {/* Looking for the project README? See /README.md at the repo root: https://github.com/ai-dynamo/dynamo/blob/main/README.md */}
 
+<Note>
+This is **Stage 0** of the [Well-Lit Path](/dynamo/dev/well-lit-paths) — the tested, end-to-end route from your first request to a production service. Get a response below, then follow the path stage by stage.
+</Note>
+
 ## Choose Your Path
 
 <CardGroup cols={4}>
@@ -136,6 +140,19 @@ Connection refused? The frontend takes a few seconds to start — retry. For pro
   </Card>
   <Card title="Flash Indexer: Inter-Galactic KV Routing" icon="regular bolt" href="/dynamo/dev/digest/flash-indexer">
     How Dynamo's concurrent global index evolved through six iterations to sustain over 100M ops/sec.
+  </Card>
+</CardGroup>
+
+## Keep going — follow the path
+
+You've finished Stage 0. The [Well-Lit Path](/dynamo/dev/well-lit-paths) takes it from here, one tested stage at a time:
+
+<CardGroup cols={2}>
+  <Card title="Stage 1 · Run a Real Model as a Service" icon="regular server" href="/dynamo/dev/well-lit-paths/aggregated-service">
+    Stand up a persistent endpoint serving a model you actually care about.
+  </Card>
+  <Card title="See the whole path" icon="regular map" href="/dynamo/dev/well-lit-paths">
+    The full 1→100 journey: routing, disaggregation, and production on Kubernetes.
   </Card>
 </CardGroup>
 

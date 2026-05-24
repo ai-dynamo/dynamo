@@ -17,6 +17,27 @@
 # Rebuilt to exactly replicate the rendered Sphinx sidebar
 
 navigation:
+  # ==================== Well-Lit Paths ====================
+  # The canonical onboarding journey: a tested, opinionated route from a
+  # first request to a production service. This is the front door — keep it
+  # first so newcomers land on the path, not the reference tree.
+  - section: Well-Lit Paths
+    slug: well-lit-paths
+    path: path/README.mdx
+    contents:
+      - page: "Stage 1 · Run a Real Model as a Service"
+        path: path/aggregated-service.mdx
+        slug: aggregated-service
+      - page: "Stage 2 · Add KV-Aware Routing"
+        path: path/kv-routing.mdx
+        slug: kv-routing
+      - page: "Stage 3 · Disaggregate Prefill and Decode"
+        path: path/disaggregated.mdx
+        slug: disaggregated
+      - page: "Stage 4 · Go to Production on Kubernetes"
+        path: path/production.mdx
+        slug: production
+
   # ==================== Getting Started ====================
   - section: Getting Started
     contents:

@@ -1,0 +1,128 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Stage 2 · Add KV-Aware Routing"
+subtitle: Run several workers behind one frontend and route each request to the worker that already holds its KV cache — the first step that makes Dynamo faster than a bare engine.
+---
+
+<Note>
+**Well-Lit Path · Stage 2 of 4.** Previous: [Stage 1 — Run a Real Model as a Service](/dynamo/dev/well-lit-paths/aggregated-service).
+</Note>
+
+## What you'll have at the end
+
+One frontend load-balancing across **multiple workers** using **KV-cache-aware routing** instead of round-robin. Requests that share a prefix (a system prompt, a RAG document, a chat history) get sent to the worker that already has those tokens cached — skipping redundant prefill and cutting time-to-first-token by up to **2x** on prefix-heavy traffic.
+
+## Prerequisites
+
+- Finished [Stage 1](/dynamo/dev/well-lit-paths/aggregated-service).
+- **2+ GPUs** (one worker per GPU in this walkthrough).
+- **~20 minutes.**
+
+## Why round-robin leaves performance on the table
+
+A bare engine, or a naive load balancer, spreads requests evenly. But LLM traffic is rarely uniform — agents replay long system prompts, RAG stuffs the same documents into every call, chat sessions accumulate history. With round-robin, whichever worker happens to receive the request recomputes that shared prefix from scratch.
+
+The **KV Router** evaluates each incoming request against what every worker currently has cached, and weighs cache overlap against current load. High overlap → route there and reuse the KV cache. No overlap, or that worker is busy → pick a better one. The result is less wasted prefill and lower, more predictable TTFT.
+
+## Step 1 — Start etcd and NATS
+
+KV-aware routing coordinates cache state across workers, which needs etcd (discovery) and NATS (KV event bus). The repo ships a compose file that starts both:
+
+```bash
+docker compose -f dev/docker-compose.yml up -d
+```
+
+> [!NOTE]
+> In Stage 1 you used `--discovery-backend file` to avoid these services. KV-aware routing is the point where they start earning their place, so we drop that flag from here on and use the default discovery backend.
+
+## Step 2 — Start the frontend with the KV router
+
+```bash
+python3 -m dynamo.frontend --router-mode kv --http-port 8000
+```
+
+That single flag — `--router-mode kv` — is the whole feature switch. The frontend now scores cache overlap for every request before placing it.
+
+## Step 3 — Start two workers publishing KV events
+
+The router needs to know what each worker has cached, so workers publish **KV cache events**. Launch two on separate GPUs:
+
+<Tabs>
+  <Tab title="vLLM" language="vllm">
+    ```bash
+    # Worker 1 on GPU 0
+    DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+      --model Qwen/Qwen3-8B \
+      --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
+
+    # Worker 2 on GPU 1
+    DYN_SYSTEM_PORT=8082 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+      --model Qwen/Qwen3-8B \
+      --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+    ```
+  </Tab>
+  <Tab title="SGLang" language="sglang">
+    ```bash
+    # Worker 1 on GPU 0
+    CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang --model-path Qwen/Qwen3-8B &
+
+    # Worker 2 on GPU 1
+    CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang --model-path Qwen/Qwen3-8B &
+    ```
+  </Tab>
+  <Tab title="TensorRT-LLM" language="trtllm">
+    ```bash
+    # Worker 1 on GPU 0
+    CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm --model-path Qwen/Qwen3-8B &
+
+    # Worker 2 on GPU 1
+    CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm --model-path Qwen/Qwen3-8B &
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+**No KV events from your engine?** The router can still help in *approximate* mode — start the frontend with `--router-mode kv --no-router-kv-events` and it predicts cache state from the requests it has already routed, no worker-side event publishing required.
+</Tip>
+
+## Step 4 — Verify routing reuses cache
+
+Send the same long prefix twice. The first call fills a worker's cache; the second should land on that same worker and return its first token noticeably faster.
+
+```bash
+PREFIX="You are a meticulous assistant. Here is a long document to reference: $(head -c 4000 /dev/urandom | base64)."
+
+for i in 1 2; do
+  curl -s localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d "{\"model\": \"Qwen/Qwen3-8B\",
+         \"messages\": [{\"role\": \"user\", \"content\": \"$PREFIX Summarize it.\"}],
+         \"max_tokens\": 32}" > /dev/null
+  echo "request $i sent"
+done
+```
+
+To see the effect quantitatively, point a benchmark with shared prefixes at the endpoint — see [Benchmarking](/dynamo/dev/user-guides/benchmarking) and the [KV Router A/B test](../benchmarks/kv-router-ab-testing.md), which compares routed vs. round-robin head to head.
+
+## You now have a routed, multi-worker service
+
+You've gone from one worker to a small fleet that routes intelligently. This scales horizontally: add more workers and the router keeps placing requests where the cache already lives.
+
+> [!TIP]
+> **Stop here if** aggregated workers meet your latency and throughput targets — routing plus horizontal scaling carries a lot of production workloads. **Continue to Stage 3 when** prefill and decode are competing for the same GPUs and you want to scale them independently (long prompts, high concurrency, or strict TTFT *and* throughput targets at once).
+
+<CardGroup cols={2}>
+  <Card title="Next · Stage 3 — Disaggregate Prefill and Decode" icon="regular arrows-split-up-and-left" href="/dynamo/dev/well-lit-paths/disaggregated">
+    Split prefill and decode into independently scaled pools.
+  </Card>
+  <Card title="Go deeper · Router Guide" icon="regular route" href="/dynamo/dev/components/router">
+    Routing concepts, tuning, temperature, load-aware modes.
+  </Card>
+</CardGroup>
+
+## Go deeper
+
+- [Routing Concepts](/dynamo/dev/components/router/routing-concepts) — how cost and overlap are scored.
+- [Router Configuration and Tuning](/dynamo/dev/components/router/configuration-and-tuning) — temperature, overlap credit, queue policies.
+- [Service Discovery](/dynamo/dev/kubernetes-deployment/deployment-guide/service-discovery) — file vs. etcd vs. K8s-native discovery, and where NATS is required.
