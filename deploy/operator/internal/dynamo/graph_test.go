@@ -32,6 +32,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
@@ -6101,6 +6103,138 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T) {
+	podSpec, err := GenerateBasePodSpec(
+		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: commonconsts.ComponentTypeWorker,
+			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+				Enabled:               true,
+				Mode:                  v1alpha1.GMSModeIntraPod,
+				ExtraClientContainers: []string{"gms-loader"},
+			},
+			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+				MainContainer: &corev1.Container{
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+						},
+					},
+				},
+				PodSpec: &corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "gms-loader",
+						Image: "loader:latest",
+					}},
+				},
+			},
+		}),
+		BackendFrameworkVLLM,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"worker",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.NotNil(t, findInitContainerByName(podSpec, gmsruntime.ServerContainerName))
+	var main *corev1.Container
+	var loader *corev1.Container
+	for i := range podSpec.Containers {
+		switch podSpec.Containers[i].Name {
+		case commonconsts.MainContainerName:
+			main = &podSpec.Containers[i]
+		case "gms-loader":
+			loader = &podSpec.Containers[i]
+		}
+	}
+	require.NotNil(t, main)
+	require.NotNil(t, loader)
+
+	assertGMSClientContainer(t, main)
+	assertGMSClientContainer(t, loader)
+}
+
+func TestGenerateBasePodSpec_GPUMemoryServiceMissingExtraClientContainerIgnored(t *testing.T) {
+	podSpec, err := GenerateBasePodSpec(
+		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: commonconsts.ComponentTypeWorker,
+			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+				Enabled:               true,
+				Mode:                  v1alpha1.GMSModeIntraPod,
+				ExtraClientContainers: []string{"missing"},
+			},
+			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+				MainContainer: &corev1.Container{
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+						},
+					},
+				},
+			},
+		}),
+		BackendFrameworkVLLM,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"worker",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	var main *corev1.Container
+	var missing *corev1.Container
+	for i := range podSpec.Containers {
+		switch podSpec.Containers[i].Name {
+		case commonconsts.MainContainerName:
+			main = &podSpec.Containers[i]
+		case "missing":
+			missing = &podSpec.Containers[i]
+		}
+	}
+	require.NotNil(t, main)
+	assertGMSClientContainer(t, main)
+	assert.Nil(t, missing)
+}
+
+func assertGMSClientContainer(t *testing.T, container *corev1.Container) {
+	t.Helper()
+
+	env := envVarsToMap(container.Env)
+	assert.Equal(t, gmsruntime.SharedMountPath, env[gmsruntime.EnvSocketDir])
+
+	mounts := map[string]string{}
+	for _, mount := range container.VolumeMounts {
+		mounts[mount.Name] = mount.MountPath
+	}
+	assert.Equal(t, gmsruntime.SharedMountPath, mounts[gmsruntime.SharedVolumeName])
+
+	require.Len(t, container.Resources.Claims, 1)
+	assert.Equal(t, dra.ClaimName, container.Resources.Claims[0].Name)
+}
+
+func findInitContainerByName(podSpec *corev1.PodSpec, name string) *corev1.Container {
+	if podSpec == nil {
+		return nil
+	}
+	for i := range podSpec.InitContainers {
+		if podSpec.InitContainers[i].Name == name {
+			return &podSpec.InitContainers[i]
+		}
+	}
+	return nil
 }
 
 func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {

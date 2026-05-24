@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
@@ -52,9 +53,9 @@ type checkpointLocations struct {
 }
 
 const (
-	restoreContainerResolveInterval       = 50 * time.Millisecond
-	restoreContainerResolveAttemptTimeout = 1 * time.Second
-	restoreContainerResolveTimeout        = 30 * time.Second
+	containerResolveAttemptTimeout  = 1 * time.Second
+	restoreContainerResolveInterval = 50 * time.Millisecond
+	restoreContainerResolveTimeout  = 30 * time.Second
 )
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
@@ -208,7 +209,49 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 	}
 
 	jobStatus := job.Annotations[snapshotprotocol.CheckpointStatusAnnotation]
-	if jobStatus == snapshotprotocol.CheckpointStatusCompleted || jobStatus == snapshotprotocol.CheckpointStatusFailed {
+	if jobStatus == snapshotprotocol.CheckpointStatusFailed {
+		return
+	}
+
+	for i := range pod.Status.ContainerStatuses {
+		failed := &pod.Status.ContainerStatuses[i]
+		term := failed.State.Terminated
+		if term == nil || term.ExitCode == 0 {
+			continue
+		}
+		message := fmt.Sprintf("Checkpoint container %q terminated with exit code %d", failed.Name, term.ExitCode)
+		if term.Reason != "" {
+			message = fmt.Sprintf("%s: %s", message, term.Reason)
+		}
+		opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container", failed.Name)
+		opLog.Info("Checkpoint pod container failed", "exit_code", term.ExitCode, "reason", term.Reason)
+		emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", message)
+		if err := annotateJob(ctx, w.clientset, opLog, job, map[string]string{
+			snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed,
+		}); err != nil {
+			opLog.Error(err, "Failed to mark checkpoint job failed")
+		}
+		reason := fmt.Sprintf("checkpoint container %s failed", failed.Name)
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.State.Running == nil || status.ContainerID == "" {
+				continue
+			}
+			containerID := snapshotruntime.StripCRIScheme(status.ContainerID)
+			resolveCtx, cancel := context.WithTimeout(ctx, containerResolveAttemptTimeout)
+			pid, _, err := w.runtime.ResolveContainer(resolveCtx, containerID)
+			cancel()
+			if err != nil {
+				opLog.Error(err, "Failed to resolve running checkpoint container", "container", status.Name)
+				continue
+			}
+			if err := snapshotruntime.SendSignalToPID(opLog, pid, syscall.SIGKILL, reason); err != nil {
+				opLog.Error(err, "Failed to signal running checkpoint container", "container", status.Name)
+			}
+		}
+		return
+	}
+
+	if jobStatus == snapshotprotocol.CheckpointStatusCompleted {
 		return
 	}
 
@@ -370,7 +413,7 @@ func (w *NodeController) pollForContainerID(
 }
 
 func restoreContainerResolveAttemptContext(ctx context.Context, deadlineAt time.Time) (context.Context, context.CancelFunc) {
-	attemptDeadline := time.Now().Add(restoreContainerResolveAttemptTimeout)
+	attemptDeadline := time.Now().Add(containerResolveAttemptTimeout)
 	if deadlineAt.Before(attemptDeadline) {
 		attemptDeadline = deadlineAt
 	}
@@ -479,15 +522,50 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 
 	go w.renewCheckpointLease(leaseCtx, log, job, stopLease)
 
-	setCheckpointStatus := func(value string) error {
-		if err := annotateJob(ctx, w.clientset, log, job, map[string]string{
-			snapshotprotocol.CheckpointStatusAnnotation: value,
-		}); err != nil {
+	setCheckpointStatus := func(value string) (bool, error) {
+		if value != snapshotprotocol.CheckpointStatusCompleted {
+			if err := annotateJob(ctx, w.clientset, log, job, map[string]string{
+				snapshotprotocol.CheckpointStatusAnnotation: value,
+			}); err != nil {
+				releasePodOnExit = false
+				releaseLeaseOnExit = false
+				return false, fmt.Errorf("failed to persist terminal checkpoint status %q: %w", value, err)
+			}
+			return true, nil
+		}
+
+		updated := false
+		jobClient := w.clientset.BatchV1().Jobs(job.Namespace)
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current, err := jobClient.Get(ctx, job.Name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to get current checkpoint job %s/%s: %w", job.Namespace, job.Name, err)
+			}
+			if current.Annotations[snapshotprotocol.CheckpointStatusAnnotation] == snapshotprotocol.CheckpointStatusFailed {
+				updated = false
+				return nil
+			}
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Annotations[snapshotprotocol.CheckpointStatusAnnotation] = value
+			if _, err := jobClient.Update(ctx, current, metav1.UpdateOptions{}); err != nil {
+				return err
+			}
+			updated = true
+			return nil
+		})
+		if err != nil {
 			releasePodOnExit = false
 			releaseLeaseOnExit = false
-			return fmt.Errorf("failed to persist terminal checkpoint status %q: %w", value, err)
+			return false, fmt.Errorf("failed to persist terminal checkpoint status %q: %w", value, err)
 		}
-		return nil
+		if !updated {
+			log.Info("Skipping checkpoint completion because checkpoint job is already failed",
+				"job", fmt.Sprintf("%s/%s", job.Namespace, job.Name),
+			)
+		}
+		return updated, nil
 	}
 
 	// Resolve the target container ID from pod status.
@@ -500,7 +578,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	}
 	if containerID == "" {
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", fmt.Sprintf("Could not resolve container %q ID", containerName))
-		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
+		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
 			return statusErr
 		}
 		return nil
@@ -511,7 +589,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	if err != nil {
 		log.Error(err, "Failed to resolve container")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", fmt.Sprintf("Container resolve failed: %v", err))
-		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
+		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
 			return statusErr
 		}
 		return nil
@@ -521,7 +599,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	if err != nil {
 		log.Error(err, "Checkpoint pod is missing storage metadata")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
+		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
 			return statusErr
 		}
 		return nil
@@ -529,7 +607,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID); err != nil {
 		log.Error(err, "Checkpoint container changed before storage access")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
+		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
 			return statusErr
 		}
 		return nil
@@ -557,7 +635,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		if signalErr := snapshotruntime.SendSignalToPID(log, containerPID, syscall.SIGKILL, "checkpoint failed"); signalErr != nil {
 			log.Error(signalErr, "Failed to signal checkpoint failure to runtime process")
 		}
-		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
+		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
 			return statusErr
 		}
 		return nil
@@ -575,7 +653,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		if signalErr := snapshotruntime.SendSignalToPID(log, containerPID, syscall.SIGKILL, "checkpoint verification failed"); signalErr != nil {
 			log.Error(signalErr, "Failed to signal checkpoint verification failure to runtime process")
 		}
-		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
+		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
 			return statusErr
 		}
 		return nil
@@ -584,20 +662,23 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	// snapshot-control volume; containerPID is a PID inside the container's
 	// mount namespace, which is all the /host/proc/<pid>/root write path
 	// requires. The Succeeded event is emitted only after the sentinel has
-	// been written so a sentinel-write failure doesn't produce conflicting
-	// Succeeded+Failed events for the same operation.
+	// been written and the terminal status has been persisted so failures don't
+	// produce conflicting Succeeded+Failed events for the same operation.
 	if err := snapshotruntime.WriteControlSentinel(containerPID, snapshotprotocol.SnapshotCompleteFile); err != nil {
 		log.Error(err, "Failed to write snapshot-complete sentinel")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
+		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
 			return statusErr
 		}
 		return nil
 	}
-	emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeNormal, "CheckpointSucceeded", fmt.Sprintf("Checkpoint completed: %s", checkpointID))
 
-	if err := setCheckpointStatus(snapshotprotocol.CheckpointStatusCompleted); err != nil {
+	updated, err := setCheckpointStatus(snapshotprotocol.CheckpointStatusCompleted)
+	if err != nil {
 		return err
+	}
+	if updated {
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeNormal, "CheckpointSucceeded", fmt.Sprintf("Checkpoint completed: %s", checkpointID))
 	}
 	return nil
 }
