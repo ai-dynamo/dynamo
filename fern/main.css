@@ -1887,15 +1887,15 @@ svg.card-icon{
 
 .dynamo-benchmark-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
     gap: 12px;
-    margin: 18px 0 28px;
+    margin: 24px 0 28px;
 }
 
 .dynamo-benchmark-card {
     display: flex;
     flex-direction: column;
-    min-height: 178px;
+    min-height: 260px;
     padding: 16px;
     color: var(--pst-color-text-base);
     text-decoration: none;
@@ -1906,7 +1906,7 @@ svg.card-icon{
     text-decoration: none;
 }
 
-.dynamo-benchmark-card span,
+.dynamo-benchmark-kind,
 .dynamo-benchmark-facts span {
     color: var(--pst-color-text-muted);
     font-size: 11px;
@@ -1915,9 +1915,45 @@ svg.card-icon{
     text-transform: uppercase;
 }
 
-.dynamo-benchmark-card strong {
+.dynamo-benchmark-model {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 14px;
+}
+
+.dynamo-benchmark-model .dynamo-model-logo {
+    width: 42px;
+    height: 42px;
+    border-radius: 10px;
+}
+
+.dynamo-benchmark-model strong {
     display: block;
-    margin: 8px 0;
+    margin: 0;
+    color: var(--pst-color-text-base);
+    font-size: 17px;
+    line-height: 1.2;
+    overflow-wrap: break-word;
+}
+
+.dynamo-benchmark-model small {
+    display: block;
+    margin-top: 3px;
+    color: var(--pst-color-text-muted);
+    font-size: 12px;
+    line-height: 1.25;
+    overflow-wrap: break-word;
+}
+
+.dynamo-benchmark-kind {
+    display: block;
+    margin-bottom: 8px;
+}
+
+.dynamo-benchmark-card h2 {
+    margin: 0 0 8px;
     font-size: 18px;
     line-height: 1.25;
 }
@@ -1930,6 +1966,67 @@ svg.card-icon{
 .dynamo-benchmark-card small {
     margin-top: auto;
     color: var(--pst-color-text-muted);
+}
+
+.dynamo-feature-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: auto 0 12px;
+}
+
+.dynamo-feature-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 26px;
+    padding: 3px 8px 3px 4px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: var(--rounded);
+    background: var(--nv-color-bg-default);
+    color: var(--pst-color-text-base);
+    font-size: 12px;
+    line-height: 1.15;
+}
+
+.dark .dynamo-feature-chip {
+    background: var(--nv-dark-grey-1);
+}
+
+.dynamo-feature-chip b {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 18px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
+    color: var(--nv-color-green);
+    font-size: 10px;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0.02em;
+}
+
+.dynamo-benchmark-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border, var(--grayscale-a5));
+}
+
+.dynamo-benchmark-meta span {
+    color: var(--pst-color-text-muted);
+    font-size: 12px;
+    line-height: 1.2;
+}
+
+.dynamo-benchmark-meta span:not(:last-child)::after {
+    content: "/";
+    margin-left: 6px;
+    color: var(--border, var(--grayscale-a5));
 }
 
 .dynamo-benchmark-hero {
