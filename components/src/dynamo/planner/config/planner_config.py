@@ -188,6 +188,8 @@ class PlannerConfig(BaseModel):
                 )
             )
             or None
+            if os.environ.get("PROMETHEUS_EXTRA_QUERY_PARAMS")
+            else None
         ),
         exclude=True,
         description=(

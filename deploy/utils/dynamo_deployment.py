@@ -271,6 +271,10 @@ class DynamoDeploymentClient:
         self.deployment_spec["metadata"]["name"] = self.deployment_name
         self.deployment_spec["metadata"]["namespace"] = self.namespace
 
+        # Upgrade apiVersion if the generated spec still uses the deprecated v1alpha1
+        if self.deployment_spec.get("apiVersion") == "nvidia.com/v1alpha1":
+            self.deployment_spec["apiVersion"] = "nvidia.com/v1alpha1"
+
         # Add ownerReference if env vars are set (for temporary DGDs during profiling)
         # This makes the DGD auto-delete when the DGDR is deleted
         dgdr_name = os.environ.get("DGDR_NAME")
@@ -291,6 +295,8 @@ class DynamoDeploymentClient:
                 ]
                 print(f"Added ownerReference to DGDR {dgdr_name} for auto-cleanup")
 
+        import json as _json
+        print(f"DEBUG DGD spec being submitted:\n{_json.dumps(self.deployment_spec, indent=2, default=str)[:3000]}")
         try:
             await self.custom_api.create_namespaced_custom_object(
                 group="nvidia.com",

@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Case 7b: Thorough search + planner with thorough pre-deployment sweeping
-# Both the config picking and the interpolation use real GPUs (mocked in tests).
-model: "Qwen/Qwen3-32B"
-backend: trtllm
+# Both the config picking and the interpolation use real XPUs (mocked in tests).
+# Configured for Intel XPU B60.
+model: "Qwen/Qwen3-0.6B"
+backend: vllm
 image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
 hardware:
-  gpuSku: h200_sxm
-  totalGpus: 8
-  numGpusPerNode: 8
+  gpuSku: b60
+  deviceType: xpu
+  totalGpus: 3
+  numGpusPerNode: 3
 sla:
   itl: 50.0
 searchStrategy: thorough
@@ -20,4 +22,4 @@ features:
     enable_throughput_scaling: true
     enable_load_scaling: false
     mode: disagg
-    backend: trtllm
+    backend: vllm
