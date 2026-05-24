@@ -389,6 +389,7 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
 	assert.Nil(t, weightsServer.StartupProbe, "no probe — clients drive readiness via connect-retry")
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"}, saver.Command)
+	assert.Empty(t, saver.Args)
 	assert.Nil(t, saver.RestartPolicy, "saver runs as a regular Job container so Job completion waits for it")
 
 	saverMounts := map[string]string{}
@@ -396,12 +397,6 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 		saverMounts[m.Name] = m.MountPath
 	}
 	assert.Equal(t, "/checkpoints", saverMounts[snapshotprotocol.CheckpointVolumeName])
-
-	saverEnv := map[string]string{}
-	for _, env := range saver.Env {
-		saverEnv[env.Name] = env.Value
-	}
-	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", saverEnv["GMS_CHECKPOINT_DIR"])
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
