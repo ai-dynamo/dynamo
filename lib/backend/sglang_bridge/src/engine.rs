@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, DisaggregationMode, DynamoError, EngineConfig, ErrorType,
-    FinishReason, GenerateContext, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
+    FinishReason, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
     PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use futures::stream::BoxStream;
@@ -25,7 +25,9 @@ use crate::proto::v1::{
     HealthCheckRequest, sglang_service_client::SglangServiceClient,
 };
 use crate::sampling::{build_sampling_params, parse_finish_reason};
-use crate::server_info::parse_server_info;
+use crate::server_info::{
+    KvEventsConfig, offset_endpoint_port, parse_server_info, rewrite_zmq_host_for_loopback,
+};
 
 /// Initial gRPC dial timeout. The port binds early — before the scheduler
 /// finishes loading weights — so the connect itself is fast; this just
@@ -44,6 +46,14 @@ pub struct SglangBridge {
     disaggregation_mode: OnceCell<DisaggregationMode>,
     bootstrap: OnceCell<(String, u16)>,
     client: OnceCell<SglangServiceClient<Channel>>,
+    /// Parsed `--kv-events-config`; populated in `start()` from
+    /// `GetServerInfo`. `None` means SGLang was launched without KV events
+    /// (publisher unset or `null`) → `kv_event_sources()` returns empty.
+    kv_events: OnceCell<Option<KvEventsConfig>>,
+    /// SGLang's `dp_size` (1 when DP attention is off). Used by
+    /// `kv_event_sources()` to fan out one source per DP rank, matching
+    /// `dynamo.sglang`'s subscribe-per-rank pattern.
+    dp_size: OnceCell<u32>,
 }
 
 impl SglangBridge {
@@ -59,6 +69,8 @@ impl SglangBridge {
             disaggregation_mode: OnceCell::new(),
             bootstrap: OnceCell::new(),
             client: OnceCell::new(),
+            kv_events: OnceCell::new(),
+            dp_size: OnceCell::new(),
         };
         // disaggregation_mode is discovered by `start()` from SGLang and
         // returned on EngineConfig; Worker reads the engine's override.
@@ -180,10 +192,18 @@ impl LLMEngine for SglangBridge {
             _ => None,
         };
 
+        // Stash fields `kv_event_sources()` reads after `start()` returns.
+        // `dp_size` defaults to 1 — SGLang omits the field when DP attention
+        // is off, which is the common case.
+        let _ = self.kv_events.set(info.kv_events.clone());
+        let _ = self.dp_size.set(info.dp_size.unwrap_or(1).max(1));
+
         tracing::info!(
             endpoint = %self.grpc_endpoint,
             model = %model_path,
             disagg_mode = %mode,
+            kv_events_enabled = info.kv_events.is_some(),
+            dp_size = info.dp_size.unwrap_or(1),
             "sglang_bridge connected"
         );
 
@@ -238,6 +258,42 @@ impl LLMEngine for SglangBridge {
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
         Ok(())
+    }
+
+    /// Subscribe Dynamo's KV-router publisher to SGLang's scheduler ZMQ
+    /// PUB, one per DP rank. Mirrors `components/src/dynamo/sglang/publisher.py`
+    /// (`init_kv_event_publish`): same offset-port math, same rewrite of
+    /// the wildcard host, same per-rank fan-out. Returning an empty list
+    /// is the documented opt-out — happens when SGLang was launched
+    /// without `--kv-events-config` or with `publisher: null`.
+    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        let Some(Some(kv)) = self.kv_events.get() else {
+            return Ok(Vec::new());
+        };
+        // `start()` always sets dp_size; defending the unwrap_or anyway in
+        // case kv_event_sources() ever runs before start() (shouldn't, per
+        // Worker lifecycle).
+        let dp_size = self.dp_size.get().copied().unwrap_or(1).max(1);
+
+        let mut sources = Vec::with_capacity(dp_size as usize);
+        for dp_rank in 0..dp_size {
+            let Some(rank_endpoint) = offset_endpoint_port(&kv.endpoint, dp_rank) else {
+                tracing::warn!(
+                    base = %kv.endpoint,
+                    dp_rank,
+                    "skipping kv_events source: offset_endpoint_port failed"
+                );
+                continue;
+            };
+            let endpoint = rewrite_zmq_host_for_loopback(&rank_endpoint);
+            tracing::info!(endpoint = %endpoint, dp_rank, "kv_events subscriber");
+            sources.push(KvEventSource::Zmq {
+                endpoint,
+                topic: kv.topic.clone(),
+                dp_rank,
+            });
+        }
+        Ok(sources)
     }
 }
 
