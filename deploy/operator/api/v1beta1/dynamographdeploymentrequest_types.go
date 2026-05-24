@@ -347,6 +347,53 @@ type FeaturesSpec struct {
 	// Mocker configures the simulated (mocker) backend for testing without GPUs.
 	// +optional
 	Mocker *MockerSpec `json:"mocker,omitempty"`
+
+	// InferenceGateway fronts the generated deployment with a Gateway API
+	// Inference Extension (GAIE) endpoint picker (EPP) for token-aware routing.
+	// When enabled, the operator injects an EPP component into the generated DGD
+	// and emits the InferencePool + HTTPRoute so the gateway routes through the
+	// Dynamo EPP. The per-pool TTFT-vs-ISL curves produced during profiling feed
+	// the EPP routing table (and, when the planner is enabled, its scaling curves).
+	// +optional
+	InferenceGateway *InferenceGatewayFeature `json:"inferenceGateway,omitempty"`
+}
+
+// RoutingProfile is a preset that maps to the EPP scorer weights
+// (KV-overlap vs. load), so users don't tune raw env vars.
+// +kubebuilder:validation:Enum=throughput;latency;balanced
+type RoutingProfile string
+
+const (
+	// RoutingProfileThroughput favors KV-cache reuse (overlap-weighted) for max tokens/GPU.
+	RoutingProfileThroughput RoutingProfile = "throughput"
+	// RoutingProfileLatency favors least-loaded endpoints to minimize TTFT/queueing.
+	RoutingProfileLatency RoutingProfile = "latency"
+	// RoutingProfileBalanced blends overlap and load (default).
+	RoutingProfileBalanced RoutingProfile = "balanced"
+)
+
+// InferenceGatewayFeature enables the GAIE EPP integration for the generated DGD.
+type InferenceGatewayFeature struct {
+	// Enabled turns on the inference-gateway integration.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// RoutingProfile selects the EPP routing policy preset.
+	// +optional
+	// +kubebuilder:default=balanced
+	RoutingProfile RoutingProfile `json:"routingProfile,omitempty"`
+
+	// GatewayClassName is the Gateway API GatewayClass to attach the generated
+	// HTTPRoute to. Defaults to the platform's configured class (agentgateway)
+	// when empty.
+	// +optional
+	GatewayClassName string `json:"gatewayClassName,omitempty"`
+
+	// GatewayName, when set, attaches the generated HTTPRoute to an existing
+	// Gateway instead of having the operator create one.
+	// +optional
+	GatewayName string `json:"gatewayName,omitempty"`
 }
 
 // HardwareSpec describes the GPU hardware for profiling and deployment.
