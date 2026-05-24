@@ -161,6 +161,7 @@ async fn cd_without_p2p_rejected_by_dependency_closure() {
         p,
         vec![Feature::ConditionalDisagg(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Decode,
+            vllm_http: None,
         })],
         None,
     )

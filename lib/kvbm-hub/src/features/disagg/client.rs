@@ -131,7 +131,10 @@ impl ConditionalDisaggClient {
     ) -> Result<Option<InstanceId>> {
         let mut features = vec![
             Feature::P2P(P2pConfig { layout_compat }),
-            Feature::ConditionalDisagg(ConditionalDisaggConfig { role: self.role }),
+            Feature::ConditionalDisagg(ConditionalDisaggConfig {
+                role: self.role,
+                vllm_http: None,
+            }),
         ];
         features.extend(extra_features);
         let hub_id = match runtime {

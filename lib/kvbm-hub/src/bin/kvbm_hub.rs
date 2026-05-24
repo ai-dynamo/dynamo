@@ -71,6 +71,28 @@ struct Cli {
     #[arg(long)]
     prefill_vllm_model: Option<String>,
 
+    /// Enable the multi-prefill load-aware dispatcher. Prefill workers
+    /// are discovered from the CD registry — each prefill must advertise
+    /// its vLLM HTTP frontend on registration (set
+    /// `KVBM_VLLM_HTTP_URL` / `KVBM_VLLM_HTTP_MODEL` on the prefill
+    /// side). Mutually exclusive with `--prefill-vllm-url`.
+    #[arg(long)]
+    prefill_load_balanced: bool,
+
+    /// Per-worker in-flight POST concurrency cap for the load-aware
+    /// dispatcher. The fleet-wide semaphore is sized
+    /// `worker_count * this`, so the queue pump blocks at exactly this
+    /// many concurrent requests per worker.
+    #[arg(long, default_value_t = 4)]
+    prefill_worker_concurrency: u32,
+
+    /// How long the hub waits (in seconds) for at least one prefill
+    /// worker to register with an advertised HTTP endpoint before the
+    /// load-aware dispatcher gives up. Only relevant when
+    /// `--prefill-load-balanced` is set.
+    #[arg(long, default_value_t = 60)]
+    prefill_discovery_timeout_secs: u64,
+
     /// Maximum sequence length (tokens). Shared "primary" config: validated
     /// against every registrant and used to size the KV index. Required (may
     /// also come from a config file / env). Must be a non-zero multiple of
@@ -281,6 +303,21 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
              disagg is not in --features"
         );
     }
+    if cli.prefill_load_balanced && !enabled.contains(&FeatureKey::ConditionalDisagg) {
+        anyhow::bail!(
+            "--prefill-load-balanced enables the disagg dispatcher but \
+             disagg is not in --features"
+        );
+    }
+    if cli.prefill_load_balanced && cli.prefill_vllm_url.is_some() {
+        anyhow::bail!(
+            "--prefill-load-balanced and --prefill-vllm-url are mutually exclusive; \
+             pick the single-target dispatcher OR the multi-prefill load-aware one"
+        );
+    }
+    if cli.prefill_load_balanced && cli.prefill_worker_concurrency == 0 {
+        anyhow::bail!("--prefill-worker-concurrency must be >= 1");
+    }
 
     // KV indexer: resolve sizing from primary; carry ZMQ / advertise overrides.
     // Enabled iff selected in the feature set.
@@ -368,10 +405,26 @@ async fn main() -> anyhow::Result<()> {
         builder = builder.add_feature_manager(p2p_manager as Arc<dyn kvbm_hub::FeatureManager>);
     }
 
-    // ConditionalDisagg, optionally with the HTTP prefill dispatcher.
+    // ConditionalDisagg, optionally with one of two HTTP prefill
+    // dispatchers (single-target or multi-prefill load-aware). When
+    // load-balanced, we hold an `Arc` to the manager so we can install
+    // the dispatcher after the prefill workers have advertised their
+    // endpoints via registration.
+    let mut cd_manager_for_late_dispatcher: Option<Arc<kvbm_hub::ConditionalDisaggManager>> = None;
     if enabled.contains(&FeatureKey::ConditionalDisagg) {
-        let cd_manager = match (&cli.prefill_vllm_url, &cli.prefill_vllm_model) {
-            (Some(url), Some(model)) => {
+        let cd_manager = match (
+            cli.prefill_load_balanced,
+            &cli.prefill_vllm_url,
+            &cli.prefill_vllm_model,
+        ) {
+            (true, _, _) => {
+                tracing::info!(
+                    per_worker_concurrency = cli.prefill_worker_concurrency,
+                    "CD prefill load-aware dispatcher enabled (multi-prefill, registry discovery)"
+                );
+                kvbm_hub::ConditionalDisaggManager::new()
+            }
+            (false, Some(url), Some(model)) => {
                 let dispatcher = kvbm_hub::HttpVllmDispatcher::new(url.clone(), model.clone())?;
                 tracing::info!(
                     prefill_url = %url,
@@ -381,20 +434,24 @@ async fn main() -> anyhow::Result<()> {
                 kvbm_hub::ConditionalDisaggManager::new()
                     .with_dispatcher(dispatcher as Arc<dyn kvbm_hub::PrefillRequestDispatcher>)
             }
-            (Some(_), None) | (None, Some(_)) => {
+            (false, Some(_), None) | (false, None, Some(_)) => {
                 anyhow::bail!(
                     "--prefill-vllm-url and --prefill-vllm-model must be specified together"
                 );
             }
-            (None, None) => {
+            (false, None, None) => {
                 tracing::info!(
-                    "CD prefill dispatcher disabled (set --prefill-vllm-url + --prefill-vllm-model to enable)"
+                    "CD prefill dispatcher disabled (set --prefill-vllm-url + --prefill-vllm-model \
+                     to enable single-target, or --prefill-load-balanced for multi-prefill)"
                 );
                 kvbm_hub::ConditionalDisaggManager::new()
             }
         };
-        builder =
-            builder.add_feature_manager(Arc::new(cd_manager) as Arc<dyn kvbm_hub::FeatureManager>);
+        let cd_manager = Arc::new(cd_manager);
+        if cli.prefill_load_balanced {
+            cd_manager_for_late_dispatcher = Some(Arc::clone(&cd_manager));
+        }
+        builder = builder.add_feature_manager(cd_manager as Arc<dyn kvbm_hub::FeatureManager>);
     }
 
     builder = builder.add_feature_manager(cpm as Arc<dyn kvbm_hub::FeatureManager>);
@@ -437,6 +494,60 @@ async fn main() -> anyhow::Result<()> {
         control = %server.control_addr(),
         "kvbm-hub listening"
     );
+
+    // Load-aware dispatcher: wait for prefill registrations carrying an
+    // advertised vLLM HTTP endpoint, then build the dispatcher and
+    // install it on the CD manager. Discovery is a one-shot snapshot —
+    // workers that register after this point are not picked up. Restart
+    // the hub if the prefill fleet shape changes.
+    if let Some(cd_manager) = cd_manager_for_late_dispatcher {
+        let block_size = config
+            .primary
+            .block_size
+            .expect("validated above: --block-size required");
+        let per_worker_concurrency = cli.prefill_worker_concurrency;
+        let timeout = Duration::from_secs(cli.prefill_discovery_timeout_secs);
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + timeout;
+            let endpoints: Vec<kvbm_hub::VllmHttpEndpoint> = loop {
+                let snap = cd_manager.prefill_endpoints();
+                let ready: Vec<_> = snap.into_iter().filter_map(|(_, ep)| ep).collect();
+                if !ready.is_empty() {
+                    break ready;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::error!(
+                        timeout_secs = timeout.as_secs(),
+                        "load-aware dispatcher: no prefill workers advertised an HTTP endpoint \
+                         before the discovery timeout; dispatcher will not start"
+                    );
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            };
+            tracing::info!(
+                worker_count = endpoints.len(),
+                per_worker_concurrency,
+                "load-aware dispatcher: discovered prefill workers; starting"
+            );
+            let dispatcher = match kvbm_hub::LoadAwareHttpDispatcher::new(
+                endpoints,
+                block_size,
+                per_worker_concurrency,
+            ) {
+                Ok(d) => d,
+                Err(err) => {
+                    tracing::error!(error = %err, "load-aware dispatcher: construction failed");
+                    return;
+                }
+            };
+            if let Err(err) = cd_manager
+                .start_dispatcher(dispatcher as Arc<dyn kvbm_hub::PrefillRequestDispatcher>)
+            {
+                tracing::error!(error = %err, "load-aware dispatcher: failed to install");
+            }
+        });
+    }
 
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutting down");

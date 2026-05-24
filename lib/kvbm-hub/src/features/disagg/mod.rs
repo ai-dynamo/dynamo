@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod client;
 pub mod dispatcher;
+pub mod load_aware;
 pub mod manager;
 pub mod protocol;
 
@@ -15,5 +16,6 @@ pub use client::ConditionalDisaggClient;
 pub use dispatcher::{
     DispatchOutcome, HttpVllmDispatcher, PrefillRequestDispatcher, RecordingDispatcher,
 };
+pub use load_aware::LoadAwareHttpDispatcher;
 pub use manager::ConditionalDisaggManager;
 pub use protocol::{ConditionalDisaggInstancesResponse, ROUTE_PREFIX};

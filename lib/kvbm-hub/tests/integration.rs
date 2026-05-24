@@ -100,7 +100,10 @@ fn p2p_cd_features(role: ConditionalDisaggRole) -> Vec<Feature> {
         Feature::P2P(P2pConfig {
             layout_compat: test_layout_compat_payload(),
         }),
-        Feature::ConditionalDisagg(ConditionalDisaggConfig { role }),
+        Feature::ConditionalDisagg(ConditionalDisaggConfig {
+            role,
+            vllm_http: None,
+        }),
     ]
 }
 

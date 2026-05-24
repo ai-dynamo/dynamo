@@ -18,7 +18,9 @@ use velo_ext::InstanceId;
 use super::dispatcher::{DispatchOutcome, PrefillRequestDispatcher};
 use super::protocol::ConditionalDisaggInstancesResponse;
 use crate::features::{FeatureError, FeatureManager, HubContext};
-use crate::protocol::{self, ConditionalDisaggRole, Feature, FeatureKey, PrefillRequest};
+use crate::protocol::{
+    self, ConditionalDisaggRole, Feature, FeatureKey, PrefillRequest, VllmHttpEndpoint,
+};
 
 /// Tracks which instances participate in ConditionalDisagg and under what role.
 ///
@@ -42,7 +44,10 @@ pub struct ConditionalDisaggManager {
 }
 
 struct CdInner {
-    prefill: HashSet<InstanceId>,
+    /// Prefill participants keyed by InstanceId. The value carries the
+    /// advertised HTTP frontend endpoint (if any) used by the
+    /// load-aware dispatcher to route POSTs.
+    prefill: HashMap<InstanceId, Option<VllmHttpEndpoint>>,
     decode: HashSet<InstanceId>,
     by_instance: HashMap<InstanceId, ConditionalDisaggRole>,
 }
@@ -75,7 +80,7 @@ impl ConditionalDisaggManager {
     pub fn with_queue_capacity(capacity: Option<usize>) -> Self {
         Self {
             inner: RwLock::new(CdInner {
-                prefill: HashSet::new(),
+                prefill: HashMap::new(),
                 decode: HashSet::new(),
                 by_instance: HashMap::new(),
             }),
@@ -96,13 +101,57 @@ impl ConditionalDisaggManager {
         self
     }
 
+    /// Install a [`PrefillRequestDispatcher`] AFTER [`FeatureManager::attach`]
+    /// has run. Intended for late-binding configurations (e.g. the load-
+    /// aware dispatcher needs the registry to be populated before it can
+    /// be constructed). Spawns the dispatcher loop on top of the
+    /// existing queue backend.
+    ///
+    /// Returns an error if no Velo / queue backend was attached, or if a
+    /// dispatcher loop is already running.
+    pub fn start_dispatcher(
+        self: &Arc<Self>,
+        dispatcher: Arc<dyn PrefillRequestDispatcher>,
+    ) -> Result<(), FeatureError> {
+        let backend = self.queue_backend.get().cloned().ok_or_else(|| {
+            FeatureError::Other(anyhow::anyhow!(
+                "start_dispatcher: no queue backend (was the hub started without Velo?)"
+            ))
+        })?;
+        if self.dispatcher_task.get().is_some() {
+            return Err(FeatureError::Other(anyhow::anyhow!(
+                "start_dispatcher: a dispatcher loop is already running"
+            )));
+        }
+        let task = tokio::spawn(prefill_dispatcher_loop(backend, dispatcher));
+        if self.dispatcher_task.set(task).is_err() {
+            return Err(FeatureError::Other(anyhow::anyhow!(
+                "start_dispatcher: lost race to install dispatcher loop"
+            )));
+        }
+        tracing::info!("CD prefill dispatcher worker started (late-bound)");
+        Ok(())
+    }
+
     /// Current snapshot of the role split, sorted deterministically.
     pub fn snapshot(&self) -> ConditionalDisaggInstancesResponse {
         let inner = self.inner.read();
         ConditionalDisaggInstancesResponse {
-            prefill: inner.prefill.iter().copied().collect(),
+            prefill: inner.prefill.keys().copied().collect(),
             decode: inner.decode.iter().copied().collect(),
         }
+    }
+
+    /// Snapshot of registered prefill instances paired with their advertised
+    /// vLLM HTTP endpoints (if any). Used by the load-aware dispatcher at
+    /// startup to discover routing targets.
+    pub fn prefill_endpoints(&self) -> Vec<(InstanceId, Option<VllmHttpEndpoint>)> {
+        let inner = self.inner.read();
+        inner
+            .prefill
+            .iter()
+            .map(|(id, ep)| (*id, ep.clone()))
+            .collect()
     }
 
     /// Hub Velo handle stashed during [`FeatureManager::attach`], if any.
@@ -117,10 +166,15 @@ impl ConditionalDisaggManager {
     }
 }
 
-fn insert_role(inner: &mut CdInner, id: InstanceId, role: ConditionalDisaggRole) {
+fn insert_role(
+    inner: &mut CdInner,
+    id: InstanceId,
+    role: ConditionalDisaggRole,
+    vllm_http: Option<VllmHttpEndpoint>,
+) {
     match role {
         ConditionalDisaggRole::Prefill => {
-            inner.prefill.insert(id);
+            inner.prefill.insert(id, vllm_http);
         }
         ConditionalDisaggRole::Decode => {
             inner.decode.insert(id);
@@ -222,7 +276,7 @@ impl FeatureManager for ConditionalDisaggManager {
             }
 
             inner.by_instance.insert(instance_id, role);
-            insert_role(&mut inner, instance_id, role);
+            insert_role(&mut inner, instance_id, role, cfg.vllm_http.clone());
             Ok(())
         })
     }
@@ -358,7 +412,20 @@ mod tests {
     use crate::protocol::ConditionalDisaggConfig;
 
     fn cd(role: ConditionalDisaggRole) -> Feature {
-        Feature::ConditionalDisagg(ConditionalDisaggConfig { role })
+        Feature::ConditionalDisagg(ConditionalDisaggConfig {
+            role,
+            vllm_http: None,
+        })
+    }
+
+    fn cd_with_http(role: ConditionalDisaggRole, base_url: &str, model: &str) -> Feature {
+        Feature::ConditionalDisagg(ConditionalDisaggConfig {
+            role,
+            vllm_http: Some(VllmHttpEndpoint {
+                base_url: base_url.to_string(),
+                model: model.to_string(),
+            }),
+        })
     }
 
     #[tokio::test]
@@ -433,5 +500,37 @@ mod tests {
     fn unregister_unknown_is_noop() {
         let mgr = ConditionalDisaggManager::new();
         mgr.on_unregister(InstanceId::new_v4());
+    }
+
+    #[tokio::test]
+    async fn prefill_endpoints_round_trips_advertised_url() {
+        let mgr = ConditionalDisaggManager::new();
+        let a = InstanceId::new_v4();
+        let b = InstanceId::new_v4();
+        mgr.on_register(
+            a,
+            &cd_with_http(
+                ConditionalDisaggRole::Prefill,
+                "http://10.0.0.1:8000",
+                "test-model",
+            ),
+        )
+        .await
+        .unwrap();
+        mgr.on_register(b, &cd(ConditionalDisaggRole::Prefill))
+            .await
+            .unwrap();
+
+        let eps = mgr.prefill_endpoints();
+        assert_eq!(eps.len(), 2);
+        let by_id: std::collections::HashMap<_, _> = eps.into_iter().collect();
+        assert_eq!(
+            by_id.get(&a),
+            Some(&Some(VllmHttpEndpoint {
+                base_url: "http://10.0.0.1:8000".to_string(),
+                model: "test-model".to_string(),
+            })),
+        );
+        assert_eq!(by_id.get(&b), Some(&None));
     }
 }

@@ -454,6 +454,25 @@ pub struct P2pConfig {
 pub struct ConditionalDisaggConfig {
     /// The role this instance is taking inside the ConditionalDisagg split.
     pub role: ConditionalDisaggRole,
+    /// Optional vLLM HTTP frontend endpoint advertised by a Prefill role
+    /// so the hub's load-aware dispatcher can route requests directly
+    /// without a separate operator-managed URL list. Decode registrations
+    /// leave this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vllm_http: Option<VllmHttpEndpoint>,
+}
+
+/// HTTP frontend endpoint a prefill worker advertises at registration so
+/// the hub can POST `/v1/completions` requests to it directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VllmHttpEndpoint {
+    /// Base URL of the vLLM frontend (e.g. `http://10.0.0.5:8000`).
+    /// Trailing slashes are not stripped on the wire — consumers should
+    /// trim before appending paths.
+    pub base_url: String,
+    /// Model name to pass in dispatched POST bodies. Must match the vLLM
+    /// process's `--model` argument.
+    pub model: String,
 }
 
 /// Role a ConditionalDisagg participant takes on.
@@ -626,6 +645,7 @@ mod tests {
             peer_info: peer_info.clone(),
             features: vec![Feature::ConditionalDisagg(ConditionalDisaggConfig {
                 role: ConditionalDisaggRole::Prefill,
+                vllm_http: None,
             })],
             runtime: None,
         };
@@ -651,6 +671,7 @@ mod tests {
     fn feature_cd_serde_round_trip() {
         let f = Feature::ConditionalDisagg(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Decode,
+            vllm_http: None,
         });
         let json = serde_json::to_string(&f).unwrap();
         // Adjacently-tagged: {"kind":"disagg","config":{"role":"decode"}}

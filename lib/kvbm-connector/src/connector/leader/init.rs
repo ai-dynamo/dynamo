@@ -1004,6 +1004,38 @@ impl ConnectorLeader {
                 DisaggregationRole::Prefill => kvbm_hub::ConditionalDisaggRole::Prefill,
                 DisaggregationRole::Decode => kvbm_hub::ConditionalDisaggRole::Decode,
             };
+            // Prefill instances advertise their co-located vLLM HTTP frontend
+            // so the hub's load-aware dispatcher can route POSTs without an
+            // operator-managed URL list. Both env vars are required to opt in;
+            // a partial pair is a misconfiguration and surfaces as a warning.
+            let vllm_http = match cd_role {
+                kvbm_hub::ConditionalDisaggRole::Prefill => {
+                    match (
+                        std::env::var("KVBM_VLLM_HTTP_URL").ok(),
+                        std::env::var("KVBM_VLLM_HTTP_MODEL").ok(),
+                    ) {
+                        (Some(base_url), Some(model))
+                            if !base_url.is_empty() && !model.is_empty() =>
+                        {
+                            tracing::info!(
+                                base_url,
+                                model,
+                                "advertising vLLM HTTP endpoint to hub via CD registration"
+                            );
+                            Some(kvbm_hub::VllmHttpEndpoint { base_url, model })
+                        }
+                        (Some(_), None) | (None, Some(_)) => {
+                            tracing::warn!(
+                                "KVBM_VLLM_HTTP_URL and KVBM_VLLM_HTTP_MODEL must both be set \
+                                 to advertise the prefill endpoint; ignoring partial pair"
+                            );
+                            None
+                        }
+                        _ => None,
+                    }
+                }
+                kvbm_hub::ConditionalDisaggRole::Decode => None,
+            };
             let super::p2p::wire::P2pFoundation {
                 hub,
                 hub_velo_id,
@@ -1017,7 +1049,10 @@ impl ConnectorLeader {
                 handshake,
                 layout_compat_payload,
                 vec![kvbm_hub::Feature::ConditionalDisagg(
-                    kvbm_hub::ConditionalDisaggConfig { role: cd_role },
+                    kvbm_hub::ConditionalDisaggConfig {
+                        role: cd_role,
+                        vllm_http,
+                    },
                 )],
             )
             .await

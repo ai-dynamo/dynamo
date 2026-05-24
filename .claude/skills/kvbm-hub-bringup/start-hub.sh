@@ -35,8 +35,15 @@
 #   KVBM_HUB_HEARTBEAT_SECS   (default: 10)
 #   KVBM_KV_INDEX_ADVERTISE_HOST (default: 127.0.0.1)
 #   KVBM_HUB_PREFILL_VLLM_URL / KVBM_HUB_PREFILL_VLLM_MODEL
-#                              (optional; enables the CD prefill dispatcher — both
-#                               required together)
+#                              (optional; enables the single-target CD prefill
+#                               dispatcher — both required together)
+#   KVBM_HUB_PREFILL_LOAD_BALANCED (optional; "1"/"true" enables the multi-prefill
+#                                load-aware dispatcher. Prefill workers must
+#                                advertise their HTTP endpoint at registration
+#                                via KVBM_VLLM_HTTP_URL/KVBM_VLLM_HTTP_MODEL on
+#                                each prefill process. Mutually exclusive with
+#                                KVBM_HUB_PREFILL_VLLM_URL.)
+#   KVBM_HUB_PREFILL_WORKER_CONCURRENCY (optional; default 4)
 #   KVBM_HUB_KVBM             (optional; newline-separated KEY.PATH=VALUE entries
 #                               each becoming a --kvbm flag on the hub binary)
 #   KVBM_HUB_KVBM_CONFIG      (optional; JSON blob → --kvbm-config; applied before
@@ -97,6 +104,16 @@ if [ -n "${KVBM_HUB_PREFILL_VLLM_URL:-}" ]; then
     args+=( --prefill-vllm-url "$KVBM_HUB_PREFILL_VLLM_URL"
             --prefill-vllm-model "${KVBM_HUB_PREFILL_VLLM_MODEL:?KVBM_HUB_PREFILL_VLLM_MODEL required with _URL}" )
 fi
+
+# Optional multi-prefill load-aware dispatcher. The hub discovers worker URLs
+# from the CD registry — each prefill must advertise its vLLM HTTP endpoint
+# via KVBM_VLLM_HTTP_URL/KVBM_VLLM_HTTP_MODEL on the prefill process.
+case "${KVBM_HUB_PREFILL_LOAD_BALANCED:-0}" in
+  1|true|TRUE|yes|YES)
+    args+=( --prefill-load-balanced
+            --prefill-worker-concurrency "${KVBM_HUB_PREFILL_WORKER_CONCURRENCY:-4}" )
+    ;;
+esac
 
 # Optional hub-side KvbmConfig overrides.
 # KVBM_HUB_KVBM_CONFIG: JSON blob → --kvbm-config (applied before KVBM_HUB_KVBM entries).

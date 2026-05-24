@@ -139,7 +139,10 @@ fn payload_with_topology(
 /// layout_compat payload" case. Pass `None` for `layout` to test the
 /// CD-without-P2P rejection path (legacy).
 fn cd_features(role: ConditionalDisaggRole, layout: Option<LayoutCompatPayload>) -> Vec<Feature> {
-    let cd = Feature::ConditionalDisagg(ConditionalDisaggConfig { role });
+    let cd = Feature::ConditionalDisagg(ConditionalDisaggConfig {
+        role,
+        vllm_http: None,
+    });
     match layout {
         Some(payload) => vec![
             Feature::P2P(P2pConfig {
@@ -337,6 +340,7 @@ async fn cd_register_without_p2p_feature_is_rejected() {
         peer_info: peer.clone(),
         features: vec![Feature::ConditionalDisagg(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Prefill,
+            vllm_http: None,
         })],
         runtime: None,
     };
