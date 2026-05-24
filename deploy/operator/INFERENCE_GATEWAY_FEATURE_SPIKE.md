@@ -178,9 +178,10 @@ v1alpha1 services-dict DGD in place:
      `DYN_KV_CACHE_BLOCK_SIZE` (block size read from worker `--block-size`, else agg/disagg default).
   2. **`frontendSidecar`** (`-m dynamo.frontend --router-mode direct`) added to **every** worker; the
      standalone `Frontend` service is dropped (gateway+EPP now own routing).
-  3. **Annotation** `nvidia.com/inference-gateway-name` set when `gatewayName` is supplied (drives the
-     reconcile hook). No name ⇒ EPP InferencePool only, no HTTPRoute (logged) — the operator does not
-     yet create a Gateway from `gatewayClassName`.
+  3. **Annotations** `nvidia.com/inference-gateway-name` (+ `...-namespace` when `gatewayNamespace` is
+     set) drive the reconcile hook. No name ⇒ EPP InferencePool only, no HTTPRoute (logged). Attach-only
+     by design: the Gateway is shared, pre-provisioned infra (usually in its own namespace), so we attach
+     cross-namespace; we never create the Gateway.
   4. **`RoutingProfile` is now a real consumer** — maps to Dynamo KV-router env knobs the EPP's FFI
      scorer reads (`lib/bindings/c/src/lib.rs`): `throughput` → high
      `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` (1.0) + low `DYN_ROUTER_PREFILL_LOAD_SCALE` (0.5) [pack onto
@@ -189,9 +190,9 @@ v1alpha1 services-dict DGD in place:
 - Also gated the vLLM self-benchmark step on `planner` (its only consumer) so an IGW-only deployment
   doesn't spuriously set `DYN_BENCHMARK_MODE`.
 
-**Tests:** `tests/unit/test_dgd_generation_inference_gateway.py` — 13 cases (agg/disagg EPP config,
-routing-profile env, sidecar conversion + Frontend removal, annotation handoff, disabled = no-op).
-All green; no regression in the existing profiler unit suite.
+**Tests:** `tests/unit/test_dgd_generation_inference_gateway.py` — 15 cases (agg/disagg EPP config,
+routing-profile env, sidecar conversion + Frontend removal, name + cross-ns namespace annotation
+handoff, disabled = no-op). All green; no regression in the existing profiler unit suite.
 
 **Controller coverage (this pass):** `dynamographdeployment_epp_route_test.go` — fake-client tests of
 `reconcileEPPResources` itself (the repo's dominant controller-test style; the Ginkgo envtest suite
@@ -199,6 +200,11 @@ lacks the gateway-api/gaie CRDs). Asserts: annotation set ⇒ HTTPRoute emitted,
 (cross-namespace) Gateway, and owner-referenced by the DGD; annotation absent ⇒ InferencePool created
 but no HTTPRoute. Green on Go 1.25.0.
 
-**Still deferred:** real-silicon EPP e2e (needs the `epp-image` + GPUs); cross-namespace gateway via a
-DGDR field (operator supports it, DGDR doesn't expose a gateway namespace yet); operator-side Gateway
-*creation* from `gatewayClassName`.
+**Design settled (attach-only):** the Gateway is shared, pre-provisioned infrastructure; the operator
+owns the InferencePool + HTTPRoute and attaches to an existing Gateway, never creates one. Consequently
+`gatewayClassName` was **dropped** from the DGDR feature (inert in attach-only — the class is fixed at
+Gateway-creation time) and `gatewayNamespace` was **added** (the shared Gateway usually lives in its own
+namespace ⇒ cross-namespace attach is the common case).
+
+**Still deferred:** real-silicon EPP e2e (needs the `epp-image` + GPUs). Operator-side Gateway *creation*
+is explicitly out of scope (would re-add a `gatewayClassName`-like field additively if ever needed).

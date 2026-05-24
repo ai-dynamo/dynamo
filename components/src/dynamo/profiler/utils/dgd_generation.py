@@ -64,9 +64,12 @@ PLANNER_CONFIG_MOUNT = f"{get_workspace_dir()}/planner_config"
 # --- Inference-gateway (GAIE/EPP) injection ------------------------------
 # Service key for the injected Endpoint Picker Plugin component.
 EPP_SERVICE_NAME = "Epp"
-# Annotation the DGD controller reads to emit the HTTPRoute (mirrors
-# deploy/operator/internal/consts.KubeAnnotationInferenceGatewayName).
+# Annotations the DGD controller reads to emit the HTTPRoute (mirror
+# deploy/operator/internal/consts.KubeAnnotationInferenceGatewayName /
+# ...InferenceGatewayNamespace). The name gates emission; the namespace
+# targets a shared, cross-namespace Gateway (defaults to the DGD namespace).
 INFERENCE_GATEWAY_NAME_ANNOTATION = "nvidia.com/inference-gateway-name"
+INFERENCE_GATEWAY_NAMESPACE_ANNOTATION = "nvidia.com/inference-gateway-namespace"
 # Pod label the EPP label-filter selects on to separate prefill/decode pools.
 DYNAMO_SUB_COMPONENT_LABEL = "nvidia.com/dynamo-sub-component-type"
 # Each worker runs a direct-mode frontend sidecar so the gateway can route
@@ -734,21 +737,26 @@ def add_inference_gateway_to_config(dgdr, config_dict: dict) -> None:
         svc["frontendSidecar"] = sidecar
 
     # --- 3. annotation handoff so the operator emits the HTTPRoute ----------
+    # The Gateway is shared, pre-provisioned infrastructure: we attach to it by
+    # name (and namespace, since it usually lives in its own namespace), never
+    # create it.
     if igw.gatewayName:
         metadata = config_dict.setdefault("metadata", {})
         annotations = metadata.setdefault("annotations", {})
         annotations[INFERENCE_GATEWAY_NAME_ANNOTATION] = igw.gatewayName
+        if igw.gatewayNamespace:
+            annotations[INFERENCE_GATEWAY_NAMESPACE_ANNOTATION] = igw.gatewayNamespace
         logger.info(
             "Inference gateway enabled: EPP injected (%s), HTTPRoute will bind to "
-            "Gateway %r.",
+            "Gateway %r in namespace %r.",
             "disaggregated" if disaggregated else "aggregated",
             igw.gatewayName,
+            igw.gatewayNamespace or "<deployment namespace>",
         )
     else:
         logger.warning(
             "inferenceGateway.gatewayName is not set: emitting the EPP InferencePool "
-            "but no HTTPRoute. The operator does not yet create a Gateway from "
-            "gatewayClassName; set gatewayName to attach to an existing Gateway."
+            "but no HTTPRoute. Set gatewayName to attach to the shared Gateway."
         )
 
 

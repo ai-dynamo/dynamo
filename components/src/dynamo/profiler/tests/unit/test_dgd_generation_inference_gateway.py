@@ -15,6 +15,7 @@ import pytest
 try:
     from dynamo.profiler.utils.dgd_generation import (
         INFERENCE_GATEWAY_NAME_ANNOTATION,
+        INFERENCE_GATEWAY_NAMESPACE_ANNOTATION,
         add_inference_gateway_to_config,
     )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
@@ -48,12 +49,14 @@ _PLANNER_IMAGE = "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
 def _dgdr(
     routing_profile: RoutingProfile = RoutingProfile.Balanced,
     gateway_name: str | None = "my-gateway",
+    gateway_namespace: str | None = None,
     image: str | None = _PLANNER_IMAGE,
 ) -> DynamoGraphDeploymentRequestSpec:
     igw = InferenceGatewayFeature(
         enabled=True,
         routingProfile=routing_profile,
         gatewayName=gateway_name,
+        gatewayNamespace=gateway_namespace,
     )
     return DynamoGraphDeploymentRequestSpec(
         model="Qwen/Qwen3-0.6B",
@@ -217,6 +220,26 @@ def test_no_gateway_name_emits_no_annotation():
     # EPP still injected (InferencePool will be created) but no HTTPRoute handoff
     assert "Epp" in cfg["spec"]["services"]
     assert "annotations" not in cfg.get("metadata", {})
+
+
+def test_gateway_namespace_annotation_set_for_cross_ns_gateway():
+    cfg = _agg_config()
+    add_inference_gateway_to_config(
+        _dgdr(gateway_name="prod-gw", gateway_namespace="gw-system"), cfg
+    )
+    ann = cfg["metadata"]["annotations"]
+    assert ann[INFERENCE_GATEWAY_NAME_ANNOTATION] == "prod-gw"
+    assert ann[INFERENCE_GATEWAY_NAMESPACE_ANNOTATION] == "gw-system"
+
+
+def test_no_gateway_namespace_defaults_to_deployment_namespace():
+    cfg = _agg_config()
+    # gatewayNamespace unset -> only the name annotation; operator defaults the
+    # route's parent namespace to the deployment namespace.
+    add_inference_gateway_to_config(_dgdr(gateway_name="prod-gw"), cfg)
+    ann = cfg["metadata"]["annotations"]
+    assert ann[INFERENCE_GATEWAY_NAME_ANNOTATION] == "prod-gw"
+    assert INFERENCE_GATEWAY_NAMESPACE_ANNOTATION not in ann
 
 
 # ---------------------------------------------------------------------------
