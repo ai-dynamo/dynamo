@@ -554,39 +554,6 @@ def _extract_block_size(services: dict, default: int) -> int:
     return default
 
 
-def _routing_profile_router_env(routing_profile) -> list[dict]:
-    """Map a ``RoutingProfile`` preset to Dynamo KV-router env knobs.
-
-    The EPP scorer (``dyn-decode-scorer`` / ``dyn-prefill-scorer``) delegates
-    endpoint selection to the Dynamo KV router via FFI, and that router reads
-    these env vars on the EPP container (see ``lib/bindings/c/src/lib.rs``):
-
-    * ``DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`` in ``[0, 1]`` (default ``1.0``) —
-      credit for device-local prefix-cache overlap; higher packs requests onto
-      cache-warm workers.
-    * ``DYN_ROUTER_PREFILL_LOAD_SCALE`` >= ``0`` (default ``1.0``) — how
-      strongly prefill load penalizes a worker; higher spreads load to cut
-      queueing.
-
-    ``balanced`` leaves the router at its defaults (no env emitted). The
-    magnitudes here are initial heuristics, not tuned constants.
-    """
-    profile = getattr(routing_profile, "value", routing_profile)
-    if profile == "throughput":
-        # Maximize KV-cache reuse and tolerate load -> pack onto warm workers.
-        return [
-            {"name": "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "value": "1.0"},
-            {"name": "DYN_ROUTER_PREFILL_LOAD_SCALE", "value": "0.5"},
-        ]
-    if profile == "latency":
-        # De-emphasize reuse and penalize loaded workers -> spread, cut queueing.
-        return [
-            {"name": "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "value": "0.5"},
-            {"name": "DYN_ROUTER_PREFILL_LOAD_SCALE", "value": "2.0"},
-        ]
-    return []
-
-
 def _build_epp_endpoint_picker_config(disaggregated: bool) -> dict:
     """Build the EndpointPickerConfig, mirroring the dynamo-gaie presets.
 
@@ -691,12 +658,14 @@ def add_inference_gateway_to_config(dgdr, config_dict: dict) -> None:
             break
 
     # --- 1. Epp service -----------------------------------------------------
+    # Functional wiring only — model, block size, disagg enforcement. Routing
+    # policy is intentionally left to the EPP's embedded KV router defaults (we
+    # don't hand-tune overlap credit / load scale / temperature here).
     epp_env = [
         {"name": "DYN_KV_CACHE_BLOCK_SIZE", "value": str(block_size)},
         {"name": "DYN_MODEL_NAME", "value": dgdr.model},
         {"name": "DYN_ENFORCE_DISAGG", "value": "true" if disaggregated else "false"},
     ]
-    epp_env.extend(_routing_profile_router_env(igw.routingProfile))
 
     main_container: dict = {"env": epp_env}
     if dgdr.image:

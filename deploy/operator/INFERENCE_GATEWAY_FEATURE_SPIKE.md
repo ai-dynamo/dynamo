@@ -182,17 +182,19 @@ v1alpha1 services-dict DGD in place:
      set) drive the reconcile hook. No name ⇒ EPP InferencePool only, no HTTPRoute (logged). Attach-only
      by design: the Gateway is shared, pre-provisioned infra (usually in its own namespace), so we attach
      cross-namespace; we never create the Gateway.
-  4. **`RoutingProfile` is now a real consumer** — maps to Dynamo KV-router env knobs the EPP's FFI
-     scorer reads (`lib/bindings/c/src/lib.rs`): `throughput` → high
-     `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` (1.0) + low `DYN_ROUTER_PREFILL_LOAD_SCALE` (0.5) [pack onto
-     cache-warm workers]; `latency` → 0.5 / 2.0 [spread to cut queueing]; `balanced` → router defaults
-     (no env). Magnitudes are initial heuristics, not tuned.
+  4. **Routing policy is NOT set here** (`RoutingProfile` was removed). The DGDR/profiler deploy path
+     doesn't tune router knobs anywhere — the generated Frontend runs `dynamo.frontend` on defaults
+     (round-robin; KV routing uses built-in `KvRouterConfig` defaults), and the global router sets
+     nothing. The EPP embeds that same KV router via FFI, so it inherits the same defaults. We emit only
+     *functional* EPP env (`DYN_MODEL_NAME` / `DYN_KV_CACHE_BLOCK_SIZE` / `DYN_ENFORCE_DISAGG`), never
+     overlap-credit / prefill-load-scale / temperature. If validated presets ever exist they belong at
+     the router level (shared by the frontend KV router and the EPP), not a GAIE-only enum.
 - Also gated the vLLM self-benchmark step on `planner` (its only consumer) so an IGW-only deployment
   doesn't spuriously set `DYN_BENCHMARK_MODE`.
 
-**Tests:** `tests/unit/test_dgd_generation_inference_gateway.py` — 15 cases (agg/disagg EPP config,
-routing-profile env, sidecar conversion + Frontend removal, name + cross-ns namespace annotation
-handoff, disabled = no-op). All green; no regression in the existing profiler unit suite.
+**Tests:** `tests/unit/test_dgd_generation_inference_gateway.py` — 13 cases (agg/disagg EPP config,
+functional-only EPP env / no router-policy knobs, sidecar conversion + Frontend removal, name + cross-ns
+namespace annotation handoff, disabled = no-op). All green; no regression in the existing profiler suite.
 
 **Controller coverage (this pass):** `dynamographdeployment_epp_route_test.go` — fake-client tests of
 `reconcileEPPResources` itself (the repo's dominant controller-test style; the Ginkgo envtest suite

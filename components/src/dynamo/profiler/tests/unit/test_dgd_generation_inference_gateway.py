@@ -4,8 +4,9 @@
 """Unit tests for the inference-gateway (GAIE/EPP) producer.
 
 Covers ``add_inference_gateway_to_config`` and its helpers: the agg-vs-disagg
-EndpointPickerConfig, the RoutingProfile -> KV-router env mapping, the
-frontend-sidecar conversion (+ standalone Frontend removal), and the
+EndpointPickerConfig, the frontend-sidecar conversion (+ standalone Frontend
+removal), the functional-only EPP env (routing policy is inherited from the
+EPP's KV-router defaults, not tuned here), and the
 ``nvidia.com/inference-gateway-name`` annotation handoff that makes the DGD
 controller emit the HTTPRoute.
 """
@@ -22,7 +23,6 @@ try:
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         InferenceGatewayFeature,
-        RoutingProfile,
     )
     from dynamo.profiler.utils.profile_common import (
         derive_epp_image,
@@ -47,14 +47,12 @@ _PLANNER_IMAGE = "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
 
 
 def _dgdr(
-    routing_profile: RoutingProfile = RoutingProfile.Balanced,
     gateway_name: str | None = "my-gateway",
     gateway_namespace: str | None = None,
     image: str | None = _PLANNER_IMAGE,
 ) -> DynamoGraphDeploymentRequestSpec:
     igw = InferenceGatewayFeature(
         enabled=True,
-        routingProfile=routing_profile,
         gatewayName=gateway_name,
         gatewayNamespace=gateway_namespace,
     )
@@ -284,30 +282,21 @@ def test_disagg_env_and_all_workers_get_sidecar():
 
 
 # ---------------------------------------------------------------------------
-# routing profile -> router knobs
+# routing policy: inherited from EPP/router defaults (not tuned here)
 # ---------------------------------------------------------------------------
 
 
-def test_routing_profile_throughput_packs_on_cache():
+def test_epp_env_has_no_router_policy_knobs():
+    """The EPP inherits the KV router's defaults; we set only functional env."""
     cfg = _agg_config()
-    add_inference_gateway_to_config(_dgdr(RoutingProfile.Throughput), cfg)
+    add_inference_gateway_to_config(_dgdr(), cfg)
     env = _epp_env(cfg)
-    assert env["DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT"] == "1.0"
-    assert env["DYN_ROUTER_PREFILL_LOAD_SCALE"] == "0.5"
-
-
-def test_routing_profile_latency_spreads_load():
-    cfg = _agg_config()
-    add_inference_gateway_to_config(_dgdr(RoutingProfile.Latency), cfg)
-    env = _epp_env(cfg)
-    assert env["DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT"] == "0.5"
-    assert env["DYN_ROUTER_PREFILL_LOAD_SCALE"] == "2.0"
-
-
-def test_routing_profile_balanced_uses_router_defaults():
-    cfg = _agg_config()
-    add_inference_gateway_to_config(_dgdr(RoutingProfile.Balanced), cfg)
-    env = _epp_env(cfg)
-    # balanced leaves the router at its defaults -> no override env emitted
-    assert "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT" not in env
-    assert "DYN_ROUTER_PREFILL_LOAD_SCALE" not in env
+    # functional wiring is present...
+    assert set(env) == {
+        "DYN_KV_CACHE_BLOCK_SIZE",
+        "DYN_MODEL_NAME",
+        "DYN_ENFORCE_DISAGG",
+    }
+    # ...and no routing-policy knobs are injected.
+    for k in env:
+        assert "OVERLAP" not in k and "PREFILL_LOAD" not in k and "TEMPERATURE" not in k
