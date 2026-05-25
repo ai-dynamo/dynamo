@@ -38,13 +38,29 @@ except ImportError as e:
         "PyTorch must be installed to use this module. Please install PyTorch, ex: 'pip install torch'."
     ) from e
 
+_NIXL_IMPORT_ERROR: Optional[ImportError] = None
 try:
     import nixl._api as nixl_api
     import nixl._bindings as nixl_bindings
 except ImportError as e:
-    raise ImportError(
-        "NIXL Python bindings must be installed to use this module. Please install NIXL, ex: 'pip install nixl'."
-    ) from e
+    # Defer the error: a pip-installed `nixl` wheel only exists for CUDA
+    # (`nixl-cu12`). Allowing `import dynamo.nixl_connect` to succeed on
+    # platforms without a NIXL wheel (e.g. AMD ROCm) lets transitive
+    # importers — router, planner, frontend — load. The ImportError is
+    # re-raised by `_require_nixl()` only when an operation that
+    # actually needs NIXL is attempted (e.g. constructing a `Connector`).
+    nixl_api = None  # type: ignore[assignment]
+    nixl_bindings = None  # type: ignore[assignment]
+    _NIXL_IMPORT_ERROR = e
+
+
+def _require_nixl() -> None:
+    """Raise the deferred NIXL ImportError if the bindings are not installed."""
+    if nixl_api is None:
+        raise ImportError(
+            "NIXL Python bindings must be installed to use this module. "
+            "Please install NIXL, ex: 'pip install nixl'."
+        ) from _NIXL_IMPORT_ERROR
 
 logger = logging.getLogger(__name__)
 
@@ -576,6 +592,7 @@ class Connection:
         if number <= 0:
             raise ValueError("Argument `number` must be greater than 0.")
 
+        _require_nixl()
         self._connector: Connector = connector
         self._is_initialized = False
         self._name = f"{connector.name}-{number}"
