@@ -53,7 +53,7 @@ dynamo-kv-router = { path = "lib/kv-router", version = "1.2.0", features = ["met
 dynamo-protocols = { path = "lib/protocols", version = "1.2.0" }
 dynamo-parsers = { path = "lib/parsers", version = "1.2.0" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.2.0" }
-fastokens = { version = "0.1.0" }
+fastokens = { version = "0.2.0" }
 
 
 # kvbm

@@ -735,7 +735,11 @@ def _normalize_single_stage_runtime_devices(stage_arg: dict) -> None:
 
 
 def _get_visible_devices() -> list[str]:
-    for env_var in ("CUDA_VISIBLE_DEVICES", "ASCEND_RT_VISIBLE_DEVICES"):
+    for env_var in (
+        "CUDA_VISIBLE_DEVICES",
+        "ASCEND_RT_VISIBLE_DEVICES",
+        "ZE_AFFINITY_MASK",
+    ):
         if devices := os.environ.get(env_var):
             return _parse_runtime_devices(devices)
     return []
