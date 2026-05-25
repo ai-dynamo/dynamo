@@ -227,14 +227,78 @@ non-agentic traffic sharing the same workers.
 
 ---
 
-## Testing
+## Reproducing the MiniMax-M2 results
+
+The headline numbers — program-aware scheduling vs KV-routing-only on the
+same hardware — come from driving SWE-bench-Lite through pi via a Harbor
+adapter, against two TP4 MiniMax-M2 replicas on a single 8×H100 node.
+
+### 1. Bring up Dynamo (2× TP4 MiniMax-M2)
 
 ```bash
-pytest components/src/dynamo/thunderagent_router/tests/test_router.py
+# Two TP4 vLLM workers, KV events on, native MiniMax tool-call parser.
+for i in 0 1; do
+  CUDA_VISIBLE_DEVICES=$((i*4)),$((i*4+1)),$((i*4+2)),$((i*4+3)) \
+  python -m dynamo.vllm \
+      --model MiniMaxAI/MiniMax-M2 --tensor-parallel-size 4 \
+      --dyn-tool-call-parser minimax_m2 \
+      --kv-events-config '{"publisher":"zmq","topic":"kv-events",
+                           "endpoint":"tcp://*:2008'"$i"'",
+                           "enable_kv_cache_events":true}' &
+done
+
+# Router. DYN_TOOL_CALL_PARSER is forwarded to register_model so MiniMax's
+# <minimax:tool_call> XML reaches pi as real OpenAI tool_calls, not raw text.
+DYN_TOOL_CALL_PARSER=minimax_m2 python -m dynamo.thunderagent_router \
+    --endpoint dynamo.vllm.generate \
+    --model-name MiniMaxAI/MiniMax-M2 \
+    --router-block-size 16
+
+# Frontend on :8100 (the router already registered the model handler).
+python -m dynamo.frontend --http-port 8100 --router-mode round-robin
 ```
 
-The unit tests exercise admission, after-request token accounting, and
-the default BFD-on-resume path.
+For the **KV-routing-only baseline** arm, drop the `thunderagent_router`
+process and run the frontend in KV-router mode against the same two workers
+(`python -m dynamo.frontend --http-port 8100 --router-mode kv`).
+
+### 2. Run pi + Harbor
+
+The Harbor pi adapter lives on the `feat/harbor-pi-adapter` branch of the
+fork. It installs `pi-dynamo-provider` into each trial container and injects
+`nvext.agent_context` so each Harbor trial maps to one ThunderAgent program.
+
+```bash
+# Clone the fork and the provider side by side.
+git clone -b feat/harbor-pi-adapter https://github.com/ishandhanani/ThunderAgent
+git clone https://github.com/ai-dynamo/pi-dynamo-provider
+export PI_DYNAMO_PROVIDER_PATH="$PWD/pi-dynamo-provider"
+
+cd ThunderAgent/examples/datagen/harbor
+uv venv && source .venv/bin/activate && uv pip install -e .
+
+harbor run \
+  --path datasets/swebench \
+  --agent pi \
+  --model 'dynamo/MiniMaxAI/MiniMax-M2' \
+  --ak api_base='http://127.0.0.1:8100/v1' \
+  --n-tasks 30 --n-concurrent 10 \
+  --network-mode host --override-cpus 2 --override-memory-mb 8192 \
+  -v "$PI_DYNAMO_PROVIDER_PATH:/opt/pi-dynamo-provider:ro" \
+  --jobs-dir /tmp/harbor-jobs --job-name ta-run --quiet
+```
+
+### Expected
+
+On 8×H100 with 30 SWE-bench-Lite tasks (20 astropy + 10 django) at
+`n_concurrent=10`, program-aware scheduling runs at ~1.34 trials/min vs ~0.84
+for the KV-routing-only baseline — roughly **+60% faster wall-clock at matched
+pass rate** (pass-rate deltas on this slice are within run-to-run noise). The
+advantage widens as agents make more LLM calls per task.
+
+Pointing `--ak api_base` at a stock `vllm serve` instead of the Dynamo
+frontend also works — `nvext.agent_context` is silently dropped — which is how
+the non-Dynamo control arm is run.
 
 ---
 
