@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v4
+model_label: DeepSeek V4
+mode: batch
+refs:
+  upstream: &upstream_ref 'inspired by vLLM DeepSeek V4 alias coverage in DeepSeek V3 reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_deepseekv3_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
+cases:
+  REASONING.batch.1.b:
+    description: Plain text without reasoning markers
+    ref: *upstream_ref
+    chat_template_kwargs:
+      enable_thinking: false
+    model_text: plain answer
+    expected:
+      dynamo: &d_0
+        reasoning_text: ''
+        normal_text: plain answer
+      vllm: *d_0
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.2.a:
+    description: Single reasoning block
+    ref: *upstream_ref
+    model_text: <think>thinking</think>
+    expected:
+      dynamo: &d_1
+        reasoning_text: thinking
+        normal_text: ''
+      vllm: *d_1
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.3.a:
+    description: Reasoning followed by downstream tool-call text
+    ref: *upstream_ref
+    model_text: |-
+      <think>choose tool</think><｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    expected:
+      dynamo: &d_2
+        reasoning_text: choose tool
+        normal_text: |-
+          <｜DSML｜tool_calls>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          </｜DSML｜tool_calls>
+      vllm: *d_2
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.3.b:
+    description: Open reasoning interrupted by downstream tool-call text is not configured for DeepSeek V4
+    ref: *upstream_ref
+    reason: Dynamo's DeepSeek V4 reasoning parser has no downstream tool-call boundary while reasoning is open; closed-span handoff is covered by REASONING.batch.3.a.
+  REASONING.batch.2.c:
+    description: Reasoning followed by normal answer text
+    ref: *upstream_ref
+    model_text: <think>thinking</think>answer
+    expected:
+      dynamo: &d_3
+        reasoning_text: thinking
+        normal_text: answer
+      vllm: *d_3
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.2.d:
+    description: Normal text around reasoning
+    ref: *upstream_ref
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    model_text: before <think>thinking</think> after
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: before  after
+      vllm:
+        reasoning_text: thinking
+        normal_text: ' after'
+        reason: Dynamo keeps visible text outside a complete reasoning span as normal_text; vLLM drops the prefix.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.4:
+    description: Dangling end marker without an opening think tag
+    dynamo_leak: true
+    ref: *upstream_ref
+    model_text: normal</think>answer
+    expected:
+      dynamo: &d_4
+        reasoning_text: ''
+        normal_text: normal</think>answer
+      vllm:
+        reasoning_text: normal
+        normal_text: answer
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.5:
+    description: Open think marker starts reasoning from an outside-reasoning initial state
+    ref: *upstream_ref
+    model_text: <think>plain answer
+    expected:
+      dynamo: &d_5
+        reasoning_text: plain answer
+        normal_text: ''
+      vllm: *d_5
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.2.e:
+    description: Empty reasoning block
+    ref: *upstream_ref
+    model_text: <think></think>answer
+    expected:
+      dynamo: &d_6
+        reasoning_text: ''
+        normal_text: answer
+      vllm: *d_6
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.2.f:
+    description: Complex reasoning content with Unicode and newlines
+    ref: *upstream_ref
+    model_text: |-
+      <think>Line 1
+      Unicode: café
+      JSON-ish: {"x": [1, true]}</think>Done.
+    expected:
+      dynamo: &d_7
+        reasoning_text: |-
+          Line 1
+          Unicode: café
+          JSON-ish: {"x": [1, true]}
+        normal_text: Done.
+      vllm: *d_7
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.1.a:
+    description: Empty input
+    ref: *upstream_ref
+    model_text: ''
+    expected:
+      dynamo: &d_8
+        reasoning_text: ''
+        normal_text: ''
+      vllm: *d_8
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.6.a:
+    description: Multiple reasoning spans are concatenated by Dynamo
+    ref: *upstream_ref
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    model_text: <think>first</think> middle <think>second</think> done
+    expected:
+      dynamo: &d_9
+        reasoning_text: firstsecond
+        normal_text: middle  done
+      vllm:
+        reasoning_text: first
+        normal_text: ' middle <think>second</think> done'
+        reason: Dynamo extracts each complete reasoning span; vLLM leaves the later complete span in normal_text.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'

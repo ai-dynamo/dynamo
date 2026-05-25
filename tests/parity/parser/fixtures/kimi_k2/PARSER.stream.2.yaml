@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: kimi_k2
+model_label: Kimi K2.6
+mode: stream
+cases:
+  PARSER.stream.2:
+    description: Multiple tool calls split across multiple content chunks
+    ref: derived from PARSER.batch.2.a
+    chunks:
+    - delta_text: <|tool_ca
+    - delta_text: lls_sec
+    - delta_text: tion_begin|><
+    - delta_text: '|tool'
+    - delta_text: _call_begin|>func
+    - delta_text: tio
+    - delta_text: ns.get_we
+    - delta_text: ather:0
+    - delta_text: <|tool_call_a
+    - delta_text: rgume
+    - delta_text: nt_begin|>{"locat
+    - delta_text: ion
+    - delta_text: '":"NYC"}<'
+    - delta_text: '|tool_c'
+    - delta_text: all_end|><|to
+    - delta_text: ol_ca
+    - delta_text: ll_begin|>functio
+    - delta_text: ns.
+    - delta_text: 'get_time:'
+    - delta_text: 1<|tool
+    - delta_text: _call_argumen
+    - delta_text: t_beg
+    - delta_text: in|>{"timezone":"
+    - delta_text: EST
+    - delta_text: '"}<|tool_'
+    - delta_text: call_en
+    - delta_text: d|><|tool_cal
+    - delta_text: ls_se
+    - delta_text: ction_end|>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|>
+      vllm: *id001

@@ -166,9 +166,11 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
+
     fn taints(&self) -> &HashSet<String> {
         &EMPTY_WORKER_TAINTS
     }
+
     /// Stable identifier for the worker, preserved across process restarts.
     ///
     /// In Kubernetes StatefulSet deployments this is the pod hostname (`worker-0`, `worker-1`,
@@ -179,6 +181,40 @@ pub trait WorkerConfigLike {
     fn stable_routing_id(&self) -> Option<&str> {
         None
     }
+
+    /// Returns the worker's topology domain labels (e.g. {"zone": "us-east-1a", "rack": "rack1"}).
+    /// Topology-aware routing turns these labels into canonical worker taints such as
+    /// `dynamo.topology/zone=us-east-1a`.
+    /// Returns `None` by default for backward compatibility.
+    fn topology_domains(&self) -> Option<&HashMap<String, String>> {
+        None
+    }
+
+    /// Returns the topology domain to enforce for KV-cache transfers (e.g. "zone").
+    /// When set, decode worker selection is constrained to workers sharing the same
+    /// topology domain value as the prefill worker.
+    fn kv_transfer_domain(&self) -> Option<&str> {
+        None
+    }
+
+    /// Returns the KV transfer topology enforcement mode.
+    fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
+        None
+    }
+
+    /// Returns the taint preference weight used when KV transfer topology enforcement is preferred.
+    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KvTransferEnforcement {
+    /// Put the generated topology taint in `RoutingConstraints.required_taints`.
+    Required,
+    /// Put the generated topology taint in `RoutingConstraints.preferred_taints`.
+    Preferred,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -406,6 +442,13 @@ impl Default for RouterRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouterBackpressureReason {
+    /// The configured cap on total queued ISL tokens has been reached.
+    MaxQueuedIslTokensExceeded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterResponse {
     New {
@@ -413,6 +456,12 @@ pub enum RouterResponse {
         #[serde(default)]
         dp_rank: DpRank,
         overlap_blocks: u32,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_queued_isl_tokens: Option<usize>,
     },
     PrefillMarked {
         success: bool,
@@ -438,7 +487,7 @@ pub struct WorkerSelectionResult {
     pub cached_tokens: usize,
 }
 
-/// Active load metrics for a worker, used for busy detection.
+/// Active load metrics for a worker, used for overload detection.
 ///
 /// Published by workers (with `kv_used_blocks`) and by the scheduler (with
 /// `active_decode_blocks` and `active_prefill_tokens`).
@@ -454,7 +503,7 @@ pub struct ActiveLoad {
     /// Total KV blocks currently in use on the worker.
     ///
     /// This is published by workers only and is the authoritative signal for
-    /// backend KV occupancy used by busy detection.
+    /// backend KV occupancy used by overload detection.
     #[serde(default)]
     pub kv_used_blocks: Option<u64>,
 }
@@ -1406,6 +1455,57 @@ mod tests {
         assert_eq!(hits.hits_beyond(6), 2);
         // from_position=8 => nothing
         assert_eq!(hits.hits_beyond(8), 0);
+    }
+
+    #[test]
+    fn test_kv_transfer_enforcement_serde() {
+        assert_eq!(
+            serde_json::to_string(&KvTransferEnforcement::Required).unwrap(),
+            r#""required""#
+        );
+        assert_eq!(
+            serde_json::from_str::<KvTransferEnforcement>(r#""preferred""#).unwrap(),
+            KvTransferEnforcement::Preferred
+        );
+        assert!(serde_json::from_str::<KvTransferEnforcement>(r#""fallback""#).is_err());
+    }
+
+    #[test]
+    fn test_worker_config_like_topology_domains_default() {
+        // A minimal implementor that does NOT override topology_domains()
+        struct MinimalConfig;
+        impl WorkerConfigLike for MinimalConfig {
+            fn data_parallel_start_rank(&self) -> u32 {
+                0
+            }
+            fn data_parallel_size(&self) -> u32 {
+                1
+            }
+            fn max_num_batched_tokens(&self) -> Option<u64> {
+                None
+            }
+            fn total_kv_blocks(&self) -> Option<u64> {
+                None
+            }
+        }
+
+        let config = MinimalConfig;
+        assert!(
+            config.topology_domains().is_none(),
+            "Default topology_domains() should return None"
+        );
+        assert!(
+            config.kv_transfer_domain().is_none(),
+            "Default kv_transfer_domain() should return None"
+        );
+        assert!(
+            config.kv_transfer_enforcement().is_none(),
+            "Default kv_transfer_enforcement() should return None"
+        );
+        assert!(
+            config.kv_transfer_preferred_weight().is_none(),
+            "Default kv_transfer_preferred_weight() should return None"
+        );
     }
 
     #[test]

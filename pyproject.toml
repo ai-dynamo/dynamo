@@ -49,8 +49,8 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai,otel]==0.20.1",
+    "nixl[cu12]==1.1.0",
+    "vllm[flashinfer,runai,otel]==0.21.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -69,7 +69,7 @@ sglang = [
 ]
 
 mocker = [
-    "aiconfigurator>=0.7.0",
+    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@2103aa286a822d112ea83781ad14e3e022b603d9",
 ]
 
 [project.entry-points.pytest11]
@@ -163,6 +163,7 @@ addopts = [
     "--showlocals",
     "--strict-markers",
     "--strict-config",
+    "-p", "no:schemathesis",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",

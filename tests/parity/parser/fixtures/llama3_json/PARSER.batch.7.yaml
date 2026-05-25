@@ -98,3 +98,82 @@ cases:
         normal_text: ''
       vllm: *id004
       sglang: *id004
+  PARSER.batch.7.e:
+    description: Large / deep JSON-edge argument payload
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "process_data", "arguments": {"payload": {"regions": [{"name": "west", "scores": [1,
+      2, 3]}, {"name": "east", "scores": [4, 5, 6]}], "flags": {"enabled": true, "retry": null}, "empty": {}}}}'
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          payload:
+            type: object
+    expected:
+      dynamo:
+        calls:
+        - name: process_data
+          arguments:
+            payload:
+              regions:
+              - name: west
+                scores:
+                - 1
+                - 2
+                - 3
+              - name: east
+                scores:
+                - 4
+                - 5
+                - 6
+              flags:
+                enabled: true
+                retry: null
+              empty: {}
+        normal_text: ''
+      vllm:
+        calls:
+        - name: process_data
+          arguments:
+            payload:
+              regions:
+              - name: west
+                scores:
+                - 1
+                - 2
+                - 3
+              - name: east
+                scores:
+                - 4
+                - 5
+                - 6
+              flags:
+                enabled: true
+                retry: null
+              empty: {}
+        normal_text: ''
+      sglang:
+        calls:
+        - name: process_data
+          arguments:
+            payload:
+              regions:
+              - name: west
+                scores:
+                - 1
+                - 2
+                - 3
+              - name: east
+                scores:
+                - 4
+                - 5
+                - 6
+              flags:
+                enabled: true
+                retry: null
+              empty: {}
+        normal_text: ''
+  PARSER.batch.7.f:
+    description: Numeric precision edge test 7.f — not yet authored for this family
+    reason: Numeric precision edge test 7.f not yet authored for llama3_json; Qwen3-Coder coverage is provided by qwen3_coder 7.f.
