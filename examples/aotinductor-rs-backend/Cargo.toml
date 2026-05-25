@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-aotinductor-backend"
+version = "0.1.0"
+edition = "2024"
+authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
+license = "Apache-2.0"
+publish = false
+
+# Keep this example out of the main Dynamo workspace so regular workspace
+# builds do not require a local libtorch install.
+[workspace]
+
+[[bin]]
+name = "dynamo-aotinductor-backend"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-backend-common = { path = "../../lib/backend-common" }
+
+anyhow = "1"
+aotinductor = { git = "https://github.com/pierric/aotinductor-rs.git", rev = "9dce538d2ad6796b9e362dd80b07506486f6c2d5" }
+async-stream = "0.3"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+tch = "0.23.0"
+tokio = { version = "=1.48.0", features = ["full"] }
+tracing = "0.1"
+
+[dev-dependencies]
+dynamo-backend-common = { path = "../../lib/backend-common", features = ["testing"] }
