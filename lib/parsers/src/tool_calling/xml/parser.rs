@@ -812,6 +812,7 @@ mod tests {
                     "precise_count": {"type": "number"}
                 }
             })),
+            strict: None,
         }];
 
         let (calls, normal) =
@@ -958,6 +959,7 @@ Orlando
                     "config": {"type": "object"}
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -1216,6 +1218,7 @@ NYC
                 },
                 "required": ["param1", "param2", "param3", "param4", "param5", "param6", "param7", "param8"]
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -1279,6 +1282,7 @@ NYC
                     "bool_param": {"type": "boolean"}
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -1332,6 +1336,7 @@ NYC
                     }
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>

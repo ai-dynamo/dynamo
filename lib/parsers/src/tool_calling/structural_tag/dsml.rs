@@ -63,7 +63,7 @@ pub(crate) fn build_dsml_tool_calls(
             // function name validated by validate_tools() in the request handler
             let begin = config
                 .invoke_begin_template
-                .replace(TOOL_NAME_PLACEHOLDER, &tool.function.name);
+                .replace(TOOL_NAME_PLACEHOLDER, &tool.name);
 
             TagFormat {
                 begin,

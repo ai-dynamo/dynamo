@@ -3067,6 +3067,7 @@ fahrenheit
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -3105,6 +3106,7 @@ true
                     "enabled": {"type": "bool"},
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -3227,6 +3229,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -3283,6 +3286,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -3334,6 +3338,7 @@ weather forecasting
                     "query_list": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3426,6 +3431,7 @@ weather forecasting
                     "enabled": {"type": "boolean"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3452,6 +3458,7 @@ weather forecasting
                     "items": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await

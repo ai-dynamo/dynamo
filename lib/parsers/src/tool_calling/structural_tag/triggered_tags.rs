@@ -60,7 +60,7 @@ pub(crate) fn build_triggered_tags(
             // function name validated by validate_tools() in the request handler
             let begin = config
                 .begin_template
-                .replace(TOOL_NAME_PLACEHOLDER, &tool.function.name);
+                .replace(TOOL_NAME_PLACEHOLDER, &tool.name);
 
             TagFormat {
                 begin,

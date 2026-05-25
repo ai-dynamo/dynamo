@@ -6,15 +6,15 @@
 use crate::local_model::runtime_config::{StructuralTagMode, StructuralTagScope};
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 
-use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption};
+use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
 impl OpenAIPreprocessor {
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
         &self,
-        tool_choice: &ChatCompletionToolChoiceOption,
-        tools: &[ChatCompletionTool],
+        tool_choice: &ToolChoice,
+        tools: &[ToolDefinition],
         parallel_tool_calls: Option<bool>,
         prompt_injected_reasoning: bool,
         preprocessed_request: &mut PreprocessedRequest,
@@ -35,7 +35,7 @@ impl OpenAIPreprocessor {
             return Ok(false);
         };
 
-        if matches!(tool_choice, ChatCompletionToolChoiceOption::None) {
+        if matches!(tool_choice, ToolChoice::None) {
             if tools.is_empty() {
                 return Ok(false);
             }
@@ -142,20 +142,18 @@ impl OpenAIPreprocessor {
     /// Decide whether this request should use a tool-call format tag.
     fn should_apply_tool_call_format(
         scope: StructuralTagScope,
-        tool_choice: &ChatCompletionToolChoiceOption,
-        tools: &[ChatCompletionTool],
+        tool_choice: &ToolChoice,
+        tools: &[ToolDefinition],
         parallel_tool_calls: Option<bool>,
     ) -> bool {
         match tool_choice {
-            ChatCompletionToolChoiceOption::None => false,
-            ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_) => {
-                true
-            }
-            ChatCompletionToolChoiceOption::Auto => match scope {
+            ToolChoice::None => false,
+            ToolChoice::Required | ToolChoice::Named(_) => true,
+            ToolChoice::Auto => match scope {
                 StructuralTagScope::Always => true,
                 StructuralTagScope::Auto => {
                     let explicit_single_call = parallel_tool_calls == Some(false);
-                    tools.iter().any(|t| t.function.strict.unwrap_or(false)) || explicit_single_call
+                    tools.iter().any(|t| t.strict.unwrap_or(false)) || explicit_single_call
                 }
             },
         }

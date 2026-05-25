@@ -2219,6 +2219,7 @@ mod tests {
                     "filter": {"type": "string"},
                 },
             })),
+            strict: None,
         }];
 
         let input_stream = stream::iter(chunks);

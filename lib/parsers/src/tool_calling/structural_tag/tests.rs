@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_protocols::types::{
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, FunctionObject,
-};
 use serde_json::{Value, json};
 
 use super::TOOL_NAME_PLACEHOLDER;
@@ -11,7 +8,7 @@ use super::builder::{StructuralTagBuilder, StructuralTagSchemaMode, ToolCallForm
 use super::dsml::DsmlToolCallsConfig;
 use super::format::JsonSchemaStyle;
 use super::triggered_tags::TriggeredTagsConfig;
-use crate::tool_calling::ToolCallConfig;
+use crate::tool_calling::{ToolCallConfig, ToolChoice, ToolDefinition};
 
 fn sample_config() -> TriggeredTagsConfig {
     TriggeredTagsConfig {
@@ -24,38 +21,30 @@ fn sample_config() -> TriggeredTagsConfig {
     }
 }
 
-fn sample_tools() -> Vec<ChatCompletionTool> {
+fn sample_tools() -> Vec<ToolDefinition> {
     vec![
-        ChatCompletionTool {
-            r#type: ChatCompletionToolType::Function,
-            function: FunctionObject {
-                name: "add_numbers".to_string(),
-                description: Some("Add two integers".to_string()),
-                parameters: Some(json!({
-                    "type": "object",
-                    "properties": {
-                        "a": {"type": "integer"},
-                        "b": {"type": "integer"},
-                    },
-                    "required": ["a", "b"],
-                })),
-                strict: None,
-            },
+        ToolDefinition {
+            name: "add_numbers".to_string(),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "integer"},
+                    "b": {"type": "integer"},
+                },
+                "required": ["a", "b"],
+            })),
+            strict: None,
         },
-        ChatCompletionTool {
-            r#type: ChatCompletionToolType::Function,
-            function: FunctionObject {
-                name: "get_weather".to_string(),
-                description: Some("Get weather".to_string()),
-                parameters: Some(json!({
-                    "type": "object",
-                    "properties": {
-                        "location": {"type": "string"},
-                    },
-                    "required": ["location"],
-                })),
-                strict: None,
-            },
+        ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+                "required": ["location"],
+            })),
+            strict: None,
         },
     ]
 }
@@ -65,8 +54,8 @@ fn builder() -> StructuralTagBuilder {
 }
 
 fn ctx<'a>(
-    tool_choice: &'a ChatCompletionToolChoiceOption,
-    tools: &'a [ChatCompletionTool],
+    tool_choice: &'a ToolChoice,
+    tools: &'a [ToolDefinition],
     parallel_tool_calls: Option<bool>,
     schema_mode: StructuralTagSchemaMode,
 ) -> ToolCallFormatBuildContext<'a> {
@@ -80,8 +69,8 @@ fn ctx<'a>(
 }
 
 fn ctx_starting_in_reasoning<'a>(
-    tool_choice: &'a ChatCompletionToolChoiceOption,
-    tools: &'a [ChatCompletionTool],
+    tool_choice: &'a ToolChoice,
+    tools: &'a [ToolDefinition],
 ) -> ToolCallFormatBuildContext<'a> {
     ToolCallFormatBuildContext {
         tool_choice,
@@ -95,8 +84,8 @@ fn ctx_starting_in_reasoning<'a>(
 /// Helper: build and unwrap both Result and Option layers.
 fn build_unwrap(
     builder: &StructuralTagBuilder,
-    tool_choice: &ChatCompletionToolChoiceOption,
-    tools: &[ChatCompletionTool],
+    tool_choice: &ToolChoice,
+    tools: &[ToolDefinition],
     parallel_tool_calls: Option<bool>,
     schema_mode: StructuralTagSchemaMode,
 ) -> Value {
@@ -112,7 +101,7 @@ fn required_builds_all_tools_with_at_least_one() {
     let tools = sample_tools();
     let parsed = build_unwrap(
         &builder(),
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &tools,
         None,
         StructuralTagSchemaMode::Auto,
@@ -136,7 +125,7 @@ fn auto_builds_all_tools_without_at_least_one() {
     let tools = sample_tools();
     let parsed = build_unwrap(
         &builder(),
-        &ChatCompletionToolChoiceOption::Auto,
+        &ToolChoice::Auto,
         &tools,
         None,
         StructuralTagSchemaMode::Auto,
@@ -152,14 +141,7 @@ fn auto_builds_all_tools_without_at_least_one() {
 #[test]
 fn named_builds_single_tool() {
     let tools = sample_tools();
-    let named = ChatCompletionToolChoiceOption::Named(
-        dynamo_protocols::types::ChatCompletionNamedToolChoice {
-            r#type: ChatCompletionToolType::Function,
-            function: dynamo_protocols::types::FunctionName {
-                name: "get_weather".to_string(),
-            },
-        },
-    );
+    let named = ToolChoice::Named("get_weather".to_string());
     let parsed = build_unwrap(
         &builder(),
         &named,
@@ -178,14 +160,7 @@ fn named_builds_single_tool() {
 #[test]
 fn named_unknown_tool_returns_error() {
     let tools = sample_tools();
-    let named = ChatCompletionToolChoiceOption::Named(
-        dynamo_protocols::types::ChatCompletionNamedToolChoice {
-            r#type: ChatCompletionToolType::Function,
-            function: dynamo_protocols::types::FunctionName {
-                name: "nonexistent".to_string(),
-            },
-        },
-    );
+    let named = ToolChoice::Named("nonexistent".to_string());
     let c = ctx(&named, &tools, None, StructuralTagSchemaMode::Auto);
     let err = builder()
         .build_tool_call_format(&c)
@@ -199,7 +174,7 @@ fn named_unknown_tool_returns_error() {
 #[test]
 fn required_with_empty_tools_returns_error() {
     let c = ctx(
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &[],
         None,
         StructuralTagSchemaMode::Auto,
@@ -217,7 +192,7 @@ fn required_with_empty_tools_returns_error() {
 fn none_returns_ok_none() {
     let tools = sample_tools();
     let c = ctx(
-        &ChatCompletionToolChoiceOption::None,
+        &ToolChoice::None,
         &tools,
         None,
         StructuralTagSchemaMode::Auto,
@@ -230,12 +205,7 @@ fn none_returns_ok_none() {
 
 #[test]
 fn auto_with_empty_tools_returns_ok_none() {
-    let c = ctx(
-        &ChatCompletionToolChoiceOption::Auto,
-        &[],
-        None,
-        StructuralTagSchemaMode::Auto,
-    );
+    let c = ctx(&ToolChoice::Auto, &[], None, StructuralTagSchemaMode::Auto);
     let result = builder()
         .build_tool_call_format(&c)
         .expect("should not error");
@@ -247,7 +217,7 @@ fn parallel_false_sets_stop_after_first() {
     let tools = sample_tools();
     let parsed = build_unwrap(
         &builder(),
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &tools,
         Some(false),
         StructuralTagSchemaMode::Auto,
@@ -261,7 +231,7 @@ fn parallel_true_does_not_stop_after_first() {
     let tools = sample_tools();
     let parsed = build_unwrap(
         &builder(),
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &tools,
         Some(true),
         StructuralTagSchemaMode::Auto,
@@ -275,7 +245,7 @@ fn non_strict_tools_get_unconstrained_schema() {
     let tools = sample_tools();
     let parsed = build_unwrap(
         &builder(),
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &tools,
         None,
         StructuralTagSchemaMode::Auto,
@@ -288,10 +258,10 @@ fn non_strict_tools_get_unconstrained_schema() {
 #[test]
 fn strict_tool_uses_own_schema() {
     let mut tools = sample_tools();
-    tools[0].function.strict = Some(true);
+    tools[0].strict = Some(true);
     let parsed = build_unwrap(
         &builder(),
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &tools,
         None,
         StructuralTagSchemaMode::Auto,
@@ -307,7 +277,7 @@ fn strict_schema_mode_uses_real_schema_for_all() {
     let tools = sample_tools();
     let parsed = build_unwrap(
         &builder(),
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &tools,
         None,
         StructuralTagSchemaMode::Strict,
@@ -345,7 +315,7 @@ fn tool_call_ban_empty_tokens_returns_none() {
 #[test]
 fn required_starting_in_reasoning_wraps_tool_calls_in_sequence() {
     let tools = sample_tools();
-    let c = ctx_starting_in_reasoning(&ChatCompletionToolChoiceOption::Required, &tools);
+    let c = ctx_starting_in_reasoning(&ToolChoice::Required, &tools);
 
     let parsed = builder()
         .build_tool_call_format(&c)
@@ -366,7 +336,7 @@ fn required_starting_in_reasoning_wraps_tool_calls_in_sequence() {
 #[test]
 fn auto_starting_in_reasoning_keeps_plain_tool_call_format() {
     let tools = sample_tools();
-    let c = ctx_starting_in_reasoning(&ChatCompletionToolChoiceOption::Auto, &tools);
+    let c = ctx_starting_in_reasoning(&ToolChoice::Auto, &tools);
 
     let parsed = builder()
         .build_tool_call_format(&c)
@@ -396,8 +366,8 @@ fn dsml_builder() -> StructuralTagBuilder {
 }
 
 fn dsml_build_unwrap(
-    tool_choice: &ChatCompletionToolChoiceOption,
-    tools: &[ChatCompletionTool],
+    tool_choice: &ToolChoice,
+    tools: &[ToolDefinition],
     parallel_tool_calls: Option<bool>,
     schema_mode: StructuralTagSchemaMode,
 ) -> Value {
@@ -412,7 +382,7 @@ fn dsml_build_unwrap(
 fn dsml_required_builds_nested_structure() {
     let tools = sample_tools();
     let parsed = dsml_build_unwrap(
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &tools,
         None,
         StructuralTagSchemaMode::Auto,
@@ -467,7 +437,7 @@ fn dsml_required_builds_nested_structure() {
 fn dsml_auto_sets_inner_at_least_one() {
     let tools = sample_tools();
     let parsed = dsml_build_unwrap(
-        &ChatCompletionToolChoiceOption::Auto,
+        &ToolChoice::Auto,
         &tools,
         None,
         StructuralTagSchemaMode::Auto,
@@ -482,14 +452,7 @@ fn dsml_auto_sets_inner_at_least_one() {
 #[test]
 fn dsml_named_builds_single_invoke() {
     let tools = sample_tools();
-    let named = ChatCompletionToolChoiceOption::Named(
-        dynamo_protocols::types::ChatCompletionNamedToolChoice {
-            r#type: ChatCompletionToolType::Function,
-            function: dynamo_protocols::types::FunctionName {
-                name: "get_weather".to_string(),
-            },
-        },
-    );
+    let named = ToolChoice::Named("get_weather".to_string());
     let parsed = dsml_build_unwrap(&named, &tools, None, StructuralTagSchemaMode::Auto);
 
     let invoke_tags = parsed["format"]["tags"][0]["content"]["tags"]
@@ -506,7 +469,7 @@ fn dsml_named_builds_single_invoke() {
 fn dsml_parallel_false_sets_stop_after_first() {
     let tools = sample_tools();
     let parsed = dsml_build_unwrap(
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &tools,
         Some(false),
         StructuralTagSchemaMode::Auto,
@@ -521,7 +484,7 @@ fn dsml_parallel_false_sets_stop_after_first() {
 fn dsml_none_returns_ok_none() {
     let tools = sample_tools();
     let c = ctx(
-        &ChatCompletionToolChoiceOption::None,
+        &ToolChoice::None,
         &tools,
         None,
         StructuralTagSchemaMode::Auto,
@@ -535,7 +498,7 @@ fn dsml_none_returns_ok_none() {
 #[test]
 fn dsml_required_starting_in_reasoning_wraps_tool_calls_in_sequence() {
     let tools = sample_tools();
-    let c = ctx_starting_in_reasoning(&ChatCompletionToolChoiceOption::Required, &tools);
+    let c = ctx_starting_in_reasoning(&ToolChoice::Required, &tools);
 
     let parsed = dsml_builder()
         .build_tool_call_format(&c)
@@ -560,7 +523,7 @@ fn deepseek_v4_config_builds_tool_calls_block() {
         .as_ref()
         .expect("deepseek_v4 should provide a structural tag builder");
     let c = ctx(
-        &ChatCompletionToolChoiceOption::Required,
+        &ToolChoice::Required,
         &tools,
         None,
         StructuralTagSchemaMode::Auto,
@@ -612,7 +575,7 @@ fn parser_map_structural_tag_smoke() {
             .unwrap_or_else(|| panic!("'{name}' has no structural_tag_builder"));
 
         let c = ctx(
-            &ChatCompletionToolChoiceOption::Required,
+            &ToolChoice::Required,
             &tools,
             None,
             StructuralTagSchemaMode::Auto,

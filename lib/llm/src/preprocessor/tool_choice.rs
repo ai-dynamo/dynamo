@@ -7,7 +7,8 @@ use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::tools::get_json_schema_from_tools;
 
-use dynamo_protocols::types::{ChatCompletionToolChoiceOption, ResponseFormat};
+use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
+use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption, ResponseFormat};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
 fn invalid_argument(message: impl Into<String>) -> DynamoError {
@@ -66,8 +67,8 @@ impl OpenAIPreprocessor {
         }
 
         if self.apply_tool_choice_structural_tag(
-            tool_choice,
-            tools,
+            &convert_tool_choice(tool_choice),
+            &convert_tools(tools),
             request.inner.parallel_tool_calls,
             prompt_injected_reasoning,
             common_request,
@@ -112,4 +113,26 @@ fn has_response_format_constraint(request: &NvCreateChatCompletionRequest) -> bo
         .response_format
         .as_ref()
         .is_some_and(|format| !matches!(format, ResponseFormat::Text))
+}
+
+fn convert_tool_choice(tool_choice: &ChatCompletionToolChoiceOption) -> ToolChoice {
+    match tool_choice {
+        ChatCompletionToolChoiceOption::None => ToolChoice::None,
+        ChatCompletionToolChoiceOption::Auto => ToolChoice::Auto,
+        ChatCompletionToolChoiceOption::Required => ToolChoice::Required,
+        ChatCompletionToolChoiceOption::Named(named) => {
+            ToolChoice::Named(named.function.name.clone())
+        }
+    }
+}
+
+fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
+    tools
+        .iter()
+        .map(|tool| ToolDefinition {
+            name: tool.function.name.clone(),
+            parameters: tool.function.parameters.clone(),
+            strict: tool.function.strict,
+        })
+        .collect()
 }

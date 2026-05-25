@@ -22,6 +22,16 @@ pub mod xml;
 pub struct ToolDefinition {
     pub name: String,
     pub parameters: Option<Value>,
+    pub strict: Option<bool>,
+}
+
+/// Tool choice policy used by parser-side tool-call helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolChoice {
+    None,
+    Auto,
+    Required,
+    Named(String),
 }
 
 // Re-export main types and functions for convenience

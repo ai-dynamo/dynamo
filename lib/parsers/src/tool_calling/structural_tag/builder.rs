@@ -3,9 +3,10 @@
 
 //! Public structural tag builder API used by the Dynamo preprocessor.
 
-use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::tool_calling::{ToolChoice, ToolDefinition};
 
 use super::dsml::{self, DsmlToolCallsConfig};
 use super::format::{
@@ -30,9 +31,9 @@ pub enum StructuralTagSchemaMode {
 #[derive(Debug, Clone, Copy)]
 pub struct ToolCallFormatBuildContext<'a> {
     /// Resolved `tool_choice` from the request.
-    pub tool_choice: &'a ChatCompletionToolChoiceOption,
+    pub tool_choice: &'a ToolChoice,
     /// All tools from the request.
-    pub tools: &'a [ChatCompletionTool],
+    pub tools: &'a [ToolDefinition],
     /// From the request; `Some(false)` sets `stop_after_first` in the tag.
     pub parallel_tool_calls: Option<bool>,
     /// Schema strictness mode for tool arguments.
@@ -56,41 +57,37 @@ impl ToolCallFormatBuildContext<'_> {
 /// Select tools for `tool_choice` and whether at least one call is required.
 pub(crate) fn resolve_tools_to_include<'a>(
     ctx: &ToolCallFormatBuildContext<'a>,
-) -> anyhow::Result<(Vec<&'a ChatCompletionTool>, bool)> {
+) -> anyhow::Result<(Vec<&'a ToolDefinition>, bool)> {
     match ctx.tool_choice {
-        ChatCompletionToolChoiceOption::None => Ok((vec![], false)),
-        ChatCompletionToolChoiceOption::Auto => Ok((ctx.tools.iter().collect(), false)),
-        ChatCompletionToolChoiceOption::Required => {
+        ToolChoice::None => Ok((vec![], false)),
+        ToolChoice::Auto => Ok((ctx.tools.iter().collect(), false)),
+        ToolChoice::Required => {
             anyhow::ensure!(
                 !ctx.tools.is_empty(),
                 "tool_choice is \"required\" but tools is empty"
             );
             Ok((ctx.tools.iter().collect(), true))
         }
-        ChatCompletionToolChoiceOption::Named(named) => {
-            let tool = ctx
-                .tools
-                .iter()
-                .find(|t| t.function.name == named.function.name)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "tool named \"{}\" in tool_choice is not present in tools",
-                        named.function.name
-                    )
-                })?;
+        ToolChoice::Named(name) => {
+            let tool = ctx.tools.iter().find(|t| t.name == *name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "tool named \"{}\" in tool_choice is not present in tools",
+                    name
+                )
+            })?;
             Ok((vec![tool], true))
         }
     }
 }
 
 /// Resolve one tool's argument schema for structural tag generation.
-pub(crate) fn resolve_tool_schema(tool: &ChatCompletionTool, strict_schema: bool) -> Value {
+pub(crate) fn resolve_tool_schema(tool: &ToolDefinition, strict_schema: bool) -> Value {
     // xgrammar uses `true` for syntactically valid but schema-unconstrained JSON.
     let default_schema = json!(true);
 
-    let use_tool_schema = strict_schema || tool.function.strict.unwrap_or(false);
+    let use_tool_schema = strict_schema || tool.strict.unwrap_or(false);
     if use_tool_schema {
-        tool.function.parameters.clone().unwrap_or(default_schema)
+        tool.parameters.clone().unwrap_or(default_schema)
     } else {
         default_schema
     }
@@ -137,10 +134,7 @@ impl StructuralTagBuilder {
         suffix: StructuralTag,
     ) -> anyhow::Result<StructuralTag> {
         let should_wrap_with_reasoning_tag = ctx.starts_in_reasoning
-            && matches!(
-                ctx.tool_choice,
-                ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
-            );
+            && matches!(ctx.tool_choice, ToolChoice::Required | ToolChoice::Named(_));
         if !should_wrap_with_reasoning_tag {
             return Ok(suffix);
         }
