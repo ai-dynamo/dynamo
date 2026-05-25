@@ -67,5 +67,6 @@ cases:
           arguments:
             location: NYC
         normal_text: rt|>assistant<|channel|>commentary to=functions.get_time <|constrain|>js
+        reason: SGLang emits only the first split Harmony call and leaks the second call envelope into normal_text; Dynamo parses both complete `<|call|>`-terminated calls.
       vllm:
         unavailable: vLLM streaming parser for family='harmony' requires `delta_token_ids` in fixture chunks

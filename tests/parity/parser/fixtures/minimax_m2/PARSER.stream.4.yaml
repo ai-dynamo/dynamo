@@ -8,6 +8,7 @@ cases:
   PARSER.stream.4.a:
     description: Truncated stream terminates after a complete in-flight tool-call body
     ref: derived from PARSER.batch.5.a
+    spec_ref: https://huggingface.co/MiniMaxAI/MiniMax-M2.7/blob/main/docs/tool_calling_guide.md#parsing-tool-calls
     chunks:
     - delta_text: |-
         <minimax:tool_call>
@@ -25,27 +26,38 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: |-
+          Strict per MiniMax-M2.7's published parser regexes: the outer
+          <minimax:tool_call>...</minimax:tool_call> block must be paired, so
+          a stream that ends before </minimax:tool_call> recovers no call.
+          Dynamo drops the buffered protocol block from normal_text so
+          tool-call markup does not leak to user-facing content.
         calls: []
-        normal_text: |-
-          <minimax:tool_call>
-          <invoke name="get_weather">
-          <parameter name="location">NYC</parameter>
-          </invoke>
+        normal_text: ''
       sglang:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
+        reason: |-
+          SGLang's streaming parser recovers a MiniMax call from a body that
+          lacks the required closing </minimax:tool_call>; that contradicts
+          the strict MiniMax-M2.7 reference parser.
       vllm:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
+        reason: |-
+          vLLM's streaming parser recovers a MiniMax call from a body that
+          lacks the required closing </minimax:tool_call>; that contradicts
+          the strict MiniMax-M2.7 reference parser.
   PARSER.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from PARSER.batch.5.c
+    spec_ref: https://huggingface.co/MiniMaxAI/MiniMax-M2.7/blob/main/docs/tool_calling_guide.md#parsing-tool-calls
     chunks:
     - delta_text: |-
         <minimax:tool_call>
@@ -63,17 +75,22 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
+      dynamo: &d_4_b
+        reason: |-
+          Strict per MiniMax-M2.7's published parser regexes: the outer
+          <minimax:tool_call>, inner <invoke>, and <parameter> blocks must all
+          be paired. This stream ends mid-parameter, so Dynamo recovers no call
+          and drops the buffered protocol block from normal_text.
         calls: []
-        normal_text: |-
-          <minimax:tool_call>
-          <invoke name="get_weather">
-          <parameter name="location">NY
+        normal_text: ''
       sglang:
         calls:
         - name: get_weather
           arguments: {}
         normal_text: ''
-      vllm:
-        calls: []
-        normal_text: ''
+        reason: |-
+          SGLang's streaming parser emits an empty-argument MiniMax call from
+          a stream that ends before </parameter>, </invoke>, and
+          </minimax:tool_call>; that contradicts the strict MiniMax-M2.7
+          reference parser.
+      vllm: *d_4_b

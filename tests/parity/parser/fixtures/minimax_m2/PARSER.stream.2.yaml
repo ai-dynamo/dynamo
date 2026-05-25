@@ -8,6 +8,7 @@ cases:
   PARSER.stream.2:
     description: Multiple tool calls split across multiple content chunks
     ref: derived from PARSER.batch.2.a
+    spec_ref: https://huggingface.co/MiniMaxAI/MiniMax-M2.7/blob/main/docs/tool_calling_guide.md#model-output-format
     chunks:
     - delta_text: '<minimax:'
     - delta_text: tool_ca
@@ -79,6 +80,9 @@ cases:
           <parameter name="timezone">EST</parameter>
           </invoke>
           </minimax:tool_call>
+        reason: |-
+          SGLang leaks the complete MiniMax tool-call block into normal_text;
+          Dynamo parses it as structured tool output per the M2.7 spec.
       vllm:
         calls: []
         normal_text: |-
@@ -90,3 +94,6 @@ cases:
           <parameter name="timezone">EST</parameter>
           </invoke>
           </minimax:tool_call>
+        reason: |-
+          vLLM leaks the complete MiniMax tool-call block into normal_text;
+          Dynamo parses it as structured tool output per the M2.7 spec.

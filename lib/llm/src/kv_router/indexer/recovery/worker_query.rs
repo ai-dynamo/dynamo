@@ -1,243 +1,48 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use async_trait::async_trait;
+use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_runtime::component::{Component, Instance};
-use dynamo_runtime::discovery::{
-    DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, EndpointInstanceId,
-};
-use dynamo_runtime::pipeline::{
-    AddressedPushRouter, AddressedRequest, AsyncEngine, AsyncEngineContextProvider, ManyOut,
-    ResponseStream, SingleIn, network::Ingress,
-};
-use dynamo_runtime::protocols::maybe_error::MaybeError;
-use dynamo_runtime::stream;
+use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryQuery, EndpointInstanceId};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
 use rand::Rng;
 use tokio::sync::{Mutex, Semaphore};
 
-use super::Indexer;
+use super::worker_query_directory::{DiscoveredQueryEndpoint, WorkerQueryEndpointDirectory};
+#[cfg(test)]
+use super::worker_query_endpoint::WorkerKvQueryEngine;
+use super::worker_query_state::{LiveEventAction, PendingDrainAction, RecoveryKey, WorkerState};
+use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
+use crate::kv_router::Indexer;
+use dynamo_kv_router::{
+    indexer::WorkerKvQueryResponse,
+    protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId},
+};
+
+#[cfg(test)]
+use super::worker_query_state::RankState;
+#[cfg(test)]
 use crate::kv_router::{
     worker_kv_indexer_query_endpoint, worker_kv_indexer_query_endpoint_for_worker,
 };
-use dynamo_kv_router::{
-    indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse},
-    protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId},
-    recovery::{CursorObservation, CursorState},
-};
+#[cfg(test)]
+use async_trait::async_trait;
+#[cfg(test)]
+use dynamo_kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest};
+#[cfg(test)]
+use dynamo_kv_router::recovery::CursorState;
+#[cfg(test)]
+use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
 
 // Recovery retry configuration
 const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
 const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
-
-/// Prefix for worker KV indexer query endpoint names.
-const QUERY_ENDPOINT_PREFIX: &str = "worker_kv_indexer_query_dp";
-
-type RecoveryKey = (WorkerId, DpRank);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DiscoveredQueryEndpoint {
-    worker_id: WorkerId,
-    dp_rank: DpRank,
-    target: Instance,
-}
-
-#[derive(Debug, Default)]
-struct WorkerQueryEndpointDirectory {
-    targets: DashMap<RecoveryKey, Instance>,
-}
-
-impl WorkerQueryEndpointDirectory {
-    fn parse_endpoint_name(
-        endpoint_name: &str,
-        route_worker_id: WorkerId,
-    ) -> Option<(WorkerId, DpRank)> {
-        let suffix = endpoint_name.strip_prefix(QUERY_ENDPOINT_PREFIX)?;
-        let (dp_rank, worker_id) = match suffix.split_once("_worker") {
-            Some((dp_rank, worker_id)) => (dp_rank.parse().ok()?, worker_id.parse().ok()?),
-            None => (suffix.parse().ok()?, route_worker_id),
-        };
-        Some((worker_id, dp_rank))
-    }
-
-    fn parse_added(instance: DiscoveryInstance) -> Option<DiscoveredQueryEndpoint> {
-        let DiscoveryInstance::Endpoint(inst) = instance else {
-            return None;
-        };
-        let (worker_id, dp_rank) = Self::parse_endpoint_name(&inst.endpoint, inst.instance_id)?;
-        Some(DiscoveredQueryEndpoint {
-            worker_id,
-            dp_rank,
-            target: inst,
-        })
-    }
-
-    fn parse_removed(id: DiscoveryInstanceId) -> Option<(WorkerId, DpRank, EndpointInstanceId)> {
-        let DiscoveryInstanceId::Endpoint(eid) = id else {
-            return None;
-        };
-        let (worker_id, dp_rank) = Self::parse_endpoint_name(&eid.endpoint, eid.instance_id)?;
-        Some((worker_id, dp_rank, eid))
-    }
-
-    fn insert(&self, endpoint: &DiscoveredQueryEndpoint) -> Option<Instance> {
-        self.targets.insert(
-            (endpoint.worker_id, endpoint.dp_rank),
-            endpoint.target.clone(),
-        )
-    }
-
-    fn target_for(&self, worker_id: WorkerId, dp_rank: DpRank) -> Option<Instance> {
-        self.targets
-            .get(&(worker_id, dp_rank))
-            .map(|target| target.value().clone())
-    }
-
-    #[cfg(test)]
-    fn remove_dp(&self, worker_id: WorkerId, dp_rank: DpRank) {
-        self.targets.remove(&(worker_id, dp_rank));
-    }
-
-    fn remove_if_matches(
-        &self,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-        endpoint_id: &EndpointInstanceId,
-    ) -> bool {
-        let key = (worker_id, dp_rank);
-        let should_remove = self
-            .targets
-            .get(&key)
-            .is_some_and(|target| target.value().endpoint_instance_id() == *endpoint_id);
-        if should_remove {
-            self.targets.remove(&key);
-        }
-        should_remove
-    }
-}
-
-#[derive(Debug, Default)]
-struct RankState {
-    cursor: CursorState,
-    max_seen_live_id: Option<u64>,
-    recovery_inflight: bool,
-}
-
-impl RankState {
-    fn last_applied_id(&self) -> Option<u64> {
-        self.cursor.last_applied_id()
-    }
-
-    fn observe_live_id(&mut self, event_id: u64) {
-        self.max_seen_live_id = Some(self.max_seen_live_id.unwrap_or(0).max(event_id));
-    }
-
-    fn clear_max_seen_if_caught_up(&mut self, last_applied_id: u64) {
-        if self
-            .max_seen_live_id
-            .is_some_and(|max_seen| max_seen <= last_applied_id)
-        {
-            self.max_seen_live_id = None;
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct WorkerState {
-    epoch: u64,
-    ranks: HashMap<DpRank, RankState>,
-}
-
-#[async_trait]
-trait WorkerQueryTransport: Send + Sync {
-    async fn query_worker(
-        &self,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-        target: Instance,
-        start_event_id: Option<u64>,
-        end_event_id: Option<u64>,
-    ) -> Result<WorkerKvQueryResponse>;
-
-    async fn cancel_instance_streams(&self, _endpoint_id: &EndpointInstanceId) -> usize {
-        0
-    }
-
-    async fn clear_instance_tombstone(&self, _endpoint_id: &EndpointInstanceId) {}
-}
-
-struct RuntimeWorkerQueryTransport {
-    addressed: Arc<AddressedPushRouter>,
-}
-
-impl RuntimeWorkerQueryTransport {
-    async fn new(component: &Component) -> Result<Self> {
-        Ok(Self {
-            addressed: AddressedPushRouter::from_runtime_provider(component).await?,
-        })
-    }
-}
-
-#[async_trait]
-impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
-    async fn query_worker(
-        &self,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-        target: Instance,
-        start_event_id: Option<u64>,
-        end_event_id: Option<u64>,
-    ) -> Result<WorkerKvQueryResponse> {
-        let request = WorkerKvQueryRequest {
-            worker_id,
-            dp_rank,
-            start_event_id,
-            end_event_id,
-        };
-        let instance = target;
-        let instance_id = instance.instance_id;
-        let endpoint_name = instance.endpoint.clone();
-        let addressed_request =
-            SingleIn::new(request).map(|req| AddressedRequest::for_instance(req, instance));
-        let mut stream: ManyOut<WorkerKvQueryResponse> = self
-            .addressed
-            .generate(addressed_request)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to send worker KV query to worker {worker_id} dp_rank {dp_rank} \
-                     via endpoint {endpoint_name} instance {instance_id}"
-                )
-            })?;
-
-        let response = stream
-            .next()
-            .await
-            .context("Worker KV query returned an empty response stream")?;
-
-        if let Some(err) = response.err() {
-            return Err(err).context("Worker KV query response error");
-        }
-
-        Ok(response)
-    }
-
-    async fn cancel_instance_streams(&self, endpoint_id: &EndpointInstanceId) -> usize {
-        self.addressed.cancel_instance_streams(endpoint_id).await
-    }
-
-    async fn clear_instance_tombstone(&self, endpoint_id: &EndpointInstanceId) {
-        self.addressed.clear_instance_tombstone(endpoint_id).await;
-    }
-}
 
 /// Router-side client for querying worker local KV indexers.
 ///
@@ -418,21 +223,16 @@ impl WorkerQueryClient {
         let worker_state = self.get_or_create_worker_state(worker_id);
         let spawn = {
             let mut worker_state = worker_state.lock().await;
-            if replaced.is_some() {
-                worker_state.epoch += 1;
-                worker_state.ranks.insert(dp_rank, RankState::default());
+            let action = worker_state.handle_discovered_rank(dp_rank, replaced.is_some());
+            if action.reset_rank {
                 self.indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
             }
-            let rank_state = worker_state.ranks.entry(dp_rank).or_default();
-            if matches!(rank_state.cursor, CursorState::Initial) && !rank_state.recovery_inflight {
+            if action.restore_epoch.is_some() {
                 tracing::info!(
                     "WorkerQueryClient: discovered worker {worker_id} dp_rank {dp_rank}, scheduling restore"
                 );
-                rank_state.recovery_inflight = true;
-                Some(worker_state.epoch)
-            } else {
-                None
             }
+            action.restore_epoch
         };
 
         if let Some(epoch) = spawn {
@@ -474,10 +274,10 @@ impl WorkerQueryClient {
 
         let should_remove_worker = {
             let mut worker_state = worker_state.lock().await;
-            if worker_state.ranks.remove(&dp_rank).is_none() {
+            if !worker_state.remove_rank(dp_rank) {
                 return;
             }
-            worker_state.ranks.is_empty()
+            worker_state.is_empty()
         };
 
         if should_remove_worker {
@@ -492,18 +292,7 @@ impl WorkerQueryClient {
         let clear_dp_rank = event.event.dp_rank;
         let clear_event_id = event.event.event_id;
 
-        worker_state.epoch += 1;
-        for rank_state in worker_state.ranks.values_mut() {
-            let post_clear_max_seen = rank_state
-                .max_seen_live_id
-                .filter(|max_seen| *max_seen > clear_event_id);
-            rank_state.cursor = rank_state.cursor.invalidate_by_barrier();
-            rank_state.max_seen_live_id = post_clear_max_seen;
-            rank_state.recovery_inflight = false;
-        }
-
-        let rank_state = worker_state.ranks.entry(clear_dp_rank).or_default();
-        rank_state.cursor = rank_state.cursor.apply_barrier(clear_event_id);
+        worker_state.apply_worker_clear_barrier(clear_dp_rank, clear_event_id);
 
         tracing::info!(
             "Applying clear barrier for worker {worker_id}; invalidating recovery across {} dp_ranks",
@@ -527,80 +316,34 @@ impl WorkerQueryClient {
     pub(crate) async fn handle_live_event(self: &Arc<Self>, event: RouterEvent) {
         let worker_id = event.worker_id;
         let dp_rank = event.event.dp_rank;
-        let event_id = event.event.event_id;
         let key = (worker_id, dp_rank);
-
-        enum Action {
-            ApplyDirect,
-            SpawnFullRestore { epoch: u64 },
-            SpawnIncremental { epoch: u64, start_event_id: u64 },
-        }
 
         let action = {
             let worker_state = self.get_or_create_worker_state(worker_id);
             let mut worker_state = worker_state.lock().await;
-            let rank_state = worker_state.ranks.entry(dp_rank).or_default();
-
-            // `Cleared` is worker-wide in the indexer, so it bypasses the per-rank gap logic and
-            // instead installs a worker barrier that invalidates any inflight recovery.
-            if matches!(&event.event.data, KvCacheEventData::Cleared) {
-                if rank_state
-                    .last_applied_id()
-                    .is_none_or(|last_applied_id| event_id > last_applied_id)
-                {
-                    self.apply_worker_clear_locked(&mut worker_state, event)
-                        .await;
-                }
-                // Already applied the event, so no further action needed.
-                return;
-            }
-
-            match rank_state.cursor.observe(event_id) {
-                CursorObservation::Stale { .. } => return,
-                observation if rank_state.recovery_inflight => {
-                    match observation {
-                        CursorObservation::Initial { .. }
-                        | CursorObservation::Contiguous { .. }
-                        | CursorObservation::Gap { .. }
-                        | CursorObservation::FreshAfterBarrier { .. } => {
-                            rank_state.observe_live_id(event_id);
-                        }
-                        CursorObservation::Stale { .. } => {}
-                    }
+            match worker_state.observe_live_event(event) {
+                LiveEventAction::ApplyClear(event) => {
+                    tracing::info!(
+                        "Applying clear barrier for worker {worker_id}; invalidating recovery across {} dp_ranks",
+                        worker_state.ranks.len()
+                    );
+                    self.indexer.apply_event(event).await;
                     return;
                 }
-                CursorObservation::Initial { .. } => {
-                    rank_state.observe_live_id(event_id);
-                    rank_state.recovery_inflight = true;
-                    Action::SpawnFullRestore {
-                        epoch: worker_state.epoch,
-                    }
-                }
-                CursorObservation::Gap { expected, .. } => {
-                    rank_state.observe_live_id(event_id);
-                    rank_state.recovery_inflight = true;
-                    Action::SpawnIncremental {
-                        epoch: worker_state.epoch,
-                        start_event_id: expected,
-                    }
-                }
-                CursorObservation::Contiguous { got }
-                | CursorObservation::FreshAfterBarrier { got, .. } => {
-                    rank_state.cursor = rank_state.cursor.advance_to(got);
-                    rank_state.clear_max_seen_if_caught_up(got);
-                    Action::ApplyDirect
-                }
+                action => action,
             }
         };
 
         match action {
-            Action::ApplyDirect => {
+            LiveEventAction::Ignore => {}
+            LiveEventAction::ApplyDirect(event) => {
                 self.indexer.apply_event(event).await;
             }
-            Action::SpawnFullRestore { epoch } => {
+            LiveEventAction::ApplyClear(_) => unreachable!("clear is applied under worker lock"),
+            LiveEventAction::SpawnFullRestore { epoch } => {
                 self.spawn_recovery_task(key, epoch, None, None);
             }
-            Action::SpawnIncremental {
+            LiveEventAction::SpawnIncremental {
                 epoch,
                 start_event_id,
             } => {
@@ -657,11 +400,10 @@ impl WorkerQueryClient {
             return;
         }
 
-        let Some(rank_state) = worker_state.ranks.get(&key.1) else {
+        let Some(mut new_cursor) = worker_state.rank_cursor(key.1) else {
             return;
         };
 
-        let mut new_cursor = rank_state.cursor;
         let mut successful_response = false;
 
         match result {
@@ -740,25 +482,22 @@ impl WorkerQueryClient {
         }
 
         let mut follow_up_start = None;
-        {
-            let rank_state = worker_state
-                .ranks
-                .get_mut(&key.1)
-                .expect("rank state should exist while finishing recovery");
-            rank_state.recovery_inflight = false;
-            rank_state.cursor = new_cursor;
-
-            let last_applied_id = rank_state.last_applied_id().unwrap_or(0);
-            rank_state.clear_max_seen_if_caught_up(last_applied_id);
-
-            if successful_response
-                && rank_state
-                    .max_seen_live_id
-                    .is_some_and(|max_seen| max_seen > last_applied_id)
-            {
-                rank_state.recovery_inflight = true;
-                follow_up_start = Some(last_applied_id.saturating_add(1));
+        if successful_response {
+            worker_state.begin_successful_recovery_drain(key.1, new_cursor);
+            loop {
+                match worker_state.next_pending_drain_action(key.1) {
+                    PendingDrainAction::Apply(event) => {
+                        self.indexer.apply_event(event).await;
+                    }
+                    PendingDrainAction::RecoverFrom(start_event_id) => {
+                        follow_up_start = Some(start_event_id);
+                        break;
+                    }
+                    PendingDrainAction::Complete => break,
+                }
             }
+        } else {
+            worker_state.finish_failed_recovery(key.1);
         }
         let follow_up_epoch = worker_state.epoch;
         drop(worker_state);
@@ -845,182 +584,6 @@ impl WorkerQueryClient {
 
         Err(last_error
             .unwrap_or_else(|| anyhow::anyhow!("No response after {RECOVERY_MAX_RETRIES} retries")))
-    }
-}
-
-/// Worker-side endpoint registration for Router -> LocalKvIndexer query service
-pub(crate) async fn start_worker_kv_query_endpoint(
-    component: Component,
-    worker_id: u64,
-    dp_rank: DpRank,
-    local_indexer: Arc<LocalKvIndexer>,
-) {
-    let engine = Arc::new(WorkerKvQueryEngine {
-        worker_id,
-        dp_rank,
-        local_indexer,
-        processing_semaphore: Semaphore::new(1),
-    });
-
-    let ingress = match Ingress::for_engine(engine) {
-        Ok(ingress) => ingress,
-        Err(e) => {
-            tracing::error!(
-                "Failed to build WorkerKvQuery endpoint handler for worker {worker_id} dp_rank {dp_rank}: {e}"
-            );
-            return;
-        }
-    };
-
-    let route_worker_id = component.drt().connection_id();
-    let endpoint_name = if route_worker_id == worker_id {
-        worker_kv_indexer_query_endpoint(dp_rank)
-    } else {
-        worker_kv_indexer_query_endpoint_for_worker(worker_id, dp_rank)
-    };
-    tracing::info!(
-        "WorkerKvQuery endpoint starting for worker {worker_id} dp_rank {dp_rank} \
-         routed by instance {route_worker_id} on endpoint '{endpoint_name}'"
-    );
-
-    if let Err(e) = component
-        .endpoint(&endpoint_name)
-        .endpoint_builder()
-        .handler(ingress)
-        .graceful_shutdown(true)
-        .start()
-        .await
-    {
-        tracing::error!(
-            "WorkerKvQuery endpoint failed for worker {worker_id} dp_rank {dp_rank}: {e}"
-        );
-    }
-}
-
-struct WorkerKvQueryEngine {
-    worker_id: u64,
-    dp_rank: DpRank,
-    local_indexer: Arc<LocalKvIndexer>,
-    /// Semaphore limiting concurrent recovery request processing to 1.
-    /// Prevents multiple routers from overwhelming the worker with heavy tree dump operations.
-    processing_semaphore: Semaphore,
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>, anyhow::Error>
-    for WorkerKvQueryEngine
-{
-    async fn generate(
-        &self,
-        request: SingleIn<WorkerKvQueryRequest>,
-    ) -> anyhow::Result<ManyOut<WorkerKvQueryResponse>> {
-        let (request, ctx) = request.into_parts();
-
-        tracing::debug!(
-            "Received query request for worker {}: {:?}",
-            self.worker_id,
-            request
-        );
-
-        if request.worker_id != self.worker_id {
-            let error_message = format!(
-                "WorkerKvQueryEngine::generate worker_id mismatch: request.worker_id={} this.worker_id={}",
-                request.worker_id, self.worker_id
-            );
-            let response = WorkerKvQueryResponse::Error(error_message);
-            return Ok(ResponseStream::new(
-                Box::pin(stream::iter(vec![response])),
-                ctx.context(),
-            ));
-        }
-
-        if request.dp_rank != self.dp_rank {
-            let error_message = format!(
-                "WorkerKvQueryEngine::generate dp_rank mismatch: request.dp_rank={} this.dp_rank={}",
-                request.dp_rank, self.dp_rank
-            );
-            let response = WorkerKvQueryResponse::Error(error_message);
-            return Ok(ResponseStream::new(
-                Box::pin(stream::iter(vec![response])),
-                ctx.context(),
-            ));
-        }
-
-        // Check if this request can likely be served from buffer (fast path).
-        // If not, acquire semaphore for tree dump (heavy operation).
-        let likely_buffer_read = self
-            .local_indexer
-            .likely_served_from_buffer(request.start_event_id);
-
-        let _maybe_permit = if !likely_buffer_read {
-            // Acquire semaphore permit before processing tree dump.
-            // This prevents multiple heavy tree dump operations from running concurrently
-            let engine_ctx = ctx.context();
-            let permit = tokio::select! {
-                result = self.processing_semaphore.acquire() => {
-                    result.map_err(|_| anyhow::anyhow!("Worker KV query semaphore closed"))?
-                }
-                _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
-                    tracing::warn!("Worker<>Router KV query request cancelled while waiting for semaphore");
-                    return Ok(ResponseStream::new(
-                        // this response will be dropped on the router side since the request was cancelled,
-                        // but we return it here to satisfy the function signature and provide some context in logs if it does get processed for some reason.
-                        Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
-                            "Request cancelled by client".to_string(),
-                        )])),
-                        ctx.context(),
-                    ));
-                }
-            };
-            Some(permit)
-        } else {
-            // Fast buffer read - no semaphore needed
-            None
-        };
-
-        // Start slow-query logging only once the request is actively executing the slow path.
-        // Queued requests waiting on the semaphore should remain silent.
-        let _slow_query_guard = if !likely_buffer_read {
-            Some(SlowQueryGuard::spawn(self.worker_id))
-        } else {
-            None
-        };
-
-        let response = self
-            .local_indexer
-            .get_events_in_id_range(request.start_event_id, request.end_event_id)
-            .await;
-
-        Ok(ResponseStream::new(
-            Box::pin(stream::iter(vec![response])),
-            ctx.context(),
-        ))
-    }
-}
-
-/// RAII guard that aborts a slow query logger task on drop.
-struct SlowQueryGuard(tokio::task::JoinHandle<()>);
-
-impl SlowQueryGuard {
-    fn spawn(worker_id: u64) -> Self {
-        Self(tokio::spawn(async move {
-            let mut elapsed_secs = 0u64;
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                elapsed_secs += 5;
-                tracing::warn!(
-                    worker_id,
-                    elapsed_secs,
-                    "Worker KV query still running - possible slow tree dump",
-                );
-            }
-        }))
-    }
-}
-
-impl Drop for SlowQueryGuard {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }
 
@@ -1605,21 +1168,226 @@ mod tests {
                 }),
             },
         );
+
+        client.handle_live_event(make_store_event(1, 0, 15)).await;
+        first_started.notified().await;
+        client.handle_live_event(make_store_event(1, 0, 16)).await;
+        client.handle_live_event(make_store_event(1, 0, 17)).await;
+        client.handle_live_event(make_store_event(1, 0, 18)).await;
+        first_release.notify_waiters();
+
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(18) && !state.recovery_inflight
+            })
+        })
+        .await;
+        assert_eq!(transport.calls(), vec![(key, Some(11), None)]);
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(
+            stored_block_hashes(&events),
+            vec![11, 12, 13, 14, 15, 16, 17, 18]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tree_dump_replays_pending_live_tail_after_replace() {
+        let (client, transport, kv_indexer) = make_test_client("tree-dump-pending-tail").await;
+        let key = (1, 0);
+
+        {
+            let worker_state = client.get_or_create_worker_state(key.0);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(key.1).or_default().cursor = CursorState::Live(10);
+        }
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: Some(started.clone()),
+                release: Some(release.clone()),
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: (11..=15).map(|id| make_store_event(1, 0, id)).collect(),
+                    last_event_id: 15,
+                }),
+            },
+        );
+
+        client.handle_live_event(make_store_event(1, 0, 15)).await;
+        started.notified().await;
+        client.handle_live_event(make_store_event(1, 0, 16)).await;
+        client.handle_live_event(make_store_event(1, 0, 17)).await;
+        release.notify_waiters();
+
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(17) && !state.recovery_inflight
+            })
+        })
+        .await;
+        assert_eq!(transport.calls(), vec![(key, Some(11), None)]);
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(
+            stored_block_hashes(&events),
+            vec![11, 12, 13, 14, 15, 16, 17]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pending_gap_retains_tail_across_follow_up_recovery() {
+        let (client, transport, kv_indexer) = make_test_client("pending-gap-retains-tail").await;
+        let key = (1, 0);
+
+        {
+            let worker_state = client.get_or_create_worker_state(key.0);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(key.1).or_default().cursor = CursorState::Live(15);
+        }
+
+        let first_started = Arc::new(Notify::new());
+        let first_release = Arc::new(Notify::new());
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: Some(first_started.clone()),
+                release: Some(first_release.clone()),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: (16..=20).map(|id| make_store_event(1, 0, id)).collect(),
+                    last_event_id: 20,
+                }),
+            },
+        );
         transport.push_action(
             key,
             MockQueryAction {
                 started: None,
                 release: None,
                 response: Ok(WorkerKvQueryResponse::Events {
-                    events: (16..=18).map(|id| make_store_event(1, 0, id)).collect(),
-                    last_event_id: 18,
+                    events: vec![make_store_event(1, 0, 23)],
+                    last_event_id: 23,
+                }),
+            },
+        );
+
+        client.handle_live_event(make_store_event(1, 0, 20)).await;
+        first_started.notified().await;
+        client.handle_live_event(make_store_event(1, 0, 21)).await;
+        client.handle_live_event(make_store_event(1, 0, 22)).await;
+        client.handle_live_event(make_store_event(1, 0, 24)).await;
+        client.handle_live_event(make_store_event(1, 0, 25)).await;
+        first_release.notify_waiters();
+
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(25) && !state.recovery_inflight
+            })
+        })
+        .await;
+        assert_eq!(
+            transport.calls(),
+            vec![(key, Some(16), None), (key, Some(23), None)]
+        );
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(
+            stored_block_hashes(&events),
+            vec![16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pending_duplicate_is_stale_dropped_during_drain() {
+        let (client, transport, kv_indexer) = make_test_client("pending-duplicate").await;
+        let key = (1, 0);
+
+        {
+            let worker_state = client.get_or_create_worker_state(key.0);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(key.1).or_default().cursor = CursorState::Live(15);
+        }
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: Some(started.clone()),
+                release: Some(release.clone()),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: (16..=20).map(|id| make_store_event(1, 0, id)).collect(),
+                    last_event_id: 20,
+                }),
+            },
+        );
+
+        client.handle_live_event(make_store_event(1, 0, 20)).await;
+        started.notified().await;
+        client.handle_live_event(make_store_event(1, 0, 21)).await;
+        client.handle_live_event(make_store_event(1, 0, 21)).await;
+        client.handle_live_event(make_store_event(1, 0, 22)).await;
+        release.notify_waiters();
+
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(22) && !state.recovery_inflight
+            })
+        })
+        .await;
+        assert_eq!(transport.calls(), vec![(key, Some(16), None)]);
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(
+            stored_block_hashes(&events),
+            vec![16, 17, 18, 19, 20, 21, 22]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_missing_buffered_head_schedules_follow_up_and_replays_tail() {
+        let (client, transport, kv_indexer) = make_test_client("missing-buffered-head").await;
+        let key = (1, 0);
+
+        {
+            let worker_state = client.get_or_create_worker_state(key.0);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(key.1).or_default().cursor = CursorState::Live(10);
+        }
+
+        let first_started = Arc::new(Notify::new());
+        let first_release = Arc::new(Notify::new());
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: Some(first_started.clone()),
+                release: Some(first_release.clone()),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: (11..=15).map(|id| make_store_event(1, 0, id)).collect(),
+                    last_event_id: 15,
+                }),
+            },
+        );
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![make_store_event(1, 0, 16)],
+                    last_event_id: 16,
                 }),
             },
         );
 
         client.handle_live_event(make_store_event(1, 0, 15)).await;
         first_started.notified().await;
-        client.handle_live_event(make_store_event(1, 0, 16)).await;
         client.handle_live_event(make_store_event(1, 0, 17)).await;
         client.handle_live_event(make_store_event(1, 0, 18)).await;
         first_release.notify_waiters();
@@ -1641,6 +1409,110 @@ mod tests {
             stored_block_hashes(&events),
             vec![11, 12, 13, 14, 15, 16, 17, 18]
         );
+    }
+
+    #[tokio::test]
+    async fn test_pending_starts_after_next_event_recovers_gap_then_replays_tail() {
+        let (client, transport, kv_indexer) = make_test_client("pending-starts-after-next").await;
+        let key = (1, 0);
+
+        {
+            let worker_state = client.get_or_create_worker_state(key.0);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(key.1).or_default().cursor = CursorState::Live(15);
+        }
+
+        let first_started = Arc::new(Notify::new());
+        let first_release = Arc::new(Notify::new());
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: Some(first_started.clone()),
+                release: Some(first_release.clone()),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: (16..=20).map(|id| make_store_event(1, 0, id)).collect(),
+                    last_event_id: 20,
+                }),
+            },
+        );
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![make_store_event(1, 0, 21)],
+                    last_event_id: 21,
+                }),
+            },
+        );
+
+        client.handle_live_event(make_store_event(1, 0, 20)).await;
+        first_started.notified().await;
+        client.handle_live_event(make_store_event(1, 0, 22)).await;
+        client.handle_live_event(make_store_event(1, 0, 23)).await;
+        first_release.notify_waiters();
+
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(23) && !state.recovery_inflight
+            })
+        })
+        .await;
+        assert_eq!(
+            transport.calls(),
+            vec![(key, Some(16), None), (key, Some(21), None)]
+        );
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(
+            stored_block_hashes(&events),
+            vec![16, 17, 18, 19, 20, 21, 22, 23]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_recovery_clears_pending_without_applying_buffered_events() {
+        let (client, transport, kv_indexer) =
+            make_test_client("failed-recovery-clears-pending").await;
+        let key = (1, 0);
+
+        {
+            let worker_state = client.get_or_create_worker_state(key.0);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(key.1).or_default().cursor = CursorState::Live(10);
+        }
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: Some(started.clone()),
+                release: Some(release.clone()),
+                response: Ok(WorkerKvQueryResponse::Error("query failed".to_string())),
+            },
+        );
+
+        client.handle_live_event(make_store_event(1, 0, 15)).await;
+        started.notified().await;
+        client.handle_live_event(make_store_event(1, 0, 16)).await;
+        release.notify_waiters();
+
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(10)
+                    && !state.recovery_inflight
+                    && state.pending_live_events.is_empty()
+            })
+        })
+        .await;
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert!(events.is_empty());
+        assert_eq!(transport.calls(), vec![(key, Some(11), None)]);
     }
 
     #[tokio::test]
@@ -2087,7 +1959,9 @@ mod tests {
 
         wait_for(|| {
             rank_state_matches(&client, key, |state| {
-                state.last_applied_id() == Some(15) && !state.recovery_inflight
+                state.last_applied_id() == Some(15)
+                    && !state.recovery_inflight
+                    && state.pending_live_events.is_empty()
             })
         })
         .await;

@@ -30,12 +30,14 @@ const testContainerID = "test-container"
 // fakeRuntime is a minimal Runtime implementation for controller reconciliation
 // tests.
 type fakeRuntime struct {
-	containerIDByPod string
+	containerIDByPod     string
+	resolvedContainerIDs []string
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
 
 func (r *fakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
+	r.resolvedContainerIDs = append(r.resolvedContainerIDs, id)
 	return 0, nil, errors.New("not implemented")
 }
 func (r *fakeRuntime) ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error) {
@@ -450,6 +452,80 @@ func TestReconcileCheckpointPod(t *testing.T) {
 			// Let the background goroutine (if any) finish before the test ends
 			if tc.want {
 				time.Sleep(50 * time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestReconcileCheckpointPodFailsWhenAnyRegularContainerFails(t *testing.T) {
+	for _, jobStatus := range []string{"", snapshotprotocol.CheckpointStatusCompleted} {
+		t.Run("job status "+jobStatus, func(t *testing.T) {
+			labels := map[string]string{
+				snapshotprotocol.CheckpointSourceLabel: "true",
+				snapshotprotocol.CheckpointIDLabel:     "abc123",
+				"batch.kubernetes.io/job-name":         "checkpoint-job",
+			}
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "checkpoint-job",
+					Namespace:   "default",
+					Annotations: map[string]string{},
+				},
+			}
+			if jobStatus != "" {
+				job.Annotations[snapshotprotocol.CheckpointStatusAnnotation] = jobStatus
+			}
+			pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, false, labels, nil)
+			pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "helper"})
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name:        "main",
+					Ready:       true,
+					State:       corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+					ContainerID: "containerd://main-id",
+				},
+				{
+					Name: "helper",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"},
+					},
+					ContainerID: "containerd://helper-id",
+				},
+			}
+
+			w := makeTestController(t, job)
+			rt := &fakeRuntime{}
+			w.runtime = rt
+			w.reconcileCheckpointPod(context.Background(), pod)
+
+			updated, err := w.clientset.BatchV1().Jobs("default").Get(context.Background(), "checkpoint-job", metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("failed to get checkpoint job: %v", err)
+			}
+			if got := updated.Annotations[snapshotprotocol.CheckpointStatusAnnotation]; got != snapshotprotocol.CheckpointStatusFailed {
+				t.Fatalf("checkpoint status annotation = %q, want %q", got, snapshotprotocol.CheckpointStatusFailed)
+			}
+
+			var sawFailureEvent bool
+			for _, action := range w.clientset.(*fake.Clientset).Actions() {
+				create, ok := action.(clientgotesting.CreateAction)
+				if !ok || create.GetResource().Resource != "events" {
+					continue
+				}
+				event, ok := create.GetObject().(*corev1.Event)
+				if ok && event.Reason == "CheckpointFailed" && strings.Contains(event.Message, `container "helper"`) {
+					sawFailureEvent = true
+					break
+				}
+			}
+			if !sawFailureEvent {
+				t.Fatalf("expected CheckpointFailed event for failed regular container; actions=%#v", w.clientset.(*fake.Clientset).Actions())
+			}
+			if len(w.inFlight) != 0 {
+				t.Fatalf("failed checkpoint pod should not start snapshot worker, got inFlight=%v", w.inFlight)
+			}
+			if len(rt.resolvedContainerIDs) != 1 || rt.resolvedContainerIDs[0] != "main-id" {
+				t.Fatalf("expected to resolve remaining running container before failing job, got %v", rt.resolvedContainerIDs)
 			}
 		})
 	}

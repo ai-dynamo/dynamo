@@ -42,7 +42,7 @@
       "description": "DYN: dynamo_frontend_requests_total filtered to status=success / total",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -88,7 +88,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "100 * sum(rate(dynamo_frontend_requests_total{status=\"success\"}[5m])) / sum(rate(dynamo_frontend_requests_total[5m]))",
@@ -105,7 +105,7 @@
       "description": "DYN: dynamo_frontend_requests_total (cumulative)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 3,
@@ -151,7 +151,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(dynamo_frontend_requests_total)",
@@ -168,7 +168,7 @@
       "description": "DYN: dynamo_frontend_input_sequence_tokens_sum (cumulative)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 6,
@@ -214,7 +214,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(dynamo_frontend_input_sequence_tokens_sum)",
@@ -231,7 +231,7 @@
       "description": "DYN: dynamo_frontend_output_tokens_total (cumulative)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 9,
@@ -277,7 +277,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(dynamo_frontend_output_tokens_total)",
@@ -294,7 +294,7 @@
       "description": "DYN: dynamo_frontend_time_to_first_token_seconds (rate sum / rate count)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -340,7 +340,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(rate(dynamo_frontend_time_to_first_token_seconds_sum[5m])) / sum(rate(dynamo_frontend_time_to_first_token_seconds_count[5m]))",
@@ -357,7 +357,7 @@
       "description": "DYN: dynamo_frontend_inter_token_latency_seconds (rate sum / rate count)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 15,
@@ -403,7 +403,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(rate(dynamo_frontend_inter_token_latency_seconds_sum[5m])) / sum(rate(dynamo_frontend_inter_token_latency_seconds_count[5m]))",
@@ -420,7 +420,7 @@
       "description": "DYN: dynamo_frontend_request_duration_seconds (rate sum / rate count)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 18,
@@ -466,7 +466,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(rate(dynamo_frontend_request_duration_seconds_sum[5m])) / sum(rate(dynamo_frontend_request_duration_seconds_count[5m]))",
@@ -483,7 +483,7 @@
       "description": "SGL: sglang:token_usage (overall KV pool fraction in [0,1])",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 21,
@@ -529,7 +529,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:token_usage) * 100",
@@ -559,7 +559,7 @@
       "description": "DYN: rate(dynamo_frontend_requests_total)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -624,7 +624,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (model) (rate(dynamo_frontend_requests_total[$__rate_interval]))",
@@ -641,7 +641,7 @@
       "description": "DYN: dynamo_frontend_request_duration_seconds histogram",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -706,7 +706,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(dynamo_frontend_request_duration_seconds_bucket[$__rate_interval])))",
@@ -717,7 +717,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_frontend_request_duration_seconds_bucket[$__rate_interval])))",
@@ -728,7 +728,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(dynamo_frontend_request_duration_seconds_bucket[$__rate_interval])))",
@@ -745,7 +745,7 @@
       "description": "DYN: dynamo_frontend_requests_total grouped by status code",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -810,7 +810,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (status) (rate(dynamo_frontend_requests_total[$__rate_interval]))",
@@ -827,7 +827,7 @@
       "description": "DYN: dynamo_frontend_inflight_requests / queued_requests gauges. Inflight = currently being processed (dispatched to a worker, awaiting completion). Queued = received by the frontend but not yet dispatched (waiting on router scheduling / worker permit). Inflight pinned at the worker concurrency limit while queued grows means workers are saturated and the gateway is buffering.",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -892,7 +892,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(dynamo_frontend_inflight_requests)",
@@ -903,7 +903,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(dynamo_frontend_queued_requests)",
@@ -920,7 +920,7 @@
       "description": "DYN: dynamo_frontend_time_to_first_token_seconds histogram",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -985,7 +985,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(dynamo_frontend_time_to_first_token_seconds_bucket[$__rate_interval])))",
@@ -996,7 +996,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_frontend_time_to_first_token_seconds_bucket[$__rate_interval])))",
@@ -1007,7 +1007,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(dynamo_frontend_time_to_first_token_seconds_bucket[$__rate_interval])))",
@@ -1024,7 +1024,7 @@
       "description": "DYN: dynamo_frontend_inter_token_latency_seconds histogram",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -1089,7 +1089,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(dynamo_frontend_inter_token_latency_seconds_bucket[$__rate_interval])))",
@@ -1100,7 +1100,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_frontend_inter_token_latency_seconds_bucket[$__rate_interval])))",
@@ -1111,7 +1111,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(dynamo_frontend_inter_token_latency_seconds_bucket[$__rate_interval])))",
@@ -1128,7 +1128,7 @@
       "description": "DYN: dynamo_frontend_input_sequence_tokens histogram (tokens)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -1193,7 +1193,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(dynamo_frontend_input_sequence_tokens_bucket[$__rate_interval])))",
@@ -1204,7 +1204,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_frontend_input_sequence_tokens_bucket[$__rate_interval])))",
@@ -1215,7 +1215,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(dynamo_frontend_input_sequence_tokens_bucket[$__rate_interval])))",
@@ -1232,7 +1232,7 @@
       "description": "DYN: dynamo_frontend_output_sequence_tokens histogram (tokens)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
@@ -1297,7 +1297,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(dynamo_frontend_output_sequence_tokens_bucket[$__rate_interval])))",
@@ -1308,7 +1308,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_frontend_output_sequence_tokens_bucket[$__rate_interval])))",
@@ -1319,7 +1319,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(dynamo_frontend_output_sequence_tokens_bucket[$__rate_interval])))",
@@ -1336,7 +1336,7 @@
       "description": "DYN: dynamo_frontend_cached_tokens histogram (tokens reused from cache)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
@@ -1401,7 +1401,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(dynamo_frontend_cached_tokens_bucket[$__rate_interval])))",
@@ -1412,7 +1412,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_frontend_cached_tokens_bucket[$__rate_interval])))",
@@ -1423,7 +1423,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(dynamo_frontend_cached_tokens_bucket[$__rate_interval])))",
@@ -1453,7 +1453,7 @@
       "description": "DYN: dynamo_component_router_kv_hit_rate histogram (router-side prefix-cache hit rate per request)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -1518,7 +1518,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(dynamo_component_router_kv_hit_rate_bucket[$__rate_interval])))",
@@ -1529,7 +1529,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_component_router_kv_hit_rate_bucket[$__rate_interval])))",
@@ -1540,7 +1540,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(dynamo_component_router_kv_hit_rate_bucket[$__rate_interval])))",
@@ -1551,7 +1551,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(rate(dynamo_component_router_kv_hit_rate_sum[$__rate_interval])) / sum(rate(dynamo_component_router_kv_hit_rate_count[$__rate_interval]))",
@@ -1568,7 +1568,7 @@
       "description": "DYN: per-stage routing overhead histograms (block_hashing / indexer_find_matches / seq_hashing / scheduling / total)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -1633,7 +1633,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(rate(dynamo_router_overhead_block_hashing_ms_sum[$__rate_interval])) / sum(rate(dynamo_router_overhead_block_hashing_ms_count[$__rate_interval]))",
@@ -1644,7 +1644,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_router_overhead_block_hashing_ms_bucket[$__rate_interval])))",
@@ -1655,7 +1655,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(rate(dynamo_router_overhead_indexer_find_matches_ms_sum[$__rate_interval])) / sum(rate(dynamo_router_overhead_indexer_find_matches_ms_count[$__rate_interval]))",
@@ -1666,7 +1666,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_router_overhead_indexer_find_matches_ms_bucket[$__rate_interval])))",
@@ -1677,7 +1677,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(rate(dynamo_router_overhead_seq_hashing_ms_sum[$__rate_interval])) / sum(rate(dynamo_router_overhead_seq_hashing_ms_count[$__rate_interval]))",
@@ -1688,7 +1688,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(rate(dynamo_router_overhead_scheduling_ms_sum[$__rate_interval])) / sum(rate(dynamo_router_overhead_scheduling_ms_count[$__rate_interval]))",
@@ -1699,7 +1699,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(rate(dynamo_router_overhead_total_ms_sum[$__rate_interval])) / sum(rate(dynamo_router_overhead_total_ms_count[$__rate_interval]))",
@@ -1716,7 +1716,7 @@
       "description": "DYN (worker side): dynamo_component_inflight_requests filtered to generate endpoint, grouped by worker_id",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -1781,7 +1781,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (worker_id) (dynamo_component_inflight_requests{dynamo_endpoint=\"generate\"})",
@@ -1798,7 +1798,7 @@
       "description": "DYN (worker side): dynamo_component_total_blocks \u2014 total KV blocks reported per dp_rank",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -1863,7 +1863,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (dp_rank, model) (dynamo_component_total_blocks)",
@@ -1892,7 +1892,7 @@
           "description": "DYN (worker side): dynamo_component_requests_total{dynamo_endpoint=generate} grouped by worker_id",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 0,
@@ -1957,7 +1957,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum by (worker_id) (rate(dynamo_component_requests_total{dynamo_endpoint=\"generate\"}[$__rate_interval]))",
@@ -1974,7 +1974,7 @@
           "description": "SGL: sglang:cache_hit_rate grouped by worker_id",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 12,
@@ -2039,7 +2039,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "avg by (worker_id) (sglang:cache_hit_rate)",
@@ -2056,7 +2056,7 @@
           "description": "SGL: sglang:token_usage grouped by worker_id",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 0,
@@ -2121,7 +2121,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "avg by (worker_id) (sglang:token_usage)",
@@ -2138,7 +2138,7 @@
           "description": "SGL: sglang:e2e_request_latency_seconds_bucket grouped by worker_id",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 12,
@@ -2203,7 +2203,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "histogram_quantile(0.99, sum by (le, worker_id) (rate(sglang:e2e_request_latency_seconds_bucket[$__rate_interval])))",
@@ -2235,7 +2235,7 @@
       "description": "SGL: sglang:num_running_reqs / num_queue_reqs / num_paused_reqs gauges",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -2300,7 +2300,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(sglang:num_running_reqs)",
@@ -2311,7 +2311,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(sglang:num_queue_reqs)",
@@ -2322,7 +2322,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(sglang:num_paused_reqs)",
@@ -2339,7 +2339,7 @@
       "description": "SGL: sglang:gen_throughput (tokens/sec across schedulers)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -2404,7 +2404,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(sglang:gen_throughput)",
@@ -2421,7 +2421,7 @@
       "description": "SGL: sglang:time_to_first_token_seconds histogram (engine-internal TTFT, excludes frontend overhead)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -2486,7 +2486,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(sglang:time_to_first_token_seconds_bucket[$__rate_interval])))",
@@ -2497,7 +2497,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(sglang:time_to_first_token_seconds_bucket[$__rate_interval])))",
@@ -2508,7 +2508,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(sglang:time_to_first_token_seconds_bucket[$__rate_interval])))",
@@ -2525,7 +2525,7 @@
       "description": "SGL: sglang:inter_token_latency_seconds histogram",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
@@ -2590,7 +2590,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(sglang:inter_token_latency_seconds_bucket[$__rate_interval])))",
@@ -2601,7 +2601,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(sglang:inter_token_latency_seconds_bucket[$__rate_interval])))",
@@ -2612,7 +2612,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(sglang:inter_token_latency_seconds_bucket[$__rate_interval])))",
@@ -2629,7 +2629,7 @@
       "description": "SGL: sglang:num_retracted_reqs (preempted) and sglang:new_token_ratio",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
@@ -2694,7 +2694,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(sglang:num_retracted_reqs)",
@@ -2705,7 +2705,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum(sglang:new_token_ratio)",
@@ -2722,7 +2722,7 @@
       "description": "SGL: sglang:spec_accept_rate (fraction of speculatively-drafted tokens accepted by the verifier). Zero on runs without --speculative-algorithm. Higher = better draft quality, more tokens-per-step.",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -2787,7 +2787,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:spec_accept_rate)",
@@ -2804,7 +2804,7 @@
       "description": "SGL: sglang:spec_accept_length (avg accepted tokens per draft step). Zero on runs without --speculative-algorithm. Effectively the speedup multiplier vs non-spec decode.",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -2869,7 +2869,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:spec_accept_length)",
@@ -2899,7 +2899,7 @@
       "description": "SGL: per-pool fractional usage. full_token_usage = full-attention KV pool, swa_token_usage = sliding-window pool (populates on hybrid SWA models like Gemma-2), mamba_usage = Mamba SSM state pool (populates on hybrid SSM models like Jamba). Non-hybrid models only move `full attention`.",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -2964,7 +2964,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:full_token_usage)",
@@ -2975,7 +2975,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:swa_token_usage)",
@@ -2986,7 +2986,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:mamba_usage)",
@@ -3003,7 +3003,7 @@
       "description": "SGL: token counts in the main KV pool. used+evictable+available <= max_total_num_tokens. On hybrid models these reflect the FULL-attention pool only.",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -3068,7 +3068,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:kv_used_tokens)",
@@ -3079,7 +3079,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:kv_evictable_tokens)",
@@ -3090,7 +3090,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:kv_available_tokens)",
@@ -3107,7 +3107,7 @@
       "description": "SGL: sglang:cache_hit_rate (radix prefix-cache hits)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -3172,7 +3172,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:cache_hit_rate)",
@@ -3189,7 +3189,7 @@
       "description": "SGL: sglang:pending_prealloc_token_usage (disagg pre-allocation reservation; 0 in agg mode)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
@@ -3254,7 +3254,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:pending_prealloc_token_usage)",
@@ -3271,7 +3271,7 @@
       "description": "SGL: sglang:streaming_session_held_tokens (KV held by retained streaming sessions)",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 16,
@@ -3336,7 +3336,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:streaming_session_held_tokens)",
@@ -3353,7 +3353,7 @@
       "description": "SGL: sglang:lora_pool_* (only emitted when --enable-lora). Empty in non-LoRA runs.",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -3418,7 +3418,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:lora_pool_utilization)",
@@ -3429,7 +3429,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:lora_pool_slots_used)",
@@ -3440,7 +3440,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:lora_pool_slots_total)",
@@ -3457,7 +3457,7 @@
       "description": "SGL: static pool sizing \u2014 max_total_num_tokens / num_pages / page_size",
       "datasource": {
         "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -3522,7 +3522,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:max_total_num_tokens)",
@@ -3533,7 +3533,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:num_pages)",
@@ -3544,7 +3544,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "max(sglang:page_size)",
@@ -3573,7 +3573,7 @@
           "description": "SGL: prefill-side disagg queues (zero in agg mode)",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 0,
@@ -3638,7 +3638,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum(sglang:num_prefill_prealloc_queue_reqs)",
@@ -3649,7 +3649,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum(sglang:num_prefill_inflight_queue_reqs)",
@@ -3666,7 +3666,7 @@
           "description": "SGL: decode-side disagg queues (zero in agg mode)",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 12,
@@ -3731,7 +3731,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum(sglang:num_decode_prealloc_queue_reqs)",
@@ -3742,7 +3742,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum(sglang:num_decode_transfer_queue_reqs)",
@@ -3773,7 +3773,7 @@
           "description": "SGL: sglang:hicache_host_used_tokens / hicache_host_total_tokens (RAM tier; zero unless --enable-hierarchical-cache)",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 0,
@@ -3838,7 +3838,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "max(sglang:hicache_host_used_tokens)",
@@ -3849,7 +3849,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "max(sglang:hicache_host_total_tokens)",
@@ -3866,7 +3866,7 @@
           "description": "Derived: hicache_host_used / hicache_host_total",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 12,
@@ -3931,7 +3931,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "100 * max(sglang:hicache_host_used_tokens) / max(sglang:hicache_host_total_tokens)",
@@ -3948,7 +3948,7 @@
           "description": "SGL: sglang:evicted_tokens_total / load_back_tokens_total (labeled by cache_type \u2014 RadixCache, SWARadixCache, MambaRadixCache, etc.)",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 0,
@@ -4013,7 +4013,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum by (cache_type) (rate(sglang:evicted_tokens_total[$__rate_interval]))",
@@ -4024,7 +4024,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum by (cache_type) (rate(sglang:load_back_tokens_total[$__rate_interval]))",
@@ -4041,7 +4041,7 @@
           "description": "SGL: sglang:eviction_duration_seconds_bucket grouped by cache_type",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 12,
@@ -4106,7 +4106,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "histogram_quantile(0.99, sum by (le, cache_type) (rate(sglang:eviction_duration_seconds_bucket[$__rate_interval])))",
@@ -4123,7 +4123,7 @@
           "description": "SGL: sglang:prefetched_tokens_total / backuped_tokens_total (hicache prefetch + backup activity)",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 0,
@@ -4188,7 +4188,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum(rate(sglang:prefetched_tokens_total[$__rate_interval]))",
@@ -4199,7 +4199,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum(rate(sglang:backuped_tokens_total[$__rate_interval]))",
@@ -4216,7 +4216,7 @@
           "description": "SGL: sglang:load_back_duration_seconds_bucket grouped by cache_type",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 12,
@@ -4281,7 +4281,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "histogram_quantile(0.99, sum by (le, cache_type) (rate(sglang:load_back_duration_seconds_bucket[$__rate_interval])))",
@@ -4312,7 +4312,7 @@
           "description": "DCGM: DCGM_FI_DEV_GPU_UTIL (only when dcgm-exporter is running)",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 0,
@@ -4377,7 +4377,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "avg by (gpu) (DCGM_FI_DEV_GPU_UTIL)",
@@ -4394,7 +4394,7 @@
           "description": "DYN (worker side): dynamo_component_gpu_cache_usage_percent \u2014 Dynamo runtime's view of KV utilization",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 12,
@@ -4459,7 +4459,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "avg by (worker_id) (dynamo_component_gpu_cache_usage_percent)",
@@ -4476,7 +4476,7 @@
           "description": "DYN: dynamo_tokio_worker_busy_ratio \u2014 async runtime saturation; >0.9 sustained means runtime is starved",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 0,
@@ -4541,7 +4541,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "avg by (worker) (dynamo_tokio_worker_busy_ratio)",
@@ -4558,7 +4558,7 @@
           "description": "DYN: dynamo_request_plane_roundtrip_ttft_seconds (frontend\u2194worker request-plane TTFT, excludes engine compute)",
           "datasource": {
             "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
+            "uid": "${datasource}"
           },
           "gridPos": {
             "x": 12,
@@ -4623,7 +4623,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "histogram_quantile(0.50, sum by (le) (rate(dynamo_request_plane_roundtrip_ttft_seconds_bucket[$__rate_interval])))",
@@ -4634,7 +4634,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "histogram_quantile(0.90, sum by (le) (rate(dynamo_request_plane_roundtrip_ttft_seconds_bucket[$__rate_interval])))",
@@ -4645,7 +4645,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "histogram_quantile(0.99, sum by (le) (rate(dynamo_request_plane_roundtrip_ttft_seconds_bucket[$__rate_interval])))",
@@ -4665,7 +4665,25 @@
     "sglang"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "text": "default",
+          "value": "default"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
   },
   "time": {
     "from": "now-15m",
