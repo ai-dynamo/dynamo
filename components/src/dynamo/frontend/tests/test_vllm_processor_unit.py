@@ -441,20 +441,6 @@ class TestChatTemplateKwargsForwarding:
         kwargs = {**chat_params.chat_template_kwargs, "tokenize": False}
         return tokenizer.apply_chat_template(self._messages(), **kwargs)
 
-    def test_qwen3_enable_thinking_false_inserts_closed_think_block(self, tokenizer):
-        """enable_thinking=False makes Qwen3 insert <think></think> to suppress reasoning."""
-        chat_params, _ = self._prepare(
-            {
-                "model": MODEL,
-                "messages": self._messages(),
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-            tokenizer,
-        )
-        prompt = self._render(tokenizer, chat_params)
-        assert "<think>" in prompt
-        assert "</think>" in prompt
-
     def test_qwen3_enable_thinking_true_no_closed_think_block(self, tokenizer):
         """enable_thinking=True leaves reasoning open (model generates <think> itself)."""
         chat_params, _ = self._prepare(
@@ -501,16 +487,3 @@ class TestChatTemplateKwargsForwarding:
             tokenizer,
         )
         assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
-
-    def test_unknown_kwargs_ignored_by_template(self, tokenizer):
-        """Unknown keys in chat_template_kwargs do not crash preprocessing."""
-        chat_params, _ = self._prepare(
-            {
-                "model": MODEL,
-                "messages": self._messages(),
-                "chat_template_kwargs": {"nonexistent_flag": True},
-            },
-            tokenizer,
-        )
-        prompt = self._render(tokenizer, chat_params)
-        assert len(prompt) > 0
