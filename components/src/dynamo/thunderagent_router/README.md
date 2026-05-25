@@ -79,6 +79,8 @@ future work, not part of this version.
 | `--scheduler-interval-seconds` | `DYN_THUNDERAGENT_SCHEDULER_INTERVAL_SECONDS` | 5.0 | Scheduler tick period. |
 | `--model-name` | `DYN_THUNDERAGENT_MODEL_NAME` | – | Frontend-visible model name. Triggers `register_model`. |
 | `--model-path` | `DYN_THUNDERAGENT_MODEL_PATH` | – | Path or HF repo ID for tokenizer + model card. |
+| `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | – | Tool-call parser forwarded to `register_model` (same value as the worker's). Translates model-native tool calls into OpenAI `tool_calls`. Applies only with `--model-name`. |
+| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | – | Reasoning parser forwarded to `register_model`, mirroring the worker's flag. Applies only with `--model-name`. |
 
 All `KvRouter` flags from `dynamo.router` (`--router-temperature`,
 `--use-kv-events`, `--router-track-output-blocks`, …) are also accepted
@@ -247,11 +249,12 @@ for i in 0 1; do
                            "enable_kv_cache_events":true}' &
 done
 
-# Router. DYN_TOOL_CALL_PARSER is forwarded to register_model so MiniMax's
+# Router. --dyn-tool-call-parser is forwarded to register_model so MiniMax's
 # <minimax:tool_call> XML reaches pi as real OpenAI tool_calls, not raw text.
-DYN_TOOL_CALL_PARSER=minimax_m2 python -m dynamo.thunderagent_router \
+python -m dynamo.thunderagent_router \
     --endpoint dynamo.vllm.generate \
     --model-name MiniMaxAI/MiniMax-M2 \
+    --dyn-tool-call-parser minimax_m2 \
     --router-block-size 16
 
 # Frontend on :8100 (the router already registered the model handler).

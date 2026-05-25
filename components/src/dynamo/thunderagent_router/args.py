@@ -34,6 +34,8 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     scheduler_interval_seconds: float
     model_name: Optional[str] = None
     model_path: Optional[str] = None
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
 
     def to_thunderagent_config(self) -> ThunderAgentConfig:
         return ThunderAgentConfig(
@@ -190,6 +192,30 @@ class ThunderAgentArgGroup(ArgGroup):
             "client-facing name differs from the on-disk location (e.g. "
             "served name 'zai-org/GLM-4.6-FP8' but local cache "
             "/home/nvidia/hf_cache/models/glm-4.6-fp8).",
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-tool-call-parser",
+            dest="tool_call_parser",
+            env_var="DYN_TOOL_CALL_PARSER",
+            default=None,
+            help="Tool-call parser forwarded to register_model so the frontend "
+            "translates model-native tool calls (e.g. MiniMax's "
+            "<minimax:tool_call> XML, Qwen hermes) into OpenAI tool_calls "
+            "before agents see them. Use the same value as the worker's "
+            "--dyn-tool-call-parser. Only applies when --model-name is set.",
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-reasoning-parser",
+            dest="reasoning_parser",
+            env_var="DYN_REASONING_PARSER",
+            default=None,
+            help="Reasoning parser forwarded to register_model, mirroring the "
+            "worker's --dyn-reasoning-parser. Only applies when --model-name "
+            "is set.",
             arg_type=str,
         )
 

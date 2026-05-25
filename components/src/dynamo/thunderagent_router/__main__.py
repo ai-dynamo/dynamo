@@ -16,7 +16,6 @@ without it are routed via plain KvRouter with no lifecycle.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Optional
 
 import uvloop
@@ -255,19 +254,18 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     if config.model_name:
         model_path = config.model_path or config.model_name
-        # Thread the tool_call/reasoning parsers from env so the frontend's
-        # response path can translate model-native tool calls (e.g.
+        # Thread the tool_call/reasoning parsers into register_model so the
+        # frontend's response path can translate model-native tool calls (e.g.
         # MiniMax's <minimax:tool_call> XML, Qwen's hermes) into OpenAI
-        # tool_calls before pi / openhands / other agents see them.
-        # These env vars are the same names the standalone dynamo.vllm worker
-        # accepts via --dyn-tool-call-parser / --dyn-reasoning-parser.
+        # tool_calls before pi / openhands / other agents see them. These use
+        # the same --dyn-tool-call-parser / --dyn-reasoning-parser flag names
+        # (and DYN_TOOL_CALL_PARSER / DYN_REASONING_PARSER env vars) as the
+        # standalone dynamo.vllm worker.
         runtime_cfg = ModelRuntimeConfig()
-        tool_call_parser = os.environ.get("DYN_TOOL_CALL_PARSER")
-        reasoning_parser = os.environ.get("DYN_REASONING_PARSER")
-        if tool_call_parser:
-            runtime_cfg.tool_call_parser = tool_call_parser
-        if reasoning_parser:
-            runtime_cfg.reasoning_parser = reasoning_parser
+        if config.tool_call_parser:
+            runtime_cfg.tool_call_parser = config.tool_call_parser
+        if config.reasoning_parser:
+            runtime_cfg.reasoning_parser = config.reasoning_parser
         await register_model(
             model_input=ModelInput.Tokens,
             model_type=ModelType.Chat | ModelType.Completions,
