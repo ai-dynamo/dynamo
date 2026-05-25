@@ -49,6 +49,21 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_predicted_ttl_secs",
 )
 
+# Single source of truth for `--router-conditional-prefill-policy` accepted
+# values on the Python side. Kept in lock-step with the Rust enum at
+# `lib/kv-router/src/scheduling/config.rs::ConditionalPrefillPolicyKind` and
+# its Python-binding kwarg in `lib/bindings/python/rust/llm/entrypoint.rs`.
+# Re-exported from this module so `frontend_args.py` and `router/args.py`
+# can share it rather than re-declare the tuple.
+CONDITIONAL_PREFILL_POLICY_CHOICES: tuple[str, ...] = (
+    "token_cap",
+    "threshold_regression",
+    "threshold_only",
+    "regression_only",
+    "always_bypass",
+    "random_bypass",
+)
+
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
     "router KV overlap score weight is deprecated; use "
     "--router-prefill-load-scale or DYN_ROUTER_PREFILL_LOAD_SCALE for equivalent behavior"
@@ -424,14 +439,7 @@ class KvRouterArgGroup(ArgGroup):
                 "mixed-traffic smoke testing."
             ),
             arg_type=str,
-            choices=[
-                "token_cap",
-                "threshold_regression",
-                "threshold_only",
-                "regression_only",
-                "always_bypass",
-                "random_bypass",
-            ],
+            choices=list(CONDITIONAL_PREFILL_POLICY_CHOICES),
             dest="conditional_prefill_policy",
         )
         add_negatable_bool_argument(

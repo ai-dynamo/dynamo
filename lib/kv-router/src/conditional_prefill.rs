@@ -458,7 +458,7 @@ impl RegressionConditionalPrefillPolicy {
         enable_fast_path: bool,
         enable_slow_path: bool,
     ) -> Self {
-        let mut policy = match config {
+        let policy = match config {
             Some(cfg) => Self {
                 enabled: cfg.conditional_prefill_enabled,
                 enable_fast_path,
@@ -471,10 +471,13 @@ impl RegressionConditionalPrefillPolicy {
                     .conditional_prefill_regression_roomy_queued_blocks,
                 evaluator: OnceLock::new(),
             },
-            None => Self::with_defaults(),
+            None => {
+                let mut p = Self::with_defaults();
+                p.enable_fast_path = enable_fast_path;
+                p.enable_slow_path = enable_slow_path;
+                p
+            }
         };
-        policy.enable_fast_path = enable_fast_path;
-        policy.enable_slow_path = enable_slow_path;
         if let Some(evaluator) = evaluator {
             // Best-effort: only `Err`s if already set, which can't happen on
             // a freshly-constructed policy.

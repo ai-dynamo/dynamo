@@ -338,6 +338,14 @@ mod tests {
     use super::*;
     use dynamo_kv_router::config::RouterConfigOverride;
 
+    /// Pin the literal value of the bypass annotation. The matching Python
+    /// constant is in `components/src/dynamo/trtllm/request_handlers/handler_base.py`;
+    /// renaming one side without the other silently breaks DECODE-mode bypass.
+    #[test]
+    fn bypass_annotation_literal_pinned() {
+        assert_eq!(BYPASS_REMOTE_PREFILL_ANNOTATION, "x-bypass-remote-prefill");
+    }
+
     #[test]
     fn decode_router_override_disables_overlap_and_prefill_tracking() {
         let override_config = build_decode_router_override(Some(RouterConfigOverride {

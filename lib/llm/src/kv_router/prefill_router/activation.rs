@@ -229,6 +229,11 @@ impl PrefillRouter {
             }
         }
 
+        // Release: the `OnceLock::set` inside `try_set_cost_evaluator` above
+        // provides the happens-before for the evaluator itself; this release
+        // store publishes "activation done" to the request-path readers who
+        // see `activated=true` then call `OnceLock::get`. Both halves of the
+        // late-binding handshake are safe because of these orderings.
         self.activated.store(true, Ordering::Release);
 
         tracing::info!(

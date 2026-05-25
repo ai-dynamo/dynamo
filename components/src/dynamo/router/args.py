@@ -12,6 +12,7 @@ from dynamo.common.configuration.groups.aic_perf_args import (
     AicPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
+    CONDITIONAL_PREFILL_POLICY_CHOICES,
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
@@ -49,18 +50,10 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
             )
         if self.conditional_prefill_max_new_tokens < 0:
             raise ValueError("--router-conditional-prefill-max-new-tokens must be >= 0")
-        if self.conditional_prefill_policy not in (
-            "token_cap",
-            "threshold_regression",
-            "threshold_only",
-            "regression_only",
-            "always_bypass",
-            "random_bypass",
-        ):
+        if self.conditional_prefill_policy not in CONDITIONAL_PREFILL_POLICY_CHOICES:
             raise ValueError(
                 "--router-conditional-prefill-policy must be one of "
-                "'token_cap', 'threshold_regression', 'threshold_only', "
-                "'regression_only', 'always_bypass', 'random_bypass'"
+                + ", ".join(f"'{c}'" for c in CONDITIONAL_PREFILL_POLICY_CHOICES)
             )
         if self.router_prefill_load_model == "aic":
             missing = [

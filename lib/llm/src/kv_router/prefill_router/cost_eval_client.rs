@@ -58,40 +58,46 @@ impl RequestPlaneCostEvaluator {
         self
     }
 
-    /// Pick an instance for round-robin routing. Returns `None` if there are
-    /// no available instances (in which case the caller will fall back to
-    /// `unavailable()`).
-    fn pick_instance(&self) -> Option<u64> {
-        self.router.client.instance_ids_avail().first().copied()
-    }
-
-    /// Inner async machinery: select instance, dispatch, await first frame
-    /// off the stream within the timeout, drain remainder. Returns the
-    /// inner `CostEvalResponse` on success; any error path → `Ok(None)`
-    /// and the public `evaluate` converts to `unavailable()`.
+    /// Inner async machinery: dispatch via the configured `RouterMode`
+    /// (round-robin across cost_eval replicas if multiple are registered;
+    /// trivially the single instance otherwise), await the first frame off
+    /// the stream within `self.timeout`, drain remainder. Returns the inner
+    /// `CostEvalResponse` on success; any error path → `None` and the
+    /// public `evaluate` converts to `unavailable()`.
+    ///
+    /// The timeout wraps the *entire* RPC — dispatch, first-frame await, and
+    /// stream drain — so a sidecar that accepts the request and then stalls
+    /// during evaluation can't block the caller past the budget.
     async fn evaluate_inner(&self, request: CostEvalRequest) -> Option<CostEvalResponse> {
-        let instance_id = self.pick_instance()?;
-        let send = self.router.direct(SingleIn::new(request), instance_id);
-        let mut stream = match tokio::time::timeout(self.timeout, send).await {
-            Ok(Ok(s)) => s,
+        let send = self.router.round_robin(SingleIn::new(request));
+        match tokio::time::timeout(self.timeout, async {
+            let mut stream = send.await?;
+            let first = stream.next().await;
+            // Drain remainder to avoid trailing-publish errors on the
+            // sidecar. Matches the pattern in
+            // `agent_controller.rs::send_session_request`.
+            while stream.next().await.is_some() {}
+            Ok::<_, anyhow::Error>(first)
+        })
+        .await
+        {
+            Ok(Ok(Some(annotated))) => annotated.data,
+            Ok(Ok(None)) => {
+                tracing::warn!("cost-eval RPC returned no frames");
+                None
+            }
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "cost-eval RPC failed");
-                return None;
+                None
             }
             Err(_) => {
                 tracing::warn!(
                     timeout_ms = self.timeout.as_millis() as u64,
                     "cost-eval RPC timed out"
                 );
-                return None;
+                None
             }
-        };
-        let first = stream.next().await;
-        // Drain remainder to avoid trailing-publish errors on the sidecar.
-        // Matches the pattern in `agent_controller.rs::send_session_request`.
-        while stream.next().await.is_some() {}
-        let annotated = first?;
-        annotated.data
+        }
     }
 }
 
