@@ -762,9 +762,11 @@ def build_isl_latency_grid(
 
     The bridge from the profiler's per-pool TTFT-vs-ISL curves to the grid that
     both the Global Router and the EPP pool-selector consume (one grid → parity).
-    Per cell: the cheapest pool (lowest ``pool_costs``) whose predicted latency at
-    the band midpoint meets the target, else the fastest. Curves and costs are
-    indexed by pool; cells use the band midpoint as the representative size.
+    Per cell: the cheapest pool (lowest ``pool_costs``) whose predicted latency
+    meets the target, else the fastest. Curves and costs are indexed by pool.
+    The size axis uses the band midpoint as the representative size; the latency
+    axis uses the band's LOWER edge (the strictest target that maps to the band)
+    so the chosen pool is SLA-safe for every request in the band.
     """
     if not pool_latency_curves:
         raise ValueError("need at least one pool latency curve")
@@ -780,8 +782,13 @@ def build_isl_latency_grid(
         predicted = [curve(size_mid) for curve in pool_latency_curves]
         row: List[int] = []
         for t in range(latency_resolution):
-            # Upper edge of the latency band is the strictest target it must meet.
-            target = latency_min_ms + (t + 1) * latency_step
+            # The LOWER edge is the strictest target that maps to this band:
+            # a request with target T lands in band t = clamp((T-min)/step), so
+            # the smallest such T is `min + t*step`. Building the cell at the
+            # lower edge guarantees the chosen pool meets the SLA for every
+            # target in the band (the upper edge would be the loosest target and
+            # could under-provision stricter in-band requests).
+            target = latency_min_ms + t * latency_step
             meeting = [i for i, lat in enumerate(predicted) if lat <= target]
             if meeting:
                 # cheapest pool that meets the SLA

@@ -46,9 +46,11 @@ def _grid():
 def test_grid_shape_and_values():
     grid = _grid()
     assert len(grid) == 2 and all(len(r) == 2 for r in grid)
-    # short band: tight target -> tp2 (tp1 too slow), loose -> cheapest tp1.
-    # long band:  tight -> tp4 (only it meets), loose -> tp2.
-    assert grid == [[1, 0], [2, 1]]
+    # Latency bands use the strict LOWER edge: col0=[0,200)->target 0ms, col1=[200,400)->target 200ms.
+    # short band (ISL 1000: tp1=250,tp2=140,tp4=70): tight(0ms) nobody meets -> fastest tp4;
+    #                                                loose(200ms) -> cheapest meeting = tp2.
+    # long band  (ISL 3000: tp1=650,tp2=340,tp4=150): tight(0ms) -> fastest tp4; loose(200ms) -> only tp4.
+    assert grid == [[2, 1], [2, 2]]
 
 
 def test_build_select_parity():
@@ -63,14 +65,14 @@ def test_build_select_parity():
         isl_resolution=2,
         prefill_pool_mapping=grid,
     )
-    assert strat.select_pool(isl=1000, ttft_target_ms=300) == 0  # short, loose -> tp1
-    assert strat.select_pool(isl=1000, ttft_target_ms=150) == 1  # short, tight -> tp2
-    assert strat.select_pool(isl=3000, ttft_target_ms=150) == 2  # long, tight  -> tp4
-    assert strat.select_pool(isl=3000, ttft_target_ms=400) == 1  # long, loose  -> tp2
+    assert strat.select_pool(isl=1000, ttft_target_ms=300) == 1  # short, loose col -> tp2
+    assert strat.select_pool(isl=1000, ttft_target_ms=150) == 2  # short, tight col -> tp4 (fastest)
+    assert strat.select_pool(isl=3000, ttft_target_ms=150) == 2  # long,  tight col -> tp4
+    assert strat.select_pool(isl=3000, ttft_target_ms=400) == 2  # long,  loose col -> tp4
 
 
 def test_no_pool_meets_target_picks_fastest():
-    # impossibly tight target: pick the fastest (lowest-latency) pool = tp4.
+    # impossibly tight target (lower edge 0ms): nobody meets -> fastest pool = tp4.
     grid = build_isl_latency_grid(
         _CURVES,
         _COSTS,

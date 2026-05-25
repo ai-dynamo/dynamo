@@ -81,10 +81,21 @@ func TestSelectPool_ClampsOutOfRange(t *testing.T) {
 
 func TestSelectPool_DefaultLatencyUsesMiddle(t *testing.T) {
 	g := grid3x2()
-	// latency <= 0 → middle of [1000,5000] = 3000 → clampIndex((3000-1000)/2000)=1 (loose col).
-	// size 1500 = band1 → mapping[1][1] = 1.
-	if got := g.SelectPool(1500, 0, -1); got != 1 {
-		t.Fatalf("default latency: got pool %d, want 1 (middle→loose column)", got)
+	// latency < 0 (absent sentinel) → middle of [1000,5000] = 3000 →
+	// clampIndex((3000-1000)/2000)=1 (loose col). size 1500 = band1 → mapping[1][1] = 1.
+	if got := g.SelectPool(1500, -1, -1); got != 1 {
+		t.Fatalf("absent latency: got pool %d, want 1 (middle→loose column)", got)
+	}
+}
+
+// TestSelectPool_ExplicitZeroIsStrictest verifies an explicit 0 target is treated
+// as a real (strictest) target, not "unspecified": it clamps to the fastest
+// bucket — parity with the Python Global Router, which defaults only on None.
+func TestSelectPool_ExplicitZeroIsStrictest(t *testing.T) {
+	g := grid3x2()
+	// ttft 0 → clampIndex((0-1000)/2000) = 0 (tight col). size 1500 = band1 → mapping[1][0] = 2.
+	if got := g.SelectPool(1500, 0, -1); got != 2 {
+		t.Fatalf("explicit zero: got pool %d, want 2 (tight column / fastest bucket)", got)
 	}
 }
 

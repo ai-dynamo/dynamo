@@ -92,14 +92,18 @@ func (g *GridSelectionStrategy) latencyStep() float64 {
 
 // SelectPool returns the pool index for the given size and latency target.
 //
-//   - latencyTargetMs <= 0 means "unspecified" → the middle of the configured
-//     range is used (matching the Global Router's None handling).
+//   - latencyTargetMs < 0 means "unspecified" — the filter passes -1 when
+//     nvext.router.ttft_target is absent → the middle of the configured range
+//     is used, matching the Global Router's None handling. An explicit 0 is a
+//     real (strictest) target and clamps to the fastest bucket, preserving
+//     parity with the Python select_pool, which defaults only on `is None`
+//     (not `<= 0`).
 //   - priority < 0 means "no priority" → grid result is used as-is.
 //
 // Indices are clamped into the grid, so out-of-range sizes/latencies map to the
 // nearest edge cell rather than erroring.
 func (g *GridSelectionStrategy) SelectPool(size float64, latencyTargetMs float64, priority int) int {
-	if latencyTargetMs <= 0 {
+	if latencyTargetMs < 0 {
 		latencyTargetMs = (g.LatencyMinMs + g.LatencyMaxMs) / 2
 	}
 	sizeIdx := clampIndex((size-g.SizeMin)/g.sizeStep(), g.SizeResolution)
