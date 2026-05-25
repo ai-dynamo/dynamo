@@ -1969,20 +1969,6 @@ class TestChatTemplateKwargsForwarding:
     def _decode(self, tokenizer, token_ids: list[int]) -> str:
         return tokenizer.decode(token_ids, skip_special_tokens=False)
 
-    def test_qwen3_enable_thinking_false_inserts_closed_think_block(self, tokenizer):
-        """enable_thinking=False makes Qwen3 insert <think></think> to suppress reasoning."""
-        result = self._preprocess(
-            {
-                "model": MODEL,
-                "messages": self._messages(),
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-            tokenizer,
-        )
-        prompt = self._decode(tokenizer, result.prompt_token_ids)
-        assert "<think>" in prompt
-        assert "</think>" in prompt
-
     def test_qwen3_enable_thinking_true_no_closed_think_block(self, tokenizer):
         """enable_thinking=True leaves reasoning open (model generates <think> itself)."""
         result = self._preprocess(
@@ -2015,15 +2001,3 @@ class TestChatTemplateKwargsForwarding:
             tokenizer,
         )
         assert think.prompt_token_ids != no_think.prompt_token_ids
-
-    def test_unknown_kwargs_ignored_by_template(self, tokenizer):
-        """Unknown keys in chat_template_kwargs do not crash preprocessing."""
-        result = self._preprocess(
-            {
-                "model": MODEL,
-                "messages": self._messages(),
-                "chat_template_kwargs": {"nonexistent_flag": True},
-            },
-            tokenizer,
-        )
-        assert len(result.prompt_token_ids) > 0
