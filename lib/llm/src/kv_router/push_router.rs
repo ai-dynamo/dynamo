@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank};
@@ -524,9 +525,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
-        // Resolve session affinity: if the request has a session_id, inject the
-        // pinned worker_id into backend_instance_id before worker selection.
-        // Skip entirely for non-session requests to keep them off the sticky path.
+        // Pin a bound session to its (worker, dp_rank) before selection so it
+        // stays on the rank where its prefix is warm. Pinning dp_rank (not just
+        // the worker) is what stops a multi-rank engine from drifting the
+        // conversation across ranks. A miss is bound after routing, below.
+        let mut bind_session_after_route = false;
         if request
             .routing
             .as_ref()
@@ -537,9 +540,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .as_ref()
                 .and_then(|r| r.backend_instance_id)
                 .is_none()
-            && let Some(worker_id) = self.sticky_sessions.resolve(&request)
         {
-            request.routing_mut().backend_instance_id = Some(worker_id);
+            match self.sticky_sessions.resolve(&request) {
+                Some(worker) => {
+                    let routing = request.routing_mut();
+                    routing.backend_instance_id = Some(worker.worker_id);
+                    routing.dp_rank = Some(worker.dp_rank);
+                }
+                None => bind_session_after_route = true,
+            }
         }
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
@@ -658,6 +667,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .and_then(|r| r.expected_output_tokens);
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
+
+        // Bind a new session to the (worker, dp_rank) it just landed on so its
+        // later turns stick to that rank. Routing-layer only -- no worker RPC.
+        // Bound sessions are kept alive by the sliding TTL refresh in resolve().
+        if bind_session_after_route
+            && let Some(sc) = request
+                .routing
+                .as_ref()
+                .and_then(|r| r.session_control.as_ref())
+        {
+            self.sticky_sessions.bind(
+                &sc.session_id,
+                WorkerWithDpRank::new(instance_id, dp_rank),
+                Duration::from_secs(sc.timeout),
+            );
+        }
 
         // Session lifecycle RPCs via agent controller.
         // Fails fast if session_control.open is requested but the client can't be created.

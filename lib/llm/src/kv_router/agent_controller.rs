@@ -178,12 +178,8 @@ impl AgentController {
                 })?;
                 ensure_session_open_succeeded(&resp, &sc.session_id)?;
 
-                // Bind affinity only after the worker confirms the
-                // session exists, otherwise retries can get pinned to a
-                // worker that never opened the session.
-                if let Some(sticky) = sticky {
-                    sticky.bind(&sc.session_id, instance_id, Duration::from_secs(sc.timeout));
-                }
+                // Affinity is bound at the routing layer after worker selection;
+                // this controller only owns the open/close RPC lifecycle.
 
                 Ok(None)
             }
