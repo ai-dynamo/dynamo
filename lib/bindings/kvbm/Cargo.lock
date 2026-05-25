@@ -3092,6 +3092,7 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "dynamo-tokens",
  "kvbm-common",
  "serde",
  "serde_json",

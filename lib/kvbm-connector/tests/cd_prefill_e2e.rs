@@ -27,7 +27,8 @@ use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequenc
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_logical::manager::BlockManager;
 use kvbm_protocols::disagg::{
-    DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
+    DISAGG_PROTOCOL_VERSION, KvHashingRequestEnvelope, RemotePrefillParams, SessionEndpoint,
+    SessionId, TransferParams,
 };
 
 const TOTAL_BLOCKS: usize = 4;
@@ -63,15 +64,18 @@ fn synthetic_decode_endpoint() -> SessionEndpoint {
 fn cd_transfer_params(
     session_id: SessionId,
     initiator_instance_id: kvbm_connector::InstanceId,
-    expected_hashes: Vec<kvbm_logical::SequenceHash>,
+    num_provided_blocks: usize,
 ) -> TransferParams {
     TransferParams::remote_prefill(RemotePrefillParams {
         protocol_version: DISAGG_PROTOCOL_VERSION,
         session_id,
         initiator_instance_id,
         decode_endpoint: Some(synthetic_decode_endpoint()),
-        sequence_hashes: expected_hashes,
-        num_computed_tokens: 0,
+        num_provided_tokens: num_provided_blocks * BLOCK_SIZE,
+        request: KvHashingRequestEnvelope::default(),
+        // Mock fixtures don't compute the canonical digest; skip the
+        // verifier (production paths populate this and assert).
+        expected_hash_digest: None,
     })
 }
 
@@ -125,7 +129,7 @@ fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -
         Some(cd_transfer_params(
             session_id,
             decode_instance_id,
-            all_hashes.clone(),
+            all_hashes.len(),
         ))
     } else {
         None
@@ -431,14 +435,10 @@ fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness
 
     let session_id = uuid::Uuid::new_v4();
     let decode_instance_id: kvbm_connector::InstanceId = uuid::Uuid::new_v4().into();
-    // CD-bound but with **empty** sequence_hashes — mirrors the
+    // CD-bound but with `num_local_match_blocks = 0` — mirrors the
     // hub dispatcher payload when decode has no local-match cache to
     // forward (the common golden-path case).
-    let transfer_params = Some(cd_transfer_params(
-        session_id,
-        decode_instance_id,
-        Vec::new(),
-    ));
+    let transfer_params = Some(cd_transfer_params(session_id, decode_instance_id, 0));
 
     let slot = MockSlot {
         block_size: BLOCK_SIZE,

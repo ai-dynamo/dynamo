@@ -397,6 +397,16 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         Ok(out)
     }
 
+    fn slot_lora_name(&self, _request_id: &str) -> Result<Option<String>> {
+        // Mock requests have no LoRA — the CD wire's loud-fail guard
+        // depends on these returning None for the assert-None contract.
+        Ok(None)
+    }
+
+    fn slot_salt(&self, _request_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     fn local_instance_id(&self) -> crate::InstanceId {
         self.local_id
     }

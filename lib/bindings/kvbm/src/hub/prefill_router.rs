@@ -166,10 +166,7 @@ impl Drop for PrefillRouterHandler {
             && let Some(inner) = self.inner.get()
         {
             let hub = Arc::clone(&inner.hub);
-            if let Err(e) = self
-                .runtime
-                .block_on(async move { hub.unregister().await })
-            {
+            if let Err(e) = self.runtime.block_on(async move { hub.unregister().await }) {
                 tracing::warn!(error = %e, "PrefillRouterHandler: hub unregister on drop failed");
             }
         }
@@ -241,75 +238,61 @@ fn register_dispatch_handler(
     messenger: &Arc<velo::Messenger>,
     lambda: Arc<Py<PyAny>>,
 ) -> anyhow::Result<()> {
-    let handler = Handler::typed_unary_async::<
-        PrefillDispatchRequest,
-        PrefillDispatchResponse,
-        _,
-        _,
-    >(PREFILL_DISPATCH_HANDLER, move |ctx| {
-        let lambda = Arc::clone(&lambda);
-        async move {
-            let (tx, rx) = oneshot::channel::<Result<(), String>>();
-            // Brief GIL hold: build CompletionEvent + pythonize request +
-            // invoke the lambda. The lambda is expected to schedule its
-            // async work onto its captured asyncio loop and return None.
-            // Round-trip through `serde_json::Value` BEFORE pythonize so
-            // the Python side sees JSON-friendly types only — never Python
-            // `bytes`. Background: `kv_transfer_params.remote_prefill.
-            // sequence_hashes` is a `Vec<PositionalLineageHash>`, and
-            // `PositionalLineageHash` serializes its inner u128 via
-            // `serde_bytes_u128` (`serializer.serialize_bytes(&val.
-            // to_be_bytes())`). Pythonize honors `serialize_bytes`
-            // faithfully and produces a Python `bytes` object — but
-            // downstream consumers (the vLLM scheduler ultimately calls
-            // `json.dumps(kv_transfer_params)` to ship the params to
-            // its Rust side) cannot encode `bytes` to JSON and crash
-            // the engine. `serde_json` has no bytes type, so a value-tree
-            // round-trip turns the byte arrays into JSON arrays of u8 ints
-            // — pythonize then maps those to Python `list[int]`, which is
-            // the same shape the HTTP execution backend produces (since
-            // its body is also JSON) and which `json.dumps` handles
-            // natively. This keeps the Python type identical across both
-            // transports and avoids touching every downstream consumer.
-            let json_input = serde_json::to_value(&ctx.input)
-                .map_err(|e| anyhow::anyhow!("serialize PrefillDispatchRequest: {e}"))?;
-            let call_result: Result<(), String> = Python::attach(|py| {
-                let evt = CompletionEvent::with_sender(tx);
-                let py_evt = Py::new(py, evt)
-                    .map_err(|e| format!("Py::new(CompletionEvent): {e}"))?;
-                let py_req = pythonize::pythonize(py, &json_input)
-                    .map_err(|e| format!("pythonize request: {e}"))?;
-                lambda
-                    .call1(py, (py_req, py_evt))
-                    .map_err(|e| format!("lambda invocation raised: {e}"))?;
-                Ok(())
-            });
+    let handler =
+        Handler::typed_unary_async::<PrefillDispatchRequest, PrefillDispatchResponse, _, _>(
+            PREFILL_DISPATCH_HANDLER,
+            move |ctx| {
+                let lambda = Arc::clone(&lambda);
+                async move {
+                    let (tx, rx) = oneshot::channel::<Result<(), String>>();
+                    // Brief GIL hold: build CompletionEvent + pythonize request +
+                    // invoke the lambda. The lambda schedules its async work onto
+                    // its captured asyncio loop and returns None. The wire payload
+                    // (PrefillDispatchRequest + nested RemotePrefillParams) is
+                    // JSON-friendly by design — no `PositionalLineageHash` u128
+                    // bytes ride on the wire anymore, so pythonize is safe to call
+                    // directly without a serde_json value-tree round-trip. See
+                    // `kvbm_protocols::disagg::KvHashingRequestEnvelope` for the
+                    // shape; PLH values are recomputed prefill-side from the
+                    // canonical `kv_hashing::Request` inputs.
+                    let call_result: Result<(), String> = Python::attach(|py| {
+                        let evt = CompletionEvent::with_sender(tx);
+                        let py_evt = Py::new(py, evt)
+                            .map_err(|e| format!("Py::new(CompletionEvent): {e}"))?;
+                        let py_req = pythonize::pythonize(py, &ctx.input)
+                            .map_err(|e| format!("pythonize request: {e}"))?;
+                        lambda
+                            .call1(py, (py_req, py_evt))
+                            .map_err(|e| format!("lambda invocation raised: {e}"))?;
+                        Ok(())
+                    });
 
-            if let Err(msg) = call_result {
-                return Ok(PrefillDispatchResponse {
-                    ok: false,
-                    error: Some(msg),
-                });
-            }
+                    if let Err(msg) = call_result {
+                        return Ok(PrefillDispatchResponse {
+                            ok: false,
+                            error: Some(msg),
+                        });
+                    }
 
-            // Await completion outside the GIL.
-            match rx.await {
-                Ok(Ok(())) => Ok(PrefillDispatchResponse {
-                    ok: true,
-                    error: None,
-                }),
-                Ok(Err(msg)) => Ok(PrefillDispatchResponse {
-                    ok: false,
-                    error: Some(msg),
-                }),
-                Err(_) => Ok(PrefillDispatchResponse {
-                    ok: false,
-                    error: Some("CompletionEvent dropped before signal".into()),
-                }),
-            }
-        }
-    })
-    .build();
+                    // Await completion outside the GIL.
+                    match rx.await {
+                        Ok(Ok(())) => Ok(PrefillDispatchResponse {
+                            ok: true,
+                            error: None,
+                        }),
+                        Ok(Err(msg)) => Ok(PrefillDispatchResponse {
+                            ok: false,
+                            error: Some(msg),
+                        }),
+                        Err(_) => Ok(PrefillDispatchResponse {
+                            ok: false,
+                            error: Some("CompletionEvent dropped before signal".into()),
+                        }),
+                    }
+                }
+            },
+        )
+        .build();
     messenger
         .register_handler(handler)
         .map_err(|e| anyhow::anyhow!("register {PREFILL_DISPATCH_HANDLER} handler: {e}"))?;

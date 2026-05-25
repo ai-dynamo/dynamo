@@ -199,15 +199,16 @@ mod tests {
     #[test]
     fn prefill_dispatch_request_round_trips() {
         use kvbm_protocols::disagg::{
-            DISAGG_PROTOCOL_VERSION, RemotePrefillParams, TransferParams,
+            DISAGG_PROTOCOL_VERSION, KvHashingRequestEnvelope, RemotePrefillParams, TransferParams,
         };
         let params = RemotePrefillParams {
             protocol_version: DISAGG_PROTOCOL_VERSION,
             session_id: uuid::Uuid::new_v4(),
             initiator_instance_id: InstanceId::new_v4(),
             decode_endpoint: None,
-            sequence_hashes: vec![],
-            num_computed_tokens: 0,
+            num_provided_tokens: 0,
+            request: KvHashingRequestEnvelope::default(),
+            expected_hash_digest: None,
         };
         let req = PrefillDispatchRequest {
             request_id: "r1".to_string(),

@@ -27,7 +27,10 @@ use kvbm_engine::p2p::session::{
     AvailabilityDelta, CommitDelta, CommittedBlock, Session, SessionFactory,
 };
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
-use kvbm_protocols::disagg::{DISAGG_PROTOCOL_VERSION, RemotePrefillParams, RemotePrefillRequest};
+use kvbm_protocols::disagg::{
+    DISAGG_PROTOCOL_VERSION, KvHashingRequestEnvelope, RemotePrefillParams, RemotePrefillRequest,
+    digest_provided_hashes,
+};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
@@ -59,6 +62,14 @@ pub struct RemotePrefillStart<'a> {
     pub prefix_g2: Vec<ImmutableBlock<G2>>,
     pub local_match_g2: Vec<ImmutableBlock<G2>>,
     pub prefill_token_ids: Vec<u32>,
+    /// LoRA adapter name from the slot's request (the same value decode
+    /// passed to `kv_hashing::Request`). Forwarded onto the CD wire so
+    /// prefill can rebuild an identical `kv_hashing::Request` and
+    /// recompute matching PLHs locally.
+    pub lora_name: Option<String>,
+    /// Raw salt string from the slot's request. Same purpose as
+    /// `lora_name` — feeds the prefill-side hasher.
+    pub salt: Option<String>,
 }
 
 /// Shared dependencies every coordinator constructor needs. Bundled so the
@@ -1035,7 +1046,41 @@ impl ConditionalDisaggCoordinator {
             prefix_g2,
             local_match_g2,
             prefill_token_ids,
+            lora_name,
+            salt,
         } = start;
+
+        // Loud-fail guards for not-yet-wired CD inputs at the decode
+        // enqueue site. The envelope mirrors `kv_hashing::Request` so
+        // future enablement of LoRA / salt / mm_info is a value change,
+        // not a wire-format change — but until each is exercised end-
+        // to-end, fail loud here so the first user with such a request
+        // gets a clear error instead of an RDMA-pull stall or silent
+        // hash divergence. Multimodal is blocked upstream in
+        // `kvbm/v2/vllm/schedulers/leader.py` (raises on
+        // `mm_features`/`mm_positions`), so `mm_info` is empty by
+        // construction here.
+        //
+        // PC-on (`inputs.num_computed_tokens > 0`) is intentionally NOT
+        // guarded here: decode-side enqueue with a non-zero
+        // already-computed prefix is well-formed. The mismatch surfaces
+        // on the PREFILL side when it tries to recompute absolute-coord
+        // PLHs from its windowed slot — see the matching bail in
+        // `ensure_started`.
+        if lora_name.is_some() {
+            anyhow::bail!(
+                "CD wire: LoRA not yet wired end-to-end for conditional disagg \
+                 (request_id={request_id}); decode-side request carried a LoRA adapter \
+                 but the prefill-side recompute path is not validated"
+            );
+        }
+        if salt.is_some() {
+            anyhow::bail!(
+                "CD wire: cache_salt not yet wired end-to-end for conditional disagg \
+                 (request_id={request_id}); decode-side request carried a cache_salt \
+                 but the prefill-side recompute path is not validated"
+            );
+        }
 
         if self.states.contains_key(request_id) {
             anyhow::bail!(
@@ -1147,15 +1192,45 @@ impl ConditionalDisaggCoordinator {
 
         let endpoint = session.endpoint();
 
+        // DNPT = decode's total committed prefix length (in tokens) from
+        // absolute position 0. Folds in the vLLM-decode G1 prefix
+        // (`inputs.num_computed_tokens`) AND the G2 local-match window
+        // decode just resolved (`local_match_hashes.len() * block_size`).
+        // Decode's slot's PLH chain at indices `[0, DNPT/BS)` covers
+        // exactly this range; the digest below pins that slice for the
+        // prefill-side verifier.
+        let block_size = self.inner.block_size();
+        let dnpt_tokens = inputs.num_computed_tokens + local_match_hashes.len() * block_size;
+        let dnpt_blocks = dnpt_tokens / block_size;
+        let provided_hashes: Vec<SequenceHash> = self
+            .inner
+            .slot_match_split(request_id)?
+            .all_sequence_hashes
+            .iter()
+            .take(dnpt_blocks)
+            .copied()
+            .collect();
+        // Defense-in-depth: digest covers the FULL `[0, DNPT/BS)` slice
+        // decode commits to serve. Prefill recomputes the same slice from
+        // its own slot's absolute-coord PLH chain and asserts the digest
+        // matches before accepting the dispatch.
+        let expected_hash_digest = Some(digest_provided_hashes(&provided_hashes));
+        let envelope = KvHashingRequestEnvelope {
+            lora_name,
+            salt,
+            mm_info: Vec::new(),
+        };
+
         let request = RemotePrefillRequest {
             protocol_version: DISAGG_PROTOCOL_VERSION,
             request_id: request_id.to_string(),
             session_id,
             initiator_instance_id,
             decode_endpoint: endpoint,
-            sequence_hashes: local_match_hashes,
             token_ids: prefill_token_ids,
-            num_computed_tokens: inputs.num_computed_tokens,
+            num_provided_tokens: dnpt_tokens,
+            request: envelope,
+            expected_hash_digest,
         };
 
         // Enqueue asynchronously so a slow queue doesn't block the sync caller.
@@ -1309,39 +1384,75 @@ impl ConditionalDisaggCoordinator {
         }
 
         let block_size = self.inner.block_size();
-        // Decode forwarded `params.sequence_hashes` covering positions
-        // [D, D + N*BS) where D = `params.num_computed_tokens` (decode
-        // side). The connector pulls all N hashes into G2 regardless
-        // of `prefill_num_computed_tokens` (P) — this lets retries
-        // with a new P just re-derive the external count without
-        // re-slicing in-flight pulls. The slot-side onboard at USAA
-        // takes the SUFFIX of the pulled blocks corresponding to
-        // [P, D + N*BS).
-        let decode_offset_tokens = params.num_computed_tokens;
-        let total_position_end_tokens =
-            decode_offset_tokens + params.sequence_hashes.len() * block_size;
+        // DNPT = decode's total committed prefix in tokens (folds in
+        // both vLLM-decode's G1 prefix and the G2 local-match window).
+        // Decode sends the FULL prompt `token_ids` on the wire, so
+        // prefill's slot is built from the same full sequence and its
+        // PLH chain is in ABSOLUTE coordinates — bit-identical to
+        // decode's by construction. Decode's slot's PLH chain at
+        // `[0, DNPT/BS)` covers exactly what decode commits to serve.
+        //
+        // Today prefill pulls all of `[0, DNPT/BS)` (conservative —
+        // over-pull instead of under-pull). The future PNCT
+        // optimization will narrow this to `[PNCT/BS, DNPT/BS)` so
+        // prefill skips hashes it already has locally; that requires
+        // computing PNCT from prefill-vLLM's GNMT hint + prefill's own
+        // G2/G3 local-match search.
+        let dnpt_tokens = params.num_provided_tokens;
+        let dnpt_blocks = dnpt_tokens / block_size;
+        let total_position_end_tokens = dnpt_tokens;
         let num_external_tokens =
             total_position_end_tokens.saturating_sub(prefill_num_computed_tokens);
-        let expected_hashes: Vec<SequenceHash> = params.sequence_hashes.clone();
-        // `expected_hashes[i]` lands at absolute token-block index
-        // `D/BS + i`; `pull_and_register_*` uses this to translate to
-        // `token_blocks_for_range`.
-        let computed_blocks_offset = decode_offset_tokens / block_size;
-        if prefill_num_computed_tokens > decode_offset_tokens {
+        // `computed_blocks_offset` is the absolute-coordinate offset
+        // where `expected_hashes` starts. Currently 0 because we pull
+        // the full `[0, DNPT/BS)` range; when PNCT-aware pulls land,
+        // this becomes `PNCT/BS`. `pull_and_register_*` uses it to
+        // translate the local position-i element of `expected_hashes`
+        // to the peer's absolute token-block index `offset + i`.
+        let computed_blocks_offset = 0;
+        if prefill_num_computed_tokens > dnpt_tokens {
             crate::audit!(
-                "prefill_local_prefix_overlap",
+                "prefill_local_prefix_exceeds_decode_commitment",
                 role = "prefill",
                 request_id = %request_id,
-                decode_offset_tokens = decode_offset_tokens,
+                dnpt_tokens = dnpt_tokens,
                 prefill_num_computed_tokens = prefill_num_computed_tokens,
-                total_position_end_tokens = total_position_end_tokens,
                 num_external_tokens = num_external_tokens
             );
         }
 
-        // Compute expected output hashes and install the observer entry.
+        // Slice prefill's locally-computed PLH chain `[0, DNPT/BS)` —
+        // these are the hashes prefill will RDMA-pull from decode.
         let split = self.inner.slot_match_split(request_id)?;
-        let pulled: HashSet<SequenceHash> = params.sequence_hashes.iter().copied().collect();
+        if dnpt_blocks > split.all_sequence_hashes.len() {
+            anyhow::bail!(
+                "CD prefill: DNPT window [0, {dnpt_blocks}) exceeds prefill slot's \
+                 hashed block count {} (request_id={request_id}); prefill slot's \
+                 token_ids must cover at least decode's DNPT range",
+                split.all_sequence_hashes.len()
+            );
+        }
+        let expected_hashes: Vec<SequenceHash> = split.all_sequence_hashes[..dnpt_blocks].to_vec();
+
+        // Defense-in-depth: if decode shipped a digest, assert our
+        // recomputed `[0, DNPT/BS)` slice matches bit-for-bit.
+        // Mismatch means decode and prefill disagree on the hashing
+        // inputs (missed salt/LoRA propagation, hasher version skew,
+        // etc.) — fail loud here so the operator sees the real cause
+        // instead of an RDMA-pull stall.
+        if let Some(expected_digest) = params.expected_hash_digest {
+            let local_digest = digest_provided_hashes(&expected_hashes);
+            if local_digest != expected_digest {
+                anyhow::bail!(
+                    "CD hash divergence (request_id={request_id}): \
+                     decode_digest=0x{expected_digest:016x} \
+                     prefill_digest=0x{local_digest:016x}; \
+                     KvHashingRequestEnvelope inputs do not match across decode/prefill"
+                );
+            }
+        }
+
+        let pulled: HashSet<SequenceHash> = expected_hashes.iter().copied().collect();
         let expected_outputs: HashSet<SequenceHash> = split
             .all_sequence_hashes
             .iter()
@@ -1404,7 +1515,7 @@ impl ConditionalDisaggCoordinator {
             request_id = %request_id_owned,
             session_id = %params.session_id,
             initiator = %params.initiator_instance_id,
-            num_sequence_hashes = params.sequence_hashes.len()
+            num_provided_tokens = params.num_provided_tokens
         );
 
         self.runtime.spawn(async move {

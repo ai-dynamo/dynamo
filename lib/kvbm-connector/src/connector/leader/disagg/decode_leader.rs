@@ -631,11 +631,17 @@ impl DecodeDisaggLeader {
         let session_local_g2: Vec<ImmutableBlock<G2>> = local_g2.to_vec();
         let session_prefix_g2: Vec<ImmutableBlock<G2>> = prefix_g2;
 
+        // Send the FULL prompt tokens on the wire (not the suffix
+        // starting at `num_computed_tokens`). Prefill's slot must
+        // hash the same TokenBlockSequence decode hashed so its
+        // PositionalLineageHash chain matches decode's at absolute
+        // positions — windowing the tokens would reset prefill's
+        // chain to relative position 0 and silently break
+        // cross-instance pull keying for PC-on requests.
+        // `num_computed_tokens` rides separately on the wire so
+        // prefill's vLLM knows to skip recomputing the prefix portion;
+        // the connector pulls the prefix-G2 hashes decode published.
         let all_token_ids = self.inner.slot_token_ids(request_id)?;
-        // Slice tokens to the prefill window: only the full-block
-        // prefix `[num_computed_tokens, num_computed_tokens +
-        // full_block_external_tokens)`. The partial tail block (if
-        // any) and decode-already-computed prefix stay on decode.
         let base_offset = inputs.num_computed_tokens;
         let prefill_window_end = base_offset + full_block_external_tokens;
         if prefill_window_end > all_token_ids.len() {
@@ -646,7 +652,10 @@ impl DecodeDisaggLeader {
                 all_token_ids.len(),
             );
         }
-        let prefill_token_ids: Vec<u32> = all_token_ids[base_offset..prefill_window_end].to_vec();
+        // Reserve only the full-block tail still in `all_token_ids`
+        // (everything before `prefill_window_end`). The partial tail
+        // block, if any, stays on decode.
+        let prefill_token_ids: Vec<u32> = all_token_ids[..prefill_window_end].to_vec();
 
         let new_state = Arc::new(CdRequestState {
             reserved_tokens: full_block_external_tokens,
@@ -702,6 +711,8 @@ impl DecodeDisaggLeader {
             });
             inner_for_install.install_cd_onboarding_payload(rid, payload)
         };
+        let lora_name = self.inner.slot_lora_name(request_id)?;
+        let salt = self.inner.slot_salt(request_id)?;
         match self.coordinator.begin_remote_prefill(
             RemotePrefillStart {
                 request_id,
@@ -710,6 +721,8 @@ impl DecodeDisaggLeader {
                 prefix_g2: session_prefix_g2,
                 local_match_g2: session_local_g2,
                 prefill_token_ids,
+                lora_name,
+                salt,
             },
             install_payload,
         ) {

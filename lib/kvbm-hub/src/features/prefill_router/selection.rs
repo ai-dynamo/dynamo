@@ -36,11 +36,12 @@ pub struct SelectorConfig {
 
 impl SelectorConfig {
     /// Compute the worst-case net-new prefill token count for a request:
-    /// `token_ids.len() - sequence_hashes.len() * block_size`, floored at
-    /// zero.
+    /// `token_ids.len() - num_provided_tokens`, floored at zero. The
+    /// wire carries the FULL prompt in `token_ids` and `num_provided_tokens`
+    /// (DNPT) is decode's total commitment from absolute position 0; the
+    /// difference is the suffix prefill must actually compute.
     pub fn net_new(&self, req: &PrefillRequest) -> u64 {
-        let cached = (req.sequence_hashes.len() as u64).saturating_mul(self.block_size as u64);
-        (req.token_ids.len() as u64).saturating_sub(cached)
+        (req.token_ids.len() as u64).saturating_sub(req.num_provided_tokens as u64)
     }
 }
 
@@ -332,18 +333,17 @@ mod tests {
     }
 
     fn make_request(n_tokens: usize, n_hashes: usize) -> PrefillRequest {
-        use kvbm_logical::SequenceHash;
+        use kvbm_protocols::disagg::KvHashingRequestEnvelope;
         PrefillRequest {
             protocol_version: DISAGG_PROTOCOL_VERSION,
             request_id: "r".to_string(),
             session_id: uuid::Uuid::new_v4(),
             initiator_instance_id: InstanceId::new_v4(),
             decode_endpoint: None,
-            sequence_hashes: (0..n_hashes)
-                .map(|i| SequenceHash::new(i as u64, None, i as u64))
-                .collect(),
             token_ids: vec![0u32; n_tokens],
-            num_computed_tokens: 0,
+            num_provided_tokens: n_hashes * 16,
+            request: KvHashingRequestEnvelope::default(),
+            expected_hash_digest: None,
         }
     }
 

@@ -847,7 +847,7 @@ pub enum MatchCheckOutcome {
 ///
 /// The state machine is private and can only be manipulated through validated methods.
 pub struct RequestSlot {
-    request: Request,
+    pub(crate) request: Request,
 
     /// The sequence of tokens organized by blocks. This will grow as tokens are decoded.
     pub(crate) sequence: TokenBlockSequence,

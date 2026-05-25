@@ -682,6 +682,25 @@ impl ConnectorLeader {
         self.runtime.messenger().instance_id()
     }
 
+    /// Borrow the slot's LoRA adapter name. Used by the CD wire to
+    /// forward the canonical `kv_hashing::Request` shape to the prefill
+    /// side so it can recompute identical hashes locally.
+    #[allow(dead_code)]
+    pub(crate) fn slot_lora_name(&self, request_id: &str) -> Result<Option<String>> {
+        let slot = self.get_slot(request_id)?;
+        let slot = slot.lock();
+        Ok(slot.request.lora_name.clone())
+    }
+
+    /// Borrow the slot's raw salt string (the input to `salt_hash`
+    /// computation). Forwarded onto the CD wire alongside `lora_name`.
+    #[allow(dead_code)]
+    pub(crate) fn slot_salt(&self, request_id: &str) -> Result<Option<String>> {
+        let slot = self.get_slot(request_id)?;
+        let slot = slot.lock();
+        Ok(slot.request.salt.clone())
+    }
+
     /// Read the slot's parsed CD transfer params, if any. Returns `None`
     /// when the slot has no metadata or no `kv_transfer_params`.
     ///

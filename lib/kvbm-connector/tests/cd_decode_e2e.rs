@@ -210,18 +210,23 @@ async fn cd_decode_happy_path() -> Result<()> {
     wait_until(|| h.queue.snapshot().len() == 1).await;
     let queued = h.queue.snapshot();
     assert_eq!(queued[0].request_id, "req-1");
-    // sequence_hashes carries the local-match (what prefill will pull
-    // from us), not the remote slice — symmetric-API wire semantics.
-    assert_eq!(queued[0].sequence_hashes, local_match_hashes(&h));
-    // num_computed_tokens carries the decode-side gnmt argument
-    // (decode-already-computed prefix), so prefill knows where the
-    // sequence_hashes blocks live in absolute position.
-    assert_eq!(queued[0].num_computed_tokens, COMPUTED_BLOCKS * BLOCK_SIZE);
-    // token_ids carries only the prefill-window slice — decode keeps
-    // its already-computed prefix and the partial tail block.
+    // num_provided_tokens (DNPT) folds both the vLLM-decode G1 prefix
+    // and the G2 local-match window into a single absolute-tokens
+    // commitment from position 0. PLH values are NOT on the wire —
+    // prefill recomputes them locally from its own slot's full hash
+    // chain over the same token range.
+    assert_eq!(
+        queued[0].num_provided_tokens,
+        (COMPUTED_BLOCKS + local_match_hashes(&h).len()) * BLOCK_SIZE
+    );
+    // token_ids carries the FULL prompt up to the partial tail block —
+    // prefill must build its TokenBlockSequence from the same tokens
+    // decode hashed so the absolute-coord PositionalLineageHash chain
+    // matches. `num_computed_tokens` rides separately on the wire so
+    // prefill skips actually recomputing the prefix portion.
     assert_eq!(
         queued[0].token_ids.len(),
-        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE
+        (COMPUTED_BLOCKS + LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE
     );
 
     let session = h.factory.last_opened().expect("decode opened a session");

@@ -159,6 +159,10 @@ pub trait InnerLeaderShim: Send + Sync {
     fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize>;
     fn slot_match_split(&self, request_id: &str) -> Result<SlotMatchSplit>;
     fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>>;
+    /// Borrow the slot's LoRA adapter name for CD wire propagation.
+    fn slot_lora_name(&self, request_id: &str) -> Result<Option<String>>;
+    /// Borrow the slot's raw salt string for CD wire propagation.
+    fn slot_salt(&self, request_id: &str) -> Result<Option<String>>;
     fn local_instance_id(&self) -> InstanceId;
     fn apply_block_assignments(&self, request_id: &str, block_ids: Vec<BlockId>) -> Result<()>;
     fn take_local_match_g2_blocks(&self, request_id: &str) -> Result<Vec<ImmutableBlock<G2>>>;
@@ -319,6 +323,14 @@ impl InnerLeaderShim for ConnectorLeaderShim {
 
     fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>> {
         self.inner.slot_token_ids(request_id)
+    }
+
+    fn slot_lora_name(&self, request_id: &str) -> Result<Option<String>> {
+        self.inner.slot_lora_name(request_id)
+    }
+
+    fn slot_salt(&self, request_id: &str) -> Result<Option<String>> {
+        self.inner.slot_salt(request_id)
     }
 
     fn local_instance_id(&self) -> InstanceId {

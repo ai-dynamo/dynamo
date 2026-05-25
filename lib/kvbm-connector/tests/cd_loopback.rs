@@ -36,7 +36,8 @@ use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
 use kvbm_logical::manager::BlockManager;
 use kvbm_protocols::disagg::{
-    DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
+    DISAGG_PROTOCOL_VERSION, KvHashingRequestEnvelope, RemotePrefillParams, SessionEndpoint,
+    SessionId, TransferParams,
 };
 
 const COMPUTED_BLOCKS: usize = 0;
@@ -182,8 +183,12 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         .decode_endpoint
         .clone()
         .expect("queued decode_endpoint");
-    // sequence_hashes carries the local-match (what P will pull).
-    assert_eq!(queued[0].sequence_hashes, local_match_hashes);
+    // Local-match window count rides on the wire; PLH values are
+    // recomputed prefill-side from the slot's own hash chain.
+    assert_eq!(
+        queued[0].num_provided_tokens,
+        (COMPUTED_BLOCKS + local_match_hashes.len()) * BLOCK_SIZE
+    );
 
     // ---------- Install P slot with transfer_params for this session ----------
     let d_instance_id = d_inner.local_id();
@@ -192,8 +197,11 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         session_id,
         initiator_instance_id: d_instance_id,
         decode_endpoint: Some(decode_endpoint),
-        sequence_hashes: local_match_hashes.clone(),
-        num_computed_tokens: COMPUTED_BLOCKS * BLOCK_SIZE,
+        num_provided_tokens: (COMPUTED_BLOCKS + local_match_hashes.len()) * BLOCK_SIZE,
+        request: KvHashingRequestEnvelope::default(),
+        // Mock fixtures don't compute the canonical digest; skip the
+        // verifier (real production paths set this and assert).
+        expected_hash_digest: None,
     });
     p_inner.install_slot(
         "req-1",

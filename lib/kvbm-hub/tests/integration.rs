@@ -1127,12 +1127,10 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
         session_id: uuid::Uuid::new_v4(),
         initiator_instance_id: d_id,
         decode_endpoint: None,
-        sequence_hashes: vec![
-            kvbm_common::SequenceHash::new(100, None, 0),
-            kvbm_common::SequenceHash::new(101, Some(100), 1),
-        ],
         token_ids: vec![1, 2, 3],
-        num_computed_tokens: 16,
+        num_provided_tokens: 48,
+        request: kvbm_protocols::disagg::KvHashingRequestEnvelope::default(),
+        expected_hash_digest: None,
     };
     d_cd.push_prefill_request(&req).await.unwrap();
 
@@ -1242,9 +1240,10 @@ async fn dispatcher_worker_drains_queue_and_invokes_dispatcher() {
         session_id: uuid::Uuid::new_v4(),
         initiator_instance_id: d_velo.instance_id(),
         decode_endpoint: None,
-        sequence_hashes: vec![],
         token_ids: vec![10, 20, 30],
-        num_computed_tokens: 0,
+        num_provided_tokens: 0,
+        request: kvbm_protocols::disagg::KvHashingRequestEnvelope::default(),
+        expected_hash_digest: None,
     };
     let req_two = PrefillRequest {
         request_id: "dispatch-test-2".to_string(),
@@ -1302,9 +1301,10 @@ async fn no_dispatcher_does_not_spawn_worker() {
         session_id: uuid::Uuid::new_v4(),
         initiator_instance_id: d_velo.instance_id(),
         decode_endpoint: None,
-        sequence_hashes: vec![],
         token_ids: vec![1],
-        num_computed_tokens: 0,
+        num_provided_tokens: 0,
+        request: kvbm_protocols::disagg::KvHashingRequestEnvelope::default(),
+        expected_hash_digest: None,
     };
     // Push succeeds — queue is installed by `attach`, dispatcher absence
     // doesn't change that.

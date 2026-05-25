@@ -27,6 +27,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 kvbm-common = { workspace = true }
+dynamo-tokens = { workspace = true }
 velo-ext = { workspace = true }
 velo = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }

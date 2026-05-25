@@ -257,15 +257,17 @@ mod tests {
     use tokio::task::JoinHandle;
 
     fn make_request(id: &str) -> PrefillRequest {
+        use kvbm_protocols::disagg::KvHashingRequestEnvelope;
         PrefillRequest {
             protocol_version: DISAGG_PROTOCOL_VERSION,
             request_id: id.to_string(),
             session_id: uuid::Uuid::new_v4(),
             initiator_instance_id: InstanceId::new_v4(),
             decode_endpoint: None,
-            sequence_hashes: vec![],
             token_ids: vec![1, 2, 3],
-            num_computed_tokens: 0,
+            num_provided_tokens: 0,
+            request: KvHashingRequestEnvelope::default(),
+            expected_hash_digest: None,
         }
     }
 

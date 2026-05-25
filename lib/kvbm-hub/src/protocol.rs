@@ -613,7 +613,6 @@ pub fn instance_describe(id: InstanceId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kvbm_common::SequenceHash;
     use velo_ext::WorkerAddress;
 
     fn make_peer_info() -> PeerInfo {
@@ -774,18 +773,17 @@ mod tests {
 
     #[test]
     fn prefill_request_serde_round_trip() {
+        use kvbm_protocols::disagg::KvHashingRequestEnvelope;
         let orig = PrefillRequest {
             protocol_version: DISAGG_PROTOCOL_VERSION,
             request_id: "req-123".to_string(),
             session_id: uuid::Uuid::new_v4(),
             initiator_instance_id: InstanceId::new_v4(),
             decode_endpoint: None,
-            sequence_hashes: vec![
-                SequenceHash::new(11, None, 11),
-                SequenceHash::new(12, None, 12),
-            ],
             token_ids: vec![1, 2, 3],
-            num_computed_tokens: 16,
+            num_provided_tokens: 48,
+            request: KvHashingRequestEnvelope::default(),
+            expected_hash_digest: Some(0xABCD_EF01_2345_6789),
         };
         let json = serde_json::to_string(&orig).unwrap();
         let back: PrefillRequest = serde_json::from_str(&json).unwrap();

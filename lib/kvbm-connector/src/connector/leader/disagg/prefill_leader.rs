@@ -163,8 +163,7 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         };
 
         tracing::info!(
-            num_sequence_hashes = remote.sequence_hashes.len(),
-            num_computed_tokens = remote.num_computed_tokens,
+            num_provided_tokens = remote.num_provided_tokens,
             initiator = %remote.initiator_instance_id,
             session_id = %remote.session_id,
             "prefill_gnmt: CD-bound — ensure_started"
@@ -173,8 +172,7 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
             "cd_bound_ensure_started",
             role = "prefill",
             request_id,
-            num_sequence_hashes = remote.sequence_hashes.len(),
-            decode_num_computed_tokens = remote.num_computed_tokens,
+            num_provided_tokens = remote.num_provided_tokens,
             initiator = %remote.initiator_instance_id,
             session_id = %remote.session_id
         );

@@ -120,7 +120,6 @@ mod tests {
     use crate::features::prefill_router::selection::SelectorConfig;
     use anyhow::Result;
     use async_trait::async_trait;
-    use kvbm_logical::SequenceHash;
     use kvbm_protocols::disagg::DISAGG_PROTOCOL_VERSION;
     use parking_lot::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -155,17 +154,17 @@ mod tests {
     }
 
     fn make_request(id: &str, n_tokens: usize, n_hashes: usize) -> PrefillRequest {
+        use kvbm_protocols::disagg::KvHashingRequestEnvelope;
         PrefillRequest {
             protocol_version: DISAGG_PROTOCOL_VERSION,
             request_id: id.to_string(),
             session_id: uuid::Uuid::new_v4(),
             initiator_instance_id: InstanceId::new_v4(),
             decode_endpoint: None,
-            sequence_hashes: (0..n_hashes)
-                .map(|i| SequenceHash::new(i as u64, None, i as u64))
-                .collect(),
             token_ids: vec![0u32; n_tokens],
-            num_computed_tokens: 0,
+            num_provided_tokens: n_hashes * 16,
+            request: KvHashingRequestEnvelope::default(),
+            expected_hash_digest: None,
         }
     }
 
