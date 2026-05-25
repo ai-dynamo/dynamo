@@ -21,7 +21,11 @@ GH_API = "https://api.github.com"
 FRAMEWORK_SOURCES: dict[str, dict[str, object]] = {
     "trtllm": {
         "github_repo": "NVIDIA/TensorRT-LLM",
-        "current_regex": re.compile(r"^\s*pip_wheel:\s*tensorrt-llm==(\S+)\s*$", re.M),
+        # Anchored inside the trtllm: block so we don't pick up
+        # vllm/sglang runtime_image_tag lines earlier in the file.
+        "current_regex": re.compile(
+            r"(?ms)^trtllm:\s*?\n(?:[ \t]+.*\n)*?[ \t]+runtime_image_tag:\s*(\S+)\s*$",
+        ),
     },
 }
 
