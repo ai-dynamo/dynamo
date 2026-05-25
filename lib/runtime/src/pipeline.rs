@@ -19,8 +19,9 @@ pub use network::egress::push_router::{PushRouter, RouterMode, WorkerLoadMonitor
 pub mod registry;
 
 pub use crate::engine::{
-    self as engine, AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, DataStream,
-    Engine, EngineStream, EngineUnary, RequestStream, ResponseStream, async_trait,
+    self as engine, AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream,
+    Data, DataStream, Engine, EngineStream, EngineUnary, RequestStream, ResponseStream,
+    async_trait,
 };
 pub use anyhow::Error;
 pub use context::Context;
@@ -30,18 +31,77 @@ pub use error::{PipelineError, PipelineErrorExt, TwoPartCodecError};
 /// about the request. This information propagates through the stages, both local and distributed.
 pub type SingleIn<T> = Context<T>;
 
-/// Pipeline input for streaming-request engines: a trait-object alias around a
-/// stream that carries its own cancellation context (via the
-/// [`AsyncEngineContextProvider`] half of [`AsyncEngineStream`]).
+/// Pipeline input for streaming-request engines.
 ///
-/// This is the input-side mirror of [`ManyOut`]. Both aliases resolve to the
-/// same underlying [`EngineStream<T>`] type; the directional names are
-/// documentary. Earlier definitions wrapped the stream in a `Context<…>`
-/// (`Context<DataStream<T>>`); that shape was uninstantiable because
-/// `DataStream<T>` is `!Sync` while `Context<T: Data>` requires `Sync`. The
-/// trait-object form solves that cleanly: the cancellation surface is part of
-/// the trait contract rather than an outer wrapper.
-pub type ManyIn<T> = EngineStream<T>;
+/// Symmetric to [`SingleIn<T>`] (which is `Context<T>`): both inputs carry a
+/// typed payload alongside the full pipeline `Context` sidecar (metadata,
+/// registry, stages, controller). For the streaming side the payload is a
+/// stream of `T` rather than a single value, so this is a two-field struct
+/// rather than a `Context<T>` directly.
+///
+/// Earlier definitions wrapped the stream inside `Context<DataStream<T>>`;
+/// that shape was uninstantiable because `DataStream<T>` is `!Sync` while
+/// `Context<T: Data>` requires `Sync`. Sibling-field composition sidesteps
+/// the bound: `Context<()>` is fine and the stream sits next to it.
+///
+/// Implements [`Stream<Item = T>`] (delegating to the inner stream) and
+/// [`AsyncEngineContextProvider`] (delegating to the inner `Context`), so
+/// engines that only need the cancellation slice keep their existing usage
+/// (`input.context()`, `.next().await`) without change. Engines that want
+/// the full typed sidecar reach for [`Self::context_ref`].
+pub struct ManyIn<T: Data> {
+    stream: DataStream<T>,
+    context: Context<()>,
+}
+
+impl<T: Data> ManyIn<T> {
+    /// Wrap a stream + context into a streaming input. The stream is the
+    /// per-frame payload; the context carries lifecycle + metadata + registry.
+    pub fn new(stream: DataStream<T>, context: Context<()>) -> Self {
+        Self { stream, context }
+    }
+
+    /// Consume `self`, returning the inner stream and context. Useful when an
+    /// engine wants to spawn the stream into a forwarder while keeping
+    /// access to metadata separately.
+    pub fn into_parts(self) -> (DataStream<T>, Context<()>) {
+        (self.stream, self.context)
+    }
+
+    /// Borrow the inner `Context<()>` for access to metadata / registry /
+    /// stages. The dyn-safe cancellation handle is also available via the
+    /// [`AsyncEngineContextProvider`] impl as `self.context()`.
+    pub fn context_ref(&self) -> &Context<()> {
+        &self.context
+    }
+}
+
+impl<T: Data> futures::Stream for ManyIn<T> {
+    type Item = T;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.get_mut().stream.as_mut().poll_next(cx)
+    }
+}
+
+impl<T: Data> AsyncEngineContextProvider for ManyIn<T> {
+    fn context(&self) -> std::sync::Arc<dyn AsyncEngineContext> {
+        self.context.context()
+    }
+}
+
+impl<T: Data> AsyncEngineStream<T> for ManyIn<T> {}
+
+impl<T: Data> std::fmt::Debug for ManyIn<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManyIn")
+            .field("context", &self.context)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Type alias for the output of pipeline that returns a single value
 pub type SingleOut<T> = EngineUnary<T>;
@@ -92,6 +152,9 @@ mod sealed {
     impl<T: Data> Connectable for EngineStream<T> {
         type DataType = T;
     }
+    impl<T: Data> Connectable for ManyIn<T> {
+        type DataType = T;
+    }
 }
 
 pub trait PipelineIO: sealed::Connectable + AsyncEngineContextProvider + 'static {
@@ -111,6 +174,11 @@ impl<T: Data> PipelineIO for EngineUnary<T> {
 impl<T: Data> PipelineIO for EngineStream<T> {
     fn id(&self) -> String {
         self.context().id().to_string()
+    }
+}
+impl<T: Data> PipelineIO for ManyIn<T> {
+    fn id(&self) -> String {
+        self.context.id().to_string()
     }
 }
 

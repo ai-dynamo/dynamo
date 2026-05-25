@@ -561,7 +561,7 @@ mod tests {
     use futures::stream;
 
     fn make_input(events: Vec<RealtimeClientEvent>) -> ManyIn<RealtimeClientEvent> {
-        RequestStream::new(Box::pin(stream::iter(events)), Context::new(()).context())
+        ManyIn::new(Box::pin(stream::iter(events)), Context::new(()))
     }
 
     fn parse_client_event(json: serde_json::Value) -> RealtimeClientEvent {

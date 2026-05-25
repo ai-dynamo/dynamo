@@ -1142,7 +1142,10 @@ mod tests {
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
         error::DynamoError,
-        pipeline::{ResponseStream, context::Controller},
+        pipeline::{
+            ResponseStream,
+            context::{Context, Controller},
+        },
     };
     use serde::{Deserialize, Serialize};
 
@@ -1310,9 +1313,10 @@ mod tests {
             .await
             .unwrap();
 
-        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
-        let input: ManyIn<u64> =
-            ResponseStream::new(Box::pin(tokio_stream::iter(vec![1u64, 2u64])), ctx);
+        let input: ManyIn<u64> = ManyIn::new(
+            Box::pin(tokio_stream::iter(vec![1u64, 2u64])),
+            Context::new(()),
+        );
         let result = router.generate(input).await;
         assert!(
             result.is_err(),
@@ -1337,8 +1341,8 @@ mod tests {
             .await
             .unwrap();
 
-        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
-        let input: ManyIn<u64> = ResponseStream::new(Box::pin(tokio_stream::iter(vec![1u64])), ctx);
+        let input: ManyIn<u64> =
+            ManyIn::new(Box::pin(tokio_stream::iter(vec![1u64])), Context::new(()));
         let result = router.generate(input).await;
         assert!(
             result.is_err(),
@@ -1368,8 +1372,8 @@ mod tests {
             .await
             .unwrap();
 
-        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
-        let input: ManyIn<u64> = ResponseStream::new(Box::pin(tokio_stream::iter(vec![1u64])), ctx);
+        let input: ManyIn<u64> =
+            ManyIn::new(Box::pin(tokio_stream::iter(vec![1u64])), Context::new(()));
         let result = router.generate(input).await;
         assert!(
             result.is_err(),

@@ -24,9 +24,9 @@ use serde::{Deserialize, Serialize};
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     distributed::DistributedConfig,
-    engine::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, DataStream},
+    engine::{AsyncEngine, AsyncEngineContextProvider, DataStream},
     error::DynamoError,
-    pipeline::{ManyIn, ManyOut, ResponseStream, context::Controller, network::Ingress},
+    pipeline::{ManyIn, ManyOut, ResponseStream, context::Context, network::Ingress},
     protocols::maybe_error::MaybeError,
 };
 
@@ -96,9 +96,10 @@ async fn bidirectional_end_to_end_echo() {
         .await
         .unwrap();
 
-    let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
-    let input: ManyIn<u64> =
-        ResponseStream::new(Box::pin(tokio_stream::iter(vec![1u64, 2, 3])), ctx);
+    let input: ManyIn<u64> = ManyIn::new(
+        Box::pin(tokio_stream::iter(vec![1u64, 2, 3])),
+        Context::new(()),
+    );
     let response_stream = router.generate(input).await.unwrap();
     let responses: Vec<EchoResponse> = futures::StreamExt::collect(response_stream).await;
 

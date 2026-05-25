@@ -291,6 +291,10 @@ impl AddressedPushRouter {
         let engine_ctx = input.context();
         let request_id = engine_ctx.id().to_string();
         let engine_ctx_for_forwarder = engine_ctx.clone();
+        // Pull the caller-side metadata off the `Context<()>` carried by
+        // `ManyIn<T>` so it survives the wire hop; without this the worker
+        // would receive an empty map even when the caller had populated it.
+        let metadata = input.context_ref().metadata().clone();
 
         // Register both halves on the response transport: a `send_stream`
         // (upstream → worker, carrying subsequent request frames) and a
@@ -334,7 +338,7 @@ impl AddressedPushRouter {
             request_type: RequestType::ManyIn,
             response_type: ResponseType::ManyOut,
             connection_info: resp_stream_conn_info,
-            metadata: BTreeMap::new(),
+            metadata,
             frontend_send_ts_ns: None,
             request_stream_connection_info: Some(req_stream_conn_info),
         };
