@@ -4,7 +4,7 @@
 use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashMap};
 
-use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
+use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
 use crate::protocols::{
@@ -72,7 +72,7 @@ struct DeltaChoice {
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
     // Optional tool calls for the chat choice, populated *after* fold either
     // by finalizing `tool_call_chunks` above, or by
-    // `try_tool_call_parse_aggregate` running against `text` for producers
+    // `try_tool_call_parse_aggregate_finalize` running against `text` for producers
     // that put tool calls in content rather than as structured chunks.
     tool_calls: Option<Vec<dynamo_protocols::types::ChatCompletionMessageToolCall>>,
 
@@ -355,8 +355,8 @@ impl DeltaAggregator {
                 .filter_map(finalize_merged_tool_chunk)
                 .collect();
             // choice.tool_calls is always None at this point: or_insert
-            // initializes it to None, try_tool_call_parse_aggregate runs
-            // strictly after this loop. Unconditional assign is the only
+            // initializes it to None, try_tool_call_parse_aggregate_finalize
+            // runs strictly after this loop. Unconditional assign is the only
             // reachable path; no merge-with-existing needed.
             if !finalized.is_empty() {
                 choice.tool_calls = Some(finalized);
@@ -375,7 +375,9 @@ impl DeltaAggregator {
                 }
 
                 let (tool_calls, content) =
-                    match try_tool_call_parse_aggregate(&choice.text, Some(parser), None).await {
+                    match try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None)
+                        .await
+                    {
                         Ok(result) => result,
                         Err(error) => {
                             tracing::debug!(

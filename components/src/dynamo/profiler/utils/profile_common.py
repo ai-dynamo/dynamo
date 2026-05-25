@@ -80,7 +80,7 @@ def derive_backend_image(profiler_image: str, backend: str) -> str:
     Examples::
 
         derive_backend_image(
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1", "vllm"
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1", "vllm"
         )
         # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 

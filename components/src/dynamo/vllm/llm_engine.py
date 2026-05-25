@@ -312,7 +312,7 @@ class VllmLLMEngine(LLMEngine):
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
 
-        num_output_tokens_so_far: dict[int, int] = {}
+        total_output_tokens_by_index: dict[int, int] = {}
         async for res in gen:
             if not res.outputs:
                 yield {
@@ -322,23 +322,30 @@ class VllmLLMEngine(LLMEngine):
                 }
                 break
 
+            prepared_outputs = []
             for output in res.outputs:
                 output_idx = getattr(output, "index", 0) or 0
-                previous_total = num_output_tokens_so_far.get(output_idx, 0)
-                next_total = len(output.token_ids)
+                token_ids = list(output.token_ids or [])
+                total_output_tokens_by_index[
+                    output_idx
+                ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                finish_reason = getattr(output, "finish_reason", None)
+                if not token_ids and not finish_reason:
+                    continue
+                prepared_outputs.append((output_idx, token_ids, finish_reason))
+
+            for output_idx, token_ids, finish_reason in prepared_outputs:
                 out: GenerateChunk = {
                     "index": output_idx,
-                    "token_ids": output.token_ids[previous_total:],
+                    "token_ids": token_ids,
                 }
 
-                if output.finish_reason:
-                    out["finish_reason"] = str(output.finish_reason)
+                if finish_reason:
+                    out["finish_reason"] = str(finish_reason)
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
-                    completion_tokens = sum(
-                        len(choice.token_ids) for choice in res.outputs
-                    )
+                    completion_tokens = sum(total_output_tokens_by_index.values())
                     out["completion_usage"] = {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
@@ -354,7 +361,6 @@ class VllmLLMEngine(LLMEngine):
                             }
 
                 yield out
-                num_output_tokens_so_far[output_idx] = next_total
 
     def _kv_routing_enabled(self) -> bool:
         # Matches the legacy `setup_kv_event_publisher` gate.

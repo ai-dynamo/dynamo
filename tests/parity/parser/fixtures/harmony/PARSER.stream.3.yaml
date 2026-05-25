@@ -34,10 +34,14 @@ cases:
             type: string
     expected:
       dynamo:
-        calls: []
-        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>j
+        reason: SGLang leaks a split Harmony commentary block into normal_text; Dynamo buffers the split marker and parses the complete `<|call|>`-terminated call.
       vllm:
         unavailable: vLLM streaming parser for family='harmony' requires `delta_token_ids` in fixture chunks

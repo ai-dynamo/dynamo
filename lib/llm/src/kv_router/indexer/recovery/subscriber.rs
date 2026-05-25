@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Indexer, worker_query::WorkerQueryClient};
+use super::worker_query::WorkerQueryClient;
+use crate::kv_router::Indexer;
 use anyhow::Result;
 use dynamo_kv_router::{
     config::KvRouterConfig,

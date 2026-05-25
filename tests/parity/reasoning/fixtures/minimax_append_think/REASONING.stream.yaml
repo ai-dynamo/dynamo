@@ -4,10 +4,12 @@
 family: minimax_append_think
 model_label: MiniMax append-think
 mode: stream
+refs:
+  upstream: &upstream_ref 'inspired by vLLM MiniMax M2 append-think reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_minimax_m2_append_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
 cases:
   REASONING.stream.1.a:
     description: Empty stream chunk still receives the synthetic think opener
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - ''
     expected:
@@ -19,7 +21,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.stream.2.a:
     description: First streamed chunk gets the synthetic think opener
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - 'reasoning '
     - content
@@ -33,7 +35,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.stream.2.b:
     description: Multiple append-think-looking spans remain normal text
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - first</think>
     - ' middle '
@@ -47,7 +49,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.stream.3.a:
     description: Single chunk without a model-emitted think opener
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - reasoning content
     expected:
@@ -59,7 +61,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.stream.3.b:
     description: End marker split across chunks is still normal text
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - reasoning</th
     - ink>answer
@@ -72,7 +74,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.stream.3.c:
     description: Partial marker-looking prefix remains normal text
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain <th
     - esis answer
@@ -85,7 +87,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.stream.1.b:
     description: Plain text is passed through after the synthetic opener
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain
     - ' answer'
