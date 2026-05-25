@@ -133,6 +133,10 @@ impl LoraStateTracker {
 
         if let Some(mut loras) = self.worker_to_loras.get_mut(&worker) {
             loras.remove(lora_name);
+            if loras.is_empty() {
+                drop(loras);
+                self.worker_to_loras.remove(&worker);
+            }
         }
 
         tracing::debug!(

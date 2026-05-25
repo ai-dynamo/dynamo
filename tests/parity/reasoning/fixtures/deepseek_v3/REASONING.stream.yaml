@@ -4,12 +4,14 @@
 family: deepseek_v3
 model_label: DeepSeek V3.x
 mode: stream
+refs:
+  upstream: &upstream_ref 'inspired by vLLM DeepSeek V3 reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_deepseekv3_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
 chat_template_kwargs:
   thinking: true
 cases:
   REASONING.stream.1.a:
     description: Empty stream chunk
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - ''
     expected:
@@ -21,7 +23,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
   REASONING.stream.2.a:
     description: Single reasoning block across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - <think>thin
     - king</think>
@@ -37,7 +39,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
   REASONING.stream.2.b:
     description: Multiple reasoning spans across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - <think>first</think>
     - ' middle '
@@ -53,7 +55,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
   REASONING.stream.3.a:
     description: Start marker split across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - <th
     - ink>thinking</think>answer
@@ -68,7 +70,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
   REASONING.stream.3.b:
     description: End marker split across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - <think>thinking</th
     - ink>answer
@@ -83,7 +85,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
   REASONING.stream.3.c:
     description: Partial start-marker prefix later resolves as force-reasoning text
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain <th
     - esis answer
@@ -96,7 +98,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
   REASONING.stream.1.b:
     description: Plain text stays in force-reasoning mode until an end marker
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain
     - ' answer'

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: kimi
-model_label: Kimi reasoning
+model_label: Kimi Unicode reasoning
 mode: batch
 cases:
   REASONING.batch.1.b:
@@ -32,11 +32,11 @@ cases:
   REASONING.batch.3.a:
     description: Reasoning followed by downstream tool-call text
     ref: dynamo
-    model_text: ◁think▷choose tool◁/think▷<tool_call>{}
+    model_text: ◁think▷choose tool◁/think▷<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
     expected:
       dynamo: &d_2
         reasoning_text: choose tool
-        normal_text: <tool_call>{}
+        normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
       sglang:
@@ -145,15 +145,6 @@ cases:
       sglang:
         unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
   REASONING.batch.3.b:
-    description: Tool-call boundary inside an open Kimi reasoning span
-    dynamo_leak: true
+    description: Open reasoning interrupted by downstream tool-call text is not configured for this Kimi delimiter family
     ref: dynamo
-    model_text: ◁think▷choose tool<tool_call>{}
-    expected:
-      dynamo: &d_11
-        reasoning_text: choose tool<tool_call>{}
-        normal_text: ''
-      vllm:
-        unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+    reason: Dynamo's Kimi Unicode-delimiter reasoning parser has no downstream tool-call boundary while reasoning is open; closed-span handoff is covered by REASONING.batch.3.a.

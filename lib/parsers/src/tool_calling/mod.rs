@@ -36,7 +36,9 @@ pub use parsers::{
     try_tool_call_parse,
 };
 pub use pythonic::try_tool_call_parse_pythonic;
-pub use response::{CalledFunction, ToolCallResponse, ToolCallType};
+pub use response::{
+    CalledFunction, CalledFunctionStream, ToolCallResponse, ToolCallResponseChunk, ToolCallType,
+};
 pub use tools::{
     try_tool_call_parse_aggregate, try_tool_call_parse_aggregate_finalize,
     try_tool_call_parse_stream,

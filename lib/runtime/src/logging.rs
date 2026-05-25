@@ -47,7 +47,9 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{filter::Directive, fmt};
 
-use crate::config::{disable_ansi_logging, jsonl_logging_enabled, span_events_enabled};
+use crate::config::{
+    disable_ansi_logging, env_is_truthy, jsonl_logging_enabled, span_events_enabled,
+};
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
 use axum::http;
@@ -90,8 +92,6 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::environment_names::logging as env_logging;
-
-use dynamo_config::env_is_truthy;
 
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";

@@ -44,7 +44,7 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 		return
 	}
 
-	EnsureSharedVolume(podSpec, mainContainer)
+	EnsureClient(podSpec, mainContainer)
 
 	sidecar := Container(ServerContainerName, ServerModule, mainContainer.Image)
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
@@ -56,48 +56,69 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 	podSpec.InitContainers = append(podSpec.InitContainers, sidecar)
 }
 
-// EnsureSharedVolume adds the GMS UDS socket volume, mount, and GMS_SOCKET_DIR
-// env var to the main container. Idempotent.
-func EnsureSharedVolume(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
-	hasVolume := false
-	for _, v := range podSpec.Volumes {
-		if v.Name == SharedVolumeName {
-			hasVolume = true
+// EnsureClient adds the GMS UDS socket volume, mount, GMS_SOCKET_DIR env var,
+// and DRA claim to a GMS client container. Idempotent.
+func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) {
+	if podSpec == nil || container == nil {
+		return
+	}
+	sharedVolume := corev1.Volume{
+		Name:         SharedVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+	foundVolume := false
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == SharedVolumeName {
+			podSpec.Volumes[i] = sharedVolume
+			foundVolume = true
 			break
 		}
 	}
-	if !hasVolume {
-		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name:         SharedVolumeName,
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-		})
+	if !foundVolume {
+		podSpec.Volumes = append(podSpec.Volumes, sharedVolume)
 	}
 
-	hasMount := false
-	for _, m := range mainContainer.VolumeMounts {
-		if m.Name == SharedVolumeName {
-			hasMount = true
+	sharedMount := corev1.VolumeMount{Name: SharedVolumeName, MountPath: SharedMountPath}
+	foundMount := false
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == SharedVolumeName {
+			container.VolumeMounts[i] = sharedMount
+			foundMount = true
 			break
 		}
 	}
-	if !hasMount {
-		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{Name: SharedVolumeName, MountPath: SharedMountPath})
+	if !foundMount {
+		container.VolumeMounts = append(container.VolumeMounts, sharedMount)
 	}
 
-	hasEnv := false
-	for _, e := range mainContainer.Env {
-		if e.Name == EnvSocketDir {
-			hasEnv = true
+	sharedEnv := corev1.EnvVar{Name: EnvSocketDir, Value: SharedMountPath}
+	foundEnv := false
+	for i := range container.Env {
+		if container.Env[i].Name == EnvSocketDir {
+			container.Env[i] = sharedEnv
+			foundEnv = true
 			break
 		}
 	}
-	if !hasEnv {
-		mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{Name: EnvSocketDir, Value: SharedMountPath})
+	if !foundEnv {
+		container.Env = append(container.Env, sharedEnv)
+	}
+
+	dra.RemoveGPUResources(container.Resources.Limits)
+	dra.RemoveGPUResources(container.Resources.Requests)
+	foundClaim := false
+	for i := range container.Resources.Claims {
+		if container.Resources.Claims[i].Name == dra.ClaimName {
+			foundClaim = true
+			break
+		}
+	}
+	if !foundClaim {
+		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	}
 }
 
-// Container builds a GMS container with the shared socket volume, env, and
-// DRA claim. Used for the server, loader, and saver.
+// Container builds a GMS container with the shared socket volume, env, and DRA claim.
 func Container(name, module, image string) corev1.Container {
 	return corev1.Container{
 		Name:    name,

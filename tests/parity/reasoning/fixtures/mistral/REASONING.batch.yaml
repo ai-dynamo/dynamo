@@ -4,10 +4,12 @@
 family: mistral
 model_label: Mistral / Magistral
 mode: batch
+refs:
+  upstream: &upstream_ref 'inspired by vLLM Mistral reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_mistral_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
 cases:
   REASONING.batch.1.b:
     description: Plain text stays in force-reasoning mode in Dynamo
-    ref: dynamo
+    ref: *upstream_ref
     model_text: plain answer
     expected:
       dynamo: &d_0
@@ -21,7 +23,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.batch.2.a:
     description: Mistral THINK block
-    ref: dynamo
+    ref: *upstream_ref
     model_text: '[THINK]thinking[/THINK]answer'
     expected:
       dynamo: &d_1
@@ -32,32 +34,22 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.batch.3.a:
     description: Mistral reasoning followed by downstream tool-call text
-    ref: dynamo
-    model_text: '[THINK]choose tool[/THINK]<tool_call>{}'
+    ref: *upstream_ref
+    model_text: '[THINK]choose tool[/THINK][TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
     expected:
       dynamo: &d_2
         reasoning_text: choose tool
-        normal_text: <tool_call>{}
+        normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
       vllm: *d_2
       sglang:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.batch.3.b:
-    description: Open reasoning interrupted by downstream tool-call text
-    dynamo_leak: true
-    ref: dynamo
-    model_text: '[THINK]choose tool<tool_call>{}'
-    expected:
-      dynamo:
-        reasoning_text: choose tool<tool_call>{}
-        normal_text: ''
-      vllm:
-        reasoning_text: choose tool<tool_call>{}
-        normal_text: ''
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+    description: Open reasoning interrupted by downstream tool-call text is not configured for Mistral
+    ref: *upstream_ref
+    reason: Dynamo's Mistral reasoning parser has no downstream tool-call boundary while reasoning is open; closed-span handoff is covered by REASONING.batch.3.a.
   REASONING.batch.2.c:
     description: Mistral reasoning followed by normal answer text
-    ref: dynamo
+    ref: *upstream_ref
     model_text: '[THINK]compute[/THINK]answer'
     expected:
       dynamo: &d_3
@@ -71,7 +63,7 @@ cases:
     reason: Force-reasoning parser families start inside reasoning; marker-free prefix text is not a normal-text prefix.
   REASONING.batch.4:
     description: Dangling Mistral end marker without an opening marker
-    ref: dynamo
+    ref: *upstream_ref
     model_text: normal[/THINK]answer
     expected:
       dynamo:
@@ -85,7 +77,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.batch.5:
     description: Force-reasoning parser treats unterminated text as reasoning
-    ref: dynamo
+    ref: *upstream_ref
     model_text: thinking without an end marker
     expected:
       dynamo: &d_5
@@ -99,7 +91,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.batch.2.e:
     description: Empty Mistral reasoning block
-    ref: dynamo
+    ref: *upstream_ref
     model_text: '[THINK][/THINK]answer'
     expected:
       dynamo: &d_6
@@ -110,7 +102,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.batch.2.f:
     description: Complex Mistral reasoning content with Unicode and newlines
-    ref: dynamo
+    ref: *upstream_ref
     model_text: |-
       [THINK]Line 1
       Unicode: café
@@ -127,7 +119,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.batch.1.a:
     description: Empty input
-    ref: dynamo
+    ref: *upstream_ref
     model_text: ''
     expected:
       dynamo: &d_8
@@ -138,7 +130,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.batch.6.a:
     description: Multiple Mistral reasoning spans are concatenated by Dynamo
-    ref: dynamo
+    ref: *upstream_ref
     model_text: '[THINK]first[/THINK] middle [THINK]second[/THINK] done'
     expected:
       dynamo:

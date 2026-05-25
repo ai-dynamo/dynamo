@@ -60,3 +60,10 @@ cases:
           </parameter>
           </function>
           </tool_call>
+        reason: >-
+          Same root cause as PARSER.stream.2: vLLM checks for `<tool_call>` in
+          `delta_text` only (qwen3coder_tool_parser.py:402). With the start
+          token split across chunks (`<t` + `ool` + `_call` + `>\n…`), the
+          guard never matches and every chunk is emitted as plain content via
+          qwen3coder_tool_parser.py:422, leaking the entire payload into
+          `normal_text`.

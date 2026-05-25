@@ -358,6 +358,7 @@ func generateSingleDCD(
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err
 	}
+	delete(deployment.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
 
 	labels := make(map[string]string)
 	maps.Copy(labels, GetPodTemplateLabels(component))
@@ -378,6 +379,14 @@ func generateSingleDCD(
 	}
 
 	applyDGDTemplateDefaults(&deployment.Spec.DynamoComponentDeploymentSharedSpec, parentDGD)
+
+	// Topology label controller marker: set on the DCD so it propagates to pods.
+	if shouldApplyKvTransferPolicyToWorkerComponent(component, parentDGD) {
+		if deployment.Annotations == nil {
+			deployment.Annotations = make(map[string]string)
+		}
+		deployment.Annotations[commonconsts.KubeAnnotationTopologyLabelKey] = parentDGD.Spec.Experimental.KvTransferPolicy.LabelKey
+	}
 
 	// Apply restart annotation if this component should be restarted.
 	if restartState.ShouldAnnotateComponent(componentName) {
@@ -1509,6 +1518,19 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
 		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+		for _, name := range GetGPUMemoryService(component).ExtraClientContainers {
+			var container *corev1.Container
+			for i := range podSpec.Containers {
+				if podSpec.Containers[i].Name == name {
+					container = &podSpec.Containers[i]
+					break
+				}
+			}
+			if container == nil {
+				continue
+			}
+			gms.EnsureClient(&podSpec, container)
+		}
 	}
 
 	// Clone main container into two engine containers (active + standby) for failover.
@@ -1775,6 +1797,7 @@ func shouldApplyKvTransferPolicyToWorkerComponent(
 		dynamoDeployment != nil &&
 		dynamoDeployment.Spec.Experimental != nil &&
 		dynamoDeployment.Spec.Experimental.KvTransferPolicy != nil &&
+		dynamoDeployment.Spec.Experimental.KvTransferPolicy.LabelKey != "" &&
 		IsWorkerComponent(string(component.ComponentType))
 }
 
@@ -2014,6 +2037,10 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	annotations, err := generateAnnotations(p.component, p.dynamoDeployment, p.componentName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
+	}
+	delete(annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	if p.r.Role != RoleGMS && shouldApplyKvTransferPolicyToWorkerComponent(p.component, p.dynamoDeployment) {
+		annotations[commonconsts.KubeAnnotationTopologyLabelKey] = p.dynamoDeployment.Spec.Experimental.KvTransferPolicy.LabelKey
 	}
 	if p.r.Role != RoleGMS {
 		if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {

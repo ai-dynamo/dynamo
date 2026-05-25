@@ -403,6 +403,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) GetRecorder() record.EventRecor
 	return r.Recorder
 }
 
+func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryEnabled() bool {
+	if r == nil || r.Config == nil || r.Config.GPU.DiscoveryEnabled == nil {
+		return true
+	}
+	return *r.Config.GPU.DiscoveryEnabled
+}
+
+func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryReader() (client.Reader, bool) {
+	if r == nil || r.APIReader == nil {
+		return nil, false
+	}
+	return r.APIReader, true
+}
+
 // FinalizeResource implements commonController.Finalizer interface
 func (r *DynamoGraphDeploymentRequestReconciler) FinalizeResource(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
@@ -522,9 +536,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 	logger.Info("Handling pending phase", "name", dgdr.Name)
 
 	// Create profiling job (online or AIC)
-	if err := r.createProfilingJob(ctx, dgdr); err != nil {
+	requeue, err := r.createProfilingJob(ctx, dgdr)
+	if err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonProfilingJobFailed, err.Error())
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
+	}
+	if requeue {
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Record event with appropriate message
@@ -1259,9 +1277,18 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		return nil
 	}
 
+	reader, ok := r.gpuDiscoveryReader()
+	if !ok {
+		logger.Info("GPU discovery unavailable; APIReader is not configured")
+		return fmt.Errorf(
+			"GPU hardware info required but auto-discovery failed. " +
+				"Verify DCGM exporter is reachable from the operator's namespace, " +
+				"or set spec.hardware.{gpuSku,vramMb,numGpusPerNode} explicitly.")
+	}
+
 	// DCGM exporter is a cluster-level Service — reachable from any namespace.
 	if r.GPUDiscovery != nil {
-		if _, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache); err == nil {
+		if _, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, reader, r.GPUDiscoveryCache); err == nil {
 			return nil
 		} else {
 			logger.Info("DCGM discovery unavailable", "error", err.Error())
@@ -1269,8 +1296,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 	}
 
 	// Node-label fallback
-	if ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
-		if _, err := gpu.DiscoverGPUs(ctx, r.APIReader); err == nil {
+	if r.gpuDiscoveryEnabled() {
+		if _, err := gpu.DiscoverGPUs(ctx, reader); err == nil {
 			return nil
 		} else {
 			logger.Info("Node-label discovery unavailable", "error", err.Error())
@@ -1329,15 +1356,38 @@ func GetGPUDiscoveryFailureReason(err error) string {
 	return "unknown"
 }
 
-// createProfilingJob creates a Kubernetes Job for profiling using SyncResource
-func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
+// createProfilingJob creates a Kubernetes Job for profiling using SyncResource.
+// It returns requeue=true when it persists discovered hardware and intentionally
+// skips job creation until the next reconcile sees the updated generation.
+func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (bool, error) {
 	logger := log.FromContext(ctx)
+
+	// Enrich hardware from GPU discovery before marshalling the spec.
+	// This fills in any missing hardware fields and persists them so the DGDR
+	// reflects the profiler input.
+	hardwareChanged, err := r.enrichHardwareFromDiscovery(ctx, dgdr)
+	if err != nil {
+		return false, err
+	}
+	if hardwareChanged {
+		if err := r.Update(ctx, dgdr); err != nil {
+			return false, fmt.Errorf("failed to update DGDR with auto-discovered hardware: %w", err)
+		}
+		logger.Info("Persisted auto-discovered hardware fields",
+			"gpuSku", dgdr.Spec.Hardware.GPUSKU,
+			"vramMiB", ptr.Deref(dgdr.Spec.Hardware.VRAMMB, 0),
+			"numGpusPerNode", ptr.Deref(dgdr.Spec.Hardware.NumGPUsPerNode, 0),
+			"totalGpus", ptr.Deref(dgdr.Spec.Hardware.TotalGPUs, 0),
+			"interconnect", dgdr.Spec.Hardware.Interconnect,
+			"rdma", ptr.Deref(dgdr.Spec.Hardware.RDMA, false))
+		return true, nil
+	}
 
 	// Delete any existing output ConfigMap to ensure fresh profiling results
 	// This prevents using stale data from previous profiling runs
 	outputConfigMapName := getOutputConfigMapName(dgdr)
 	existingCM := &corev1.ConfigMap{}
-	err := r.Get(ctx, types.NamespacedName{
+	err = r.Get(ctx, types.NamespacedName{
 		Name:      outputConfigMapName,
 		Namespace: dgdr.Namespace,
 	}, existingCM)
@@ -1346,13 +1396,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		logger.Info("Deleting existing output ConfigMap to ensure fresh profiling results", "configMap", outputConfigMapName)
 		if err := r.Delete(ctx, existingCM); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "Failed to delete existing output ConfigMap", "configMap", outputConfigMapName)
-			return fmt.Errorf("failed to delete existing output ConfigMap: %w", err)
+			return false, fmt.Errorf("failed to delete existing output ConfigMap: %w", err)
 		}
 		logger.Info("Successfully deleted old output ConfigMap", "configMap", outputConfigMapName)
 	} else if !apierrors.IsNotFound(err) {
 		// Unexpected error checking for ConfigMap
 		logger.Error(err, "Failed to check for existing output ConfigMap", "configMap", outputConfigMapName)
-		return fmt.Errorf("failed to check for existing output ConfigMap: %w", err)
+		return false, fmt.Errorf("failed to check for existing output ConfigMap: %w", err)
 	}
 
 	// Ensure profiling job RBAC exists (only for cluster-wide installation)
@@ -1364,14 +1414,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			r.Config.RBAC.DGDRProfilingClusterRoleName,
 		); err != nil {
 			logger.Error(err, "Failed to ensure profiling job RBAC")
-			return fmt.Errorf("failed to ensure profiling job RBAC: %w", err)
+			return false, fmt.Errorf("failed to ensure profiling job RBAC: %w", err)
 		}
-	}
-
-	// Enrich hardware from GPU discovery before marshalling the spec.
-	// This fills in any missing hardware fields (gpuSku, vramMb, numGpusPerNode, totalGpus).
-	if err := r.enrichHardwareFromDiscovery(ctx, dgdr); err != nil {
-		return err
 	}
 
 	// Use SyncResource to create/update the job
@@ -1610,7 +1654,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	})
 
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if modified {
@@ -1620,7 +1664,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	// Store the job name in status for observability
 	dgdr.Status.ProfilingJobName = job.Name
 
-	return nil
+	return false, nil
 }
 
 // marshalDGDRSpec produces the JSON string passed to the profiler via --config.
@@ -1634,61 +1678,54 @@ func marshalDGDRSpec(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (strin
 }
 
 // enrichHardwareFromDiscovery fills in hardware fields that the user didn't set.
-// Called before marshalDGDRSpec(). Mutates dgdr.Spec.Hardware in-place (memory only, not persisted).
+// Called before marshalDGDRSpec(). Mutates dgdr.Spec.Hardware in-place; the caller
+// persists the DGDR when this returns changed=true.
 //
-// Discovery is attempted whenever any required field (GPUSKU, VRAMMB, NumGPUsPerNode) is absent,
-// regardless of whether other fields are already set. This prevents a nil-pointer panic that
-// occurred when hasManualConfig was true (at least one field set) but gpuInfo was never populated
-// because discovery was gated on !hasManualConfig, yet the enrichment code below still
-// dereferenced gpuInfo for whichever fields were still nil.
+// Discovery is attempted whenever any required field (GPUSKU, VRAMMB, NumGPUsPerNode,
+// TotalGPUs) or optional metadata field (Interconnect, RDMA) is absent. This intentionally
+// changes the old "required fields complete means skip discovery" behavior so manually
+// specified hardware can still receive best-effort metadata. Discovery failures remain fatal
+// when required fields are missing, but optional metadata is best-effort.
 //
 // DCGM is tried first; node-label discovery (DiscoverGPUs) is used as a fallback to support
-// environments such as vCluster where DCGM sockets are exclusive to the host cluster.
-func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
+// environments such as vCluster where DCGM sockets are exclusive to the host cluster. A
+// successful DCGM result is accepted as authoritative; if it lacks optional metadata, missing
+// optional fields are left unset rather than forcing a second discovery backend.
+func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (bool, error) {
+	changed := false
 	if dgdr.Spec.Hardware == nil {
 		dgdr.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{}
 	}
 	hw := dgdr.Spec.Hardware
 
-	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil && hw.TotalGPUs != nil {
-		return nil
+	requiredComplete := hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil && hw.TotalGPUs != nil
+	metadataComplete := hw.Interconnect != "" && hw.RDMA != nil
+	if requiredComplete && metadataComplete {
+		return changed, nil
 	}
+	discoveryRequired := !requiredComplete
 
 	logger := log.FromContext(ctx)
 
-	var gpuInfo *gpu.GPUInfo
-	logger.Info("Attempting GPU discovery for profiling job")
-	var discoveredInfo *gpu.GPUInfo
-	var err error
-	if r.GPUDiscovery != nil {
-		discoveredInfo, err = r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, r.APIReader, r.GPUDiscoveryCache, hw.GPUSKU)
-		if err != nil {
-			reason := GetGPUDiscoveryFailureReason(err)
-			logger.Info("DCGM discovery failed, falling back to node-label discovery",
-				"reason", reason, "error", err.Error())
-			if !ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
-				return fmt.Errorf("auto-discovery failed: %w", err)
-			}
-		}
+	gpuInfo, err := r.discoverHardwareForEnrichment(ctx, hw, discoveryRequired)
+	if err != nil {
+		return changed, err
 	}
-	if discoveredInfo == nil {
-		discoveredInfo, err = gpu.DiscoverGPUsFiltered(ctx, r.APIReader, hw.GPUSKU)
-		if err != nil {
-			logger.Info("Node-label discovery also failed", "error", err.Error())
-			return fmt.Errorf("auto-discovery failed: %w", err)
-		}
+	if gpuInfo == nil {
+		return changed, nil
 	}
-	gpuInfo = discoveredInfo
-	if gpuInfo != nil {
-		logger.Info("GPU discovery completed successfully",
-			"gpusPerNode", gpuInfo.GPUsPerNode,
-			"nodesWithGPUs", gpuInfo.NodesWithGPUs,
-			"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
-			"model", gpuInfo.Model,
-			"vramMiB", gpuInfo.VRAMPerGPU,
-			"system", gpuInfo.System,
-			"cloudprovider", gpuInfo.CloudProvider)
-	}
+	logger.Info("GPU discovery completed successfully",
+		"gpusPerNode", gpuInfo.GPUsPerNode,
+		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
+		"model", gpuInfo.Model,
+		"vramMiB", gpuInfo.VRAMPerGPU,
+		"system", gpuInfo.System,
+		"cloudprovider", gpuInfo.CloudProvider,
+		"interconnect", gpuInfo.Interconnect,
+		"interconnectTier", gpuInfo.InterconnectTier,
+		"rdma", gpuInfo.RDMAEnabled,
+		"rdmaType", gpuInfo.RDMAType)
 
 	if hw.GPUSKU == "" {
 		inferred := gpu.InferHardwareSystem(gpuInfo.Model)
@@ -1700,14 +1737,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		default:
 			hw.GPUSKU = nvidiacomv1beta1.GPUSKUType(gpuInfo.Model)
 		}
+		changed = true
 	}
 	if hw.VRAMMB == nil && gpuInfo != nil {
 		vram := float64(gpuInfo.VRAMPerGPU)
 		hw.VRAMMB = &vram
+		changed = true
 	}
 	if hw.NumGPUsPerNode == nil && gpuInfo != nil {
 		n := int32(gpuInfo.GPUsPerNode)
 		hw.NumGPUsPerNode = &n
+		changed = true
 	}
 	if hw.TotalGPUs == nil && gpuInfo != nil {
 		// TODO: This is a temporary limit to prevent the profiler from using too many GPUs.
@@ -1720,8 +1760,73 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 			total = defaultMaxAutoGPUs
 		}
 		hw.TotalGPUs = &total
+		changed = true
 	}
-	return nil
+	if hw.Interconnect == "" && gpuInfo != nil && gpuInfo.Interconnect != "" {
+		hw.Interconnect = gpuInfo.Interconnect
+		changed = true
+	}
+	// Unlike RDMA, interconnect has no bool-like "checked and absent" value in
+	// the API. Leave it empty when discovery cannot classify the transport so
+	// consumers continue to treat it as unknown.
+	if hw.RDMA == nil && gpuInfo != nil {
+		// Persist false as "discovery ran and did not find RDMA" so consumers can
+		// distinguish it from nil, which means "not checked / unknown".
+		rdma := gpuInfo.RDMAEnabled
+		hw.RDMA = &rdma
+		changed = true
+	}
+	return changed, nil
+}
+
+func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(ctx context.Context, hw *nvidiacomv1beta1.HardwareSpec, discoveryRequired bool) (*gpu.GPUInfo, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("Attempting GPU discovery for profiling job")
+
+	reader, ok := r.gpuDiscoveryReader()
+	if !ok {
+		if discoveryRequired {
+			return nil, fmt.Errorf("auto-discovery failed: APIReader is not configured")
+		}
+		logger.Info("Optional hardware metadata discovery skipped because APIReader is not configured")
+		return nil, nil
+	}
+
+	var dcgmErr error
+	if r.GPUDiscovery != nil {
+		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, reader, r.GPUDiscoveryCache, hw.GPUSKU)
+		if err == nil {
+			return discoveredInfo, nil
+		}
+		dcgmErr = err
+
+		reason := GetGPUDiscoveryFailureReason(err)
+		logger.Info("DCGM discovery failed, falling back to node-label discovery",
+			"reason", reason, "error", err.Error())
+	}
+
+	if !r.gpuDiscoveryEnabled() {
+		if discoveryRequired {
+			if dcgmErr != nil {
+				return nil, fmt.Errorf("auto-discovery failed: %w", dcgmErr)
+			}
+			return nil, fmt.Errorf("auto-discovery failed: node-label discovery is disabled")
+		}
+		logger.Info("Optional hardware metadata discovery skipped because node-label discovery is disabled")
+		return nil, nil
+	}
+
+	discoveredInfo, err := gpu.DiscoverGPUsFiltered(ctx, reader, hw.GPUSKU)
+	if err == nil {
+		return discoveredInfo, nil
+	}
+
+	logger.Info("Node-label discovery also failed", "error", err.Error())
+	if discoveryRequired {
+		return nil, fmt.Errorf("auto-discovery failed: %w", err)
+	}
+	logger.Info("Optional hardware metadata discovery unavailable; leaving unset fields unchanged")
+	return nil, nil
 }
 
 // extractModelCachePVCConfig reads model cache PVC settings from the typed v1beta1 spec.
@@ -2227,6 +2332,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseAndRequeue(ctx conte
 	logger := log.FromContext(ctx)
 	logger.Info("Updating DGDR phase", "name", dgdr.Name, "phase", phase, "message", message)
 	dgdr.Status.Phase = phase
+	dgdr.Status.ObservedGeneration = dgdr.Generation
 	setSucceededCondition(dgdr, phase)
 	if err := r.Status().Update(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
@@ -2245,6 +2351,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseWithCondition(
 	message string,
 ) (ctrl.Result, error) {
 	dgdr.Status.Phase = phase
+	dgdr.Status.ObservedGeneration = dgdr.Generation
 
 	// Set the specific condition first so setSucceededCondition can surface it.
 	dgdr.AddStatusCondition(metav1.Condition{
