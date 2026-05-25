@@ -649,4 +649,151 @@ mod tests {
 
         assert!(ValidateRequest::validate(&request).is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Parser -> protocol mapping (decoupling guard).
+    //
+    // `dynamo-parsers` no longer depends on `dynamo-protocols`; the mapping
+    // moved into this consumer. These tests pin the mapper output to the
+    // *exact* struct + serialized JSON the old protocol-typed parser path
+    // produced, proving the wire output is unchanged.
+    // -----------------------------------------------------------------------
+    use dynamo_parsers::tool_calling::{
+        CalledFunction, CalledFunctionStream, ToolCallResponse, ToolCallResponseChunk, ToolCallType,
+    };
+
+    fn native_call(id: &str, name: &str, args: &str) -> ToolCallResponse {
+        ToolCallResponse {
+            id: id.to_string(),
+            tp: ToolCallType::Function,
+            function: CalledFunction {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    fn native_chunk(index: u32, id: &str, name: &str, args: &str) -> ToolCallResponseChunk {
+        ToolCallResponseChunk {
+            index,
+            id: Some(id.to_string()),
+            tp: Some(ToolCallType::Function),
+            function: Some(CalledFunctionStream {
+                name: Some(name.to_string()),
+                arguments: Some(args.to_string()),
+            }),
+        }
+    }
+
+    /// Reference reconstruction of the pre-decoupling unary mapping that lived
+    /// inside `dynamo-parsers`. Kept inline so a divergence in the live mapper
+    /// fails the test.
+    fn legacy_unary(id: &str, name: &str, args: &str) -> ChatCompletionMessageToolCall {
+        ChatCompletionMessageToolCall {
+            id: id.to_string(),
+            r#type: FunctionType::Function,
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    /// Reference reconstruction of the pre-decoupling streaming mapping.
+    fn legacy_chunk(
+        index: u32,
+        id: &str,
+        name: &str,
+        args: &str,
+    ) -> ChatCompletionMessageToolCallChunk {
+        ChatCompletionMessageToolCallChunk {
+            index,
+            id: Some(id.to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some(name.to_string()),
+                arguments: Some(args.to_string()),
+            }),
+        }
+    }
+
+    #[test]
+    fn unary_mapping_matches_legacy_struct_and_json() {
+        for (id, name, args) in [
+            (
+                "call_1",
+                "get_weather",
+                r#"{"location":"SF","unit":"celsius"}"#,
+            ),
+            ("call_2", "ping", "{}"), // empty arguments
+        ] {
+            let mapped = tool_call_response_to_protocol(native_call(id, name, args));
+            let legacy = legacy_unary(id, name, args);
+            assert_eq!(mapped, legacy, "struct mismatch for {name}");
+            assert_eq!(
+                serde_json::to_string(&mapped).unwrap(),
+                serde_json::to_string(&legacy).unwrap(),
+                "serialized JSON mismatch for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unary_mapping_multi_call_matches_legacy() {
+        let inputs = [
+            ("a", "first", r#"{"k":"v1"}"#),
+            ("b", "second", r#"{"k":"v2"}"#),
+        ];
+        let mapped: Vec<_> = inputs
+            .iter()
+            .map(|(id, n, a)| tool_call_response_to_protocol(native_call(id, n, a)))
+            .collect();
+        let legacy: Vec<_> = inputs
+            .iter()
+            .map(|(id, n, a)| legacy_unary(id, n, a))
+            .collect();
+        assert_eq!(mapped, legacy);
+        assert_eq!(
+            serde_json::to_string(&mapped).unwrap(),
+            serde_json::to_string(&legacy).unwrap()
+        );
+    }
+
+    #[test]
+    fn stream_mapping_matches_legacy_struct_and_json() {
+        for (idx, id, name, args) in [
+            (0u32, "call_1", "get_weather", r#"{"location":"SF"}"#),
+            (1u32, "call_2", "ping", "{}"), // empty arguments
+        ] {
+            let mapped = tool_call_response_chunk_to_protocol(native_chunk(idx, id, name, args));
+            let legacy = legacy_chunk(idx, id, name, args);
+            assert_eq!(mapped, legacy, "struct mismatch for {name}");
+            assert_eq!(
+                serde_json::to_string(&mapped).unwrap(),
+                serde_json::to_string(&legacy).unwrap(),
+                "serialized JSON mismatch for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_mapping_multi_call_indexes_and_matches_legacy() {
+        let inputs = [
+            (0u32, "a", "first", r#"{"k":"v1"}"#),
+            (1u32, "b", "second", r#"{"k":"v2"}"#),
+        ];
+        let mapped: Vec<_> = inputs
+            .iter()
+            .map(|(i, id, n, a)| tool_call_response_chunk_to_protocol(native_chunk(*i, id, n, a)))
+            .collect();
+        let legacy: Vec<_> = inputs
+            .iter()
+            .map(|(i, id, n, a)| legacy_chunk(*i, id, n, a))
+            .collect();
+        assert_eq!(mapped, legacy);
+        assert_eq!(
+            serde_json::to_string(&mapped).unwrap(),
+            serde_json::to_string(&legacy).unwrap()
+        );
+    }
 }
