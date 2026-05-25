@@ -11,13 +11,13 @@
 use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 
-use super::deepseek_common::{
+use super::common::{
     NormalizeNonText, RESPONSE_FORMAT_TEMPLATE, TOOL_CALL_TEMPLATE, TOOL_OUTPUT_TEMPLATE,
     TOOLS_SYSTEM_TEMPLATE, encode_arguments_to_dsml, find_last_user_index,
     normalize_message_contents, render_tools, to_json,
 };
 
-pub use super::deepseek_common::{ThinkingMode, tokens};
+pub use super::common::{ThinkingMode, tokens};
 
 /// Render a single message
 fn render_message(
@@ -288,16 +288,14 @@ impl DeepSeekV32Formatter {
     }
 }
 
-impl super::OAIPromptFormatter for DeepSeekV32Formatter {
+impl crate::OAIPromptFormatter for DeepSeekV32Formatter {
     fn supports_add_generation_prompt(&self) -> bool {
         true
     }
 
-    fn render(&self, req: &dyn super::OAIChatLikeRequest) -> Result<String> {
-        let thinking_mode = super::deepseek_common::resolve_thinking_mode(
-            req.chat_template_args(),
-            self.thinking_mode,
-        );
+    fn render(&self, req: &dyn crate::OAIChatLikeRequest) -> Result<String> {
+        let thinking_mode =
+            super::common::resolve_thinking_mode(req.chat_template_args(), self.thinking_mode);
 
         // Get messages from request
         let messages_value = req.messages();
@@ -317,7 +315,7 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
 
         // Inject tools and response_format from request into the first system message
         // DeepSeek V3.2 expects these to be part of the system message for prompt rendering
-        super::deepseek_common::inject_tools_and_response_format(&mut messages_array, req)?;
+        super::common::inject_tools_and_response_format(&mut messages_array, req)?;
 
         // Encode with native implementation
         encode_messages(
@@ -353,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_formatter_handles_user_content_array() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let request = MockRequest::new(json!([
             {"role": "user", "content": [
@@ -371,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_formatter_serializes_non_text_content() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let request = MockRequest::new(json!([
             {"role": "user", "content": {"foo": "bar"}}
@@ -451,7 +449,7 @@ mod tests {
         }
     }
 
-    impl super::super::OAIChatLikeRequest for MockRequest {
+    impl crate::OAIChatLikeRequest for MockRequest {
         fn model(&self) -> String {
             "deepseek-v3.2".to_string()
         }
@@ -485,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_formatter_injects_tools_into_existing_system_message() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let tools = json!([{
             "type": "function",
@@ -541,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_formatter_creates_system_message_for_tools_when_missing() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let tools = json!([{
             "type": "function",
@@ -584,7 +582,7 @@ mod tests {
 
     #[test]
     fn test_formatter_without_tools_does_not_add_tools_section() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let request = MockRequest::new(json!([
             {"role": "system", "content": "You are a helpful assistant."},
@@ -611,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_formatter_with_multiple_tools() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let tools = json!([
             {
@@ -666,7 +664,7 @@ mod tests {
 
     #[test]
     fn test_formatter_injects_response_format_into_existing_system_message() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let response_format = json!({
             "type": "json_schema",
@@ -712,7 +710,7 @@ mod tests {
 
     #[test]
     fn test_formatter_creates_system_message_for_response_format_when_missing() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let response_format = json!({
             "type": "json_schema",
@@ -750,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_formatter_with_both_tools_and_response_format() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let tools = json!([{
             "type": "function",
@@ -812,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_formatter_without_response_format_does_not_add_response_format_section() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let request = MockRequest::new(json!([
             {"role": "system", "content": "You are a helpful assistant."},
@@ -833,7 +831,7 @@ mod tests {
 
     #[test]
     fn test_chat_mode_via_thinking_false() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let args = std::collections::HashMap::from([("thinking".to_string(), json!(false))]);
 
@@ -869,7 +867,7 @@ mod tests {
 
     #[test]
     fn test_explicit_thinking_true_via_args() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let args = std::collections::HashMap::from([("thinking".to_string(), json!(true))]);
 
@@ -894,7 +892,7 @@ mod tests {
 
     #[test]
     fn test_chat_mode_via_thinking_mode_string() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let args = std::collections::HashMap::from([("thinking_mode".to_string(), json!("chat"))]);
 
@@ -919,7 +917,7 @@ mod tests {
 
     #[test]
     fn test_thinking_mode_string_thinking() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let args =
             std::collections::HashMap::from([("thinking_mode".to_string(), json!("thinking"))]);
@@ -945,7 +943,7 @@ mod tests {
 
     #[test]
     fn test_default_thinking_mode_without_args() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let request = MockRequest::new(json!([
             {"role": "system", "content": "You are a helpful assistant."},
@@ -981,7 +979,7 @@ mod tests {
 
     #[test]
     fn test_thinking_false_overrides_default_thinking() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let args = std::collections::HashMap::from([("thinking".to_string(), json!(false))]);
 
@@ -1007,7 +1005,7 @@ mod tests {
 
     #[test]
     fn test_thinking_true_overrides_default_chat() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let args = std::collections::HashMap::from([("thinking".to_string(), json!(true))]);
 
@@ -1033,7 +1031,7 @@ mod tests {
 
     #[test]
     fn test_thinking_bool_takes_precedence_over_thinking_mode_string() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let args = std::collections::HashMap::from([
             ("thinking".to_string(), json!(false)),

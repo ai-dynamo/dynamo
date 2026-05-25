@@ -510,7 +510,7 @@ pub(crate) fn resolve_thinking_mode(
     args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     default_mode: ThinkingMode,
 ) -> ThinkingMode {
-    if let Some(enabled) = super::thinking_bool_from_args(args) {
+    if let Some(enabled) = crate::thinking_bool_from_args(args) {
         return if enabled {
             ThinkingMode::Thinking
         } else {
@@ -531,7 +531,7 @@ pub(crate) fn resolve_thinking_mode(
 
 pub(crate) fn inject_tools_and_response_format(
     messages_array: &mut Vec<JsonValue>,
-    req: &dyn super::OAIChatLikeRequest,
+    req: &dyn crate::OAIChatLikeRequest,
 ) -> Result<()> {
     let tools_json = req
         .tools()

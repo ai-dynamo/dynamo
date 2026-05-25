@@ -2121,6 +2121,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-protocols",
+ "dynamo-renderer",
  "dynamo-runtime",
  "dynamo-tokenizers",
  "dynamo-tokens",
@@ -2298,6 +2299,22 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "dynamo-renderer"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dynamo-protocols",
+ "dynamo-tokenizers",
+ "either",
+ "minijinja",
+ "minijinja-contrib",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
