@@ -273,7 +273,11 @@ fn parse_tools_json(tools_json: Option<&str>) -> PyResult<Option<Vec<ToolDefinit
             })?
             .to_string();
         let parameters = inner.get("parameters").cloned();
-        defs.push(ToolDefinition { name, parameters, strict: None });
+        defs.push(ToolDefinition {
+            name,
+            parameters,
+            strict: None,
+        });
     }
     Ok(Some(defs))
 }
