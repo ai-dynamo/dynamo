@@ -30,16 +30,19 @@ _SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV = "DYN_SHARED_HICACHE_SOURCE_ENDPOINTS
 
 def _shared_hicache_control_endpoint(server_args) -> Optional[str]:
     config = getattr(server_args, "shared_hicache_config", None)
-    if not isinstance(config, dict):
-        return None
-    endpoint = config.get("control_endpoint")
-    if isinstance(endpoint, str) and endpoint:
-        return endpoint
-    control = config.get("control")
-    if isinstance(control, dict):
-        endpoint = control.get("endpoint")
+    if isinstance(config, dict):
+        endpoint = config.get("control_endpoint")
         if isinstance(endpoint, str) and endpoint:
             return endpoint
+        control = config.get("control")
+        if isinstance(control, dict):
+            endpoint = control.get("endpoint")
+            if isinstance(endpoint, str) and endpoint:
+                return endpoint
+
+    endpoint = getattr(config, "control_endpoint", None)
+    if isinstance(endpoint, str) and endpoint:
+        return endpoint
     return None
 
 
