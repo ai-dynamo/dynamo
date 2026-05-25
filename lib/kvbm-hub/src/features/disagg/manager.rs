@@ -15,8 +15,8 @@ use velo::queue::NextOptions;
 use velo::queue::backends::messenger::{MessengerQueueBackend, MessengerQueueConfig};
 use velo_ext::InstanceId;
 
-use super::dispatcher::{DispatchOutcome, PrefillRequestDispatcher};
 use super::protocol::ConditionalDisaggInstancesResponse;
+use crate::features::prefill_router::{DispatchOutcome, PrefillRequestDispatcher};
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::protocol::{self, ConditionalDisaggRole, Feature, FeatureKey, PrefillRequest};
 
@@ -94,6 +94,40 @@ impl ConditionalDisaggManager {
     pub fn with_dispatcher(mut self, dispatcher: Arc<dyn PrefillRequestDispatcher>) -> Self {
         self.dispatcher = Some(dispatcher);
         self
+    }
+
+    /// Install a [`PrefillRequestDispatcher`] AFTER
+    /// [`FeatureManager::attach`] has run. Intended for late-binding:
+    /// e.g. the binary attaches the disagg manager first, then attaches
+    /// the [`PrefillRouterManager`](crate::PrefillRouterManager), then
+    /// installs the router as this manager's dispatcher by calling
+    /// `start_dispatcher(router_manager.dispatcher())`.
+    ///
+    /// Returns an error if no Velo / queue backend was attached (the
+    /// hub was started without Velo) or if a dispatcher loop is already
+    /// running.
+    pub fn start_dispatcher(
+        self: &Arc<Self>,
+        dispatcher: Arc<dyn PrefillRequestDispatcher>,
+    ) -> Result<(), FeatureError> {
+        let backend = self.queue_backend.get().cloned().ok_or_else(|| {
+            FeatureError::Other(anyhow::anyhow!(
+                "start_dispatcher: no queue backend (was the hub started without Velo?)"
+            ))
+        })?;
+        if self.dispatcher_task.get().is_some() {
+            return Err(FeatureError::Other(anyhow::anyhow!(
+                "start_dispatcher: a dispatcher loop is already running"
+            )));
+        }
+        let task = tokio::spawn(prefill_dispatcher_loop(backend, dispatcher));
+        if self.dispatcher_task.set(task).is_err() {
+            return Err(FeatureError::Other(anyhow::anyhow!(
+                "start_dispatcher: lost race to install dispatcher loop"
+            )));
+        }
+        tracing::info!("CD prefill dispatcher worker started (late-bound)");
+        Ok(())
     }
 
     /// Current snapshot of the role split, sorted deterministically.

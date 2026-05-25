@@ -29,6 +29,7 @@ pub mod disagg;
 pub(crate) mod http;
 pub mod indexer;
 pub mod p2p;
+pub mod prefill_router;
 
 /// Context handed to a [`FeatureManager`] at hub startup so it can stash any
 /// references it needs (e.g. the hub's Velo handle for active messaging).

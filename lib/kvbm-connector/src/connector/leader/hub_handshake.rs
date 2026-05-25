@@ -19,7 +19,9 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use kvbm_config::{BlockLayoutMode, DisaggConfig, LeaderHubConfig, RemoteSearch};
+use kvbm_config::{
+    BlockLayoutMode, DisaggConfig, DisaggregationRole, LeaderHubConfig, RemoteSearch,
+};
 use kvbm_hub::{
     FeatureConfigRequirements, FeatureDescriptor, FeatureKey, HubConfigResponse, PrimaryConfig,
     RuntimeConfigSummary,
@@ -28,12 +30,32 @@ use kvbm_hub::{
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Hub features a connector can participate in (all standalone-selectable).
-/// `disagg` additionally depends on `p2p` (co-registered).
-pub const CONNECTOR_CAPS: [FeatureKey; 3] = [
+/// `disagg` additionally depends on `p2p` (co-registered). `prefill_router`
+/// is participation-by-advertisement: a prefill worker that intends to be
+/// reached by the hub's router pushes a `Feature::PrefillRouter(...)` payload
+/// at registration; decode workers leave it untouched.
+pub const CONNECTOR_CAPS: [FeatureKey; 4] = [
     FeatureKey::Indexer,
     FeatureKey::P2P,
     FeatureKey::ConditionalDisagg,
+    FeatureKey::PrefillRouter,
 ];
+
+/// `(parent, dep)` pairs where the connector auto-co-registers `dep` at
+/// registration time whenever `parent` is in the effective set, so the
+/// dep need not appear in `leader.hub.features` for the connector to
+/// declare it. Used by [`resolve`] to relax the explicit-mode
+/// dep-completeness check.
+///
+/// Today the only entry is `(ConditionalDisagg, P2P)` — see
+/// `super::p2p::wire::wire_p2p`, which always prepends `Feature::P2P`
+/// to the register payload. `PrefillRouter` has *no* auto-co-registered
+/// parent: the connector only adds its payload inside the CD wiring
+/// block, so `prefill_router` without `disagg` in
+/// `leader.hub.features` is a real misconfiguration the handshake
+/// rejects.
+const AUTO_COREGISTERED_DEPS: &[(FeatureKey, FeatureKey)] =
+    &[(FeatureKey::ConditionalDisagg, FeatureKey::P2P)];
 
 /// Outcome of the hub handshake.
 pub struct HubHandshake {
@@ -88,13 +110,25 @@ pub fn validate_remote_search_availability(
     )
 }
 
+/// Worker-side capability flags consulted by the handshake. Separates
+/// what the connector *can* do at registration time from what the hub
+/// *offers*, so [`unsatisfiable`] can drop / reject features the
+/// connector won't actually be able to fulfill. Empty today — the
+/// prefill-router velo backend is wired post-handshake by the embedding
+/// host (e.g. `kvbm.hub.try_wrap_engine`), so there is no
+/// handshake-time signal to gate on.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkerCapabilities {}
+
 /// Run the handshake. `page_size` is the worker layout block size; `disagg` is
-/// the per-instance disagg config (carries the CD role).
+/// the per-instance disagg config (carries the CD role); `caps` describes
+/// what the worker itself can fulfill at registration time.
 pub async fn resolve(
     hub: &LeaderHubConfig,
     page_size: usize,
     block_layout: BlockLayoutMode,
     disagg: Option<&DisaggConfig>,
+    caps: WorkerCapabilities,
 ) -> Result<HubHandshake> {
     // Parse requested labels up front (a bad label is always a hard error).
     let mut requested: HashSet<FeatureKey> = HashSet::new();
@@ -145,6 +179,44 @@ pub async fn resolve(
                 bail!("leader.hub.features requires {key} but the hub does not offer it");
             }
         }
+        // Some dep edges are auto-co-registered by the connector at
+        // registration time and do not need to appear in
+        // `leader.hub.features`. Today the only such edge is CD → P2P
+        // (see `super::p2p::wire::wire_p2p`, which always prepends
+        // `Feature::P2P` to the register payload). Expand the
+        // requested set with these implicits before the generic
+        // dep-completeness check so `--features disagg` (without p2p)
+        // keeps working.
+        for (parent, auto_dep) in AUTO_COREGISTERED_DEPS {
+            if requested.contains(parent) {
+                requested.insert(*auto_dep);
+            }
+        }
+        // After auto-co-registration, every remaining transitive dep
+        // must also be in the requested set. The connector's init
+        // paths key off the literal effective set (e.g. the
+        // `Feature::PrefillRouter` payload is only added inside the
+        // CD wiring block, which itself requires
+        // `handshake.has(ConditionalDisagg)`), so a missing dep
+        // produces a worker that silently registers nothing. The
+        // hub's server-side `validate_register` already mirrors this
+        // rule (`Feature::X requires Feature::Y to also be
+        // declared`); catching it client-side gives a clearer error
+        // and avoids a wasted register round-trip.
+        for key in &requested.clone() {
+            // Direct-deps-first BFS so the error names the most
+            // actionable feature: telling a user who requested
+            // `prefill_router` to "add disagg" is right; "add p2p" is
+            // technically true (via the dep chain) but misleading,
+            // since adding disagg auto-co-registers p2p.
+            if let Some(missing) = first_missing_dep(&aggregate, *key, &requested) {
+                bail!(
+                    "leader.hub.features requires {key} but its dependency {missing} is not \
+                     also in leader.hub.features (the connector wires features off the \
+                     literal list; add {missing} or drop {key})"
+                );
+            }
+        }
         requested.iter().copied().collect()
     } else {
         CONNECTOR_CAPS
@@ -162,7 +234,15 @@ pub async fn resolve(
     let primary = &aggregate.primary;
     let mut effective: HashSet<FeatureKey> = HashSet::new();
     for key in candidates {
-        match unsatisfiable(&aggregate, key, &enabled, &runtime_summary, primary, disagg) {
+        match unsatisfiable(
+            &aggregate,
+            key,
+            &enabled,
+            &runtime_summary,
+            primary,
+            disagg,
+            &caps,
+        ) {
             None => {
                 effective.insert(key);
             }
@@ -277,6 +357,7 @@ fn unsatisfiable(
     summary: &RuntimeConfigSummary,
     primary: &PrimaryConfig,
     disagg: Option<&DisaggConfig>,
+    _caps: &WorkerCapabilities,
 ) -> Option<String> {
     // Every (transitive) dependency must be enabled on the hub — they are
     // co-registered (e.g. P2P with ConditionalDisagg) and the hub rejects a
@@ -289,6 +370,23 @@ fn unsatisfiable(
     // ConditionalDisagg needs a per-instance role.
     if key == FeatureKey::ConditionalDisagg && disagg.is_none() {
         return Some("requires a `disagg` role but none is configured".to_string());
+    }
+    // PrefillRouter is participation-by-advertisement. The connector only
+    // pushes the `Feature::PrefillRouter` payload at registration when
+    // the worker is a Prefill disagg role. Decode workers have nothing
+    // to advertise; drop / hard-fail accordingly. Backend availability
+    // (HTTP env vars vs the in-process `PrefillRouterHandler` runtime)
+    // is gated at the actual push site (init.rs for HTTP, kvbm.hub for
+    // velo) — the handshake only enforces the role precondition.
+    if key == FeatureKey::PrefillRouter {
+        let Some(d) = disagg else {
+            return Some("requires a `disagg` role to participate".to_string());
+        };
+        if !matches!(d.role, DisaggregationRole::Prefill) {
+            return Some(
+                "the worker is a Decode role and cannot advertise a prefill backend".to_string(),
+            );
+        }
     }
     // Must-match fields (folding in dependency requirements) must agree.
     must_match_mismatch(aggregate, key, summary, primary)
@@ -308,6 +406,33 @@ fn transitive_deps(aggregate: &HubConfigResponse, key: FeatureKey) -> HashSet<Fe
         }
     }
     seen
+}
+
+/// BFS for the first transitive dep of `key` that is not in `requested`.
+/// Direct-deps-first so the error names the most actionable feature for
+/// the operator to add (e.g. for `requested = {prefill_router}` this
+/// returns `disagg`, not the transitively-reachable `p2p`).
+fn first_missing_dep(
+    aggregate: &HubConfigResponse,
+    key: FeatureKey,
+    requested: &HashSet<FeatureKey>,
+) -> Option<FeatureKey> {
+    let mut seen: HashSet<FeatureKey> = HashSet::new();
+    let mut frontier: std::collections::VecDeque<FeatureKey> =
+        std::collections::VecDeque::from([key]);
+    while let Some(k) = frontier.pop_front() {
+        if let Some(fd) = aggregate.features.iter().find(|f| f.key == k) {
+            for dep in &fd.dependencies {
+                if !requested.contains(dep) {
+                    return Some(*dep);
+                }
+                if seen.insert(*dep) {
+                    frontier.push_back(*dep);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Pull the KV-index ZMQ endpoint from the aggregate descriptor, guarding that
@@ -348,7 +473,7 @@ mod tests {
     use kvbm_config::DisaggregationRole;
     use kvbm_hub::{
         ConditionalDisaggManager, FeatureManager, HubServer, IndexerManager, P2pManager,
-        PrimaryConfig,
+        PrefillRouterManager, PrimaryConfig, SelectorConfig,
     };
 
     const BS: usize = 16;
@@ -383,6 +508,13 @@ mod tests {
             .unwrap();
             b = b.add_feature_manager(Arc::new(kv) as Arc<dyn FeatureManager>);
         }
+        if features.contains(&"prefill_router") {
+            let router = PrefillRouterManager::new(SelectorConfig {
+                per_worker_concurrency: 4,
+                block_size: BS,
+            });
+            b = b.add_feature_manager(router as Arc<dyn FeatureManager>);
+        }
         b.serve().await.unwrap()
     }
 
@@ -398,6 +530,21 @@ mod tests {
             role: DisaggregationRole::Decode,
             max_inflight_remote_prefill_tokens: usize::MAX,
         }
+    }
+
+    fn disagg_prefill() -> DisaggConfig {
+        DisaggConfig {
+            role: DisaggregationRole::Prefill,
+            max_inflight_remote_prefill_tokens: usize::MAX,
+        }
+    }
+
+    /// Test helper for tests that historically distinguished
+    /// "router-ready" from "not ready". The struct is empty today, so
+    /// this is equivalent to `WorkerCapabilities::default()`; kept as
+    /// a named alias so the test bodies stay readable.
+    fn caps_router_ready() -> WorkerCapabilities {
+        WorkerCapabilities::default()
     }
 
     fn handshake_with(effective: &[FeatureKey]) -> HubHandshake {
@@ -460,6 +607,164 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_prefill_router_standalone_resolves() {
+        // `prefill_router` is now a self-contained velo target that
+        // does not carry a hard `ConditionalDisagg` dep. The connector
+        // handshake accepts an explicit `["prefill_router"]` list as
+        // long as the worker is a Prefill role with a ready backend —
+        // this is the path the `python -m kvbm.vllm.prefill` entrypoint
+        // takes after pulling its config from the hub.
+        let server = start_hub(&["p2p", "disagg", "prefill_router"]).await;
+        let url = format!("http://{}", server.discovery_addr());
+        let h = resolve(
+            &hub_cfg(&url, &["prefill_router"]),
+            BS,
+            BlockLayoutMode::Operational,
+            Some(&disagg_prefill()),
+            caps_router_ready(),
+        )
+        .await
+        .unwrap();
+        assert!(h.has(FeatureKey::PrefillRouter));
+        assert!(!h.has(FeatureKey::ConditionalDisagg));
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_disagg_without_p2p_still_works_via_auto_coreg() {
+        // The connector auto-co-registers P2P inside `wire_p2p`
+        // whenever CD is being registered. `--features disagg` (no
+        // p2p) must therefore keep working — otherwise this fix
+        // regresses an existing supported pattern.
+        let server = start_hub(&["p2p", "disagg"]).await;
+        let url = format!("http://{}", server.discovery_addr());
+        let h = resolve(
+            &hub_cfg(&url, &["disagg"]),
+            BS,
+            BlockLayoutMode::Operational,
+            Some(&disagg()),
+            WorkerCapabilities::default(),
+        )
+        .await
+        .unwrap();
+        assert!(h.has(FeatureKey::ConditionalDisagg));
+        assert!(h.has(FeatureKey::P2P));
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_prefill_router_with_disagg_and_ready_backend_works() {
+        let server = start_hub(&["p2p", "disagg", "prefill_router"]).await;
+        let url = format!("http://{}", server.discovery_addr());
+        let h = resolve(
+            &hub_cfg(&url, &["disagg", "prefill_router"]),
+            BS,
+            BlockLayoutMode::Operational,
+            Some(&disagg_prefill()),
+            caps_router_ready(),
+        )
+        .await
+        .unwrap();
+        assert!(h.has(FeatureKey::PrefillRouter));
+        assert!(h.has(FeatureKey::ConditionalDisagg));
+        assert!(h.has(FeatureKey::P2P));
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_prefill_router_prefill_role_resolves_regardless_of_env() {
+        // The connector handshake no longer gates `prefill_router` on
+        // HTTP env vars — the velo `PrefillRouterHandler` is wired
+        // post-handshake by `kvbm.hub.try_wrap_engine`, so the
+        // handshake only enforces the role precondition. Default caps
+        // (no env vars) for a Prefill role must keep
+        // `prefill_router` in the effective set.
+        let server = start_hub(&["p2p", "disagg", "prefill_router"]).await;
+        let url = format!("http://{}", server.discovery_addr());
+        let h = resolve(
+            &hub_cfg(&url, &["disagg", "prefill_router"]),
+            BS,
+            BlockLayoutMode::Operational,
+            Some(&disagg_prefill()),
+            WorkerCapabilities::default(),
+        )
+        .await
+        .unwrap();
+        assert!(h.has(FeatureKey::PrefillRouter));
+        assert!(h.has(FeatureKey::ConditionalDisagg));
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_prefill_router_with_decode_role_is_rejected() {
+        // Decode workers have nothing to advertise to the router; an
+        // explicit `prefill_router` selection must be rejected so the
+        // operator notices the misconfiguration.
+        let server = start_hub(&["p2p", "disagg", "prefill_router"]).await;
+        let url = format!("http://{}", server.discovery_addr());
+        let result = resolve(
+            &hub_cfg(&url, &["disagg", "prefill_router"]),
+            BS,
+            BlockLayoutMode::Operational,
+            Some(&disagg()),
+            caps_router_ready(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "decode-role explicit prefill_router must hard-fail"
+        );
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_keeps_prefill_router_for_prefill_role_no_env() {
+        // Auto mode + Prefill role + hub offers router + no env vars
+        // → keep `prefill_router` effective. The connector's init.rs
+        // only pushes the Http advertisement when env vars are set;
+        // without them no Feature::PrefillRouter is sent by the
+        // connector, but the velo `PrefillRouterHandler` still gets
+        // wired downstream and registers on its own velo instance.
+        let server = start_hub(&["p2p", "disagg", "prefill_router"]).await;
+        let url = format!("http://{}", server.discovery_addr());
+        let h = resolve(
+            &hub_cfg(&url, &[]),
+            BS,
+            BlockLayoutMode::Operational,
+            Some(&disagg_prefill()),
+            WorkerCapabilities::default(),
+        )
+        .await
+        .unwrap();
+        assert!(h.has(FeatureKey::PrefillRouter));
+        assert!(h.has(FeatureKey::ConditionalDisagg));
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_picks_up_prefill_router_from_hub() {
+        // Without PrefillRouter in CONNECTOR_CAPS the auto-mode intersection
+        // would drop the hub's prefill_router feature and the
+        // connector's init.rs gate (handshake.has(PrefillRouter)) would
+        // always return false — so workers would never advertise even
+        // when the hub was started with --prefill-router.
+        let server = start_hub(&["p2p", "disagg", "prefill_router"]).await;
+        let url = format!("http://{}", server.discovery_addr());
+        let h = resolve(
+            &hub_cfg(&url, &[]),
+            BS,
+            BlockLayoutMode::Operational,
+            Some(&disagg_prefill()),
+            caps_router_ready(),
+        )
+        .await
+        .unwrap();
+        assert!(h.has(FeatureKey::PrefillRouter));
+        assert!(h.has(FeatureKey::ConditionalDisagg));
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_intersects_caps_and_gates_cd_on_role() {
         let server = start_hub(&["p2p", "disagg", "indexer"]).await;
         let url = format!("http://{}", server.discovery_addr());
@@ -470,6 +775,7 @@ mod tests {
             BS,
             BlockLayoutMode::Operational,
             Some(&disagg()),
+            WorkerCapabilities::default(),
         )
         .await
         .unwrap();
@@ -478,9 +784,15 @@ mod tests {
         assert!(h.indexer_zmq_endpoint.is_some());
 
         // Auto + no disagg role → CD dropped (best-effort), indexer stays.
-        let h = resolve(&hub_cfg(&url, &[]), BS, BlockLayoutMode::Operational, None)
-            .await
-            .unwrap();
+        let h = resolve(
+            &hub_cfg(&url, &[]),
+            BS,
+            BlockLayoutMode::Operational,
+            None,
+            WorkerCapabilities::default(),
+        )
+        .await
+        .unwrap();
         assert!(h.has(FeatureKey::Indexer));
         assert!(!h.has(FeatureKey::ConditionalDisagg));
 
@@ -498,6 +810,7 @@ mod tests {
             BS,
             BlockLayoutMode::Operational,
             None,
+            WorkerCapabilities::default(),
         )
         .await
         .unwrap();
@@ -511,6 +824,7 @@ mod tests {
                 BS,
                 BlockLayoutMode::Operational,
                 Some(&disagg()),
+                WorkerCapabilities::default(),
             )
             .await
             .is_ok()
@@ -523,6 +837,7 @@ mod tests {
                 BS,
                 BlockLayoutMode::Operational,
                 None,
+                WorkerCapabilities::default(),
             )
             .await
             .is_err()
@@ -534,7 +849,8 @@ mod tests {
                 &hub_cfg(&url, &["bogus"]),
                 BS,
                 BlockLayoutMode::Operational,
-                None
+                None,
+                WorkerCapabilities::default(),
             )
             .await
             .is_err()
@@ -545,6 +861,7 @@ mod tests {
             BS,
             BlockLayoutMode::Operational,
             None,
+            WorkerCapabilities::default(),
         )
         .await
         .unwrap();
@@ -565,6 +882,7 @@ mod tests {
                 BS,
                 BlockLayoutMode::Operational,
                 Some(&disagg()),
+                WorkerCapabilities::default(),
             )
             .await
             .is_err()
@@ -580,6 +898,7 @@ mod tests {
                 BS,
                 BlockLayoutMode::Operational,
                 Some(&disagg()),
+                WorkerCapabilities::default(),
             )
             .await
             .is_err()
@@ -600,6 +919,7 @@ mod tests {
             32,
             BlockLayoutMode::Operational,
             Some(&disagg()),
+            WorkerCapabilities::default(),
         )
         .await
         .unwrap();
@@ -616,6 +936,7 @@ mod tests {
                 32,
                 BlockLayoutMode::Operational,
                 None,
+                WorkerCapabilities::default(),
             )
             .await
             .is_err()
@@ -635,6 +956,7 @@ mod tests {
             BS,
             BlockLayoutMode::Operational,
             Some(&disagg()),
+            WorkerCapabilities::default(),
         )
         .await
         .unwrap();
@@ -651,9 +973,15 @@ mod tests {
         let url = "http://127.0.0.1:1";
 
         // Auto → best-effort: no features, no error.
-        let h = resolve(&hub_cfg(url, &[]), BS, BlockLayoutMode::Operational, None)
-            .await
-            .unwrap();
+        let h = resolve(
+            &hub_cfg(url, &[]),
+            BS,
+            BlockLayoutMode::Operational,
+            None,
+            WorkerCapabilities::default(),
+        )
+        .await
+        .unwrap();
         assert!(h.effective.is_empty());
 
         // Explicit → hard-fail.
@@ -663,6 +991,7 @@ mod tests {
                 BS,
                 BlockLayoutMode::Operational,
                 None,
+                WorkerCapabilities::default(),
             )
             .await
             .is_err()

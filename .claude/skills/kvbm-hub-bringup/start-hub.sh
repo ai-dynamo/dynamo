@@ -34,9 +34,11 @@
 #   KVBM_HUB_LAYOUT           (default: operational; or universal)
 #   KVBM_HUB_HEARTBEAT_SECS   (default: 10)
 #   KVBM_KV_INDEX_ADVERTISE_HOST (default: 127.0.0.1)
-#   KVBM_HUB_PREFILL_VLLM_URL / KVBM_HUB_PREFILL_VLLM_MODEL
-#                              (optional; enables the CD prefill dispatcher — both
-#                               required together)
+#   KVBM_HUB_PREFILL_ROUTER    (default: 1 — enable the prefill-router feature.
+#                               Late-bound to the CD prefill queue, replaces the
+#                               old --prefill-vllm-url/-model dispatcher. Workers
+#                               advertise their backend (Http/Velo) at register.)
+#   KVBM_HUB_PREFILL_WORKER_CONCURRENCY  (default: 4 — per-worker in-flight cap)
 #   KVBM_HUB_KVBM             (optional; newline-separated KEY.PATH=VALUE entries
 #                               each becoming a --kvbm flag on the hub binary)
 #   KVBM_HUB_KVBM_CONFIG      (optional; JSON blob → --kvbm-config; applied before
@@ -92,10 +94,13 @@ else
     args+=( --g2-memory "${KVBM_HUB_G2_MEMORY_GIB:-1}" )
 fi
 
-# Optional CD prefill dispatcher (both env vars required together).
-if [ -n "${KVBM_HUB_PREFILL_VLLM_URL:-}" ]; then
-    args+=( --prefill-vllm-url "$KVBM_HUB_PREFILL_VLLM_URL"
-            --prefill-vllm-model "${KVBM_HUB_PREFILL_VLLM_MODEL:?KVBM_HUB_PREFILL_VLLM_MODEL required with _URL}" )
+# Enable the prefill-router feature. CD prefill dispatch is now late-bound on
+# the hub to a PrefillRouterManager; workers advertise their execution backend
+# (Http or Velo) at registration time. The old --prefill-vllm-url/-model
+# flags were removed from the hub binary.
+if [ "${KVBM_HUB_PREFILL_ROUTER:-1}" = "1" ]; then
+    args+=( --prefill-router
+            --prefill-worker-concurrency "${KVBM_HUB_PREFILL_WORKER_CONCURRENCY:-4}" )
 fi
 
 # Optional hub-side KvbmConfig overrides.

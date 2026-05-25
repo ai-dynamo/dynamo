@@ -22,7 +22,10 @@
 #   KVBM_HARDWARE_PROFILE (default: spark-gb10; also h100-a100, custom)
 #   KVBM_HUB_FEATURES (default: disagg — dep-expands to disagg+p2p; set to
 #                      "disagg,indexer" etc. to co-enable more)
-#   KVBM_HUB_PREFILL_URL (default: http://127.0.0.1:8000)
+#   KVBM_HUB_PREFILL_ROUTER (default: 1 — enable the prefill-router feature.
+#                            Workers advertise Http or Velo backends at register
+#                            time; replaces the removed --prefill-vllm-url
+#                            dispatcher.)
 #   KVBM_HUB_BLOCK_SIZE / KVBM_HUB_MAX_SEQ_LEN / KVBM_HUB_G2_MEMORY_GIB (sizing)
 #   KVBM_HUB_DISCOVERY_PORT / KVBM_HUB_CONTROL_PORT / KVBM_HUB_VELO_PORT
 #   KVBM_HUB_KVBM (default: deployment-wide overrides; newline-separated
@@ -46,7 +49,8 @@ fi
 
 # Delegate to the reusable launcher. It builds kvbm_hub + kvbmctl, passes the
 # now-required --block-size/--max-seq-len/--g2 flags, dep-expands disagg→p2p,
-# and wires the CD prefill dispatcher from KVBM_HUB_PREFILL_VLLM_{URL,MODEL}.
+# and enables the prefill-router feature (replaces the removed --prefill-vllm-url
+# dispatcher; workers self-advertise their Http/Velo backend at register time).
 export KVBM_REPO="$REPO"
 export KVBM_HUB_FEATURES=${KVBM_HUB_FEATURES:-disagg}
 export KVBM_HUB_BLOCK_SIZE=${KVBM_HUB_BLOCK_SIZE:-16}
@@ -57,8 +61,8 @@ export KVBM_HUB_MAX_SEQ_LEN=${KVBM_HUB_MAX_SEQ_LEN:-1024}
 # connectors then render + register universal, and verify-block-layout matches).
 export KVBM_HUB_LAYOUT=${KVBM_HUB_LAYOUT:-${KVBM_BLOCK_LAYOUT:-operational}}
 export KVBM_HUB_G2_MEMORY_GIB=${KVBM_HUB_G2_MEMORY_GIB:-2}
-export KVBM_HUB_PREFILL_VLLM_URL=${KVBM_HUB_PREFILL_VLLM_URL:-${KVBM_HUB_PREFILL_URL:-http://127.0.0.1:8000}}
-export KVBM_HUB_PREFILL_VLLM_MODEL=${KVBM_HUB_PREFILL_VLLM_MODEL:-$MODEL}
+export KVBM_HUB_PREFILL_ROUTER=${KVBM_HUB_PREFILL_ROUTER:-1}
+export KVBM_HUB_PREFILL_WORKER_CONCURRENCY=${KVBM_HUB_PREFILL_WORKER_CONCURRENCY:-4}
 # Deployment-wide KvbmConfig seeded into the hub's base_config so every connector
 # inherits it without each launcher repeating the same flags. The hub owns
 # everything identical across instances — tokio workers, nixl backends, control

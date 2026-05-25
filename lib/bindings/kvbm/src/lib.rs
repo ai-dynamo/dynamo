@@ -51,6 +51,9 @@ fn init_logging() {
 #[cfg(feature = "v2")]
 mod v2;
 
+#[cfg(feature = "hub")]
+mod hub;
+
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
@@ -65,6 +68,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let v2 = PyModule::new(m.py(), "v2")?;
         v2::add_to_module(&v2)?;
         m.add_submodule(&v2)?;
+    }
+
+    #[cfg(feature = "hub")]
+    {
+        let hub = PyModule::new(m.py(), "hub")?;
+        hub::add_to_module(&hub)?;
+        m.add_submodule(&hub)?;
     }
 
     // TODO: kernels bindings disabled pending operational_copy API adaptation

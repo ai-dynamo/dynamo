@@ -68,7 +68,6 @@ pub use features::cli::{FeatureCli, feature_clis, hub_arg};
 pub use features::control_plane::ControlPlaneManager;
 pub use features::disagg::{
     ConditionalDisaggClient, ConditionalDisaggInstancesResponse, ConditionalDisaggManager,
-    DispatchOutcome, HttpVllmDispatcher, PrefillRequestDispatcher, RecordingDispatcher,
 };
 pub use features::indexer::{
     FindBlocksHit, IndexerConfigResponse, IndexerLookupClient, IndexerManager, InstancesResponse,
@@ -77,14 +76,19 @@ pub use features::indexer::{
 #[cfg(feature = "kvbmctl")]
 pub use features::p2p::cli::{p2p_command, run_p2p};
 pub use features::p2p::{P2pClient, P2pManager};
+pub use features::prefill_router::{
+    DispatchOutcome, HttpExecutionBackend, PREFILL_DISPATCH_HANDLER, PrefillDispatchRequest,
+    PrefillDispatchResponse, PrefillExecutionBackend, PrefillRequestDispatcher, PrefillRouter,
+    PrefillRouterManager, RecordingDispatcher, Selector, SelectorConfig, VeloExecutionBackend,
+};
 pub use features::{FeatureConfigRequirements, FeatureError, FeatureManager, HubContext};
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 pub use kvbm_common::BlockLayoutMode;
 pub use protocol::{
     CD_PREFILL_QUEUE, ConditionalDisaggConfig, ConditionalDisaggRole, DEFAULT_CONTROL_PORT,
     DEFAULT_DISCOVERY_PORT, Feature, FeatureDescriptor, FeatureKey, HubConfigResponse,
-    IndexerFeatureConfig, P2pConfig, PrefillRequest, PrimaryConfig, ProbeResponse,
-    RuntimeConfigSummary,
+    IndexerFeatureConfig, P2pConfig, PrefillBackendAdvertisement, PrefillRequest,
+    PrefillRouterConfig, PrimaryConfig, ProbeResponse, RuntimeConfigSummary, VllmHttpEndpoint,
 };
 pub use registry::{EvictionCallback, InMemoryRegistry, PeerRegistry, RegistryError};
 pub use server::{HubServer, HubServerBuilder, HubServerState};

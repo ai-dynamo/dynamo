@@ -624,6 +624,27 @@ class WorkerFactory:
             ),
         ]
 
+        # Auto-detect KVBM prefill-router participation from the vLLM
+        # config: if the rendered KVBM extra-config carries a hub URL and
+        # a disagg prefill role, wrap the engine in a PrefillRouterHandler
+        # so this worker registers itself as a velo prefill target with
+        # the hub. No-op (returns None) for any other configuration —
+        # including kvbm not being installed.
+        prefill_router_handler = None
+        try:
+            from kvbm.hub import try_wrap_engine
+
+            prefill_router_handler = try_wrap_engine(vllm_config, engine_client)
+            if prefill_router_handler is not None:
+                logger.info(
+                    "kvbm prefill router auto-wired (worker velo id=%s)",
+                    prefill_router_handler.worker_velo_id(),
+                )
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning("kvbm prefill router auto-wire failed: %s", e)
+
         try:
             logger.debug("Starting serve_endpoint for prefill worker")
             await asyncio.gather(
@@ -647,6 +668,11 @@ class WorkerFactory:
             logger.error(f"Failed to serve endpoints: {e}")
             raise
         finally:
+            if prefill_router_handler is not None:
+                try:
+                    prefill_router_handler.shutdown()
+                except Exception as e:
+                    logger.warning("kvbm prefill router shutdown failed: %s", e)
             logger.debug("Cleaning up prefill worker")
             handler.cleanup()
 

@@ -452,6 +452,7 @@ impl ConnectorLeader {
                     reference_config.page_size,
                     cfg.block_layout,
                     cfg.disagg.as_ref(),
+                    super::hub_handshake::WorkerCapabilities::default(),
                 )
                 .await
                 .context("kvbm-hub handshake")?,
@@ -1004,6 +1005,57 @@ impl ConnectorLeader {
                 DisaggregationRole::Prefill => kvbm_hub::ConditionalDisaggRole::Prefill,
                 DisaggregationRole::Decode => kvbm_hub::ConditionalDisaggRole::Decode,
             };
+
+            // Prefill workers may advertise an HTTP frontend so the hub's
+            // prefill router can POST `/v1/completions` against it. Gated
+            // on the hub actually offering the prefill-router feature —
+            // without that gate, advertising the feature against a hub
+            // that doesn't have the manager attached fails the whole
+            // registration (unknown feature keys are rejected, not
+            // ignored). Set both env vars *and* enable
+            // `--prefill-router` on the hub to opt in. Decode roles
+            // never advertise.
+            let mut features: Vec<kvbm_hub::Feature> = vec![kvbm_hub::Feature::ConditionalDisagg(
+                kvbm_hub::ConditionalDisaggConfig { role: cd_role },
+            )];
+            let hub_offers_router = handshake.has(kvbm_hub::FeatureKey::PrefillRouter);
+            if cd_role == kvbm_hub::ConditionalDisaggRole::Prefill {
+                match (
+                    std::env::var("KVBM_VLLM_HTTP_URL").ok(),
+                    std::env::var("KVBM_VLLM_HTTP_MODEL").ok(),
+                ) {
+                    (Some(base_url), Some(model))
+                        if !base_url.is_empty() && !model.is_empty() && hub_offers_router =>
+                    {
+                        tracing::info!(
+                            base_url,
+                            model,
+                            "advertising vLLM HTTP endpoint to hub prefill router"
+                        );
+                        features.push(kvbm_hub::Feature::PrefillRouter(
+                            kvbm_hub::PrefillRouterConfig {
+                                backend: kvbm_hub::PrefillBackendAdvertisement::Http(
+                                    kvbm_hub::VllmHttpEndpoint { base_url, model },
+                                ),
+                            },
+                        ));
+                    }
+                    (Some(_), Some(_)) if !hub_offers_router => {
+                        tracing::warn!(
+                            "KVBM_VLLM_HTTP_URL/MODEL set but hub does not offer the \
+                             prefill-router feature; skipping advertisement"
+                        );
+                    }
+                    (Some(_), None) | (None, Some(_)) => {
+                        tracing::warn!(
+                            "KVBM_VLLM_HTTP_URL and KVBM_VLLM_HTTP_MODEL must both be set to \
+                             advertise an HTTP prefill backend; skipping"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
             let super::p2p::wire::P2pFoundation {
                 hub,
                 hub_velo_id,
@@ -1016,9 +1068,7 @@ impl ConnectorLeader {
                 &leader,
                 handshake,
                 layout_compat_payload,
-                vec![kvbm_hub::Feature::ConditionalDisagg(
-                    kvbm_hub::ConditionalDisaggConfig { role: cd_role },
-                )],
+                features,
             )
             .await
             .context("disagg P2P foundation wiring failed")?;
