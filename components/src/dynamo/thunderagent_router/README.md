@@ -237,33 +237,19 @@ adapter, against two TP4 MiniMax-M2 replicas on a single 8×H100 node.
 
 ### 1. Bring up Dynamo (2× TP4 MiniMax-M2)
 
+One script brings up both TP4 workers, the program-aware router, and the
+frontend on `:8100`:
+
 ```bash
-# Two TP4 vLLM workers, KV events on, native MiniMax tool-call parser.
-for i in 0 1; do
-  CUDA_VISIBLE_DEVICES=$((i*4)),$((i*4+1)),$((i*4+2)),$((i*4+3)) \
-  python -m dynamo.vllm \
-      --model MiniMaxAI/MiniMax-M2 --tensor-parallel-size 4 \
-      --dyn-tool-call-parser minimax_m2 \
-      --kv-events-config '{"publisher":"zmq","topic":"kv-events",
-                           "endpoint":"tcp://*:2008'"$i"'",
-                           "enable_kv_cache_events":true}' &
-done
-
-# Router. --dyn-tool-call-parser is forwarded to register_model so MiniMax's
-# <minimax:tool_call> XML reaches pi as real OpenAI tool_calls, not raw text.
-python -m dynamo.thunderagent_router \
-    --endpoint dynamo.vllm.generate \
-    --model-name MiniMaxAI/MiniMax-M2 \
-    --dyn-tool-call-parser minimax_m2 \
-    --router-block-size 16
-
-# Frontend on :8100 (the router already registered the model handler).
-python -m dynamo.frontend --http-port 8100 --router-mode round-robin
+bash components/src/dynamo/thunderagent_router/run_minimax_8xh100.sh
 ```
 
-For the **KV-routing-only baseline** arm, drop the `thunderagent_router`
-process and run the frontend in KV-router mode against the same two workers
-(`python -m dynamo.frontend --http-port 8100 --router-mode kv`).
+First launch JIT-warms the FP8 kernels — wait for `curl localhost:8100/v1/models`
+to list the model before starting the client.
+
+For the **KV-routing-only baseline** arm, drop the `thunderagent_router` line
+from the script and run the frontend in KV-router mode against the same two
+workers (`--router-mode kv`).
 
 ### 2. Run pi + Harbor
 
