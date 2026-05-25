@@ -102,6 +102,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
@@ -1976,6 +1977,37 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 			return fmt.Errorf("failed to sync EPP HTTPRoute: %w", err)
 		}
 		logger.Info("Reconciled EPP HTTPRoute", "gateway", gatewayName)
+
+		// Preflight the Gateway and surface the result on the DGD status. The
+		// HTTPRoute attaching is asynchronous and silent on failure (a missing
+		// gateway, a listener that doesn't admit this namespace, or a
+		// not-yet-programmed gateway all just 404 with no signal). Turn that into
+		// an actionable InferenceGatewayReady condition.
+		gwNamespace := gatewayNamespace
+		if gwNamespace == "" {
+			gwNamespace = dgd.Namespace
+		}
+		gw := &gatewayv1.Gateway{}
+		var gwPtr *gatewayv1.Gateway
+		if gerr := r.Get(ctx, client.ObjectKey{Name: gatewayName, Namespace: gwNamespace}, gw); gerr == nil {
+			gwPtr = gw
+		} else if !errors.IsNotFound(gerr) {
+			logger.Error(gerr, "Failed to read Gateway for preflight", "gateway", gatewayName)
+		}
+		pf := epp.PreflightGateway(gwPtr, dgd.Namespace)
+		condStatus := metav1.ConditionFalse
+		if pf.Ready {
+			condStatus = metav1.ConditionTrue
+		}
+		dgd.AddStatusCondition(metav1.Condition{
+			Type:    consts.ConditionTypeInferenceGatewayReady,
+			Status:  condStatus,
+			Reason:  pf.Reason,
+			Message: pf.Message,
+		})
+		if !pf.Ready {
+			logger.Info("Inference gateway not ready", "reason", pf.Reason, "message", pf.Message)
+		}
 	}
 
 	// 3. Reconcile service mesh resources (e.g., Istio DestinationRule).

@@ -55,6 +55,18 @@ const (
 	// means same namespace as the generated HTTPRoute / InferencePool.
 	KubeAnnotationInferenceGatewayNamespace = "nvidia.com/inference-gateway-namespace"
 
+	// ConditionTypeInferenceGatewayReady is a DGD status condition surfacing
+	// whether the generated HTTPRoute can actually attach to its Gateway. It
+	// turns otherwise-silent gateway misconfigurations (missing gateway, a
+	// listener that doesn't admit this namespace, a not-yet-programmed gateway)
+	// into an actionable `kubectl get dgd` signal.
+	ConditionTypeInferenceGatewayReady = "InferenceGatewayReady"
+	// Reasons for ConditionTypeInferenceGatewayReady.
+	ReasonInferenceGatewayReady           = "Ready"
+	ReasonInferenceGatewayNotFound        = "GatewayNotFound"
+	ReasonInferenceGatewayNamespaceDenied = "GatewayNamespaceNotAllowed"
+	ReasonInferenceGatewayNotProgrammed   = "GatewayNotProgrammed"
+
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
 	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
