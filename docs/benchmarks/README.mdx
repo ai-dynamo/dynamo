@@ -77,149 +77,139 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <div className="dynamo-benchmark-grid">
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/qwen3-32b-kv-routing">
 <div className="dynamo-benchmark-card-head">
-<div className="dynamo-feature-symbol-row">
-<span className="dynamo-feature-symbol feature-kv" aria-label="KV routing"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
-<span className="dynamo-feature-symbol feature-pd" aria-label="Prefill/decode split"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span>
-</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
 <div><strong>Qwen3-32B</strong><small>Qwen/Qwen3-32B</small></div>
 </div>
-</div>
 <span className="dynamo-benchmark-kind">A/B test</span>
+</div>
 <h2>KV-aware routing + prefill/decode split</h2>
 <p>Does disaggregated KV-aware routing reduce TTFT and ITL on multi-turn prefix-reuse traffic compared with aggregated round-robin routing?</p>
-<div className="dynamo-feature-chip-row">
-<span className="dynamo-feature-chip"><b>KV</b> KV routing</span>
-<span className="dynamo-feature-chip"><b>P/D</b> Prefill/decode split</span>
+<div className="dynamo-benchmark-features">
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span><span>KV routing</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span><span>Prefill/decode split</span></span>
 </div>
-<div className="dynamo-benchmark-meta"><span>Mooncake prefix reuse</span><span>16x H200</span></div>
+<div className="dynamo-benchmark-targets">
+<span><b>Traffic</b><strong>Mooncake prefix reuse</strong></span>
+<span><b>Hardware</b><strong>16x H200</strong></span>
+</div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/deepseek-v3-2-wideep-routing">
 <div className="dynamo-benchmark-card-head">
-<div className="dynamo-feature-symbol-row">
-<span className="dynamo-feature-symbol feature-kv" aria-label="KV routing"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
-<span className="dynamo-feature-symbol feature-ep" aria-label="WideEP"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ep" /></svg></span>
-<span className="dynamo-feature-symbol feature-pd" aria-label="Prefill/decode split"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span>
-</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
 <div><strong>DeepSeek V3.2 NVFP4</strong><small>nvidia/DeepSeek-V3.2-NVFP4</small></div>
 </div>
-</div>
 <span className="dynamo-benchmark-kind">A/B test</span>
+</div>
 <h2>KV-aware routing + WideEP + P/D split</h2>
 <p>Does disaggregated KV-aware routing with WideEP improve latency and goodput against an aggregated round-robin GB200 control?</p>
-<div className="dynamo-feature-chip-row">
-<span className="dynamo-feature-chip"><b>KV</b> KV routing</span>
-<span className="dynamo-feature-chip"><b>EP</b> WideEP</span>
-<span className="dynamo-feature-chip"><b>P/D</b> Prefill/decode split</span>
+<div className="dynamo-benchmark-features">
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span><span>KV routing</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-ep" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ep" /></svg></span><span>WideEP</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span><span>Prefill/decode split</span></span>
 </div>
-<div className="dynamo-benchmark-meta"><span>Long-context coding trace</span><span>32x GB200</span></div>
+<div className="dynamo-benchmark-targets">
+<span><b>Traffic</b><strong>Long-context coding trace</strong></span>
+<span><b>Hardware</b><strong>32x GB200</strong></span>
+</div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/qwen3-vl-embedding-cache">
 <div className="dynamo-benchmark-card-head">
-<div className="dynamo-feature-symbol-row">
-<span className="dynamo-feature-symbol feature-ec" aria-label="Embedding cache"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ec" /></svg></span>
-</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
 <div><strong>Qwen3-VL-30B</strong><small>Qwen/Qwen3-VL-30B-A3B-Instruct-FP8</small></div>
 </div>
-</div>
 <span className="dynamo-benchmark-kind">A/B test</span>
+</div>
 <h2>Multimodal embedding cache</h2>
 <p>How much does enabling the vLLM multimodal embedding cache improve repeated-image traffic on one GB200 worker?</p>
-<div className="dynamo-feature-chip-row">
-<span className="dynamo-feature-chip"><b>EC</b> Embedding cache</span>
+<div className="dynamo-benchmark-features">
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-ec" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ec" /></svg></span><span>Embedding cache</span></span>
 </div>
-<div className="dynamo-benchmark-meta"><span>80% image reuse</span><span>1x GB200</span></div>
+<div className="dynamo-benchmark-targets">
+<span><b>Traffic</b><strong>80% image reuse</strong></span>
+<span><b>Hardware</b><strong>1x GB200</strong></span>
+</div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/kimi-k2-5-feature-stack">
 <div className="dynamo-benchmark-card-head">
-<div className="dynamo-feature-symbol-row">
-<span className="dynamo-feature-symbol feature-kv" aria-label="KV routing"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
-<span className="dynamo-feature-symbol feature-sp" aria-label="Speculative decoding"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-sp" /></svg></span>
-<span className="dynamo-feature-symbol feature-pd" aria-label="Prefill/decode split"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span>
-<span className="dynamo-feature-symbol feature-of" aria-label="KV offload"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-of" /></svg></span>
-</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
 <div><strong>Kimi-K2.5 NVFP4</strong><small>nvidia/Kimi-K2.5-NVFP4</small></div>
 </div>
-</div>
 <span className="dynamo-benchmark-kind">Feature composition</span>
+</div>
 <h2>KV routing, speculative decoding, P/D split, and KV offload composition</h2>
 <p>How much throughput and interactivity do we gain as KV routing, Eagle3, disaggregation, and KV offload are composed?</p>
-<div className="dynamo-feature-chip-row">
-<span className="dynamo-feature-chip"><b>KV</b> KV routing</span>
-<span className="dynamo-feature-chip"><b>SP</b> Speculative decoding (Eagle3)</span>
-<span className="dynamo-feature-chip"><b>P/D</b> Prefill/decode split</span>
-<span className="dynamo-feature-chip"><b>OF</b> KV offload</span>
+<div className="dynamo-benchmark-features">
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span><span>KV routing</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-sp" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-sp" /></svg></span><span>Speculative decoding (Eagle3)</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span><span>Prefill/decode split</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-of" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-of" /></svg></span><span>KV offload</span></span>
 </div>
-<div className="dynamo-benchmark-meta"><span>Agentic coding trace</span><span>24x GB200</span></div>
+<div className="dynamo-benchmark-targets">
+<span><b>Traffic</b><strong>Agentic coding trace</strong></span>
+<span><b>Hardware</b><strong>24x GB200</strong></span>
+</div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/qwen3-6-35b-feature-stack">
 <div className="dynamo-benchmark-card-head">
-<div className="dynamo-feature-symbol-row">
-<span className="dynamo-feature-symbol feature-fd" aria-label="Frontend decoding"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-fd" /></svg></span>
-<span className="dynamo-feature-symbol feature-ec" aria-label="Embedding cache"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ec" /></svg></span>
-</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
 <div><strong>Qwen3.6-35B-A3B FP8</strong><small>Qwen/Qwen3.6-35B-A3B-FP8</small></div>
 </div>
-</div>
 <span className="dynamo-benchmark-kind">Feature composition</span>
+</div>
 <h2>Dynamo frontend decoding plus multimodal embedding cache</h2>
 <p>How do Dynamo frontend decoding and embedding cache change a single-GPU multimodal sliding-window benchmark versus vanilla vLLM serve?</p>
-<div className="dynamo-feature-chip-row">
-<span className="dynamo-feature-chip"><b>FD</b> Frontend decoding</span>
-<span className="dynamo-feature-chip"><b>EC</b> Embedding cache</span>
+<div className="dynamo-benchmark-features">
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-fd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-fd" /></svg></span><span>Frontend decoding</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-ec" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ec" /></svg></span><span>Embedding cache</span></span>
 </div>
-<div className="dynamo-benchmark-meta"><span>Multimodal sliding window</span><span>1x H100 or GB200</span></div>
+<div className="dynamo-benchmark-targets">
+<span><b>Traffic</b><strong>Multimodal sliding window</strong></span>
+<span><b>Hardware</b><strong>1x H100 or GB200</strong></span>
+</div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/llama-3-70b-topology">
 <div className="dynamo-benchmark-card-head">
-<div className="dynamo-feature-symbol-row">
-<span className="dynamo-feature-symbol feature-pd" aria-label="Prefill/decode split"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span>
-<span className="dynamo-feature-symbol feature-mn" aria-label="Multi-node topology"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-mn" /></svg></span>
-<span className="dynamo-feature-symbol feature-gpu" aria-label="Throughput per GPU"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-gpu" /></svg></span>
-</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/meta-llama.webp" alt="" />
 <div><strong>Llama-3.3-70B FP8</strong><small>RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</small></div>
 </div>
-</div>
 <span className="dynamo-benchmark-kind">Topology benchmark</span>
+</div>
 <h2>Aggregate vs single-node P/D vs multi-node P/D topology</h2>
 <p>How do aggregate, single-node disaggregated, and multi-node disaggregated vLLM topologies compare when normalized by GPU?</p>
-<div className="dynamo-feature-chip-row">
-<span className="dynamo-feature-chip"><b>P/D</b> Prefill/decode split</span>
-<span className="dynamo-feature-chip"><b>MN</b> Multi-node topology</span>
-<span className="dynamo-feature-chip"><b>GPU</b> TPS/GPU</span>
+<div className="dynamo-benchmark-features">
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span><span>Prefill/decode split</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-mn" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-mn" /></svg></span><span>Multi-node topology</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-gpu" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-gpu" /></svg></span><span>TPS/GPU</span></span>
 </div>
-<div className="dynamo-benchmark-meta"><span>8K ISL / 1K OSL</span><span>4-16 GPUs</span></div>
+<div className="dynamo-benchmark-targets">
+<span><b>Traffic</b><strong>8K ISL / 1K OSL</strong></span>
+<span><b>Hardware</b><strong>4-16 GPUs</strong></span>
+</div>
 </a>
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/kv-router-ab-testing">
 <div className="dynamo-benchmark-card-head">
-<div className="dynamo-feature-symbol-row">
-<span className="dynamo-feature-symbol feature-kv" aria-label="KV routing"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
-<span className="dynamo-feature-symbol feature-ab" aria-label="A/B experiment setup"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ab" /></svg></span>
-</div>
 <div className="dynamo-benchmark-model">
 <img className="dynamo-model-logo" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
 <div><strong>KV Router guide</strong><small>Reusable benchmark procedure</small></div>
 </div>
-</div>
 <span className="dynamo-benchmark-kind">Hands-on guide</span>
+</div>
 <h2>General KV Router A/B setup</h2>
 <p>Legacy step-by-step guide for deploying router-on and router-off configurations.</p>
-<div className="dynamo-feature-chip-row">
-<span className="dynamo-feature-chip"><b>KV</b> KV routing</span>
-<span className="dynamo-feature-chip"><b>A/B</b> Experiment setup</span>
+<div className="dynamo-benchmark-features">
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span><span>KV routing</span></span>
+<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-ab" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ab" /></svg></span><span>A/B experiment setup</span></span>
 </div>
-<div className="dynamo-benchmark-meta"><span>Reusable procedure</span><span>Router on/off</span></div>
+<div className="dynamo-benchmark-targets">
+<span><b>Traffic</b><strong>Reusable procedure</strong></span>
+<span><b>Hardware</b><strong>Router on/off</strong></span>
+</div>
 </a>
 </div>
 

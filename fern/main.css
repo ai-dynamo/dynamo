@@ -1917,11 +1917,11 @@ svg.card-icon{
 
 .dynamo-benchmark-card-head {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 14px;
-    min-height: 72px;
-    margin-bottom: 10px;
+    min-height: 0;
+    margin-bottom: 14px;
 }
 
 .dynamo-feature-sprite {
@@ -2115,7 +2115,7 @@ svg.card-icon{
     grid-template-columns: 38px minmax(0, 1fr);
     gap: 8px;
     align-items: center;
-    flex: 0 1 210px;
+    flex: 1 1 auto;
     min-width: 0;
     padding: 8px;
     border: 1px solid var(--border, var(--grayscale-a5));
@@ -2152,8 +2152,18 @@ svg.card-icon{
 }
 
 .dynamo-benchmark-kind {
-    display: block;
-    margin-bottom: 8px;
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 5px 8px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 999px;
+    background: var(--nv-color-bg-default);
+}
+
+.dark .dynamo-benchmark-kind {
+    background: var(--nv-dark-grey-1);
 }
 
 .dynamo-benchmark-card h2 {
@@ -2174,66 +2184,82 @@ svg.card-icon{
     color: var(--pst-color-text-muted);
 }
 
-.dynamo-feature-chip-row {
+.dynamo-benchmark-features {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    margin: auto 0 10px;
-    padding-top: 8px;
+    gap: 8px;
+    margin: 12px 0;
+    padding-top: 2px;
 }
 
-.dynamo-feature-chip {
+.dynamo-feature-pair {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    min-height: 26px;
-    padding: 3px 8px 3px 4px;
+    gap: 8px;
+    min-height: 40px;
+    padding: 4px 10px 4px 4px;
     border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: var(--rounded);
+    border-radius: 999px;
     background: var(--nv-color-bg-default);
     color: var(--pst-color-text-base);
     font-size: 12px;
-    line-height: 1.15;
+    font-weight: 600;
+    line-height: 1.2;
 }
 
-.dark .dynamo-feature-chip {
+.dark .dynamo-feature-pair {
     background: var(--nv-dark-grey-1);
 }
 
-.dynamo-feature-chip b {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 24px;
-    height: 18px;
-    padding: 0 4px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
-    color: var(--nv-color-green);
-    font-size: 10px;
-    font-weight: 800;
-    line-height: 1;
-    letter-spacing: 0.02em;
+.dynamo-feature-pair .dynamo-feature-symbol {
+    flex: 0 0 auto;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
 }
 
-.dynamo-benchmark-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
+.dynamo-feature-pair .dynamo-feature-icon {
+    width: 24px;
+    height: 24px;
+}
+
+.dynamo-benchmark-targets {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: auto;
     padding-top: 12px;
     border-top: 1px solid var(--border, var(--grayscale-a5));
 }
 
-.dynamo-benchmark-meta span {
-    color: var(--pst-color-text-muted);
-    font-size: 12px;
-    line-height: 1.2;
+.dynamo-benchmark-targets span {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+    padding: 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    background: var(--nv-color-bg-default);
 }
 
-.dynamo-benchmark-meta span:not(:last-child)::after {
-    content: "/";
-    margin-left: 6px;
-    color: var(--border, var(--grayscale-a5));
+.dark .dynamo-benchmark-targets span {
+    background: var(--nv-dark-grey-1);
+}
+
+.dynamo-benchmark-targets b {
+    color: var(--pst-color-text-muted);
+    font-size: 10px;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-benchmark-targets strong {
+    color: var(--pst-color-text-base);
+    font-size: 14px;
+    line-height: 1.25;
+    overflow-wrap: break-word;
 }
 
 .dynamo-benchmark-hero {
@@ -2450,19 +2476,19 @@ svg.card-icon{
     .dynamo-benchmark-kind,
     .dynamo-benchmark-card h2,
     .dynamo-benchmark-card p,
-    .dynamo-feature-chip-row,
-    .dynamo-benchmark-meta {
+    .dynamo-benchmark-features,
+    .dynamo-benchmark-targets {
         grid-column: 1;
         grid-row: auto;
-    }
-
-    .dynamo-feature-symbol-row {
-        margin-bottom: 2px;
     }
 
     .dynamo-benchmark-model {
         flex-basis: auto;
         width: 100%;
         max-width: 100%;
+    }
+
+    .dynamo-benchmark-targets {
+        grid-template-columns: 1fr;
     }
 }
