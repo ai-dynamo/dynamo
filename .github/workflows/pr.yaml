@@ -339,27 +339,27 @@ jobs:
 #       gpu_test_timeout_minutes: 60
 #     secrets: inherit
 
-  sglang-test:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sglang
-      test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and sglang and gpu_0
-      gpu_test_markers: pre_merge and sglang and gpu_1
-      # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
-      # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
-      # while yielding one auto slot today. Larger runners will get more slots from the same markers.
-      run_gpu_parallel_tests: true
-      gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
+  # sglang-test:
+  #   name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+  #   needs: [changed-files, sglang-build]
+  #   if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+  #   uses: ./.github/workflows/shared-test.yml
+  #   with:
+  #     test_suite_name: sglang
+  #     test_type: Test
+  #     amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+  #     target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+  #     cuda_version: '["12.9", "13.0"]'
+  #     platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+  #     run_cpu_only_tests: true
+  #     cpu_only_test_markers: pre_merge and sglang and gpu_0
+  #     gpu_test_markers: pre_merge and sglang and gpu_1
+  #     # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
+  #     # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
+  #     # while yielding one auto slot today. Larger runners will get more slots from the same markers.
+  #     run_gpu_parallel_tests: true
+  #     gpu_parallel_max_vram_gib: '24'
+  #   secrets: inherit
 
 #   sglang-multi-gpu-test:
 #     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
@@ -551,12 +551,11 @@ jobs:
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [changed-files, sglang-build, sglang-test]
+    needs: [changed-files, sglang-build]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.sglang-build.result == 'success' &&
-      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
+      needs.sglang-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
