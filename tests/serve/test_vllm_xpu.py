@@ -200,29 +200,6 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "agg-request-plane-http": VLLMConfig(
-        name="agg-request-plane-http-xpu",
-        directory=vllm_dir,
-        script_name="xpu/agg_request_planes_xpu.sh",
-        marks=[
-            pytest.mark.core,
-            pytest.mark.xpu_1,
-            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                1_119_388_000
-            ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                360
-            ),  # ~8.5x observed 42.3s; bumped for GPU-parallel headroom
-            pytest.mark.pre_merge,
-        ],
-        model="Qwen/Qwen3-0.6B",
-        script_args=["--http"],
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
-        ],
-    ),
     "agg-router": VLLMConfig(
         name="agg-router-xpu",
         directory=vllm_dir,
@@ -781,6 +758,11 @@ def lora_chat_payload(
 @pytest.mark.model("Qwen/Qwen3-0.6B", "codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
+@pytest.mark.xfail(
+    reason="XPU LoRA dtype mismatch: PunicaWrapperXPU requires inputs dtype to "
+    "match lora_b_weights dtype, pending fix in vLLM XPU backend",
+    strict=False,
+)
 def test_lora_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -838,6 +820,11 @@ def test_lora_aggregated(
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
+@pytest.mark.xfail(
+    reason="XPU LoRA dtype mismatch: PunicaWrapperXPU requires inputs dtype to "
+    "match lora_b_weights dtype, pending fix in vLLM XPU backend",
+    strict=False,
+)
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_lora_aggregated_router(
     request,

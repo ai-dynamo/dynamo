@@ -30,6 +30,7 @@ from dynamo.llm import ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine import LLMEngine
+from .health_check import parse_health_check_payload_cli
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,9 @@ class WorkerConfig:
     # Decode→disable local indexer); engines read it from their own runtime
     # config to switch per-mode protocol behavior in `generate()`.
     disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
+    # Operator override; when set, the Rust Worker uses this instead of
+    # `engine.health_check_payload()`. Populated by `from_runtime_config`.
+    health_check_payload: Optional[dict] = None
 
     @classmethod
     def from_runtime_config(
@@ -152,6 +156,9 @@ class WorkerConfig:
             )
         if model_input is not None:
             kwargs["model_input"] = model_input
+        kwargs["health_check_payload"] = parse_health_check_payload_cli(
+            getattr(runtime_cfg, "health_check_payload", None)
+        )
         kwargs.update(overrides)
         return cls(**kwargs)
 
@@ -204,6 +211,7 @@ class Worker:
             disaggregation_mode=_to_rust_disaggregation_mode(
                 self.config.disaggregation_mode
             ),
+            health_check_payload=self.config.health_check_payload,
             runtime=runtime_cfg,
         )
 
