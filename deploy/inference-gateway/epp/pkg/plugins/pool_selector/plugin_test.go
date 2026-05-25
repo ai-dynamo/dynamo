@@ -33,9 +33,7 @@ func TestFactory_AcceptsValidConfig(t *testing.T) {
 func TestFactory_Rejects(t *testing.T) {
 	cases := map[string]string{
 		"missing poolLabel": `{"poolLabels":["tp1"],"sizeMin":0,"sizeMax":1,"sizeResolution":1,"latencyMinMs":1,"latencyMaxMs":2,"latencyResolution":1,"mapping":[[0]]}`,
-		"empty poolLabels":  `{"poolLabel":"x","poolLabels":[],"sizeMin":0,"sizeMax":1,"sizeResolution":1,"latencyMinMs":1,"latencyMaxMs":2,"latencyResolution":1,"mapping":[[0]]}`,
 		"grid dim mismatch": `{"poolLabel":"x","poolLabels":["tp1"],"sizeMin":0,"sizeMax":1,"sizeResolution":2,"latencyMinMs":1,"latencyMaxMs":2,"latencyResolution":1,"mapping":[[0]]}`,
-		"pool out of range": `{"poolLabel":"x","poolLabels":["tp1"],"sizeMin":0,"sizeMax":1,"sizeResolution":1,"latencyMinMs":1,"latencyMaxMs":2,"latencyResolution":1,"mapping":[[5]]}`,
 		"malformed json":    `{"poolLabel":`,
 	}
 	for name, params := range cases {

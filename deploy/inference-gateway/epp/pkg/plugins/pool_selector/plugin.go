@@ -125,7 +125,8 @@ func (p *PoolSelector) Filter(ctx context.Context, _ *schedtypes.CycleState, req
 			"isl", isl, "ttftMs", ttftMs, "pool", target)
 		return endpoints
 	}
-	logger.Info("pool-selector: routed",
+	// Per-request routing decision: debug-level, this is the hot path.
+	logger.V(1).Info("pool-selector: routed",
 		"isl", isl, "ttftMs", ttftMs, "priority", priority, "pool", target, "candidates", len(filtered))
 	return filtered
 }
