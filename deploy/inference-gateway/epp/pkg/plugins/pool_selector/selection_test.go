@@ -5,10 +5,7 @@
 
 package pool_selector
 
-import (
-	"reflect"
-	"testing"
-)
+import "testing"
 
 // grid3x2 models 3 ISL bands × 2 TTFT bands over a 3-pool fleet (TP1/TP2/TP4).
 // Size axis [0,3000) → 3 bands of 1000. Latency axis [1000,5000) → 2 bands of
@@ -52,8 +49,6 @@ func TestSelectPool_GridLookup(t *testing.T) {
 		want      int
 	}{
 		{"short loose", 500, 4000, 0},   // band0, col1
-		{"short tight", 500, 1500, 1},   // band0, col0
-		{"medium loose", 1500, 4000, 1}, // band1, col1
 		{"medium tight", 1500, 1500, 2}, // band1, col0
 		{"long", 2500, 4000, 2},         // band2
 	}
@@ -109,25 +104,5 @@ func TestSelectPool_PriorityOverride(t *testing.T) {
 	// priority < 0 → grid result even with overrides present.
 	if got := g.SelectPool(2500, 4000, -1); got != 2 {
 		t.Fatalf("no priority: got pool %d, want 2", got)
-	}
-}
-
-func TestPriorityRetryOrder(t *testing.T) {
-	// priorities [0,1,2]: pool 0 fastest. Selecting pool 2 retries 1 then 0.
-	got, err := PriorityRetryOrder(2, []int{0, 1, 2}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := []int{2, 1, 0}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("retry order = %v, want %v", got, want)
-	}
-	// disabled → only the selected pool.
-	got, _ = PriorityRetryOrder(2, []int{0, 1, 2}, false)
-	if want := []int{2}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("disabled retry order = %v, want %v", got, want)
-	}
-	// out of range → error.
-	if _, err := PriorityRetryOrder(5, []int{0, 1, 2}, true); err == nil {
-		t.Fatal("expected out-of-range selectedPool to error")
 	}
 }

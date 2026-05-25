@@ -760,31 +760,11 @@ def build_isl_latency_grid(
 ) -> List[List[int]]:
     """Build the (size x latency) -> pool-index grid from per-pool latency curves.
 
-    This is the bridge from the DGDR profiler's per-pool interpolation curves
-    (TTFT-vs-ISL, produced in profiler/interpolation.py) to the grid that both
-    the standalone Global Router (PrefillPoolSelectionStrategy.select_pool) and
-    the EPP ``pool-selector`` plugin consume. Producing one grid here keeps the
-    gateway and standalone routing paths in parity (goal.md Phase 3).
-
-    Selection rule (the cost-efficiency objective from goal.md design note #1):
-    for each (size, latency-target) cell, route to the **cheapest** pool whose
-    predicted latency at that size meets the target; if no pool meets it, route
-    to the **fastest** pool (lowest predicted latency) so the request still goes
-    somewhere sensible.
-
-    Args:
-        pool_latency_curves: one callable per pool mapping size (ISL, or context
-            length) -> predicted latency in ms (TTFT or ITL). Indexed by pool.
-        pool_costs: relative cost per pool (e.g. GPUs: TP1=1, TP2=2, TP4=4),
-            same length/order as pool_latency_curves. Lower = preferred.
-        size_min/size_max/size_resolution: size-axis grid (cells use the band
-            midpoint as the representative size).
-        latency_min_ms/latency_max_ms/latency_resolution: latency-target axis.
-
-    Returns:
-        mapping[size_idx][latency_idx] = pool index, shaped
-        size_resolution x latency_resolution (the format GridSelectionStrategy /
-        the EPP pool-selector expect).
+    The bridge from the profiler's per-pool TTFT-vs-ISL curves to the grid that
+    both the Global Router and the EPP pool-selector consume (one grid → parity).
+    Per cell: the cheapest pool (lowest ``pool_costs``) whose predicted latency at
+    the band midpoint meets the target, else the fastest. Curves and costs are
+    indexed by pool; cells use the band midpoint as the representative size.
     """
     if not pool_latency_curves:
         raise ValueError("need at least one pool latency curve")
