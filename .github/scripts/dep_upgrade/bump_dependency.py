@@ -22,7 +22,7 @@ TRTLLM_TARGETS: list[tuple[str, Pattern[str], str]] = [
         # Match runtime_image_tag inside the trtllm: block (first sub-block,
         # e.g. cuda13.1) without colliding with vllm/sglang earlier in the file.
         re.compile(
-            r"(?ms)(^trtllm:\s*?\n(?:[ \t]+.*\n)*?[ \t]+runtime_image_tag:\s+)\S+",
+            r"(?m)(^trtllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s+)\S+",
         ),
         r"\g<1>{ver}",
     ),

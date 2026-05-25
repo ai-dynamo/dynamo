@@ -24,7 +24,7 @@ FRAMEWORK_SOURCES: dict[str, dict[str, object]] = {
         # Anchored inside the trtllm: block so we don't pick up
         # vllm/sglang runtime_image_tag lines earlier in the file.
         "current_regex": re.compile(
-            r"(?ms)^trtllm:\s*?\n(?:[ \t]+.*\n)*?[ \t]+runtime_image_tag:\s*(\S+)\s*$",
+            r"(?m)^trtllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s*(\S+)\s*$",
         ),
     },
 }
