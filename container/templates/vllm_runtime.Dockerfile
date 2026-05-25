@@ -24,11 +24,34 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+ARG PYTHON_VERSION
+ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
+ARG VLLM_OMNI_REF
+ARG NIXL_REF
+{% if device == "cuda" %}
+ARG CUDA_MAJOR
+{% endif %}
+
 ARG DEVICE
 WORKDIR /workspace
 ENV DYNAMO_HOME=/opt/dynamo
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+{% if device == "cuda" %}
+# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel on
+# LD_LIBRARY_PATH so dlopen() can find it from processes that don't import
+# the `nixl` Python package — chiefly `dynamo.frontend`, which is pure-Rust
+# from a process perspective. Without this, Rust nixl-sys's stub-mode runtime
+# loader returns is_stub()=true and the frontend rejects any model card
+# carrying a `media_decoder` (i.e. workers launched with --frontend-decoding)
+# with "OpenAIPreprocessor.new_with_parts: NIXL is not supported in stub mode".
+# The wheel installs libnixl.so under a hidden ".libs/" sibling that only the
+# wheel's own RPATH knows about; standard LD search can't find it without help.
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ENV LD_LIBRARY_PATH=${SITE_PACKAGES}/.nixl_cu${CUDA_MAJOR}.mesonpy.libs:${LD_LIBRARY_PATH:-}
+{% endif %}
 
 {% if device == "xpu" %}
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
