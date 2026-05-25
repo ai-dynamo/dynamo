@@ -108,17 +108,22 @@ Roughly in priority order:
 
 ## Tracing
 
-When the frontend has agent-trace enabled
-(`DYN_AGENT_TRACE_SINKS=jsonl`, `DYN_AGENT_TRACE_OUTPUT_PATH=...`), every
-LLM call lands a `request_end` record carrying `trajectory_id`,
+Enable agent tracing on the frontend with the master switch
+`DYN_AGENT_TRACE=1`. That turns on sane defaults: the `jsonl_gz` sink at
+`/tmp/dynamo-agent-trace`, the tool-events ZMQ socket bound at
+`tcp://127.0.0.1:20390`, and replay hashes. Override any of them with
+`DYN_AGENT_TRACE_SINKS` (e.g. `jsonl`, `stderr`),
+`DYN_AGENT_TRACE_OUTPUT_PATH`, and `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT`.
+
+Every LLM call then lands a `request_end` record carrying `trajectory_id`,
 `session_id`, `input_tokens`, `output_tokens`, `cached_tokens`,
 `request_received_ms`, `total_time_ms`, and the block-level
 `input_sequence_hashes` — enough for offline replay against this router.
-With a producer-side ZMQ publisher (set
-`DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` on the harness), `tool_start` /
-`tool_end` / `tool_error` events come through with the same
-`trajectory_id` and matching `tool_call_id` pairs, giving you the full
-LLM-turn ↔ tool-gap timeline per agent.
+Dynamo owns the ZMQ bind side, so point your harness's tool-event publisher
+at that endpoint (producers connect) and `tool_start` / `tool_end` /
+`tool_error` events arrive with the same `trajectory_id` and matching
+`tool_call_id` pairs, giving you the full LLM-turn ↔ tool-gap timeline per
+agent.
 
 ---
 
