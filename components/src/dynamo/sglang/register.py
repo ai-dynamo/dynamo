@@ -23,6 +23,7 @@ from dynamo.llm import (
     ModelType,
     register_model,
 )
+from dynamo.sglang._capacity import local_dp_rank_bounds, runtime_capacity
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig
@@ -272,12 +273,15 @@ async def _get_runtime_config(
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
 
-    # Set data_parallel_size for DP attention mode
-    # This enables the router to correctly track per-(worker_id, dp_rank) pairs
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    runtime_config.data_parallel_size = dp_size
-    if dp_size > 1:
-        logging.info(f"Registering with data_parallel_size={dp_size}")
+    start_dp_rank, end_dp_rank = local_dp_rank_bounds(server_args)
+    runtime_config.data_parallel_start_rank = start_dp_rank
+    runtime_config.data_parallel_size = end_dp_rank - start_dp_rank
+    if runtime_config.data_parallel_size > 1:
+        logging.info(
+            "Registering with local data_parallel rank range [%s, %s)",
+            start_dp_rank,
+            end_dp_rank,
+        )
 
     worker_group_id = get_sglang_worker_group_id(server_args)
     if worker_group_id is not None:
@@ -310,13 +314,11 @@ async def _get_runtime_config(
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
     # Note: If --max-running-requests is not specified, SGLang uses an internal default
     # undocumented value. The value here will be None if not explicitly set by user.
-    max_running_requests = getattr(server_args, "max_running_requests", None)
-    if max_running_requests:
-        runtime_config.max_num_seqs = max_running_requests
-
-    max_prefill_tokens = getattr(server_args, "max_prefill_tokens", None)
-    if max_prefill_tokens:
-        runtime_config.max_num_batched_tokens = max_prefill_tokens
+    base_capacity = runtime_capacity(server_args, {})
+    if base_capacity.max_num_seqs is not None:
+        runtime_config.max_num_seqs = base_capacity.max_num_seqs
+    if base_capacity.max_num_batched_tokens is not None:
+        runtime_config.max_num_batched_tokens = base_capacity.max_num_batched_tokens
 
     if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
         runtime_config.enable_eagle = True
@@ -336,31 +338,30 @@ async def _get_runtime_config(
 
     try:
         scheduler_info = get_scheduler_info(engine)
+        capacity = runtime_capacity(server_args, scheduler_info)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
 
         if max_total_tokens:
-            page_size = server_args.page_size
-            if page_size:
-                runtime_config.total_kv_blocks = (
-                    max_total_tokens + page_size - 1
-                ) // page_size
+            if capacity.total_kv_blocks is not None:
+                runtime_config.total_kv_blocks = capacity.total_kv_blocks
                 logging.info(
                     f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
-                    f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
+                    f"(max_total_tokens={max_total_tokens}, page_size={server_args.page_size})"
                 )
 
             # When max_prefill_tokens is not explicitly set by the user, fall back
             # to max_total_num_tokens from the scheduler. This ensures the planner
             # always has a prefill load signal for aggregated scaling decisions.
-            if not max_prefill_tokens:
-                runtime_config.max_num_batched_tokens = max_total_tokens
+            if getattr(server_args, "max_prefill_tokens", None) is None:
+                runtime_config.max_num_batched_tokens = capacity.max_num_batched_tokens
                 logging.info(
                     f"max_prefill_tokens not set, using max_total_num_tokens "
-                    f"from scheduler as max_num_batched_tokens: {max_total_tokens}"
+                    f"from scheduler as max_num_batched_tokens: "
+                    f"{capacity.max_num_batched_tokens}"
                 )
         else:
             unpublished = "total_kv_blocks"
-            if not max_prefill_tokens:
+            if getattr(server_args, "max_prefill_tokens", None) is None:
                 unpublished += " and max_num_batched_tokens"
             logging.warning(
                 f"Could not access scheduler info from SGLang engine. "
