@@ -48,7 +48,8 @@ use crate::{BlockId, G2, InstanceId, SequenceHash};
 
 use super::{
     AvailabilityDelta, AvailabilityStream, CommitDelta, CommitStream, CommittedBlock,
-    LifecycleEvent, LifecycleStream, Session, SessionFactory, SessionId,
+    LifecycleEvent, LifecycleStream, PeerAvailable, PeerCommitted, Session, SessionFactory,
+    SessionId,
 };
 
 // ============================================================================
@@ -149,6 +150,12 @@ struct MockSessionInner {
     // ---- peer-side read model (driven by inject knobs) ----
     peer_committed: BTreeSet<SequenceHash>,
     peer_available: BTreeMap<SequenceHash, BlockId>,
+    /// Set by `inject_peer_finish_commits`; mirrors
+    /// `VeloSession`'s `peer_commits_closed`.
+    peer_commits_closed: bool,
+    /// Set by `inject_peer_drained`; mirrors `VeloSession`'s
+    /// `peer_avail_drained`.
+    peer_avail_drained: bool,
 
     // ---- holder-side local state ----
     committed: BTreeSet<SequenceHash>,
@@ -180,6 +187,8 @@ impl MockSessionInner {
         Self {
             peer_committed: BTreeSet::new(),
             peer_available: BTreeMap::new(),
+            peer_commits_closed: false,
+            peer_avail_drained: false,
             committed: BTreeSet::new(),
             available_pins: BTreeMap::new(),
             commit_calls: Vec::new(),
@@ -382,6 +391,7 @@ impl MockSession {
         if inner.commits_state.is_terminated() {
             return;
         }
+        inner.peer_commits_closed = true;
         inner.commits_state.push(CommitDelta::Closed);
         inner.commits_state.terminate();
     }
@@ -404,6 +414,7 @@ impl MockSession {
         if inner.availability_state.is_terminated() {
             return;
         }
+        inner.peer_avail_drained = true;
         inner.availability_state.push(AvailabilityDelta::Drained);
         inner.availability_state.terminate();
     }
@@ -625,6 +636,9 @@ impl Session for MockSession {
     fn commit(&self, hashes: Vec<SequenceHash>) -> Result<()> {
         {
             let mut inner = self.inner.lock();
+            if inner.finish_commits_called {
+                return Err(anyhow!("commit: cannot commit after finish_commits"));
+            }
             inner.commit_calls.push(hashes.clone());
             for h in &hashes {
                 inner.committed.insert(*h);
@@ -649,6 +663,11 @@ impl Session for MockSession {
         let mut peer_committed_blocks: Vec<CommittedBlock> = Vec::with_capacity(blocks.len());
         {
             let mut inner = self.inner.lock();
+            if inner.finish_availability_called {
+                return Err(anyhow!(
+                    "make_available: cannot make_available after finish_availability"
+                ));
+            }
             for block in &blocks {
                 let hash = block.sequence_hash();
                 if !inner.committed.contains(&hash) {
@@ -691,20 +710,31 @@ impl Session for MockSession {
         self.take_availability_stream()
     }
 
-    fn peer_committed(&self) -> Vec<SequenceHash> {
-        self.inner.lock().peer_committed.iter().copied().collect()
+    fn peer_committed(&self) -> PeerCommitted {
+        let inner = self.inner.lock();
+        let v: Vec<SequenceHash> = inner.peer_committed.iter().copied().collect();
+        if inner.peer_commits_closed {
+            PeerCommitted::Sealed(v)
+        } else {
+            PeerCommitted::Open(v)
+        }
     }
 
-    fn peer_available(&self) -> Vec<CommittedBlock> {
-        self.inner
-            .lock()
+    fn peer_available(&self) -> PeerAvailable {
+        let inner = self.inner.lock();
+        let v: Vec<CommittedBlock> = inner
             .peer_available
             .iter()
             .map(|(&hash, &peer_block_id)| CommittedBlock {
                 hash,
                 peer_block_id,
             })
-            .collect()
+            .collect();
+        if inner.peer_avail_drained {
+            PeerAvailable::Sealed(v)
+        } else {
+            PeerAvailable::Open(v)
+        }
     }
 
     fn pull(

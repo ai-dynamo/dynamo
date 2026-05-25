@@ -68,6 +68,74 @@ pub enum AvailabilityDelta {
     Drained,
 }
 
+/// Point-in-time snapshot of the peer's committed-hash set,
+/// carrying the seal status as a type-level discriminant.
+///
+/// - `Open` — peer has not yet signaled `CommitsClosed`; the set
+///   MAY grow. Safe for diagnostics and progress inspection; do
+///   NOT use to size a pull (drain `commits()` to `Closed` first).
+/// - `Sealed` — peer has signaled `CommitsClosed`; the set is
+///   final. Safe to size a pull from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerCommitted {
+    Open(Vec<SequenceHash>),
+    Sealed(Vec<SequenceHash>),
+}
+
+impl PeerCommitted {
+    /// Borrow the inner slice regardless of seal status.
+    pub fn as_slice(&self) -> &[SequenceHash] {
+        match self {
+            Self::Open(v) | Self::Sealed(v) => v.as_slice(),
+        }
+    }
+
+    /// `true` if the peer has signaled `CommitsClosed`.
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, Self::Sealed(_))
+    }
+
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+}
+
+/// Point-in-time snapshot of the peer's available-block set,
+/// carrying the seal status as a type-level discriminant.
+///
+/// - `Open` — peer has not yet signaled `Drained`; the set MAY
+///   grow. Do NOT use to size a pull.
+/// - `Sealed` — peer has signaled `Drained`; the set is final.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerAvailable {
+    Open(Vec<CommittedBlock>),
+    Sealed(Vec<CommittedBlock>),
+}
+
+impl PeerAvailable {
+    pub fn as_slice(&self) -> &[CommittedBlock] {
+        match self {
+            Self::Open(v) | Self::Sealed(v) => v.as_slice(),
+        }
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, Self::Sealed(_))
+    }
+
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+}
+
 /// Lifecycle event for an active session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleEvent {
@@ -196,16 +264,23 @@ pub trait Session: Send + Sync {
     /// in `Drained`.
     fn availability(&self) -> AvailabilityStream;
 
-    /// Snapshot of the peer's currently-committed set. Pure
-    /// local read.
-    fn peer_committed(&self) -> Vec<SequenceHash>;
+    /// Point-in-time snapshot of the peer's committed-hash set
+    /// with seal status. Returns [`PeerCommitted::Sealed`] once
+    /// the peer has signaled `CommitsClosed`; until then,
+    /// [`PeerCommitted::Open`]. The `Open` set MAY grow — do not
+    /// use it to size a pull (drain [`Self::commits`] to `Closed`
+    /// first, or wait for `Sealed`).
+    fn peer_committed(&self) -> PeerCommitted;
 
-    /// Snapshot of the peer's currently-available blocks.
-    /// Pure local read.
-    fn peer_available(&self) -> Vec<CommittedBlock>;
+    /// Point-in-time snapshot of the peer's available-block set
+    /// with seal status. Returns [`PeerAvailable::Sealed`] once
+    /// the peer has signaled `Drained`; until then,
+    /// [`PeerAvailable::Open`].
+    fn peer_available(&self) -> PeerAvailable;
 
     /// Pull `hashes` from the peer into `dst`. Each hash must
-    /// be in `peer_available` at call time (validated).
+    /// already be in the peer-available set at call time
+    /// (validated internally; synchronous error otherwise).
     /// `hashes.len() == dst.len()`. Data lands in zipped
     /// order; future resolves on transfer completion.
     fn pull(

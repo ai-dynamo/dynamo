@@ -34,7 +34,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     AvailabilityDelta, AvailabilityStream, CommitDelta, CommitStream, CommittedBlock, Frame,
-    LifecycleEvent, LifecycleStream, PeerResolver, Session, SessionFactory, SessionId,
+    LifecycleEvent, LifecycleStream, PeerAvailable, PeerCommitted, PeerResolver, Session,
+    SessionFactory, SessionId,
 };
 use crate::leader::InstanceLeader;
 use crate::leader::dispatch::{PullRef, WirePullOptions};
@@ -145,6 +146,13 @@ struct VeloSessionInner {
     // Peer state vectors (replicated from inbound frames)
     peer_committed: Mutex<BTreeSet<SequenceHash>>,
     peer_available: Mutex<BTreeMap<SequenceHash, BlockId>>,
+
+    /// Set when peer sends `Frame::CommitsClosed`. Discriminant
+    /// for `PeerCommitted::Open` vs `Sealed` snapshots.
+    peer_commits_closed: Mutex<bool>,
+    /// Set when peer sends `Frame::Drained`. Discriminant for
+    /// `PeerAvailable::Open` vs `Sealed` snapshots.
+    peer_avail_drained: Mutex<bool>,
 
     // Pending pulls keyed by pull_id. The oneshot resolves on
     // inbound `PullComplete`.
@@ -284,6 +292,8 @@ impl VeloSession {
             available_pins: Mutex::new(BTreeMap::new()),
             peer_committed: Mutex::new(BTreeSet::new()),
             peer_available: Mutex::new(BTreeMap::new()),
+            peer_commits_closed: Mutex::new(false),
+            peer_avail_drained: Mutex::new(false),
             pending_pulls: DashMap::new(),
             inbound_pulls: DashMap::new(),
             next_pull_id: AtomicU64::new(1),
@@ -533,6 +543,18 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                 session_id = %session_id,
                 num_hashes = hashes.len()
             );
+            // Guard: peer-side Sealed snapshot must be immutable.
+            // A Frame::Commit arriving after Frame::CommitsClosed is
+            // a protocol violation; drop it without mutating
+            // peer_committed or the stream.
+            if *inner.peer_commits_closed.lock() {
+                tracing::error!(
+                    session_id = %session_id,
+                    num_hashes = hashes.len(),
+                    "protocol violation: Frame::Commit after Frame::CommitsClosed dropped"
+                );
+                return;
+            }
             {
                 let mut peer_committed = inner.peer_committed.lock();
                 peer_committed.extend(hashes.iter().copied());
@@ -544,6 +566,7 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                 "session_recv_commits_closed",
                 session_id = %session_id
             );
+            *inner.peer_commits_closed.lock() = true;
             inner.commit_stream.push(CommitDelta::Closed);
         }
         Frame::Available { blocks } => {
@@ -552,6 +575,17 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                 session_id = %session_id,
                 num_blocks = blocks.len()
             );
+            // Guard: peer-side Sealed snapshot must be immutable.
+            // A Frame::Available arriving after Frame::Drained is
+            // a protocol violation; drop it.
+            if *inner.peer_avail_drained.lock() {
+                tracing::error!(
+                    session_id = %session_id,
+                    num_blocks = blocks.len(),
+                    "protocol violation: Frame::Available after Frame::Drained dropped"
+                );
+                return;
+            }
             {
                 let mut peer_available = inner.peer_available.lock();
                 for b in &blocks {
@@ -567,6 +601,7 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                 "session_recv_drained",
                 session_id = %session_id
             );
+            *inner.peer_avail_drained.lock() = true;
             inner.avail_stream.push(AvailabilityDelta::Drained);
         }
         Frame::Pull { pull_id, hashes } => {
@@ -676,6 +711,21 @@ impl VeloSession {
     #[cfg(any(test, feature = "testing"))]
     pub fn test_inbound_pulls_count(&self) -> usize {
         self.inner.inbound_pulls.len()
+    }
+
+    /// Test-only: snapshot of the hash lists recorded for each
+    /// authorized-but-unacked inbound pull. Lets pairing tests
+    /// assert that `Frame::Pull` arrived with hashes in the
+    /// caller's order. Iteration order across pull_ids is
+    /// `DashMap`-defined (non-deterministic); each per-pull
+    /// `Vec<SequenceHash>` preserves the wire-receive order.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn test_inbound_pull_hashes(&self) -> Vec<Vec<SequenceHash>> {
+        self.inner
+            .inbound_pulls
+            .iter()
+            .map(|kv| kv.value().clone())
+            .collect()
     }
 }
 
@@ -813,6 +863,17 @@ impl Session for VeloSession {
     }
 
     fn commit(&self, hashes: Vec<SequenceHash>) -> Result<()> {
+        // Hold `commits_closed` from flag-check through enqueue.
+        // `commit` and `finish_commits` serialize on this mutex, so
+        // wire-enqueue order matches the (post-acquire) call order:
+        // a concurrent `finish_commits` either runs entirely before
+        // this commit's check (we bail Err) or entirely after this
+        // commit's enqueue (its CommitsClosed lands after our
+        // Commit). No TOCTOU between check and `enqueue_frame`.
+        let closed_guard = self.inner.commits_closed.lock();
+        if *closed_guard {
+            anyhow::bail!("commit: cannot commit after finish_commits");
+        }
         crate::engine_audit!(
             "session_commit",
             session_id = %self.inner.session_id,
@@ -830,6 +891,7 @@ impl Session for VeloSession {
         if let Err(err) = self.enqueue_frame(Frame::Commit { hashes }) {
             tracing::error!(error = %err, "enqueue Commit failed");
         }
+        drop(closed_guard);
         Ok(())
     }
 
@@ -838,20 +900,30 @@ impl Session for VeloSession {
             "session_finish_commits",
             session_id = %self.inner.session_id
         );
-        {
-            let mut closed = self.inner.commits_closed.lock();
-            if *closed {
-                return Ok(());
-            }
-            *closed = true;
+        // Hold the lock from flag-flip through enqueue so a concurrent
+        // commit either bails (Err) before our CommitsClosed enqueues
+        // OR completes its own Commit enqueue before ours. See `commit`
+        // doc above.
+        let mut closed = self.inner.commits_closed.lock();
+        if *closed {
+            return Ok(());
         }
+        *closed = true;
         if let Err(err) = self.enqueue_frame(Frame::CommitsClosed) {
             tracing::error!(error = %err, "enqueue CommitsClosed failed");
         }
+        drop(closed);
         Ok(())
     }
 
     fn make_available(&self, blocks: Vec<ImmutableBlock<G2>>) -> Result<()> {
+        // Hold `avail_drained` from check through enqueue — see
+        // `commit` for the rationale. Serialises with
+        // `finish_availability`.
+        let drained_guard = self.inner.avail_drained.lock();
+        if *drained_guard {
+            anyhow::bail!("make_available: cannot make_available after finish_availability");
+        }
         crate::engine_audit!(
             "session_make_available",
             session_id = %self.inner.session_id,
@@ -890,6 +962,7 @@ impl Session for VeloSession {
         if let Err(err) = self.enqueue_frame(Frame::Available { blocks: payload }) {
             tracing::error!(error = %err, "enqueue Available failed");
         }
+        drop(drained_guard);
         Ok(())
     }
 
@@ -898,16 +971,17 @@ impl Session for VeloSession {
             "session_finish_availability",
             session_id = %self.inner.session_id
         );
-        {
-            let mut drained = self.inner.avail_drained.lock();
-            if *drained {
-                return Ok(());
-            }
-            *drained = true;
+        // Hold the lock from flag-flip through enqueue. See
+        // `finish_commits` for the rationale.
+        let mut drained = self.inner.avail_drained.lock();
+        if *drained {
+            return Ok(());
         }
+        *drained = true;
         if let Err(err) = self.enqueue_frame(Frame::Drained) {
             tracing::error!(error = %err, "enqueue Drained failed");
         }
+        drop(drained);
         Ok(())
     }
 
@@ -921,12 +995,20 @@ impl Session for VeloSession {
         build_avail_stream(rx, replay)
     }
 
-    fn peer_committed(&self) -> Vec<SequenceHash> {
-        self.inner.peer_committed.lock().iter().copied().collect()
+    fn peer_committed(&self) -> PeerCommitted {
+        let sealed = *self.inner.peer_commits_closed.lock();
+        let v: Vec<SequenceHash> = self.inner.peer_committed.lock().iter().copied().collect();
+        if sealed {
+            PeerCommitted::Sealed(v)
+        } else {
+            PeerCommitted::Open(v)
+        }
     }
 
-    fn peer_available(&self) -> Vec<CommittedBlock> {
-        self.inner
+    fn peer_available(&self) -> PeerAvailable {
+        let sealed = *self.inner.peer_avail_drained.lock();
+        let v: Vec<CommittedBlock> = self
+            .inner
             .peer_available
             .lock()
             .iter()
@@ -934,7 +1016,12 @@ impl Session for VeloSession {
                 hash: *h,
                 peer_block_id: *id,
             })
-            .collect()
+            .collect();
+        if sealed {
+            PeerAvailable::Sealed(v)
+        } else {
+            PeerAvailable::Open(v)
+        }
     }
 
     fn pull(

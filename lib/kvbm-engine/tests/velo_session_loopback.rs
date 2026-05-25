@@ -482,17 +482,22 @@ async fn pull_validation_synchronous_error() -> Result<()> {
     // Indirect proof that no Frame::Pull went on the wire: holder's
     // peer_committed / peer_available remain empty after a settling
     // delay. (No outgoing frames would mutate holder's peer state.)
+    // Snapshots return PeerCommitted::Open([]) / PeerAvailable::Open([])
+    // — peer never sent CommitsClosed/Drained, so the seal flags are
+    // unset; what matters here is the contents are empty.
     tokio::time::sleep(Duration::from_millis(150)).await;
+    let pc = h_session.peer_committed();
     assert!(
-        h_session.peer_committed().is_empty(),
-        "holder saw unexpected commits: {:?}",
-        h_session.peer_committed()
+        !pc.is_sealed(),
+        "holder unexpectedly sealed commits: {pc:?}"
     );
+    assert!(pc.is_empty(), "holder saw unexpected commits: {pc:?}");
+    let pa = h_session.peer_available();
     assert!(
-        h_session.peer_available().is_empty(),
-        "holder saw unexpected availability: {:?}",
-        h_session.peer_available()
+        !pa.is_sealed(),
+        "holder unexpectedly sealed availability: {pa:?}"
     );
+    assert!(pa.is_empty(), "holder saw unexpected availability: {pa:?}");
 
     Ok(())
 }
