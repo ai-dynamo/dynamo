@@ -20,6 +20,7 @@ use crate::{
     discovery::ModelManager,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        preprocessor::RoutingHints,
         timing::{RequestPhase, RequestTracker},
     },
 };
@@ -32,6 +33,16 @@ mod types;
 use inner::InnerPrefillRouter;
 pub use types::{PrefillError, PrefillQueryOutcome};
 use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override};
+
+fn record_selected_prefill_route(
+    routing: &mut RoutingHints,
+    worker_id: u64,
+    dp_rank: Option<u32>,
+) {
+    routing.prefill_worker_id = Some(worker_id);
+    routing.dp_rank = dp_rank;
+    routing.prefill_dp_rank = dp_rank;
+}
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
@@ -129,6 +140,8 @@ impl
             ));
         }
 
+        let mut selected_prefill_dp_rank = None;
+
         let prefill_result = match self
             .resolve_prefill_worker(&prefill_req, preselected_worker)
             .await
@@ -147,9 +160,9 @@ impl
                     router.select_next_worker();
                 }
 
-                let routing = prefill_req.routing_mut();
-                routing.prefill_worker_id = Some(worker_id);
-                routing.dp_rank = dp_rank;
+                selected_prefill_dp_rank = dp_rank;
+
+                record_selected_prefill_route(prefill_req.routing_mut(), worker_id, dp_rank);
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 // NVBugs 5969206: Do NOT link prefill as child of engine context.
@@ -258,6 +271,14 @@ impl
 
                 let mut decode_req = req;
 
+                // Preserve the prefill router's DP-rank choice for decode-side
+                // adapters. The decode router may overwrite `routing.dp_rank`
+                // with its own decode DP rank before the backend receives the
+                // request, so the prefill rank must live in its dedicated field.
+                if let Some(dp_rank) = selected_prefill_dp_rank {
+                    decode_req.routing_mut().prefill_dp_rank = Some(dp_rank);
+                }
+
                 match outcome {
                     PrefillOutcome::Bootstrap(info) => {
                         decode_req.bootstrap_info = Some(info);
@@ -303,6 +324,17 @@ impl
 mod tests {
     use super::*;
     use dynamo_kv_router::config::RouterConfigOverride;
+
+    #[test]
+    fn selected_prefill_route_sets_prefill_and_backend_dp_rank() {
+        let mut routing = RoutingHints::default();
+
+        record_selected_prefill_route(&mut routing, 12, Some(3));
+
+        assert_eq!(routing.prefill_worker_id, Some(12));
+        assert_eq!(routing.dp_rank, Some(3));
+        assert_eq!(routing.prefill_dp_rank, Some(3));
+    }
 
     #[test]
     fn decode_router_override_disables_overlap_and_prefill_tracking() {

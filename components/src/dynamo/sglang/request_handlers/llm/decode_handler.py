@@ -466,6 +466,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
+            prefill_dp_rank = routing.get("prefill_dp_rank")
+            prefill_dp_rank_kwargs = (
+                filter_supported_async_generate_kwargs(
+                    self.engine, {"disagg_prefill_dp_rank": prefill_dp_rank}
+                )
+                if prefill_dp_rank is not None
+                else {}
+            )
 
             decode = await self.engine.async_generate(
                 **input_param,
@@ -478,6 +486,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **prefill_dp_rank_kwargs,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,

@@ -44,7 +44,7 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
-from dynamo.sglang._compat import get_scheduler_info
+from dynamo.sglang._compat import filter_supported_async_generate_kwargs, get_scheduler_info
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
@@ -288,6 +288,18 @@ class SglangLLMEngine(LLMEngine):
             bootstrap_kwargs = self._resolve_prefill_bootstrap(request)
         elif self.serving_mode == DisaggregationMode.DECODE:
             bootstrap_kwargs = self._resolve_decode_bootstrap(request)
+            routing = request.get("routing") or {}
+            prefill_dp_rank = routing.get("prefill_dp_rank")
+            if prefill_dp_rank is not None:
+                # SGLang uses data_parallel_rank/routed_dp_rank for the decode
+                # worker selection. disagg_prefill_dp_rank is the separate rank
+                # used by decode to query the matching prefill bootstrap peer.
+                bootstrap_kwargs.update(
+                    filter_supported_async_generate_kwargs(
+                        self.engine,
+                        {"disagg_prefill_dp_rank": prefill_dp_rank},
+                    )
+                )
 
         # Honour the router's DP rank decision; without it SGLang picks
         # its own rank and KV events land on the wrong publisher.
