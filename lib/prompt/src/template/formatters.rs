@@ -8,7 +8,6 @@ use super::{ContextMixins, HfTokenizerConfigJsonFormatter, JinjaEnvironment};
 use either::Either;
 use minijinja::{Environment, Value, context};
 use serde_json::json;
-use tracing;
 
 /// Detects if a template requires content as arrays (multimodal) vs strings (text-only).
 /// Returns true if the template only works with array format.

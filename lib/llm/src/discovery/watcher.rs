@@ -26,6 +26,8 @@ use dynamo_runtime::{
     protocols::{EndpointId, annotated::Annotated},
 };
 
+use dynamo_prompt::PromptFormatter;
+
 use crate::{
     backend::Backend,
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
@@ -34,7 +36,9 @@ use crate::{
     kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
-    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
+    preprocessor::{
+        OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::prompt_formatter_from_mdc,
+    },
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
         openai::{
@@ -879,7 +883,7 @@ impl ModelWatcher {
                         )
                     })?;
                     let PromptFormatter::OAI(formatter) =
-                        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
+                        prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
                     let preprocessor =
                         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
                             .context("OpenAIPreprocessor.new_with_parts")?;

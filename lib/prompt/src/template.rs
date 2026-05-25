@@ -3,147 +3,52 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use anyhow::{Context, Ok, Result};
+use anyhow::{Ok, Result};
 use minijinja::Environment;
 
-use crate::model_card::{ModelDeploymentCard, PromptContextMixin, PromptFormatterArtifact};
+use super::PromptContextMixin;
 
 mod context;
 mod formatters;
 mod oai;
 mod tokcfg;
 
-use super::{OAIChatLikeRequest, OAIPromptFormatter, PromptFormatter};
-pub use tokcfg::ChatTemplate;
-use tokcfg::ChatTemplateValue;
+use super::{OAIPromptFormatter, PromptFormatter};
+pub use oai::may_be_fix_tool_schema;
+pub use tokcfg::{ChatTemplate, ChatTemplateValue};
+
+/// If the model is a DeepSeek family whose HF repo doesn't ship a Jinja
+/// `chat_template`, return the native Rust formatter for it. Returns `None`
+/// for everything else (the caller then loads the HF `tokenizer_config.json`
+/// template via [`PromptFormatter::from_parts`]).
+///
+/// `model_type_lower` is the lowercased `config.json` `model_type` (authoritative,
+/// survives `--served-model-name` renames); `display_name_lower` is the
+/// lowercased served name, used only as a fallback when `model_type` is absent.
+pub fn deepseek_formatter_for(
+    model_type_lower: &Option<String>,
+    display_name_lower: &str,
+) -> Option<PromptFormatter> {
+    if is_deepseek_v4(model_type_lower, display_name_lower) {
+        tracing::info!(
+            model_type = ?model_type_lower,
+            display_name = %display_name_lower,
+            "Detected DeepSeek V4 model, using native Rust formatter",
+        );
+        return Some(PromptFormatter::OAI(Arc::new(
+            super::deepseek_v4::DeepSeekV4Formatter::new_thinking(),
+        )));
+    }
+    if is_deepseek_v3_2_non_exp(model_type_lower, display_name_lower) {
+        tracing::info!("Detected DeepSeek V3.2 model (non-Exp), using native Rust formatter");
+        return Some(PromptFormatter::OAI(Arc::new(
+            super::deepseek_v32::DeepSeekV32Formatter::new_thinking(),
+        )));
+    }
+    None
+}
 
 impl PromptFormatter {
-    pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
-        // Special handling for DeepSeek models whose HF repos don't ship a Jinja chat_template.
-        //
-        // Prefer the authoritative `model_type` from config.json — it's set by
-        // the model author and survives any `--served-model-name` rename. Fall
-        // back to a tight substring match on `display_name` only when config.json
-        // is absent (e.g., tokenizer-only MDCs) or unreadable.
-        //
-        // An empty `model_type` string (rare but legal in the JSON) carries
-        // no signal — normalize it to `None` so the display-name fallback
-        // still runs instead of being silently suppressed.
-        let model_type_lower = mdc
-            .model_info
-            .as_ref()
-            .and_then(|info| info.get_model_info().ok())
-            .map(|info| info.model_type().to_lowercase())
-            .filter(|s| !s.is_empty());
-        let display_name_lower = mdc.display_name.to_lowercase();
-
-        if is_deepseek_v4(&model_type_lower, &display_name_lower) {
-            tracing::info!(
-                model_type = ?model_type_lower,
-                display_name = %mdc.display_name,
-                "Detected DeepSeek V4 model, using native Rust formatter",
-            );
-            return Ok(Self::OAI(Arc::new(
-                super::deepseek_v4::DeepSeekV4Formatter::new_thinking(),
-            )));
-        }
-        if is_deepseek_v3_2_non_exp(&model_type_lower, &display_name_lower) {
-            tracing::info!("Detected DeepSeek V3.2 model (non-Exp), using native Rust formatter");
-            return Ok(Self::OAI(Arc::new(
-                super::deepseek_v32::DeepSeekV32Formatter::new_thinking(),
-            )));
-        }
-
-        match mdc
-            .prompt_formatter
-            .as_ref()
-            .ok_or(anyhow::anyhow!("MDC does not contain a prompt formatter"))?
-        {
-            PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) => {
-                let Some(file) = checked_file.path() else {
-                    anyhow::bail!(
-                        "HfTokenizerConfigJson for {} is a URL, cannot load",
-                        mdc.display_name
-                    );
-                };
-                let contents = std::fs::read_to_string(file).with_context(|| {
-                    format!(
-                        "PromptFormatter.from_mdc fs:read_to_string '{}'",
-                        file.display()
-                    )
-                })?;
-                let mut config: ChatTemplate =
-                    serde_json::from_str(&contents).inspect_err(|err| {
-                        crate::log_json_err(&file.display().to_string(), &contents, err)
-                    })?;
-
-                // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
-                // stores the chat template in a separate file, we check if the file exists and
-                // put the chat template into config as normalization.
-                // This may also be a custom template provided via CLI flag.
-                match mdc.chat_template_file.as_ref() {
-                    Some(PromptFormatterArtifact::HfChatTemplateJinja {
-                        file: checked_file,
-                        ..
-                    }) => {
-                        let Some(path) = checked_file.path() else {
-                            anyhow::bail!(
-                                "HfChatTemplateJinja for {} is a URL, cannot load",
-                                mdc.display_name
-                            );
-                        };
-                        let chat_template = std::fs::read_to_string(path)
-                            .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
-                        config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
-                    }
-                    Some(PromptFormatterArtifact::HfChatTemplateJson {
-                        file: checked_file,
-                        ..
-                    }) => {
-                        let Some(path) = checked_file.path() else {
-                            anyhow::bail!(
-                                "HfChatTemplateJson for {} is a URL, cannot load",
-                                mdc.display_name
-                            );
-                        };
-                        let raw = std::fs::read_to_string(path)
-                            .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
-                        let wrapper: serde_json::Value =
-                            serde_json::from_str(&raw).with_context(|| {
-                                format!("Failed to parse '{}' as JSON", path.display())
-                            })?;
-                        let field = wrapper.get("chat_template").ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "'{}' does not contain a 'chat_template' field",
-                                path.display()
-                            )
-                        })?;
-                        let value = serde_json::from_value::<ChatTemplateValue>(field.clone())
-                            .with_context(|| {
-                                format!(
-                                    "Failed to deserialize 'chat_template' in '{}'",
-                                    path.display()
-                                )
-                            })?;
-                        config.chat_template = Some(value);
-                    }
-                    _ => {}
-                }
-                Self::from_parts(
-                    config,
-                    mdc.prompt_context
-                        .clone()
-                        .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
-                    mdc.runtime_config.exclude_tools_when_tool_choice_none,
-                )
-            }
-            PromptFormatterArtifact::HfChatTemplateJinja { .. }
-            | PromptFormatterArtifact::HfChatTemplateJson { .. } => Err(anyhow::anyhow!(
-                "prompt_formatter should not have type HfChatTemplate*"
-            )),
-        }
-    }
-
     pub fn from_parts(
         config: ChatTemplate,
         context: ContextMixins,

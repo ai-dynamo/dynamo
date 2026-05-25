@@ -57,6 +57,7 @@ dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-tokenizers = { workspace = true }
+dynamo-prompt = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace

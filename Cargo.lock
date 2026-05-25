@@ -2486,6 +2486,7 @@ dependencies = [
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
+ "dynamo-prompt",
  "dynamo-protocols",
  "dynamo-runtime",
  "dynamo-tokenizers",
@@ -2647,6 +2648,23 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "dynamo-prompt"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dynamo-protocols",
+ "dynamo-tokenizers",
+ "either",
+ "minijinja",
+ "minijinja-contrib",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

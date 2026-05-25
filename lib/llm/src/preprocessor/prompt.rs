@@ -1,171 +1,275 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Prompt Formatting Module
+//! Prompt formatting (lib/llm side).
 //!
-//! Handles formatting of LLM request prompts, including:
-//! - Chat template rendering
-//! - Tool usage formatting
-//! - Generation prompt handling
+//! The reusable chat-template / prompt-formatting engine lives in the
+//! standalone, runtime-free [`dynamo_prompt`] crate. This module holds only the
+//! lib/llm-local glue that can't live there:
+//!   * implements [`OAIChatLikeRequest`] for Dynamo's `Nv*` request wrappers,
+//!   * keeps media-IO config off the rendering trait via [`MediaRequestExt`]
+//!     (so `dynamo_prompt` need not depend on the media module),
+//!   * adapts a [`ModelDeploymentCard`] into a [`PromptFormatter`]
+//!     ([`prompt_formatter_from_mdc`]).
 //!
-//! The module supports different prompt formatting strategies through the
-//! PromptFormatter
+//! Everything else imports from `dynamo_prompt` directly.
 
-// TODO:
-// 1. Query if `add_generation_prompt` is present in the prompt template
-// 2. Support for models with add_generation_prompt:
-//    - PALS (Prefix-Assisted Language Sampling)
-//    - Continuation - Detected on user turns, where we can return
-//      partial assistant responses without add_generation_prompt
-
-use anyhow::Result;
+use anyhow::{Context, Result};
 use minijinja::value::Value;
-use std::collections::HashMap;
-use std::sync::Arc;
 
+use dynamo_prompt::{
+    ChatTemplate, ChatTemplateValue, ContextMixins, OAIChatLikeRequest, PromptFormatter,
+    PromptInput, TextInput, TokenInput, deepseek_formatter_for, may_be_fix_tool_schema,
+};
+
+use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
 use crate::preprocessor::media::MediaDecoder;
+use crate::protocols::openai::{
+    chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+};
 
-pub mod deepseek_common;
-pub mod deepseek_v32;
-pub mod deepseek_v4;
-mod template;
+/// lib/llm-local extension carrying multimodal media-IO config. Kept off
+/// [`OAIChatLikeRequest`] so `dynamo_prompt` stays free of the media module;
+/// the multimodal preprocessing path bounds on `OAIChatLikeRequest + MediaRequestExt`.
+pub trait MediaRequestExt {
+    fn media_io_kwargs(&self) -> Option<&MediaDecoder>;
+}
 
-pub use template::{ChatTemplate, ContextMixins};
+impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
+    fn model(&self) -> String {
+        self.inner.model.clone()
+    }
 
-/// Shared helper: extract a boolean thinking toggle from `chat_template_args`.
-///
-/// Reads the two equivalent keys (`thinking`, `enable_thinking` — vLLM's
-/// canonical kwarg) in order and returns the first bool value found, or `None`
-/// if neither key is present (or neither carries a bool). Used by the V4
-/// formatter's `resolve_thinking_mode` and by the reasoning-parser gate in
-/// `OpenAIPreprocessor::is_reasoning_disabled_by_request` so both paths agree
-/// on the signal interpretation.
-pub(crate) fn thinking_bool_from_args(
-    args: Option<&HashMap<String, serde_json::Value>>,
-) -> Option<bool> {
-    let args = args?;
-    for key in ["thinking", "enable_thinking"] {
-        if let Some(v) = args.get(key).and_then(|x| x.as_bool()) {
-            return Some(v);
+    fn messages(&self) -> Value {
+        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        Value::from_serialize(&messages_json)
+    }
+
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
+        Some(self.inner.messages.as_slice())
+    }
+
+    fn tools(&self) -> Option<Value> {
+        if self.inner.tools.is_none() {
+            None
+        } else {
+            // Try to fix the tool schema if it is missing type and properties
+            Some(may_be_fix_tool_schema(
+                serde_json::to_value(&self.inner.tools).unwrap(),
+            )?)
         }
     }
-    None
-}
 
-#[derive(Debug)]
-pub enum TokenInput {
-    Single(Vec<u32>),
-    Batch(Vec<Vec<u32>>),
-}
-
-#[derive(Debug)]
-pub enum TextInput {
-    Single(String),
-    Batch(Vec<String>),
-}
-
-#[derive(Debug)]
-pub enum PromptInput {
-    Tokens(TokenInput),
-    Text(TextInput),
-}
-
-/// Trait that defines a request that can map to an OpenAI-like request.
-pub trait OAIChatLikeRequest {
-    fn model(&self) -> String;
-    fn messages(&self) -> Value;
-    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
-        None
-    }
-    fn tools(&self) -> Option<Value> {
-        None
-    }
     fn tool_choice(&self) -> Option<Value> {
-        None
+        if self.inner.tool_choice.is_none() {
+            None
+        } else {
+            Some(Value::from_serialize(&self.inner.tool_choice))
+        }
     }
+
     fn response_format(&self) -> Option<Value> {
-        None
+        self.inner
+            .response_format
+            .as_ref()
+            .map(Value::from_serialize)
     }
 
-    fn should_add_generation_prompt(&self) -> bool;
-
-    /// Optional additional args to merge into the chat template context
-    fn chat_template_args(&self) -> Option<&HashMap<String, serde_json::Value>> {
-        None
-    }
-
-    /// Returns the type of input for the prompt. Default is Text.
-    fn prompt_input_type(&self) -> PromptInput {
-        PromptInput::Text(TextInput::Single(String::new()))
-    }
-
-    /// Extract tokens if the input is pre-tokenized
-    fn extract_tokens(&self) -> Option<TokenInput> {
-        None
+    fn should_add_generation_prompt(&self) -> bool {
+        // Using vLLM default behavior
+        true
     }
 
     fn extract_text(&self) -> Option<TextInput> {
-        None
+        Some(TextInput::Single(String::new()))
     }
 
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
-        None
+    fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        self.chat_template_args.as_ref()
     }
 
     fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        self.inner.mm_processor_kwargs.as_ref()
+    }
+}
+
+impl MediaRequestExt for NvCreateChatCompletionRequest {
+    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+        self.media_io_kwargs.as_ref()
+    }
+}
+
+impl OAIChatLikeRequest for NvCreateCompletionRequest {
+    fn model(&self) -> String {
+        self.inner.model.clone()
+    }
+    fn messages(&self) -> minijinja::value::Value {
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                    crate::protocols::openai::completions::prompt_to_string(&self.inner.prompt),
+                ),
+                name: None,
+            },
+        );
+
+        minijinja::value::Value::from_serialize(vec![message])
+    }
+
+    fn should_add_generation_prompt(&self) -> bool {
+        true
+    }
+
+    fn prompt_input_type(&self) -> PromptInput {
+        match &self.inner.prompt {
+            dynamo_protocols::types::Prompt::IntegerArray(_) => {
+                PromptInput::Tokens(TokenInput::Single(vec![]))
+            }
+            dynamo_protocols::types::Prompt::ArrayOfIntegerArray(_) => {
+                PromptInput::Tokens(TokenInput::Batch(vec![]))
+            }
+            dynamo_protocols::types::Prompt::String(_) => {
+                PromptInput::Text(TextInput::Single(String::new()))
+            }
+            dynamo_protocols::types::Prompt::StringArray(_) => {
+                PromptInput::Text(TextInput::Batch(vec![]))
+            }
+        }
+    }
+
+    fn extract_tokens(&self) -> Option<TokenInput> {
+        match &self.inner.prompt {
+            dynamo_protocols::types::Prompt::IntegerArray(tokens) => {
+                Some(TokenInput::Single(tokens.clone()))
+            }
+            dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arrays) => {
+                Some(TokenInput::Batch(arrays.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        match &self.inner.prompt {
+            dynamo_protocols::types::Prompt::String(text) => {
+                Some(TextInput::Single(text.to_string()))
+            }
+            dynamo_protocols::types::Prompt::StringArray(texts) => {
+                Some(TextInput::Batch(texts.to_vec()))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl MediaRequestExt for NvCreateCompletionRequest {
+    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
         None
     }
 }
 
-pub trait OAIPromptFormatter: Send + Sync + 'static {
-    fn supports_add_generation_prompt(&self) -> bool;
-    fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String>;
+/// Build a [`PromptFormatter`] from a [`ModelDeploymentCard`].
+///
+/// DeepSeek families whose HF repos ship no Jinja `chat_template` get a native
+/// Rust formatter (via [`deepseek_formatter_for`]); everything else loads the
+/// HF `tokenizer_config.json` template (and any separate chat-template file)
+/// and builds via [`PromptFormatter::from_parts`].
+pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    // Prefer the authoritative `model_type` from config.json — it's set by the
+    // model author and survives any `--served-model-name` rename. An empty
+    // `model_type` carries no signal — normalize to `None` so the display-name
+    // fallback still runs.
+    let model_type_lower = mdc
+        .model_info
+        .as_ref()
+        .and_then(|info| info.get_model_info().ok())
+        .map(|info| info.model_type().to_lowercase())
+        .filter(|s| !s.is_empty());
+    let display_name_lower = mdc.display_name.to_lowercase();
 
-    /// Per-family image-placeholder template used when the chat template
-    /// requires string content and the request contains images. `{n}` in
-    /// the template is the 1-based image index. `None` when the
-    /// formatter has no flatten strategy — MM-aware routing falls back
-    /// to text-prefix routing for those families.
-    fn image_placeholder_template(&self) -> Option<&'static str> {
-        None
-    }
-}
-
-#[derive(Clone)]
-pub enum PromptFormatter {
-    OAI(Arc<dyn OAIPromptFormatter>),
-}
-
-// No-op formatter: used for models without chat_template
-#[derive(Debug, Default)]
-pub struct NoOpFormatter;
-
-impl OAIPromptFormatter for NoOpFormatter {
-    fn supports_add_generation_prompt(&self) -> bool {
-        false
+    if let Some(formatter) = deepseek_formatter_for(&model_type_lower, &display_name_lower) {
+        return Ok(formatter);
     }
 
-    fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String> {
-        let messages = req.messages();
+    match mdc
+        .prompt_formatter
+        .as_ref()
+        .ok_or(anyhow::anyhow!("MDC does not contain a prompt formatter"))?
+    {
+        PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) => {
+            let Some(file) = checked_file.path() else {
+                anyhow::bail!(
+                    "HfTokenizerConfigJson for {} is a URL, cannot load",
+                    mdc.display_name
+                );
+            };
+            let contents = std::fs::read_to_string(file).with_context(|| {
+                format!(
+                    "prompt_formatter_from_mdc fs:read_to_string '{}'",
+                    file.display()
+                )
+            })?;
+            let mut config: ChatTemplate = serde_json::from_str(&contents).inspect_err(|err| {
+                crate::log_json_err(&file.display().to_string(), &contents, err)
+            })?;
 
-        let first_message = messages
-            .get_item_by_index(0)
-            .map_err(|_| anyhow::Error::msg("No message at index 0 or messages array is empty"))?;
-
-        let content = first_message
-            .get_attr("content")
-            .map_err(|_| anyhow::Error::msg("First message has no 'content' field"))?;
-
-        let content_str = content
-            .as_str()
-            .ok_or_else(|| anyhow::Error::msg("Message content is not a string"))?
-            .to_string();
-        Ok(content_str)
-    }
-}
-
-impl PromptFormatter {
-    pub fn no_op() -> Self {
-        Self::OAI(Arc::new(NoOpFormatter))
+            // Some HF models (e.g. Llama-4-Maverick) store the chat template in a
+            // separate file, or it may be a custom template provided via CLI flag.
+            match mdc.chat_template_file.as_ref() {
+                Some(PromptFormatterArtifact::HfChatTemplateJinja {
+                    file: checked_file, ..
+                }) => {
+                    let Some(path) = checked_file.path() else {
+                        anyhow::bail!(
+                            "HfChatTemplateJinja for {} is a URL, cannot load",
+                            mdc.display_name
+                        );
+                    };
+                    let chat_template = std::fs::read_to_string(path)
+                        .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+                    config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
+                }
+                Some(PromptFormatterArtifact::HfChatTemplateJson {
+                    file: checked_file, ..
+                }) => {
+                    let Some(path) = checked_file.path() else {
+                        anyhow::bail!(
+                            "HfChatTemplateJson for {} is a URL, cannot load",
+                            mdc.display_name
+                        );
+                    };
+                    let raw = std::fs::read_to_string(path)
+                        .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+                    let wrapper: serde_json::Value = serde_json::from_str(&raw)
+                        .with_context(|| format!("Failed to parse '{}' as JSON", path.display()))?;
+                    let field = wrapper.get("chat_template").ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "'{}' does not contain a 'chat_template' field",
+                            path.display()
+                        )
+                    })?;
+                    let value = serde_json::from_value::<ChatTemplateValue>(field.clone())
+                        .with_context(|| {
+                            format!(
+                                "Failed to deserialize 'chat_template' in '{}'",
+                                path.display()
+                            )
+                        })?;
+                    config.chat_template = Some(value);
+                }
+                _ => {}
+            }
+            PromptFormatter::from_parts(
+                config,
+                mdc.prompt_context
+                    .clone()
+                    .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
+                mdc.runtime_config.exclude_tools_when_tool_choice_none,
+            )
+        }
+        PromptFormatterArtifact::HfChatTemplateJinja { .. }
+        | PromptFormatterArtifact::HfChatTemplateJson { .. } => Err(anyhow::anyhow!(
+            "prompt_formatter should not have type HfChatTemplate*"
+        )),
     }
 }

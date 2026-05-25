@@ -6,9 +6,9 @@
 //! These tests use the official test files from:
 //! https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main/encoding
 
-use dynamo_llm::preprocessor::prompt::deepseek_v32::{ThinkingMode, encode_messages};
-use dynamo_llm::preprocessor::prompt::{OAIChatLikeRequest, OAIPromptFormatter};
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_prompt::deepseek_v32::{ThinkingMode, encode_messages};
+use dynamo_prompt::{OAIChatLikeRequest, OAIPromptFormatter};
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::PathBuf;
@@ -312,8 +312,7 @@ fn test_reasoning_content_survives_chat_request_parsing_and_rendering() {
         serde_json::Value::String("need date first".to_string())
     );
 
-    let formatter =
-        dynamo_llm::preprocessor::prompt::deepseek_v32::DeepSeekV32Formatter::new_thinking();
+    let formatter = dynamo_prompt::deepseek_v32::DeepSeekV32Formatter::new_thinking();
     let rendered = formatter.render(&request).unwrap();
 
     assert!(rendered.contains("need date first"));
@@ -376,8 +375,7 @@ fn test_reasoning_segments_roundtrip_through_parse_and_render() {
     // The formatter must not drop the reasoning content when segments are used.
     // (DeepSeek V3.2 joins segments into one <think> block; this confirms the
     // content is not silently discarded.)
-    let formatter =
-        dynamo_llm::preprocessor::prompt::deepseek_v32::DeepSeekV32Formatter::new_thinking();
+    let formatter = dynamo_prompt::deepseek_v32::DeepSeekV32Formatter::new_thinking();
     let rendered = formatter.render(&request).unwrap();
     assert!(
         rendered.contains("A"),

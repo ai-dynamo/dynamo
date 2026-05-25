@@ -4,6 +4,8 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use dynamo_prompt::PromptFormatter;
+
 use crate::{
     backend::{Backend, ExecutionContext},
     discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
@@ -16,7 +18,7 @@ use crate::{
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
-    preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
+    preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
     types::{
@@ -302,7 +304,7 @@ where
         >,
 {
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
-    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+    let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(card)?;
     let preprocessor =
         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?
             .into_operator();
