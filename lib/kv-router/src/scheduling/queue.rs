@@ -2000,7 +2000,7 @@ mod tests {
         assert_eq!(queue.pending_count(), 0);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn update_requeues_head_if_workers_become_busy_during_refresh() {
         let block_size = 16u32;
         let isl = 64usize;
@@ -2026,6 +2026,8 @@ mod tests {
             .mark_prefill_completed(&"req-1".to_string(), decay_now())
             .unwrap();
         slots.free(&"req-1".to_string(), decay_now()).unwrap();
+
+        tokio::time::advance(Duration::from_secs(11)).await;
 
         let update = {
             let queue = Arc::clone(&queue);
@@ -2068,9 +2070,19 @@ mod tests {
         slots
             .free(&"occupy-during-refresh".to_string(), decay_now())
             .unwrap();
-        queue.update().await;
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                queue.update().await;
+            })
+        };
+        refresher.wait_for_calls(2).await;
+        refresher.release_one();
+        update.await.unwrap();
 
         let resp2 = rx2.await.expect("rx2 dropped").expect("req-2 failed");
+        assert_eq!(refresher.calls.load(Ordering::Relaxed), 2);
         assert_eq!(resp2.best_worker, WorkerWithDpRank::new(0, 0));
         assert_eq!(queue.pending_count(), 0);
     }
