@@ -33,7 +33,7 @@ on:
 
 jobs:
   deploy-test:
-    runs-on: prod-deploy-tester-v1 
+    runs-on: stg-deploy-tester-v1
     timeout-minutes: 25
     permissions:
       contents: read
