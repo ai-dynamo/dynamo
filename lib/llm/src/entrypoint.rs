@@ -45,7 +45,7 @@ pub type ChatEngineFactoryCallback = Arc<
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
-    /// Load threshold configuration for busy detection
+    /// Load threshold configuration for overload detection
     pub load_threshold_config: LoadThresholdConfig,
     pub enforce_disagg: bool,
 }

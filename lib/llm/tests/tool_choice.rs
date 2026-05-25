@@ -135,6 +135,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        worker_trace_link: None,
         engine_data: None,
     }
 }
@@ -304,6 +305,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: None,
         };
 
@@ -372,6 +374,7 @@ async fn test_streaming_required_tool_parallel() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: None,
         };
 
@@ -442,6 +445,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        worker_trace_link: None,
         engine_data: None,
     };
 

@@ -54,6 +54,8 @@ def _base_argv(env: Mapping[str, str]) -> list[str]:
         "--max-num-seqs",
         "4",
         "--enforce-eager",
+        "--stream-interval",
+        "4",
     ]
 
 
@@ -72,14 +74,18 @@ pytestmark = [
 
 
 class _FakeContext:
-    """Duck-typed ``dynamo._core.Context``.  ``VllmLLMEngine`` only calls
-    ``context.id()``."""
+    """Duck-typed ``dynamo._core.Context``. ``VllmLLMEngine`` calls
+    ``context.id()`` plus ``context.trace_headers()``; the latter returns
+    ``None`` here so propagation is a no-op."""
 
     def __init__(self, request_id: str = "unit-test-req") -> None:
         self._id = request_id
 
     def id(self) -> str:
         return self._id
+
+    def trace_headers(self) -> dict[str, str] | None:
+        return None
 
     def is_stopped(self) -> bool:
         return False
@@ -144,6 +150,7 @@ async def _check_generate_streams_chunks_with_coherent_final_usage(started_engin
     ``finish_reason`` and a ``completion_usage`` whose totals add up."""
     engine, _ = started_engine
     ctx = _FakeContext("gen-1")
+    max_tokens = 16
 
     chunks = []
     async for chunk in engine.generate(
@@ -151,8 +158,8 @@ async def _check_generate_streams_chunks_with_coherent_final_usage(started_engin
             dict,
             {
                 "token_ids": [1, 2, 3, 4, 5],
-                "stop_conditions": {"max_tokens": 16},
-                "sampling_options": {"temperature": 0.0},
+                "stop_conditions": {"max_tokens": max_tokens},
+                "sampling_options": {"temperature": 0.0, "ignore_eos": True},
             },
         ),
         cast(object, ctx),  # type: ignore[arg-type]
@@ -162,7 +169,15 @@ async def _check_generate_streams_chunks_with_coherent_final_usage(started_engin
 
     final = chunks[-1]
     assert "finish_reason" in final
+    assert final["finish_reason"] == "length"
+    token_chunks = [chunk["token_ids"] for chunk in chunks]
+    non_empty_token_chunks = [ids for ids in token_chunks if ids]
+    emitted_token_ids = [token_id for ids in token_chunks for token_id in ids]
+    assert len(non_empty_token_chunks) > 1
+    assert any(len(ids) >= 4 for ids in non_empty_token_chunks)
+    assert len(emitted_token_ids) == max_tokens
     usage = final["completion_usage"]
+    assert usage["completion_tokens"] == max_tokens
     assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
 
 

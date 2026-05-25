@@ -86,6 +86,25 @@ ROUTER_AIC_CONFIG = {
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
+ROUTER_OVERLOAD_503_CASES = (
+    pytest.param(
+        {
+            "blocks_threshold": 0.2,
+            "max_tokens": 50,
+        },
+        id="decode-blocks",
+    ),
+    pytest.param(
+        {
+            "blocks_threshold": "None",
+            "tokens_threshold": 1,
+            "tokens_threshold_frac": "None",
+            "router_queue_threshold": "None",
+            "max_tokens": 1,
+        },
+        id="prefill-tokens",
+    ),
+)
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
     "Flaky on CI: tcp nondurable round-robin mocker router path timed out"
 )
@@ -1073,6 +1092,7 @@ def test_mocker_two_kv_router(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
+@pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_503_CASES)
 @pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
 def test_mocker_kv_router_overload_503(
     request,
@@ -1080,6 +1100,7 @@ def test_mocker_kv_router_overload_503(
     predownload_tokenizers,
     durable_kv_events,
     monkeypatch,
+    overload_config,
 ):
     """Test that KV router returns 503 when mocker workers are overloaded."""
     monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
@@ -1107,7 +1128,7 @@ def test_mocker_kv_router_overload_503(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
-            blocks_threshold=0.2,
+            **overload_config,
         )
 
 
