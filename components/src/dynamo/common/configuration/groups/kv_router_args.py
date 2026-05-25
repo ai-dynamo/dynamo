@@ -412,10 +412,26 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Which conditional-prefill bypass policy to use. "
                 "'token_cap' (default): bypass when net-new prompt tokens are below "
-                "--router-conditional-prefill-max-new-tokens. Load-agnostic."
+                "--router-conditional-prefill-max-new-tokens. Load-agnostic. "
+                "'threshold_regression' (production): two-phase fast-path + regression "
+                "slow-path; consults the cost_eval sidecar when the fast path is ambiguous. "
+                "'threshold_only' (diagnostic): fast path only, no cost_eval RPC. Useful "
+                "without a cost_eval sidecar deployed. "
+                "'regression_only' (diagnostic): slow path only, every request RPCs "
+                "cost_eval. Useful for slow-path E2E validation and RPC p99 measurement. "
+                "'always_bypass' (test): bypass every request — for E2E path validation. "
+                "'random_bypass' (test): bypass each request with 50%% probability — for "
+                "mixed-traffic smoke testing."
             ),
             arg_type=str,
-            choices=["token_cap"],
+            choices=[
+                "token_cap",
+                "threshold_regression",
+                "threshold_only",
+                "regression_only",
+                "always_bypass",
+                "random_bypass",
+            ],
             dest="conditional_prefill_policy",
         )
         add_negatable_bool_argument(

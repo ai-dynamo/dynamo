@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # ``components/src/dynamo/planner/config/defaults.py:97`` (max_num_fpm_samples=64).
 DEFAULT_MIN_OBSERVATIONS = 5
 DEFAULT_MAX_NUM_FPM_SAMPLES = 64
-DEFAULT_FPM_POLL_INTERVAL_S = 1.0
+DEFAULT_FPM_POLL_INTERVAL_S = 0.1
 
 
 class CostEvalConfig(BaseModel):
@@ -69,9 +69,12 @@ class CostEvalConfig(BaseModel):
     )
 
     # How often to drain FPM events from each subscriber and feed them into
-    # the regressions. Below 5 minutes keeps the Anthropic prompt-cache
-    # warm-equivalent fresh; faster than that is wasted polling unless the
-    # workload is genuinely bursty. Default 1s — Planner uses a similar cadence.
+    # the regressions. Default 0.1s, matching Planner's
+    # `asyncio.sleep(0.1)` cadence at
+    # ``components/src/dynamo/planner/core/base.py:489``. Faster polling is
+    # essentially free (one `get_recent_stats()` call into a Rust-side
+    # accumulator) and keeps the regression's input distribution fresh —
+    # important for the warmup phase when the burst is small.
     fpm_poll_interval_s: float = Field(
         default=DEFAULT_FPM_POLL_INTERVAL_S,
         gt=0.0,

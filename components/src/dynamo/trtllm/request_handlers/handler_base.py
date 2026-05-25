@@ -53,6 +53,13 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParamsCodec,
 )
 
+# Annotation marker the Rust PrefillRouter sets on a request when its
+# conditional-prefill policy bypasses the remote prefill and forwards directly
+# to a DECODE-mode worker. Without this marker, generate_locally() rejects
+# requests with disaggregated_params=None. Kept in sync with the Rust constant
+# in lib/llm/src/kv_router/prefill_router/mod.rs.
+BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+
 if TYPE_CHECKING:
     # tensorrt_llm may use a different version that doesn't have MetricsCollector,
     # so guard this import inside TYPE_CHECKING to avoid runtime import errors.
@@ -1003,9 +1010,21 @@ class HandlerBase(BaseGenerativeHandler):
             self.disaggregation_mode == DisaggregationMode.DECODE
             and disaggregated_params is None
         ):
-            logging.error("DECODE: disaggregated_params is None but required!")
-            logging.error(f"DECODE: Request keys: {list(request.keys())}")
-            raise ValueError("Disaggregated params are required for decode mode")
+            # Conditional-prefill bypass path: the Rust PrefillRouter sets this
+            # annotation when it decides to skip the remote prefill and run the
+            # request as AGG on the decode worker. TRT-LLM accepts
+            # disaggregated_params=None and runs aggregated regardless of
+            # transceiver config (see cond_pfill.md), so we just let it through.
+            # Kept in sync with BYPASS_REMOTE_PREFILL_ANNOTATION in
+            # lib/llm/src/kv_router/prefill_router/mod.rs.
+            if BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or []):
+                logging.debug(
+                    "DECODE: bypass-remote-prefill annotation present; running as AGG"
+                )
+            else:
+                logging.error("DECODE: disaggregated_params is None but required!")
+                logging.error(f"DECODE: Request keys: {list(request.keys())}")
+                raise ValueError("Disaggregated params are required for decode mode")
 
         # TensorRT-LLM streams cumulative token_ids per output. For n>1 those
         # outputs are interleaved by choice index, so maintain one cursor per

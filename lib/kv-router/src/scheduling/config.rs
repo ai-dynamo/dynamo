@@ -546,23 +546,65 @@ pub enum ConditionalPrefillPolicyKind {
     /// `CostEvaluator` (typically NATS RPC to a Python decision service that
     /// hosts the Planner regression models) when the fast path is ambiguous.
     /// See `lib/kv-router/src/conditional_prefill.rs::RegressionConditionalPrefillPolicy`.
-    #[serde(rename = "regression")]
-    Regression,
+    /// The default production variant — fast path resolves common cases
+    /// without RPC, slow path breaks ties.
+    #[serde(rename = "threshold_regression")]
+    ThresholdRegression,
+    /// Diagnostic: fast path only (router-state thresholds), no cost_eval RPC.
+    /// Useful when running without a cost_eval sidecar deployed and for
+    /// measuring pure-fast-path behavior.
+    #[serde(rename = "threshold_only")]
+    ThresholdOnly,
+    /// Diagnostic: slow path only — every request RPCs cost_eval. Useful for
+    /// validating the slow-path E2E plumbing and measuring RPC p99 without
+    /// fast-path interference.
+    #[serde(rename = "regression_only")]
+    RegressionOnly,
+    /// Test-only: bypass every request when conditional prefill is enabled.
+    /// Used to exercise the end-to-end bypass path against real engine
+    /// workers without needing carefully-shaped workloads.
+    #[serde(rename = "always_bypass")]
+    AlwaysBypass,
+    /// Test-only: bypass each request with the configured probability
+    /// (`conditional_prefill_random_bypass_probability`, default 0.5).
+    /// Used to stress mixed bypass/non-bypass traffic without
+    /// workload-shaping.
+    #[serde(rename = "random_bypass")]
+    RandomBypass,
 }
 
 impl ConditionalPrefillPolicyKind {
     pub fn as_str(self) -> &'static str {
         match self {
             ConditionalPrefillPolicyKind::TokenCap => "token_cap",
-            ConditionalPrefillPolicyKind::Regression => "regression",
+            ConditionalPrefillPolicyKind::ThresholdRegression => "threshold_regression",
+            ConditionalPrefillPolicyKind::ThresholdOnly => "threshold_only",
+            ConditionalPrefillPolicyKind::RegressionOnly => "regression_only",
+            ConditionalPrefillPolicyKind::AlwaysBypass => "always_bypass",
+            ConditionalPrefillPolicyKind::RandomBypass => "random_bypass",
         }
+    }
+
+    /// Does this policy ever consult the slow-path `CostEvaluator`?
+    /// Used at activation time to decide whether to construct the cost_eval
+    /// RPC client and whether to require it to be configured.
+    pub fn uses_slow_path(self) -> bool {
+        matches!(
+            self,
+            ConditionalPrefillPolicyKind::ThresholdRegression
+                | ConditionalPrefillPolicyKind::RegressionOnly
+        )
     }
 
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "token_cap" => Some(ConditionalPrefillPolicyKind::TokenCap),
-            "regression" => Some(ConditionalPrefillPolicyKind::Regression),
+            "threshold_regression" => Some(ConditionalPrefillPolicyKind::ThresholdRegression),
+            "threshold_only" => Some(ConditionalPrefillPolicyKind::ThresholdOnly),
+            "regression_only" => Some(ConditionalPrefillPolicyKind::RegressionOnly),
+            "always_bypass" => Some(ConditionalPrefillPolicyKind::AlwaysBypass),
+            "random_bypass" => Some(ConditionalPrefillPolicyKind::RandomBypass),
             _ => None,
         }
     }

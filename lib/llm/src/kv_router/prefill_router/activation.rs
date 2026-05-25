@@ -7,10 +7,7 @@ use std::sync::atomic::Ordering;
 use anyhow::{Result, anyhow};
 use tokio::sync::oneshot;
 
-use dynamo_kv_router::{
-    PrefillLoadEstimator,
-    config::{ConditionalPrefillPolicyKind, KvRouterConfig},
-};
+use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     pipeline::{PushRouter, RouterMode},
@@ -197,17 +194,19 @@ impl PrefillRouter {
         // Set the router (ignore error if already set)
         let _ = self.prefill_router.set(inner_router);
 
-        // If the Regression conditional-prefill policy is selected, build the
-        // request-plane cost-eval client *now* (we have an Endpoint, so we
-        // can resolve the cost-eval sidecar's Component) and late-bind it on
-        // the existing policy via `try_set_cost_evaluator()`. Must happen
-        // before `activated=true` so requests don't observe the policy
-        // before its evaluator is bound. If the construction fails, the
-        // policy's slow path falls back to conservative DISAGG on every
-        // request — no panic, no router disruption.
+        // If a Regression-flavored conditional-prefill policy is selected
+        // (and its slow path is enabled), build the request-plane cost-eval
+        // client *now* (we have an Endpoint, so we can resolve the cost-eval
+        // sidecar's Component) and late-bind it on the existing policy via
+        // `try_set_cost_evaluator()`. Must happen before `activated=true` so
+        // requests don't observe the policy before its evaluator is bound.
+        // If the construction fails, the policy's slow path falls back to
+        // conservative DISAGG on every request — no panic, no router
+        // disruption. `ThresholdOnly` skips this entirely because it never
+        // touches cost_eval.
         if let Some(cfg) = kv_router_config.as_ref()
             && cfg.conditional_prefill_enabled
-            && cfg.conditional_prefill_policy == ConditionalPrefillPolicyKind::Regression
+            && cfg.conditional_prefill_policy.uses_slow_path()
             && let Some(subject) = cfg.cost_eval_subject.as_ref()
         {
             match self.build_cost_eval_evaluator(&endpoint, subject).await {

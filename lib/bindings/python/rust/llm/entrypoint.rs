@@ -253,6 +253,20 @@ impl KvRouterConfig {
                     "invalid conditional_prefill_policy: {conditional_prefill_policy:?}"
                 ))
             })?,
+            // Regression-policy knobs. Not exposed as pyo3 kwargs for v1 —
+            // callers tune via JSON config (KvRouterConfig::from_json) or
+            // the CLI flags on the frontend / standalone router. Default
+            // values match `KvRouterConfig::default()`.
+            conditional_prefill_regression_large_prompt_threshold_tokens:
+                RsKvRouterConfig::default()
+                    .conditional_prefill_regression_large_prompt_threshold_tokens,
+            conditional_prefill_regression_roomy_available_ratio:
+                RsKvRouterConfig::default()
+                    .conditional_prefill_regression_roomy_available_ratio,
+            conditional_prefill_regression_roomy_queued_blocks:
+                RsKvRouterConfig::default()
+                    .conditional_prefill_regression_roomy_queued_blocks,
+            cost_eval_subject: RsKvRouterConfig::default().cost_eval_subject,
             router_predicted_ttl_secs,
         };
         validate_kv_router_config(&inner)?;

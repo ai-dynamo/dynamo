@@ -17,12 +17,7 @@ from typing import AsyncIterator
 
 from dynamo.cost_eval.config import CostEvalConfig
 from dynamo.cost_eval.service import CostEvalService
-from dynamo.cost_eval.wire import (
-    COMPONENT_NAME,
-    ENDPOINT_NAME,
-    CostEvalRequest,
-    CostEvalResponse,
-)
+from dynamo.cost_eval.wire import COMPONENT_NAME, ENDPOINT_NAME, CostEvalRequest
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)
@@ -37,8 +32,14 @@ async def _start(runtime: DistributedRuntime, config: CostEvalConfig) -> None:
     # request/response between the Rust caller and this handler.
     endpoint = runtime.endpoint(f"{config.namespace}.{COMPONENT_NAME}.{ENDPOINT_NAME}")
 
-    async def evaluate(request: CostEvalRequest) -> AsyncIterator[CostEvalResponse]:
-        yield service.evaluate_safe(request)
+    async def evaluate(request: dict) -> AsyncIterator[dict]:
+        # dynamo runtime delivers the payload as a dict and expects a dict
+        # back; we marshal the Pydantic models at the boundary explicitly
+        # (Planner does the same — see
+        # `components/src/dynamo/planner/__main__.py` precedent).
+        parsed = CostEvalRequest.model_validate(request)
+        response = service.evaluate_safe(parsed)
+        yield response.model_dump()
 
     # Health-check probe uses an arbitrary request; the response shape is
     # what matters, not the numbers. Set a low-overlap request that the

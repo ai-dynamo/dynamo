@@ -70,6 +70,17 @@ class CostEvalService:
 
         self._prefill_sub: Optional["FpmEventSubscriber"] = None
         self._decode_sub: Optional["FpmEventSubscriber"] = None
+        # Debug-only flags: log the first decoded FPM payload from each pool
+        # so we can confirm wall_time / iter timing fields are populated.
+        # If wall_time == 0.0 on every payload, the regression's filter at
+        # perf_model/base.py:176 silently drops observations and warmth is
+        # never reached.
+        self._sampled_prefill_fpm: bool = False
+        self._sampled_decode_fpm: bool = False
+        # Active-FPM debug counters: log the first N FPMs with wall_time>0 from
+        # each pool so we can audit the raw numbers feeding the regression.
+        self._active_prefill_logged: int = 0
+        self._active_decode_logged: int = 0
 
     # ------------------------------------------------------------------
     # Setup
@@ -116,21 +127,78 @@ class CostEvalService:
     async def _fpm_drain_loop(self) -> None:
         """Periodically pull recent FPMs from both subscribers and feed them
         into the corresponding regression's ``add_observation``."""
+        tick = 0
         while True:
-            self._drain_once()
+            prefill_added, decode_added = self._drain_once()
+            tick += 1
+            # Log every tick during warmup (until both warm) so we can see
+            # FPM observations flowing; after warmth, log every 10s so we
+            # don't spam.
+            both_warm = (
+                self._prefill_regression.has_sufficient_data()
+                and self._agg_regression.has_sufficient_data()
+            )
+            if not both_warm or tick % 10 == 0:
+                logger.info(
+                    "fpm_drain tick=%d prefill_added=%d decode_added=%d "
+                    "prefill_obs=%d decode_obs=%d "
+                    "prefill_warm=%s decode_warm=%s",
+                    tick,
+                    prefill_added,
+                    decode_added,
+                    # Surface the regression's actual counted observations so we
+                    # can see when add_observation silently drops FPMs (e.g.
+                    # wall_time==0.0 filter at perf_model/base.py:176).
+                    self._prefill_regression._total_observations,
+                    self._agg_regression._total_observations,
+                    self._prefill_regression.has_sufficient_data(),
+                    self._agg_regression.has_sufficient_data(),
+                )
             await asyncio.sleep(self._config.fpm_poll_interval_s)
 
-    def _drain_once(self) -> None:
+    def _drain_once(self) -> tuple[int, int]:
+        prefill_added = 0
+        decode_added = 0
         if self._prefill_sub is not None:
             for raw in self._prefill_sub.get_recent_stats().values():
                 fpm = decode_fpm(raw)
                 if fpm is not None:
+                    # Log up to 5 *active* (wall_time>0) FPMs from the prefill
+                    # side so we can audit what the regression is actually
+                    # learning from (vs the initial idle heartbeat at wall_time=0).
+                    if fpm.wall_time > 0.0 and self._active_prefill_logged < 5:
+                        logger.info(
+                            "active prefill FPM #%d: counter_id=%d wall_time=%.6fs "
+                            "sched_prefill_tokens=%d sched_num_prefill=%d "
+                            "queued_prefill_tokens=%d",
+                            self._active_prefill_logged,
+                            fpm.counter_id,
+                            fpm.wall_time,
+                            fpm.scheduled_requests.sum_prefill_tokens,
+                            fpm.scheduled_requests.num_prefill_requests,
+                            fpm.queued_requests.sum_prefill_tokens,
+                        )
+                        self._active_prefill_logged += 1
                     self._prefill_regression.add_observation(fpm)
+                    prefill_added += 1
         if self._decode_sub is not None:
             for raw in self._decode_sub.get_recent_stats().values():
                 fpm = decode_fpm(raw)
                 if fpm is not None:
+                    if fpm.wall_time > 0.0 and self._active_decode_logged < 5:
+                        logger.info(
+                            "active decode FPM #%d: counter_id=%d wall_time=%.6fs "
+                            "sched_decode_kv_tokens=%d sched_num_decode=%d",
+                            self._active_decode_logged,
+                            fpm.counter_id,
+                            fpm.wall_time,
+                            fpm.scheduled_requests.sum_decode_kv_tokens,
+                            fpm.scheduled_requests.num_decode_requests,
+                        )
+                        self._active_decode_logged += 1
                     self._agg_regression.add_observation(fpm)
+                    decode_added += 1
+        return prefill_added, decode_added
 
     # ------------------------------------------------------------------
     # Slow-path RPC
@@ -154,7 +222,7 @@ class CostEvalService:
             kv_hit_rate=request.disagg_kv_hit_rate,
         )
 
-        return CostEvalResponse(
+        response = CostEvalResponse(
             agg_ttft_ms=(agg_ttft_s * _S_TO_MS if agg_ttft_s is not None else None),
             disagg_ttft_ms=(
                 disagg_ttft_s * _S_TO_MS if disagg_ttft_s is not None else None
@@ -162,6 +230,23 @@ class CostEvalService:
             agg_warm=self._agg_regression.has_sufficient_data(),
             disagg_warm=self._prefill_regression.has_sufficient_data(),
         )
+        logger.info(
+            "evaluate request_id=%r prompt_tokens=%d agg_kvh=%.3f disagg_kvh=%.3f "
+            "→ agg_ttft=%s disagg_ttft=%s agg_warm=%s disagg_warm=%s",
+            request.request_id,
+            request.prompt_tokens,
+            request.agg_kv_hit_rate,
+            request.disagg_kv_hit_rate,
+            f"{response.agg_ttft_ms:.2f}ms"
+            if response.agg_ttft_ms is not None
+            else "None",
+            f"{response.disagg_ttft_ms:.2f}ms"
+            if response.disagg_ttft_ms is not None
+            else "None",
+            response.agg_warm,
+            response.disagg_warm,
+        )
+        return response
 
     def evaluate_safe(self, request: CostEvalRequest) -> CostEvalResponse:
         """Wrapper around ``evaluate`` that converts any internal exception

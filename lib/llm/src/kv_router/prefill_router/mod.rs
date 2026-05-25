@@ -36,6 +36,13 @@ use types::{
     ConditionalPrefillPolicy, PrefillOutcome, PrefillResolveDecision, build_decode_router_override,
 };
 
+/// Annotation marker the conditional-prefill bypass path sets on a request before
+/// dispatching it to a DECODE-mode worker. The worker's Python wrapper checks for
+/// this annotation and skips its "disaggregated_params is required" validation,
+/// running the request as AGG instead. Kept in sync with the Python constant in
+/// `components/src/dynamo/trtllm/request_handlers/handler_base.py`.
+const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefill";
+
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
@@ -137,6 +144,15 @@ impl
                     let routing = req.routing_mut();
                     routing.decode_worker_id = Some(decision.worker.worker_id);
                     routing.dp_rank = Some(decision.worker.dp_rank);
+
+                    // Mark the request so the DECODE-mode worker's Python wrapper
+                    // accepts disaggregated_params=None and runs the request as AGG.
+                    // Without this, handler_base.py raises
+                    // "Disaggregated params are required for decode mode".
+                    if !req.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION) {
+                        req.annotations
+                            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+                    }
 
                     return next.generate(context.map(|_| req)).await;
                 }

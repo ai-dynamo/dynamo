@@ -231,11 +231,11 @@ pub type SharedCostEvaluator = Arc<dyn CostEvaluator>;
 /// object so the policy can be swapped without changing `PrefillRouter` or
 /// other consumers.
 ///
-/// `evaluator` is consumed only by `ConditionalPrefillPolicyKind::Regression`;
-/// the other policy kinds ignore it. When `None`, the Regression policy is
-/// constructed with no evaluator and its slow path falls back to conservative
-/// DISAGG until something (typically `PrefillRouter::activate()`) calls
-/// `try_set_cost_evaluator()` on the policy.
+/// `evaluator` is consumed only by the Regression-flavored policy kinds
+/// (`ThresholdRegression`, `ThresholdOnly`, `RegressionOnly`); other kinds
+/// ignore it. When `None`, the policy is constructed with no evaluator and
+/// its slow path falls back to conservative DISAGG until something (typically
+/// `PrefillRouter::activate()`) calls `try_set_cost_evaluator()` on the policy.
 pub fn make_conditional_prefill_policy(
     config: Option<&KvRouterConfig>,
     evaluator: Option<SharedCostEvaluator>,
@@ -247,8 +247,35 @@ pub fn make_conditional_prefill_policy(
         ConditionalPrefillPolicyKind::TokenCap => {
             Box::new(TokenCapConditionalPrefillPolicy::from_config(Some(config)))
         }
-        ConditionalPrefillPolicyKind::Regression => Box::new(
-            RegressionConditionalPrefillPolicy::from_config(Some(config), evaluator),
+        ConditionalPrefillPolicyKind::ThresholdRegression => {
+            Box::new(RegressionConditionalPrefillPolicy::from_config_with_mode(
+                Some(config),
+                evaluator,
+                true,
+                true,
+            ))
+        }
+        ConditionalPrefillPolicyKind::ThresholdOnly => {
+            Box::new(RegressionConditionalPrefillPolicy::from_config_with_mode(
+                Some(config),
+                evaluator,
+                true,
+                false,
+            ))
+        }
+        ConditionalPrefillPolicyKind::RegressionOnly => {
+            Box::new(RegressionConditionalPrefillPolicy::from_config_with_mode(
+                Some(config),
+                evaluator,
+                false,
+                true,
+            ))
+        }
+        ConditionalPrefillPolicyKind::AlwaysBypass => Box::new(
+            AlwaysBypassConditionalPrefillPolicy::from_config(Some(config)),
+        ),
+        ConditionalPrefillPolicyKind::RandomBypass => Box::new(
+            RandomBypassConditionalPrefillPolicy::from_config(Some(config)),
         ),
     }
 }
@@ -294,6 +321,77 @@ impl ConditionalPrefillPolicy for TokenCapConditionalPrefillPolicy {
     }
 }
 
+// -- AlwaysBypass policy (test-only) --
+
+/// Always bypasses remote prefill when enabled. Test scaffolding for
+/// verifying the end-to-end bypass path against real engine workers
+/// (TRT-LLM, vLLM, SGLang) — strips all decision logic so the bypass path
+/// is exercised on every request. Not intended for production use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AlwaysBypassConditionalPrefillPolicy {
+    enabled: bool,
+}
+
+impl AlwaysBypassConditionalPrefillPolicy {
+    pub fn from_config(config: Option<&KvRouterConfig>) -> Self {
+        Self {
+            enabled: config.is_some_and(|c| c.conditional_prefill_enabled),
+        }
+    }
+}
+
+#[async_trait]
+impl ConditionalPrefillPolicy for AlwaysBypassConditionalPrefillPolicy {
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    async fn should_bypass_remote_prefill(&self, _input: ConditionalPrefillDecisionInput) -> bool {
+        self.enabled
+    }
+}
+
+// -- RandomBypass policy (test-only) --
+
+/// Per-request bypass probability for `RandomBypassConditionalPrefillPolicy`.
+/// Hardcoded at 50% — gives the most discriminating mix of bypass /
+/// non-bypass traffic for an E2E smoke test. If you need a different value,
+/// either edit this constant or add a knob.
+const RANDOM_BYPASS_PROBABILITY: f64 = 0.5;
+
+/// Bypasses remote prefill with a hardcoded 50% probability. Test
+/// scaffolding for stressing the routing layer's handling of mixed
+/// bypass / non-bypass traffic — exercises both code paths on every run
+/// without needing carefully-shaped workloads. Not intended for
+/// production use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RandomBypassConditionalPrefillPolicy {
+    enabled: bool,
+}
+
+impl RandomBypassConditionalPrefillPolicy {
+    pub fn from_config(config: Option<&KvRouterConfig>) -> Self {
+        Self {
+            enabled: config.is_some_and(|c| c.conditional_prefill_enabled),
+        }
+    }
+}
+
+#[async_trait]
+impl ConditionalPrefillPolicy for RandomBypassConditionalPrefillPolicy {
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    async fn should_bypass_remote_prefill(&self, _input: ConditionalPrefillDecisionInput) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        use rand::Rng;
+        rand::rng().random::<f64>() < RANDOM_BYPASS_PROBABILITY
+    }
+}
+
 // -- Regression policy --
 
 /// Two-phase router cost policy (the "Cost 4A" design in
@@ -317,6 +415,13 @@ impl ConditionalPrefillPolicy for TokenCapConditionalPrefillPolicy {
 /// signals → conservatively treat as not roomy.
 pub struct RegressionConditionalPrefillPolicy {
     enabled: bool,
+    /// When true, evaluate the roomy()/large-prompt checks. Disabled in the
+    /// `RegressionOnly` diagnostic variant so every request hits the slow path.
+    enable_fast_path: bool,
+    /// When true, the slow-path `CostEvaluator` RPC may run. Disabled in the
+    /// `ThresholdOnly` diagnostic variant so requests that the fast path can't
+    /// decide fall back to conservative DISAGG without consulting cost_eval.
+    enable_slow_path: bool,
     /// Effective ISL (post device-cache) above this triggers DISAGG on the
     /// fast path — too much prefill to commit to the decode worker.
     large_prompt_threshold_tokens: usize,
@@ -336,13 +441,28 @@ pub struct RegressionConditionalPrefillPolicy {
 }
 
 impl RegressionConditionalPrefillPolicy {
+    /// Build with the production `ThresholdRegression` mode (fast + slow).
     pub fn from_config(
         config: Option<&KvRouterConfig>,
         evaluator: Option<SharedCostEvaluator>,
     ) -> Self {
-        let policy = match config {
+        Self::from_config_with_mode(config, evaluator, true, true)
+    }
+
+    /// Variant-aware constructor. `enable_fast_path` / `enable_slow_path` are
+    /// set by `make_conditional_prefill_policy` based on which
+    /// `ConditionalPrefillPolicyKind` was requested.
+    pub fn from_config_with_mode(
+        config: Option<&KvRouterConfig>,
+        evaluator: Option<SharedCostEvaluator>,
+        enable_fast_path: bool,
+        enable_slow_path: bool,
+    ) -> Self {
+        let mut policy = match config {
             Some(cfg) => Self {
                 enabled: cfg.conditional_prefill_enabled,
+                enable_fast_path,
+                enable_slow_path,
                 large_prompt_threshold_tokens: cfg
                     .conditional_prefill_regression_large_prompt_threshold_tokens,
                 roomy_available_ratio_threshold: cfg
@@ -353,6 +473,8 @@ impl RegressionConditionalPrefillPolicy {
             },
             None => Self::with_defaults(),
         };
+        policy.enable_fast_path = enable_fast_path;
+        policy.enable_slow_path = enable_slow_path;
         if let Some(evaluator) = evaluator {
             // Best-effort: only `Err`s if already set, which can't happen on
             // a freshly-constructed policy.
@@ -364,6 +486,8 @@ impl RegressionConditionalPrefillPolicy {
     pub fn with_defaults() -> Self {
         Self {
             enabled: false,
+            enable_fast_path: true,
+            enable_slow_path: true,
             large_prompt_threshold_tokens: DEFAULT_REGRESSION_LARGE_PROMPT_THRESHOLD_TOKENS,
             roomy_available_ratio_threshold: DEFAULT_REGRESSION_ROOMY_AVAILABLE_RATIO,
             roomy_queued_blocks_threshold: DEFAULT_REGRESSION_ROOMY_QUEUED_BLOCKS,
@@ -431,8 +555,8 @@ pub const DEFAULT_REGRESSION_LARGE_PROMPT_THRESHOLD_TOKENS: usize = 16_384;
 ///   - `(max - load) / max ≥ ratio` → "enough free KV memory"
 ///   - `queued ≤ threshold`         → "small pending prefill compute backlog"
 ///
-/// TODO (Phase 6 review — see `docs/regressionpolicy_implementation.md`):
-/// once mocker/live data is in hand, revisit:
+/// TODO (Phase 4 review — see `docs/regressionpolicy_implementation.md`):
+/// before pushing on real-engine E2E, revisit with mocker data already in hand:
 ///   - Threshold defaults (`available/max ≥ 0.5`, `queued ≤ 0`).
 ///   - Whether `load_blocks` and `queued_blocks` give independent signal or
 ///     are correlated enough that we could drop one (the currently-running
@@ -478,37 +602,46 @@ impl ConditionalPrefillPolicy for RegressionConditionalPrefillPolicy {
         }
 
         // Fast path — evaluate roomy() and large-prompt cutoff on router state.
-        let p_roomy = worker_is_roomy(
-            input.prefill_chosen_load_blocks,
-            input.prefill_chosen_max_blocks,
-            input.prefill_chosen_queued_blocks,
-            self.roomy_available_ratio_threshold,
-            self.roomy_queued_blocks_threshold,
-        );
-        let overlap_tokens =
-            (input.decode_chosen_overlap_blocks as usize).saturating_mul(input.block_size);
-        let eff_isl_tokens = input.prompt_tokens.saturating_sub(overlap_tokens);
-        if p_roomy || eff_isl_tokens > self.large_prompt_threshold_tokens {
-            return false;
-        }
+        // Skipped entirely in `RegressionOnly` mode so every request that
+        // reaches the slow path RPCs cost_eval.
+        if self.enable_fast_path {
+            let p_roomy = worker_is_roomy(
+                input.prefill_chosen_load_blocks,
+                input.prefill_chosen_max_blocks,
+                input.prefill_chosen_queued_blocks,
+                self.roomy_available_ratio_threshold,
+                self.roomy_queued_blocks_threshold,
+            );
+            let overlap_tokens =
+                (input.decode_chosen_overlap_blocks as usize).saturating_mul(input.block_size);
+            let eff_isl_tokens = input.prompt_tokens.saturating_sub(overlap_tokens);
+            if p_roomy || eff_isl_tokens > self.large_prompt_threshold_tokens {
+                return false;
+            }
 
-        let d_roomy = worker_is_roomy(
-            input.decode_chosen_load_blocks,
-            input.decode_chosen_max_blocks,
-            input.decode_chosen_queued_blocks,
-            self.roomy_available_ratio_threshold,
-            self.roomy_queued_blocks_threshold,
-        );
-        if d_roomy {
-            return true;
+            let d_roomy = worker_is_roomy(
+                input.decode_chosen_load_blocks,
+                input.decode_chosen_max_blocks,
+                input.decode_chosen_queued_blocks,
+                self.roomy_available_ratio_threshold,
+                self.roomy_queued_blocks_threshold,
+            );
+            if d_roomy {
+                return true;
+            }
         }
 
         // Slow path — consult the regression-backed evaluator. Conservative
         // DISAGG fallback when:
+        //  - the slow path is disabled (`ThresholdOnly` diagnostic mode):
+        //    fast path didn't conclude, so commit to DISAGG.
         //  - the DISAGG-side credit is missing (skip the RPC entirely),
         //  - the evaluator hasn't been bound yet (pre-activate, or
         //    Regression selected without a sidecar), or
         //  - either regression is cold.
+        if !self.enable_slow_path {
+            return false;
+        }
         let Some(request) = self.cost_eval_request(input) else {
             return false;
         };
@@ -622,7 +755,11 @@ mod tests {
     fn policy_kind_round_trips() {
         for kind in [
             ConditionalPrefillPolicyKind::TokenCap,
-            ConditionalPrefillPolicyKind::Regression,
+            ConditionalPrefillPolicyKind::ThresholdRegression,
+            ConditionalPrefillPolicyKind::ThresholdOnly,
+            ConditionalPrefillPolicyKind::RegressionOnly,
+            ConditionalPrefillPolicyKind::AlwaysBypass,
+            ConditionalPrefillPolicyKind::RandomBypass,
         ] {
             assert_eq!(
                 ConditionalPrefillPolicyKind::from_str(kind.as_str()),
@@ -630,6 +767,16 @@ mod tests {
             );
         }
         assert_eq!(ConditionalPrefillPolicyKind::from_str("nonsense"), None);
+    }
+
+    #[test]
+    fn uses_slow_path_matches_variant_intent() {
+        assert!(!ConditionalPrefillPolicyKind::TokenCap.uses_slow_path());
+        assert!(!ConditionalPrefillPolicyKind::AlwaysBypass.uses_slow_path());
+        assert!(!ConditionalPrefillPolicyKind::RandomBypass.uses_slow_path());
+        assert!(!ConditionalPrefillPolicyKind::ThresholdOnly.uses_slow_path());
+        assert!(ConditionalPrefillPolicyKind::ThresholdRegression.uses_slow_path());
+        assert!(ConditionalPrefillPolicyKind::RegressionOnly.uses_slow_path());
     }
 
     // -- Regression policy tests --
@@ -671,6 +818,8 @@ mod tests {
     fn make_regression_policy(response: CostEvalResponse) -> RegressionConditionalPrefillPolicy {
         let policy = RegressionConditionalPrefillPolicy {
             enabled: true,
+            enable_fast_path: true,
+            enable_slow_path: true,
             large_prompt_threshold_tokens: 16_384,
             roomy_available_ratio_threshold: 0.5,
             roomy_queued_blocks_threshold: 0,
@@ -685,6 +834,8 @@ mod tests {
     fn make_regression_policy_without_evaluator() -> RegressionConditionalPrefillPolicy {
         RegressionConditionalPrefillPolicy {
             enabled: true,
+            enable_fast_path: true,
+            enable_slow_path: true,
             large_prompt_threshold_tokens: 16_384,
             roomy_available_ratio_threshold: 0.5,
             roomy_queued_blocks_threshold: 0,
