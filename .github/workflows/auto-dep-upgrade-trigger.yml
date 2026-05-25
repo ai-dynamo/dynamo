@@ -4,6 +4,8 @@
 name: Auto Dependency Upgrade - Trigger
 
 on:
+  push:
+    branches: [anants/fix-auto-dep-upgrade-trtllm-shape]  # TEMP: e2e on push
   schedule:
     - cron: '0 10 * * *'
   workflow_dispatch:
