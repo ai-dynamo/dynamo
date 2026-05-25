@@ -210,19 +210,19 @@ jobs:
 #       build_timeout_minutes: 60
 #     secrets: inherit
 
-#   sglang-build:
-#     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-#     needs: [changed-files]
-#     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-#     uses: ./.github/workflows/shared-build-image.yml
-#     with:
-#       framework: sglang
-#       target: runtime
-#       cuda_version: '["12.9", "13.0"]'
-#       platform: 'linux/amd64,linux/arm64'
-#       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-#       build_timeout_minutes: 60
-#     secrets: inherit
+  sglang-build:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
 
 #   sglang-dev-build:
 #     name: sglang-dev
@@ -339,27 +339,27 @@ jobs:
 #       gpu_test_timeout_minutes: 60
 #     secrets: inherit
 
-#   sglang-test:
-#     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-#     needs: [changed-files, sglang-build]
-#     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-#     uses: ./.github/workflows/shared-test.yml
-#     with:
-#       test_suite_name: sglang
-#       test_type: Test
-#       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-#       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-#       cuda_version: '["12.9", "13.0"]'
-#       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-#       run_cpu_only_tests: true
-#       cpu_only_test_markers: pre_merge and sglang and gpu_0
-#       gpu_test_markers: pre_merge and sglang and gpu_1
-#       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
-#       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
-#       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
-#       run_gpu_parallel_tests: true
-#       gpu_parallel_max_vram_gib: '24'
-#     secrets: inherit
+  sglang-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and sglang and gpu_0
+      gpu_test_markers: pre_merge and sglang and gpu_1
+      # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
+      # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
+      # while yielding one auto slot today. Larger runners will get more slots from the same markers.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
+    secrets: inherit
 
 #   sglang-multi-gpu-test:
 #     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
@@ -549,21 +549,21 @@ jobs:
 #       copy_timeout_minutes: 10
 #     secrets: inherit
 
-#   sglang-copy-to-acr:
-#     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-#     needs: [changed-files, sglang-build, sglang-test]
-#     if: |
-#       always() && !cancelled() &&
-#       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-#       needs.sglang-build.result == 'success' &&
-#       (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
-#     uses: ./.github/workflows/shared-copy.yml
-#     with:
-#       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-#       cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
-#       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-#       copy_timeout_minutes: 10
-#     secrets: inherit
+  sglang-copy-to-acr:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build, sglang-test]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      needs.sglang-build.result == 'success' &&
+      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
 
 #   trtllm-copy-to-acr:
 #     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
@@ -627,21 +627,21 @@ jobs:
   #     operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
   #   secrets: inherit
 
-  # deploy-test-sglang:
-  #   name: sglang Deploy Test
-  #   needs: [changed-files, deploy-operator, sglang-copy-to-acr]
-  #   if: |
-  #     !cancelled() && !failure() &&
-  #     (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
-  #   uses: ./.github/workflows/shared-deploy-test.yml
-  #   with:
-  #     framework: sglang
-  #     profiles: '["agg", "agg_router"]'
-  #     image_suffix: sglang-runtime-cuda13
-  #     namespace: ${{ needs.deploy-operator.outputs.namespace }}
-  #     vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-  #     operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
-  #   secrets: inherit
+  deploy-test-sglang:
+    name: sglang Deploy Test
+    needs: [changed-files, deploy-operator, sglang-copy-to-acr]
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: sglang
+      profiles: '["agg", "agg_router"]'
+      image_suffix: sglang-runtime-cuda13
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
 
   # deploy-test-trtllm:
   #   name: trtllm Deploy Test
@@ -661,7 +661,7 @@ jobs:
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator] #, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-sglang] #, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     runs-on: stg-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
