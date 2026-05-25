@@ -7,3 +7,5 @@
 - Put low-level shared utilities in `tests/router/helper.py`; examples include request sending, readiness polling, runtime setup, indexer waits, and response parsing helpers.
 - Keep process lifecycle wrappers in `tests/router/router_process.py` or the existing backend-specific process helpers, rather than embedding subprocess management inside scenario logic.
 - New e2e tests should assert behavior through stable surfaces such as response `nvext` fields, router helper APIs, metrics, or structured event dumps. Avoid log parsing unless there is no better observable contract.
+- Do not add non-router tests here. Avoid tautological tests, tests that are mostly white-box assertions about implementation details, and tests that only exercise test infrastructure such as harness process construction.
+- When a test in this directory fails, do not assume the router is at fault just because the test name says router. Read the error carefully and root cause whether the failure is in the router, backend, harness, environment, or assertion before changing code.
