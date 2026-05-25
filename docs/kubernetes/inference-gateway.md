@@ -18,6 +18,8 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 
 - GAIE integration supports Data Parallelism.
 
+- **Cross-pool (ISL/SLA-aware) routing.** The optional `pool-selector` EPP plugin lets one `InferencePool` span heterogeneous pools (e.g. TP1/TP2/TP4): it selects the target pool from a `(size, latency-target)` grid before the within-pool KV/load scorer picks the replica. This folds the [Global Router](../../components/src/dynamo/global_router/README.md)'s cross-pool selection into the gateway (one fewer hop), consuming the same profiler-derived grid for parity. See the plugin under `deploy/inference-gateway/epp/pkg/plugins/pool_selector/`; run the standalone Global Router instead when you need exact tokenization, cross-pool retry ordering, or planner integration.
+
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
 - These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation.

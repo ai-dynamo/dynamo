@@ -16,6 +16,8 @@ The Global Router supports two modes:
 
 Both modes support priority-based pool overrides from agent hints and optional priority retry to faster pools.
 
+> **Also available in the gateway.** The same cross-pool selection runs inside the Inference Gateway's Endpoint Picker (EPP) as the optional `pool-selector` plugin, folding it into the gateway (one fewer hop) so a single `InferencePool` can span heterogeneous pools. Both paths consume the same grid via [`build_isl_latency_grid`](pool_selection.py) for parity. The in-gateway path is a subset of this component — it estimates ISL from character count rather than tokenizing, and omits cross-pool retry ordering and planner integration. See [Inference Gateway (GAIE)](../../../../docs/kubernetes/inference-gateway.md).
+
 ## Supported Backends
 
 - **vLLM** - Uses synchronous prefill path (frontend waits for prefill to complete)
