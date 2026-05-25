@@ -1,89 +1,67 @@
 # `dynamo.thunderagent_router` (experimental)
 
-> **Status: experimental.** CLI flags, the `nvext.agent_context` schema, and
-> the lifecycle hooks in this package are not stable. Defaults reflect what
-> we have measured so far; expect them to move.
+> **Experimental — not a released component.** Run it from a source checkout
+> (see [Install](#install)), not from a `pip install ai-dynamo`. The CLI
+> flags, the `nvext.agent_context` schema, and the lifecycle hooks are all
+> unstable and will change.
 
-A standalone Dynamo routing service that adds **program-level scheduling**
-with tool-boundary pause/resume on top of Dynamo's native KV router. It
-treats an entire agent run (LLM turn → tool execution → next LLM turn …)
-as the schedulable unit, not individual requests.
+A standalone Dynamo router that schedules at the granularity of an agent run
+— the whole `LLM turn → tool call → next turn` loop — instead of individual
+requests. It wraps Dynamo's native KV router and adds tool-boundary
+pause/resume, porting the scheduler from the ThunderAgent paper.
 
----
+## The problem
 
-## 1. The problem
+Agentic workloads (SWE-bench, browser-use, anything with a tool loop) make
+many short LLM calls separated by non-GPU work: `docker exec`, `pytest`,
+`curl`, waiting on a subagent. Between turns the agent's KV cache stays
+resident, holding blocks while doing nothing. A request-level router
+(vLLM's, SGLang's, Dynamo's stock `KvRouter`) sees each turn but not the
+agent behind it, which costs you two ways:
 
-Agentic LLM workloads (SWE-bench, browser-use, anything with a tool loop)
-make many short LLM calls interleaved with non-GPU work — `docker exec`,
-`pytest`, `curl`, waiting on subagent output. Between turns the agent's
-KV cache sits on the GPU contributing zero progress while still occupying
-blocks. At scale this caps useful throughput well below what the engine
-can sustain on raw request volume.
+- **Cache-occupancy blowup.** With N agents at step K, the working set is
+  `N × step_K_context`, most of it idle between turns. The engine evicts
+  useful blocks under pressure or refuses admission, and every next turn
+  pays a re-prefill tax.
+- **No tool-boundary backpressure.** The router can't defer a hot trajectory
+  at a natural pause point — it can only cancel in-flight requests or queue
+  them, both worse than waiting until the agent is between turns.
 
-Request-level routers (vLLM's, SGLang's, Dynamo's stock `KvRouter`)
-schedule one request at a time. They see the LLM turn but not the agent
-behind it. Two failure modes follow:
+## The scheduler
 
-1. **Cache-occupancy explosion.** With N concurrent agents at conversation
-   step K, the working set is `N × step_K_context`. Most of that KV is
-   between turns, doing nothing. The engine evicts useful blocks under
-   memory pressure or refuses admission, and every "next turn" pays a
-   re-prefill tax.
-2. **No tool-boundary backpressure.** The router can't slow down a hot
-   trajectory at a natural pause point; it can only cancel in-flight
-   requests or queue them. Either choice is worse than "wait until this
-   agent is between turns and then defer."
+The algorithm comes from [ThunderAgent](https://arxiv.org/abs/2602.13692)
+(Kang et al., 2026). It groups requests by `program_id` and runs an outer
+scheduler that moves each program through `(REASONING | ACTING) × (ACTIVE |
+PAUSED)`. A program enters ACTING at a tool boundary. Under memory pressure
+the scheduler pauses ACTING programs — logically, with no decode preemption —
+so the engine is free to evict their KV. When utilization drops it resumes
+the smallest-token programs first, BFD-packing them back under threshold. The
+payoff is working-set accounting that counts programs rather than requests,
+plus pause/resume aimed at tool boundaries rather than arbitrary tokens.
 
-This package addresses both.
+## What this port changes
 
----
+The scheduler is upstream's, unchanged: same lifecycle, same "pause smallest
+ACTING first" selection, same BFD restore, same `2^(-t/τ)` decay on the
+resume side, same per-backend capacity bookkeeping. The knobs in the table
+below expose upstream's values as flags; none are new mechanisms.
 
-## 2. ThunderAgent in one paragraph
+Two things differ from the reference implementation:
 
-[ThunderAgent](https://arxiv.org/abs/2602.13692) (Kang et al., 2026)
-groups requests under a `program_id` and runs an outer scheduler that
-moves a program through `(REASONING | ACTING) × (ACTIVE | PAUSED)`.
-At a tool boundary the program goes to ACTING; under memory pressure the
-scheduler **pauses** ACTING programs (logically — no decode preemption)
-so that their KV blocks are eligible for eviction by the engine. When
-working-set util drops, the scheduler **resumes** the smallest-token
-programs first, BFD-packing them back below threshold. The result is
-boundary-aware admission that never preempts active decode.
+- **In-path Dynamo service, not a proxy.** Upstream ships a Python OpenAI
+  proxy in front of the engine. This runs as a Dynamo router that owns a
+  `KvRouter` directly and registers as a model handler, so there's no extra
+  proxy hop.
+- **Real token counts.** Running in-path, it reads `prompt_tokens +
+  completion_tokens` off each response. The upstream proxy only sees raw
+  bytes, so it estimates from `len(json.dumps(payload)) / chars_per_token`.
 
-The mechanism is simple. The wins reported in the paper come from two
-places: working-set accounting that knows about programs (not requests),
-and pause/resume targeting tool boundaries (not arbitrary tokens).
+v0 is a single in-memory service, so pause state is lost on restart. A Rust
+port and the larger deviations from upstream — blended load/overlap worker
+selection, workflow-profile-aware pause selection, KV demote/prefetch — are
+future work, not part of this version.
 
----
-
-## 3. How we built on ThunderAgent
-
-This is a port, not a redesign. The scheduler algorithm is upstream's:
-same lifecycle model (`REASONING / ACTING × ACTIVE / PAUSED`), same
-"pause smallest ACTING first" selection, same BFD restore, same
-`2^(-t/τ)` decay applied only on the resume side, same per-backend
-capacity bookkeeping. The scheduler knobs in the table below are
-upstream values exposed as flags, not new mechanisms.
-
-Two implementation choices worth flagging:
-
-1. **Native Dynamo router service.** Upstream's reference is a Python
-   OpenAI proxy. We re-implemented the algorithm as a Dynamo router
-   service that owns a `KvRouter` instance directly and registers as a
-   model handler — no external proxy in the path.
-2. **Real-token accounting.** Because the router runs in-path, we read
-   `prompt_tokens + completion_tokens` straight off the chat-completions
-   response. Upstream's proxy estimates from
-   `len(json.dumps(payload)) / chars_per_token_ratio` since it sits
-   in front of the engine and only sees raw bytes.
-
-Single in-memory service for now; pause state is lost on restart, a
-Rust port is on the roadmap, and the substantial deviations from
-upstream (blended cost function for worker selection,
-workflow-profile-aware pause selection, KV demote/prefetch) are
-explicitly future work, not part of v0.
-
-### Knobs (full table)
+### Knobs
 
 | Flag | Env var | Default | Description |
 |---|---|---|---|
@@ -108,9 +86,9 @@ and forwarded.
 
 ---
 
-## 4. Roadmap
+## Roadmap
 
-Next, in rough priority:
+Roughly in priority order:
 
 1. **Blended worker selection.** Admission currently picks the
    lightest-loaded worker. Configure `KvRouter` with
@@ -174,6 +152,21 @@ LLM-turn ↔ tool-gap timeline per agent.
 ```
 
 ---
+
+## Install
+
+This is experimental and not shipped as a supported entrypoint. Run it from a
+source checkout:
+
+```bash
+git clone https://github.com/ai-dynamo/dynamo
+cd dynamo
+# build the Rust bindings, then install the Python components editable
+(cd lib/bindings/python && maturin develop --uv)
+uv pip install -e .
+```
+
+`python -m dynamo.thunderagent_router` then resolves against that checkout.
 
 ## Usage
 
