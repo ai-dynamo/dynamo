@@ -184,16 +184,16 @@ impl HostMemoryPool {
             );
         }
 
-        let backend_config = if config.backends.is_empty() {
-            NixlBackendConfig::from_env()
-                .map_err(|e| ServiceError::Internal(format!("parse NIXL backend env: {e}")))?
-        } else {
-            let mut bc = NixlBackendConfig::default();
-            for name in &config.backends {
-                bc = bc.with_backend(name);
-            }
-            bc
-        };
+        // Resolve which NIXL backends to actually use. `from_env` is
+        // wrapped in a closure so it only runs on the legacy fallback
+        // path; a malformed `DYN_KVBM_NIXL_BACKEND_*` env var would
+        // otherwise abort startup for configurations that never consult
+        // env at all (explicit list / `.local_only()`).
+        let backend_config =
+            resolve_backend_config(&config.backends, config.allow_no_nixl_backends, || {
+                NixlBackendConfig::from_env()
+                    .map_err(|e| ServiceError::Internal(format!("parse NIXL backend env: {e}")))
+            })?;
         // Production trap: a NIXL agent with no DRAM-capable backend will
         // silently accept register_memory and produce slabs whose handle
         // looks valid but cannot satisfy remote pulls. Refuse to start in
@@ -390,6 +390,43 @@ fn allocate_slab(
     Ok(NodeSlab::new_registered(
         registered, agent, node, mapped_len, tier, agent_name,
     ))
+}
+
+/// Resolve the NIXL backend set the pool will hand to each slab's agent.
+///
+/// Precedence:
+/// 1. **Explicit list** (`requested_backends` non-empty) — wins
+///    unconditionally. Operator opted in via TOML / builder.
+/// 2. **Explicit opt-out** (`allow_no_nixl_backends = true` with empty
+///    list) — return an empty config; **the env fallback is suppressed**
+///    so an inherited `DYN_KVBM_NIXL_BACKEND_UCX` cannot silently
+///    re-enable NIXL behind a `.local_only()` builder call.
+/// 3. **Legacy env fallback** — read `DYN_KVBM_NIXL_BACKEND_*` via the
+///    `env_backends` closure. Preserved for operators who set backends
+///    purely via environment.
+///
+/// `env_backends` is a closure so the (potentially failing) env read only
+/// runs when the legacy fallback branch is actually taken. A malformed
+/// env var must not abort startup for configs that never look at env.
+fn resolve_backend_config<F>(
+    requested_backends: &[String],
+    allow_no_nixl_backends: bool,
+    env_backends: F,
+) -> ServiceResult<NixlBackendConfig>
+where
+    F: FnOnce() -> ServiceResult<NixlBackendConfig>,
+{
+    if !requested_backends.is_empty() {
+        let mut bc = NixlBackendConfig::default();
+        for name in requested_backends {
+            bc = bc.with_backend(name);
+        }
+        return Ok(bc);
+    }
+    if allow_no_nixl_backends {
+        return Ok(NixlBackendConfig::default());
+    }
+    env_backends()
 }
 
 /// Restrict the host-memory nodes to those allowed by the cgroup's
@@ -604,6 +641,110 @@ mod tests {
             .map(|n| n.node.0)
             .collect();
         assert_eq!(kept, vec![0]);
+    }
+
+    fn env_ucx_loader() -> impl FnOnce() -> ServiceResult<NixlBackendConfig> {
+        || Ok(NixlBackendConfig::default().with_backend("UCX"))
+    }
+
+    /// Records whether the env-loading closure ran. Used to prove that
+    /// opt-out paths never read env vars (so a malformed
+    /// `DYN_KVBM_NIXL_BACKEND_*` can't abort startup).
+    struct EnvProbe {
+        called: std::cell::Cell<bool>,
+    }
+    impl EnvProbe {
+        fn new() -> Self {
+            Self {
+                called: std::cell::Cell::new(false),
+            }
+        }
+        fn loader(&self) -> impl FnOnce() -> ServiceResult<NixlBackendConfig> + '_ {
+            || {
+                self.called.set(true);
+                Ok(NixlBackendConfig::default().with_backend("UCX"))
+            }
+        }
+        fn was_called(&self) -> bool {
+            self.called.get()
+        }
+    }
+
+    #[test]
+    fn resolve_backends_explicit_list_wins() {
+        let resolved =
+            resolve_backend_config(&["POSIX".to_string()], false, env_ucx_loader()).unwrap();
+        assert!(resolved.has_backend("POSIX"));
+        assert!(!resolved.has_backend("UCX"));
+    }
+
+    #[test]
+    fn resolve_backends_empty_list_falls_back_to_env() {
+        let resolved = resolve_backend_config(&[], false, env_ucx_loader()).unwrap();
+        assert!(
+            resolved.has_backend("UCX"),
+            "empty backends + allow_no_nixl_backends=false must consult env"
+        );
+    }
+
+    /// The bug fix: an operator who calls `.local_only()` on the builder
+    /// gets `backends = []` and `allow_no_nixl_backends = true`. If a
+    /// `DYN_KVBM_NIXL_BACKEND_UCX=true` env var happens to be set, the
+    /// old code would silently re-enable NIXL, defeating the intent.
+    #[test]
+    fn resolve_backends_local_only_ignores_env_var() {
+        let resolved = resolve_backend_config(&[], true, env_ucx_loader()).unwrap();
+        assert!(
+            !resolved.has_backend("UCX"),
+            "allow_no_nixl_backends=true must suppress env fallback"
+        );
+        assert!(resolved.backends().is_empty());
+    }
+
+    #[test]
+    fn resolve_backends_explicit_list_overrides_allow_no_nixl() {
+        // Edge case: user set a non-empty list AND allow_no_nixl_backends
+        // (e.g. via TOML); explicit list still wins. The flag is a fail-
+        // safe for "no backends OK", not a global mute.
+        let resolved =
+            resolve_backend_config(&["UCX".to_string()], true, env_ucx_loader()).unwrap();
+        assert!(resolved.has_backend("UCX"));
+    }
+
+    /// Opt-out and explicit-list paths must NOT call the env loader.
+    /// Regression for the "env parsing still runs on opt-out paths" issue:
+    /// a malformed env var must not affect configs that never look at env.
+    #[test]
+    fn resolve_backends_explicit_list_skips_env_loader() {
+        let probe = EnvProbe::new();
+        let _ = resolve_backend_config(&["UCX".to_string()], false, probe.loader()).unwrap();
+        assert!(
+            !probe.was_called(),
+            "explicit backend list must not trigger env parsing"
+        );
+    }
+
+    #[test]
+    fn resolve_backends_local_only_skips_env_loader() {
+        let probe = EnvProbe::new();
+        let _ = resolve_backend_config(&[], true, probe.loader()).unwrap();
+        assert!(
+            !probe.was_called(),
+            "allow_no_nixl_backends=true must not trigger env parsing"
+        );
+    }
+
+    #[test]
+    fn resolve_backends_env_loader_error_only_fails_on_fallback_path() {
+        // If the env loader fails, only the legacy-fallback branch
+        // surfaces the error. Explicit list / local-only succeed without
+        // touching the loader.
+        let failing = || Err(ServiceError::Internal("simulated bad env".into()));
+        assert!(resolve_backend_config(&["UCX".to_string()], false, failing).is_ok());
+        let failing = || Err(ServiceError::Internal("simulated bad env".into()));
+        assert!(resolve_backend_config(&[], true, failing).is_ok());
+        let failing = || Err(ServiceError::Internal("simulated bad env".into()));
+        assert!(resolve_backend_config(&[], false, failing).is_err());
     }
 
     #[test]
