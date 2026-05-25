@@ -313,5 +313,5 @@ ThunderAgent paper:
 - ThunderAgent paper: <https://arxiv.org/abs/2602.13692>
 - Upstream ThunderAgent reference: <https://github.com/HaoKang-Timmy/ThunderAgent>
 - Repro fork (mini-swe-agent + agent_context injector): <https://github.com/ishandhanani/ThunderAgent>
-- Dynamo KV router: `docs/components/router/router-guide.md`
-- `nvext.agent_context` schema: `docs/features/agentic_workloads.md`
+- Dynamo KV router: [Router Guide](/docs/components/router/router-guide.md)
+- `nvext.agent_context` schema: [nvext reference](/docs/components/frontend/nvext.md#agent-context)
