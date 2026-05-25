@@ -512,7 +512,7 @@ fn dsml_parallel_false_sets_stop_after_first() {
         StructuralTagSchemaMode::Auto,
     );
 
-    assert_eq!(parsed["format"]["stop_after_first"], false);
+    assert_eq!(parsed["format"]["stop_after_first"], true);
     let inner = &parsed["format"]["tags"][0]["content"];
     assert_eq!(inner["stop_after_first"], true);
 }

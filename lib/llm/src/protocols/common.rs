@@ -511,13 +511,6 @@ impl GuidedDecodingOptions {
 
         Ok(())
     }
-
-    pub fn has_user_constraint(&self) -> bool {
-        self.json.is_some()
-            || self.regex.is_some()
-            || self.choice.as_ref().is_some_and(|v| !v.is_empty())
-            || self.grammar.is_some()
-    }
 }
 
 impl SamplingOptions {
@@ -990,115 +983,5 @@ mod tests {
         let result =
             GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None, None);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_has_user_constraint_empty() {
-        let gd = GuidedDecodingOptions::default();
-        assert!(!gd.has_user_constraint());
-    }
-
-    #[test]
-    fn test_has_user_constraint_json() {
-        let gd = GuidedDecodingOptions::new(
-            Some(serde_json::json!({"type": "object"})),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(gd.has_user_constraint());
-    }
-
-    #[test]
-    fn test_has_user_constraint_regex() {
-        let gd = GuidedDecodingOptions::new(
-            None,
-            Some(r"\d+".to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(gd.has_user_constraint());
-    }
-
-    #[test]
-    fn test_has_user_constraint_choice() {
-        let gd = GuidedDecodingOptions::new(
-            None,
-            None,
-            Some(vec!["yes".to_string()]),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(gd.has_user_constraint());
-    }
-
-    #[test]
-    fn test_has_user_constraint_choice_empty_vec() {
-        let gd = GuidedDecodingOptions::new(None, None, Some(vec![]), None, None, None, None);
-        assert!(!gd.has_user_constraint());
-    }
-
-    #[test]
-    fn test_has_user_constraint_grammar() {
-        let gd = GuidedDecodingOptions::new(
-            None,
-            None,
-            None,
-            Some("root ::= 'yes'".to_string()),
-            None,
-            None,
-            None,
-        );
-        assert!(gd.has_user_constraint());
-    }
-
-    #[test]
-    fn test_has_user_constraint_backend_only() {
-        let gd = GuidedDecodingOptions::new(
-            None,
-            None,
-            None,
-            None,
-            Some("xgrammar".to_string()),
-            None,
-            None,
-        );
-        assert!(!gd.has_user_constraint());
-    }
-
-    #[test]
-    fn test_has_user_constraint_structural_tag_only() {
-        let gd = GuidedDecodingOptions::new(
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(serde_json::json!({"type": "triggered_tags"})),
-        );
-        assert!(!gd.has_user_constraint());
-    }
-
-    #[test]
-    fn test_has_user_constraint_whitespace_pattern_only() {
-        let gd = GuidedDecodingOptions::new(
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(r"\s+".to_string()),
-            None,
-        );
-        assert!(!gd.has_user_constraint());
     }
 }

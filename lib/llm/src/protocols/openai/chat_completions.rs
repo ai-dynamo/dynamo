@@ -14,7 +14,7 @@ use super::{
     common_ext::{CommonExt, CommonExtProvider},
     nvext::NvExt,
     nvext::NvExtProvider,
-    tools, validate,
+    validate,
 };
 
 pub mod aggregator;
@@ -232,23 +232,6 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
             return Some(value);
         }
 
-        // 1) Tool-call guided decoding (highest precedence after explicit guided_json)
-        if let (Some(tool_choice), Some(tools)) =
-            (self.inner.tool_choice.as_ref(), self.inner.tools.as_deref())
-        {
-            match tools::get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
-                Ok(Some(schema)) => return Some(schema),
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "failed to derive guided_json from tool_choice"
-                    );
-                }
-            }
-        }
-
-        // 2) OpenAI `response_format` (applies to assistant content, not tool calls)
         if let Some(response_format) = self.inner.response_format.as_ref() {
             use dynamo_protocols::types::ResponseFormat;
             match response_format {
@@ -434,7 +417,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
         validate::validate_tools(&self.inner.tools.as_deref())?;
-        // none for tool_choice
+        validate::validate_tool_choice(&self.inner.tool_choice, self.inner.tools.as_deref())?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call
@@ -636,6 +619,50 @@ mod tests {
 
         let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
         assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    #[test]
+    fn test_validate_tool_choice_required_rejects_empty_tools() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": "required"
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("required needs tools");
+        assert!(
+            err.to_string()
+                .contains("tool_choice is \"required\" but tools is empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_tool_choice_named_rejects_missing_tool() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "search"}
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("named tool must exist");
+        assert!(
+            err.to_string()
+                .contains("tool named \"search\" in tool_choice is not present in tools")
+        );
     }
 
     #[test]

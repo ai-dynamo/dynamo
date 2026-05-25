@@ -17,6 +17,7 @@ pub mod media;
 pub mod prompt;
 pub mod speculative_prefill;
 mod structural_tag;
+mod tool_choice;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
@@ -74,8 +75,6 @@ use crate::protocols::{
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
-use crate::preprocessor::structural_tag::StructuralTagApplyResult;
-
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
@@ -2584,14 +2583,11 @@ impl
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
 
-        let uses_tool_call_structural_tag = matches!(
-            self.try_apply_structural_tag(
-                &request,
-                &mut common_request,
-                prompt_injected_reasoning,
-            )?,
-            StructuralTagApplyResult::ToolCallFormat
-        );
+        let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
+            &request,
+            &mut common_request,
+            prompt_injected_reasoning,
+        )?;
 
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
