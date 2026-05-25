@@ -15,6 +15,7 @@ SIGTERM handler: restores default TDP on all managed GPUs before shutdown.
 Cold-start orphan recovery: UUID-gated (persisted to /var/lib/dynamo-power-agent/).
 """
 
+import argparse
 import json
 import logging
 import os
@@ -105,11 +106,39 @@ _previously_managed: set[str] = set()
 
 
 def _load_previously_managed_gpus() -> set[str]:
+    """Load the persisted set of UUIDs this agent previously capped.
+
+    Defensive parsing — corrupt / malformed state files must never crash
+    the agent's startup. Per PR #9682 CodeRabbit review, this catches a
+    superset of the original (FileNotFoundError, JSONDecodeError) cases:
+
+      * OSError (PermissionError, IsADirectoryError, I/O errors) — disk
+        problems on the host volume should NOT brick the agent.
+      * Non-dict JSON root — a file with a top-level list / int / string
+        / null would have crashed ``.get(...)`` with ``AttributeError``.
+      * Non-list ``managed_uuids`` — a misshapen value would have crashed
+        ``set(non_iterable)`` with ``TypeError``.
+
+    Returning empty means we lose the orphan-recovery opportunity for
+    this restart, which is strictly better than CrashLoopBackOff with
+    no caps actuated.
+    """
     try:
         with open(_MANAGED_STATE_PATH) as f:
-            return set(json.load(f).get("managed_uuids", []))
-    except (FileNotFoundError, json.JSONDecodeError):
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Failed to read managed GPU state: %s", e)
         return set()
+    if not isinstance(payload, dict):
+        logger.warning(
+            "Managed GPU state has non-dict root: %s", type(payload).__name__
+        )
+        return set()
+    uuids = payload.get("managed_uuids", [])
+    if not isinstance(uuids, list):
+        logger.warning("managed_uuids is not a list: %s", type(uuids).__name__)
+        return set()
+    return set(uuids)
 
 
 def _persist_managed_gpus(uuids: set[str]) -> None:
@@ -282,7 +311,14 @@ def _handle_sigterm(signum, frame):
     try:
         pynvml.nvmlShutdown()
     except Exception:
-        pass
+        # We MUST proceed to ``_shutdown.set()`` so the run loop unblocks
+        # and the container exits cleanly — re-raising here would leave
+        # the agent hung on SIGTERM. But silently dropping the failure
+        # made shutdown-time NVML faults impossible to diagnose from pod
+        # logs (PR #9682 CodeRabbit review). ``logger.exception`` writes
+        # the full traceback at ERROR level so operators can correlate
+        # with driver / hostengine events.
+        logger.exception("nvmlShutdown raised; proceeding with agent exit anyway.")
     _shutdown.set()
 
 
@@ -479,12 +515,27 @@ class PowerAgent:
         if not procs:
             return  # no K8s workload on this GPU
 
+        # Deduplicate by pod UID before building ``pod_annotations``. A
+        # single pod commonly runs multiple GPU processes (one per rank
+        # in a TP/PP/EP topology, helper workers, profilers, etc.); the
+        # pre-fix code emitted one entry per PID and would treat a
+        # one-pod / two-PID GPU as if two pods were colocated. That
+        # both fired the spurious "multi-pod-per-GPU" WARNING and, when
+        # the pod's annotation was missing/invalid, took the
+        # conflict-resolution branch in ``_resolve_cap_for_gpu`` (since
+        # ``len(pod_annotations) > 1`` was true), incorrectly applying
+        # safe_default + bumping multi_pod_gpu_total. Per PR #9682
+        # CodeRabbit review.
+        seen_uids: set[str] = set()
         pod_annotations: list[tuple[str, Optional[str]]] = []
         for proc in procs:
             uid = _extract_pod_uid_from_cgroup(proc.pid)
             if uid is None:
                 continue  # non-K8s process — skip
+            if uid in seen_uids:
+                continue  # already counted this pod via an earlier PID
             if uid in uid_to_annotation:
+                seen_uids.add(uid)
                 pod_annotations.append((uid, uid_to_annotation[uid]))
 
         if not pod_annotations:
@@ -523,8 +574,6 @@ class PowerAgent:
 
 
 def main() -> None:
-    import argparse
-
     parser = argparse.ArgumentParser(description="Dynamo Power Agent DaemonSet")
     parser.add_argument(
         "--safe-default-watts",
