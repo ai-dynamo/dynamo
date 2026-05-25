@@ -6,13 +6,44 @@
 
 use std::collections::HashMap;
 
+use num_traits::ToPrimitive;
 use regex::Regex;
+use serde::Serialize;
 use serde_json::Value;
+use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use super::super::ToolDefinition;
 use super::super::config::XmlParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
+
+enum ParsedParamValue {
+    Json(Value),
+    RawNumber(Box<RawValue>),
+}
+
+impl From<Value> for ParsedParamValue {
+    fn from(value: Value) -> Self {
+        Self::Json(value)
+    }
+}
+
+impl Serialize for ParsedParamValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Json(value) => value.serialize(serializer),
+            Self::RawNumber(raw) => raw.serialize(serializer),
+        }
+    }
+}
+
+fn is_integer_literal(value: &str) -> bool {
+    let value = value.strip_prefix('-').unwrap_or(value);
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+}
 
 /// Build a `<start>name>(body)<end>` regex pattern. When `strict` is false,
 /// missing `<end>` falls back to end-of-block so truncated input still parses
@@ -277,7 +308,7 @@ fn parse_tool_call_block(
         let param_config = get_arguments_config(function_name, tools);
 
         // Parse parameters from the function body.
-        let mut parameters: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut parameters: HashMap<String, ParsedParamValue> = HashMap::new();
 
         for param_cap in parameter_regex.captures_iter(function_body) {
             let param_name_raw = param_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
@@ -435,13 +466,13 @@ fn convert_param_value(
     param_name: &str,
     param_config: &HashMap<String, Value>,
     func_name: &str,
-) -> Value {
+) -> ParsedParamValue {
     // HTML unescape and trim
     let param_value = html_unescape(param_value.trim());
 
     // Handle null
     if param_value.to_lowercase() == "null" {
-        return Value::Null;
+        return Value::Null.into();
     }
 
     // Check if parameter is in config
@@ -451,7 +482,7 @@ fn convert_param_value(
             param_name,
             func_name
         );
-        return Value::String(param_value);
+        return Value::String(param_value).into();
     }
 
     // Get the type from schema.
@@ -481,7 +512,9 @@ fn convert_param_value(
     // If parsing fails, we log a warning and fall back to returning the value as a string.
     match param_type.as_str() {
         // String types: Return value as-is (already HTML-unescaped above)
-        "string" | "str" | "text" | "varchar" | "char" | "enum" => Value::String(param_value),
+        "string" | "str" | "text" | "varchar" | "char" | "enum" => {
+            Value::String(param_value).into()
+        }
 
         // Integer types: Parse as i64, fall back to string on error.
         // Matches: "int", "integer", "int32", "uint", "unsigned", "long", "short", etc.
@@ -492,7 +525,7 @@ fn convert_param_value(
             || t.starts_with("unsigned") =>
         {
             match param_value.parse::<i64>() {
-                Ok(int_val) => Value::Number(int_val.into()),
+                Ok(int_val) => Value::Number(int_val.into()).into(),
                 Err(_) => {
                     tracing::warn!(
                         "Parsed value '{}' of parameter '{}' is not an integer in tool '{}', degenerating to string.",
@@ -500,40 +533,58 @@ fn convert_param_value(
                         param_name,
                         func_name
                     );
-                    Value::String(param_value)
+                    Value::String(param_value).into()
                 }
             }
         }
 
-        // Float/Number types: Parse as f64.
+        // Float/Number types: Parse integer-looking tokens before f64 to avoid
+        // precision loss above f64's exact integer range.
         // Matches: "number", "num", "float", "float32", "float64", "double", etc.
-        // Note: Whole numbers (e.g., 42.0) are stored as integers for better JSON compatibility.
+        // Note: Whole numbers (e.g., 42.0) are stored as integers for better JSON compatibility
+        // when they fit in i64. Larger finite whole numbers must not be cast with `as i64`,
+        // which saturates to i64::MIN/MAX and corrupts model-emitted arguments.
         t if t.starts_with("num") || t.starts_with("float") => {
-            match param_value.parse::<f64>() {
-                Ok(float_val) => {
-                    // Return int if it's a whole number, otherwise float.
-                    if float_val.fract() == 0.0 && float_val.is_finite() {
-                        Value::Number((float_val as i64).into())
-                    } else if let Some(num) = serde_json::Number::from_f64(float_val) {
-                        Value::Number(num)
-                    } else {
+            if is_integer_literal(&param_value) {
+                if let Ok(int_val) = param_value.parse::<i64>() {
+                    Value::Number(int_val.into()).into()
+                } else if let Ok(raw) = RawValue::from_string(param_value.clone()) {
+                    ParsedParamValue::RawNumber(raw)
+                } else {
+                    Value::String(param_value).into()
+                }
+            } else {
+                match param_value.parse::<f64>() {
+                    Ok(float_val) => {
+                        if float_val.fract() == 0.0 && float_val.is_finite() {
+                            if let Some(int_val) = float_val.to_i64() {
+                                Value::Number(int_val.into()).into()
+                            } else if let Ok(raw) = RawValue::from_string(param_value.clone()) {
+                                ParsedParamValue::RawNumber(raw)
+                            } else {
+                                Value::String(param_value).into()
+                            }
+                        } else if let Some(num) = serde_json::Number::from_f64(float_val) {
+                            Value::Number(num).into()
+                        } else {
+                            tracing::warn!(
+                                "Parsed value '{}' of parameter '{}' is not a valid float in tool '{}', degenerating to string.",
+                                param_value,
+                                param_name,
+                                func_name
+                            );
+                            Value::String(param_value).into()
+                        }
+                    }
+                    Err(_) => {
                         tracing::warn!(
-                            "Parsed value '{}' of parameter '{}' is not a valid float in tool '{}', degenerating to string.",
+                            "Parsed value '{}' of parameter '{}' is not a float in tool '{}', degenerating to string.",
                             param_value,
                             param_name,
                             func_name
                         );
-                        Value::String(param_value)
+                        Value::String(param_value).into()
                     }
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "Parsed value '{}' of parameter '{}' is not a float in tool '{}', degenerating to string.",
-                        param_value,
-                        param_name,
-                        func_name
-                    );
-                    Value::String(param_value)
                 }
             }
         }
@@ -550,7 +601,7 @@ fn convert_param_value(
                     func_name
                 );
             }
-            Value::Bool(lower_val == "true")
+            Value::Bool(lower_val == "true").into()
         }
 
         // Complex types (objects/arrays): Try JSON parsing, then fall back to Python-style
@@ -566,7 +617,7 @@ fn convert_param_value(
         {
             // Try JSON parsing first (standard JSON with double quotes).
             if let Ok(json_val) = serde_json::from_str::<Value>(&param_value) {
-                return json_val;
+                return json_val.into();
             }
 
             tracing::warn!(
@@ -578,7 +629,7 @@ fn convert_param_value(
 
             // Try `ast.literal_eval` equivalent (handles Python-style single quotes, etc.).
             if let Ok(json_val) = try_literal_eval(&param_value) {
-                return json_val;
+                return json_val.into();
             }
 
             tracing::warn!(
@@ -587,7 +638,7 @@ fn convert_param_value(
                 param_name,
                 func_name
             );
-            Value::String(param_value)
+            Value::String(param_value).into()
         }
 
         // Unknown/custom types: Attempt best-effort parsing via `literal_eval`.
@@ -595,7 +646,7 @@ fn convert_param_value(
         _ => {
             // Unknown type, try `literal_eval`.
             if let Ok(json_val) = try_literal_eval(&param_value) {
-                return json_val;
+                return json_val.into();
             }
 
             tracing::warn!(
@@ -604,7 +655,7 @@ fn convert_param_value(
                 param_name,
                 func_name
             );
-            Value::String(param_value)
+            Value::String(param_value).into()
         }
     }
 }
@@ -742,6 +793,36 @@ mod tests {
             pos_inc, first_end,
             "should stop at end of first complete call when second is incomplete"
         );
+    }
+
+    #[test]
+    fn test_number_coercion_does_not_saturate_large_whole_values() {
+        let input = r#"<tool_call>
+<function=set_limit>
+<parameter=count>100000000000000000000</parameter>
+<parameter=precise_count>9007199254740993</parameter>
+</function>
+</tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "set_limit".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": {"type": "number"},
+                    "precise_count": {"type": "number"}
+                }
+            })),
+        }];
+
+        let (calls, normal) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), Some(&tools)).unwrap();
+        let args: HashMap<String, Box<RawValue>> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+
+        assert_eq!(normal, Some("".to_string()));
+        assert_eq!(calls[0].function.name, "set_limit");
+        assert_eq!(args["count"].get(), "100000000000000000000");
+        assert_eq!(args["precise_count"].get(), "9007199254740993");
     }
 
     #[rstest] // helper

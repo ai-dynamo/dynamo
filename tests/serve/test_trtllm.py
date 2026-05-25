@@ -198,6 +198,8 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.9),
+            pytest.mark.requested_trtllm_kv_tokens(2592),
             pytest.mark.timeout(
                 300
             ),  # 3x measured time (37.91s) + download time (180s)
@@ -282,12 +284,8 @@ trtllm_configs = {
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.pre_merge,
-            # E/P/D inference bug: chat-completion reaches encode+prefill+decode
-            # workers but never progresses (0 output_tokens, cancelled after 180s,
-            # both -n 1 and -n auto). Re-enable + restore VRAM markers once fixed.
-            # Bisected cap (for re-enable): profiled_vram_gib(22.9),
-            # requested_trtllm_kv_tokens(4224).
-            pytest.mark.skip(reason="E/P/D inference bug: chat-completion stalls"),
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -305,8 +303,33 @@ trtllm_configs = {
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
     ),
-    # Test Encoder with Aggregated PD worker on same GPU
-    # Make this pre-merge after TRTLLM #5938603 is fixed
+    "pd_multimodal": TRTLLMConfig(
+        name="pd_multimodal",
+        directory=trtllm_dir,
+        script_name="disagg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=120,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "PREFILL_CUDA_VISIBLE_DEVICES": "0",
+            "DECODE_CUDA_VISIBLE_DEVICES": "0",
+        },
+    ),
     "e_pd_multimodal": TRTLLMConfig(
         name="e_pd_multimodal",
         directory=trtllm_dir,
@@ -315,7 +338,9 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -503,7 +528,17 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.pre_merge,
+            # TODO: --frontend-decoding triggers OpenAIPreprocessor.new_with_parts
+            # which constructs a real NixlAgent in the frontend. ai-dynamo-runtime
+            # is built in runtime_wheel_builder before NIXL is installed, so
+            # nixl-sys links against stubs and NixlAgent::new() returns "NIXL is
+            # not supported in stub mode" at runtime. Moving the maturin build
+            # to wheel_builder fixes nixl-sys but then dynamo._core.abi3.so has
+            # NEEDED libnixl.so, which breaks import on every runtime image
+            # without libnixl on the system load path (sglang, planner, vllm).
+            # Either patch every runtime to expose libnixl, or add a runtime
+            # fallback to nixl-sys's stub check.
+            pytest.mark.nightly,
             pytest.mark.timeout(900),
             # Bisected with tests/utils/profile_pytest.py: minimum = 528 tokens,
             # 2x safety = 1056. Peak 8.1 GiB at 1056 tokens. Override threads
@@ -597,6 +632,8 @@ def test_deployment(
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
 @pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(3.9)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(660)  # 3x measured time (159.68s) + download time (180s)
 def test_chat_only_aggregated_with_test_logits_processor(
     request,

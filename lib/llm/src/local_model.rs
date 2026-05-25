@@ -260,6 +260,10 @@ impl LocalModelBuilder {
         // already supplied one or the env var is unset. Published in etcd so routing
         // layers can keep cache assignments stable across worker restarts.
         self.runtime_config.populate_stable_routing_id_from_env();
+        self.runtime_config
+            .validate_config()
+            .map_err(anyhow::Error::msg)?;
+        self.runtime_config.add_topology_taints();
 
         let template = self
             .template_file
@@ -475,15 +479,23 @@ impl LocalModel {
     ///
     /// For base models, pass `lora_name = None`.
     /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
+    ///
+    /// `worker_type` and `needs` carry the topology readiness fields. Pass
+    /// `None` / empty `Vec` for callers that haven't been updated to declare
+    /// their role yet — readers apply the missing-field shim.
     pub async fn attach(
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
         lora_info: Option<crate::model_card::LoraInfo>,
+        worker_type: Option<crate::worker_type::WorkerType>,
+        needs: Vec<Vec<crate::worker_type::WorkerType>>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
+        self.card.worker_type = worker_type;
+        self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
         // Compute model_suffix from lora_name if present
@@ -679,9 +691,7 @@ pub(crate) fn self_host_base_url(
         .unwrap_or_default()
         .system_host;
     let host = match configured.as_str() {
-        "0.0.0.0" | "::" | "[::]" => {
-            dynamo_runtime::utils::ip_resolver::get_local_ip_for_advertise()
-        }
+        "0.0.0.0" | "::" | "[::]" => dynamo_runtime::utils::local_ip_for_advertise(),
         _ => configured,
     };
 

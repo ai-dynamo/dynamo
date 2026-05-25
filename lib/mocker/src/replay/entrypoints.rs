@@ -17,7 +17,7 @@ use super::{
     TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{Trace, TraceFileFormat};
+use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
 
 fn load_trace_from_file(
     trace_path: &Path,
@@ -30,6 +30,9 @@ fn load_trace_from_file(
         TraceFileFormat::Mooncake | TraceFileFormat::MooncakeDelta => {
             Trace::from_mooncake(trace_path, trace_block_size)
         }
+        TraceFileFormat::AgenticMooncake => {
+            bail!("agentic_mooncake trace format must be loaded as an agentic workload")
+        }
         TraceFileFormat::AppliedComputeAgentic => Trace::from_applied_compute_agentic(
             trace_path,
             trace_block_size,
@@ -37,6 +40,16 @@ fn load_trace_from_file(
             trace_num_prefix_groups,
         ),
     }
+}
+
+fn load_agentic_trace_from_file(
+    trace_path: &Path,
+    trace_block_size: usize,
+    arrival_speedup_ratio: f64,
+) -> Result<AgenticTrace> {
+    AgenticTrace::from_agentic_mooncake(trace_path, trace_block_size)?
+        .normalize_starts()
+        .speed_up_timing(arrival_speedup_ratio)
 }
 
 fn trace_accumulates_session_deltas(trace_format: TraceFileFormat) -> bool {
@@ -113,6 +126,8 @@ pub fn simulate_trace_file_with_router_mode(
         TraceFileFormat::Mooncake,
         0.0,
         0,
+        false,
+        None,
     )
 }
 
@@ -129,9 +144,23 @@ pub fn simulate_trace_file_with_router_mode_and_format(
     trace_format: TraceFileFormat,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode)?;
+    if trace_format == TraceFileFormat::AgenticMooncake {
+        let trace =
+            load_agentic_trace_from_file(trace_path, trace_block_size, arrival_speedup_ratio)?;
+        return crate::replay::offline::simulate_agentic_trace_workload(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+        );
+    }
     if trace_format == TraceFileFormat::AppliedComputeAgentic {
         bail!(
             "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
@@ -155,6 +184,8 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             num_workers,
             1.0,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     } else if trace_accumulates_session_deltas(trace_format) {
         crate::replay::offline::simulate_trace_workload_accumulating_deltas(
@@ -164,6 +195,8 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             trace,
             num_workers,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     } else {
         crate::replay::offline::simulate_trace_workload(
@@ -173,6 +206,8 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             trace,
             num_workers,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     };
     Ok(report)
@@ -198,6 +233,8 @@ pub fn simulate_trace_file_disagg_with_router_mode(
         TraceFileFormat::Mooncake,
         0.0,
         0,
+        false,
+        None,
     )
 }
 
@@ -213,9 +250,14 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
     trace_format: TraceFileFormat,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config, router_mode)?;
+    if trace_format == TraceFileFormat::AgenticMooncake {
+        bail!("agentic_mooncake trace format is not supported for disaggregated replay");
+    }
     if trace_format == TraceFileFormat::AppliedComputeAgentic {
         bail!(
             "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
@@ -241,6 +283,8 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
             requests,
             1.0,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     } else {
         crate::replay::offline::simulate_trace_workload_disagg(
@@ -249,6 +293,8 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
             prefill_load_estimator,
             trace,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     };
     Ok(report)
@@ -315,6 +361,9 @@ pub fn simulate_trace_live_file_with_router_mode_and_format(
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_online_replay_args(&args, num_workers)?;
+    if trace_format == TraceFileFormat::AgenticMooncake {
+        bail!("agentic_mooncake trace format is not supported for online replay");
+    }
     if trace_format == TraceFileFormat::AppliedComputeAgentic {
         bail!(
             "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
@@ -394,6 +443,8 @@ pub fn simulate_trace_requests_with_router_mode(
         num_workers,
         arrival_speedup_ratio,
         router_mode,
+        false,
+        None,
     )?;
     Ok(report)
 }
@@ -419,6 +470,8 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
         requests,
         arrival_speedup_ratio,
         router_mode,
+        false,
+        None,
     )?;
     Ok(report)
 }
@@ -508,6 +561,8 @@ pub fn simulate_concurrency_file_with_router_mode(
         TraceFileFormat::Mooncake,
         0.0,
         0,
+        false,
+        None,
     )
 }
 
@@ -524,9 +579,14 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
     trace_format: TraceFileFormat,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_concurrency_args(&args, num_workers, max_in_flight, router_mode)?;
+    if trace_format == TraceFileFormat::AgenticMooncake {
+        bail!("agentic_mooncake trace format is not supported with replay_concurrency");
+    }
     let trace = load_trace_from_file(
         trace_path,
         trace_block_size,
@@ -543,9 +603,11 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
             max_in_flight,
             num_workers,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     } else {
-        simulate_concurrency_workload_with_router_mode(
+        crate::replay::offline::simulate_concurrency_workload(
             args,
             router_config,
             prefill_load_estimator,
@@ -553,6 +615,8 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
             max_in_flight,
             num_workers,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     };
     Ok(report)
@@ -578,6 +642,8 @@ pub fn simulate_concurrency_file_disagg_with_router_mode(
         TraceFileFormat::Mooncake,
         0.0,
         0,
+        false,
+        None,
     )
 }
 
@@ -593,9 +659,14 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
     trace_format: TraceFileFormat,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    if trace_format == TraceFileFormat::AgenticMooncake {
+        bail!("agentic_mooncake trace format is not supported for disaggregated replay");
+    }
     if trace_accumulates_session_deltas(trace_format) {
         bail!("mooncake-delta trace format is not supported for disaggregated replay");
     }
@@ -606,13 +677,15 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
         trace_shared_prefix_ratio,
         trace_num_prefix_groups,
     )?;
-    let report = simulate_concurrency_workload_disagg_with_router_mode(
+    let report = crate::replay::offline::simulate_concurrency_workload_disagg(
         config,
         router_config,
         prefill_load_estimator,
         trace,
         max_in_flight,
         router_mode,
+        record_per_request,
+        max_sim_time_ms,
     )?;
     Ok(report)
 }
@@ -678,6 +751,9 @@ pub fn simulate_concurrency_live_file_with_router_mode_and_format(
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
+    if trace_format == TraceFileFormat::AgenticMooncake {
+        bail!("agentic_mooncake trace format is not supported for online replay");
+    }
     if trace_accumulates_session_deltas(trace_format) {
         bail!("mooncake-delta trace format is not supported for online replay");
     }
@@ -782,6 +858,8 @@ pub fn simulate_concurrency_requests_with_router_mode(
         max_in_flight,
         num_workers,
         router_mode,
+        false,
+        None,
     )
 }
 
@@ -806,6 +884,8 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
         requests,
         max_in_flight,
         router_mode,
+        false,
+        None,
     )
 }
 
@@ -841,6 +921,8 @@ pub fn simulate_trace_workload_with_router_mode(
         trace,
         num_workers,
         router_mode,
+        false,
+        None,
     )?;
     Ok(report)
 }
@@ -860,6 +942,8 @@ pub fn simulate_trace_workload_disagg_with_router_mode(
         prefill_load_estimator,
         trace,
         router_mode,
+        false,
+        None,
     )?;
     Ok(report)
 }
@@ -935,6 +1019,8 @@ pub fn simulate_concurrency_workload_with_router_mode(
         max_in_flight,
         num_workers,
         router_mode,
+        false,
+        None,
     )
 }
 
@@ -955,6 +1041,8 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode(
         trace,
         max_in_flight,
         router_mode,
+        false,
+        None,
     )
 }
 
@@ -1001,6 +1089,46 @@ pub fn simulate_concurrency_live_workload_with_router_mode(
 mod tests {
     use super::*;
     use crate::loadgen::{SessionTrace, TurnTrace};
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn agentic_mooncake_trace_file_loads_and_scales_timing() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "request_id": "r1",
+                "timestamp": 100.0,
+                "input_length": 4,
+                "output_length": 1,
+                "hash_ids": [1]
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "request_id": "r2",
+                "timestamp": 130.0,
+                "delay": 10.0,
+                "tool_wait_ms": 6.0,
+                "wait_for": ["r1"],
+                "input_length": 4,
+                "output_length": 1,
+                "hash_ids": [1]
+            })
+        )
+        .unwrap();
+
+        let trace = load_agentic_trace_from_file(file.path(), 4, 2.0).unwrap();
+
+        assert_eq!(trace.turns[0].first_ready_timestamp_ms, Some(0.0));
+        assert_eq!(trace.turns[1].first_ready_timestamp_ms, Some(15.0));
+        assert_eq!(trace.turns[1].delay_after_dependencies_ms, 8.0);
+    }
 
     #[test]
     fn single_turn_mooncake_trace_uses_request_path() {
