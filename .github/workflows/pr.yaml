@@ -9,10 +9,10 @@ on:
       - "pull-request/[0-9]+"
       - rrubin/ops-5057
 
-concurrency:
-  # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
-  group: docker-build-test-${{ github.ref_name }}
-  cancel-in-progress: true
+# concurrency:
+#   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
+#   group: docker-build-test-${{ github.ref_name }}
+#   cancel-in-progress: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -594,7 +594,7 @@ jobs:
        needs.changed-files.outputs.deploy == 'true') &&
       (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
-    runs-on: prod-default-small-v2
+    runs-on: prod-deploy-tester-v1
     outputs:
       namespace: ${{ steps.setup.outputs.namespace }}
       vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
@@ -605,7 +605,6 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
           hf_token: ${{ secrets.HF_TOKEN }}
