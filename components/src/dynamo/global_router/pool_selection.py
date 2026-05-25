@@ -764,22 +764,40 @@ def build_isl_latency_grid(
     both the Global Router and the EPP pool-selector consume (one grid → parity).
     Per cell: the cheapest pool (lowest ``pool_costs``) whose predicted latency
     meets the target, else the fastest. Curves and costs are indexed by pool.
-    The size axis uses the band midpoint as the representative size; the latency
-    axis uses the band's LOWER edge (the strictest target that maps to the band)
-    so the chosen pool is SLA-safe for every request in the band.
+    Both axes use the band's worst case so the chosen pool is SLA-safe for every
+    request in the band: the size axis uses the UPPER edge (largest ISL → highest
+    predicted latency → hardest to meet), and the latency axis uses the LOWER edge
+    (smallest target that maps to the band → strictest). Using midpoints would
+    under-provision the largest/strictest requests that still fall in the band.
+
+    Resolutions must be positive and each max must exceed its min, matching the
+    validation in ``GridSelectionStrategy`` (Go) and the selection strategies, so
+    bad profiler/config input raises a clear error rather than dividing by zero
+    or silently producing an empty grid.
     """
     if not pool_latency_curves:
         raise ValueError("need at least one pool latency curve")
     if len(pool_latency_curves) != len(pool_costs):
         raise ValueError("pool_latency_curves and pool_costs length mismatch")
+    if size_resolution <= 0 or latency_resolution <= 0:
+        raise ValueError(
+            f"resolutions must be positive (size={size_resolution}, latency={latency_resolution})"
+        )
+    if size_max <= size_min or latency_max_ms <= latency_min_ms:
+        raise ValueError(
+            f"max must exceed min (size {size_min}..{size_max}, "
+            f"latency {latency_min_ms}..{latency_max_ms})"
+        )
 
     size_step = (size_max - size_min) / size_resolution
     latency_step = (latency_max_ms - latency_min_ms) / latency_resolution
 
     mapping: List[List[int]] = []
     for s in range(size_resolution):
-        size_mid = size_min + (s + 0.5) * size_step
-        predicted = [curve(size_mid) for curve in pool_latency_curves]
+        # Upper edge of the size band: the largest ISL that maps here, hence the
+        # highest predicted latency the chosen pool must still satisfy.
+        size_edge = size_min + (s + 1) * size_step
+        predicted = [curve(size_edge) for curve in pool_latency_curves]
         row: List[int] = []
         for t in range(latency_resolution):
             # The LOWER edge is the strictest target that maps to this band:

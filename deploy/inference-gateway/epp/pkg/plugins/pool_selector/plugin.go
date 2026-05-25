@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
@@ -20,12 +21,9 @@ const (
 	// PoolSelectorType is the plugin type used in the EndpointPickerConfig.
 	PoolSelectorType = "pool-selector"
 
-	// defaultCharsPerToken approximates ISL from prompt length when exact
-	// tokenization is unavailable at filter time. See the package doc / the
-	// "ISL estimate" decision flagged for review: the FFI router tokenizes
-	// inside the route call (in the scorer, which runs after filters), and we
-	// avoid a second tokenization pass here. Coarse ISL bands tolerate the
-	// approximation; swap for exact tokenization if a standalone FFI is added.
+	// defaultCharsPerToken approximates ISL from prompt length: the scorer
+	// tokenizes inside the route call (after filters), so the filter estimates
+	// rather than tokenize twice. Coarse ISL bands tolerate the approximation.
 	defaultCharsPerToken = 4
 )
 
@@ -100,7 +98,7 @@ func (p *PoolSelector) Filter(ctx context.Context, _ *schedtypes.CycleState, req
 	logger := log.FromContext(ctx)
 
 	isl := estimateISL(req)
-	ttftMs := readNvextFloat(req, "router", "ttft_target") // <=0 → grid uses mid-range
+	ttftMs := readNvextFloat(req, "router", "ttft_target") // <0 (absent) → mid-range; explicit 0 is a strict target
 	priority := readNvextPriority(req)                     // <0 → no override
 
 	poolIdx := p.grid.SelectPool(float64(isl), ttftMs, priority)
@@ -132,21 +130,14 @@ func (p *PoolSelector) Filter(ctx context.Context, _ *schedtypes.CycleState, req
 }
 
 // estimateISL approximates the input sequence length (tokens) from the prompt's
-// character count. See defaultCharsPerToken for the rationale + review flag.
+// character count. It uses the body's PromptText helper (covering completions,
+// chat, responses, and conversations) and counts runes, not bytes, so
+// multibyte scripts are not over-counted. See defaultCharsPerToken.
 func estimateISL(req *schedtypes.InferenceRequest) int {
 	if req == nil || req.Body == nil {
 		return 0
 	}
-	chars := 0
-	switch {
-	case req.Body.ChatCompletions != nil:
-		for _, m := range req.Body.ChatCompletions.Messages {
-			chars += len(m.Content.PlainText())
-		}
-	case req.Body.Completions != nil:
-		chars += len(req.Body.Completions.Prompt.PlainText())
-	}
-	return chars / defaultCharsPerToken
+	return utf8.RuneCountInString(req.Body.PromptText()) / defaultCharsPerToken
 }
 
 // nvextOf returns the caller-supplied nvext object, mirroring the dynamo_kv_scorer
