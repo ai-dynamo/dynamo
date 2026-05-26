@@ -289,6 +289,23 @@ struct CdRequestState {
     pending_g1_promotion: Option<PendingG1Promotion>,
 }
 
+/// Opaque test handle wrapping an `Arc<CdRequestState>` snapshot,
+/// so that tests/ integration code can capture the per-lifecycle
+/// Arc identity without exposing the private `CdRequestState`
+/// type. Produced by
+/// [`DecodeDisaggLeader::snapshot_cd_state_for_test`] and consumed
+/// by [`DecodeDisaggLeader::release_request_if_matches_for_test`].
+#[cfg(any(test, feature = "testing"))]
+pub struct CdRequestStateHandle(Arc<CdRequestState>);
+
+#[cfg(any(test, feature = "testing"))]
+impl CdRequestStateHandle {
+    /// Two handles refer to the same lifecycle's Arc.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 impl CdRequestState {
     fn unfilled_g1_block_ids(&self) -> Vec<BlockId> {
         let mut out = Vec::new();
@@ -479,9 +496,63 @@ impl DecodeDisaggLeader {
         self.commit_usaa1(request_id, block_ids, num_external_tokens)
     }
 
+    /// Test-only: snapshot the current `Arc<CdRequestState>` for
+    /// `request_id`. Opaque to keep the inner type crate-private;
+    /// the handle is consumed by
+    /// [`Self::release_request_if_matches_for_test`] to drive the
+    /// identity-checked release path.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn snapshot_cd_state_for_test(&self, request_id: &str) -> Option<CdRequestStateHandle> {
+        self.cd_request_state
+            .get(request_id)
+            .map(|e| CdRequestStateHandle(Arc::clone(e.value())))
+    }
+
+    /// Test-only: drive [`Self::release_request_if_matches`] with a
+    /// captured handle. Returns the bool the inner method returns
+    /// (`true` if the captured Arc still matches the DashMap entry
+    /// and the release fired; `false` otherwise).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn release_request_if_matches_for_test(
+        &self,
+        request_id: &str,
+        handle: &CdRequestStateHandle,
+    ) -> bool {
+        self.release_request_if_matches(request_id, &handle.0)
+    }
+
     fn release_request(&self, request_id: &str) {
         if let Some((_, state)) = self.cd_request_state.remove(request_id) {
             self.inflight_budget.release(state.reserved_tokens);
+        }
+    }
+
+    /// Identity-checked variant of [`Self::release_request`] for
+    /// callers that captured a specific `Arc<CdRequestState>`
+    /// snapshot and want to release ONLY if the DashMap still
+    /// holds that same Arc.
+    ///
+    /// Pairs with [`ConditionalDisaggCoordinator::release_if_matches`]
+    /// to close the cross-lifecycle stale-release window under
+    /// `kv_load_failure_policy=recompute`: a spawn-replay task
+    /// parked in `mark_failed_onboarding.await` from a prior
+    /// lifecycle MUST NOT wipe the budget reservation or evict the
+    /// freshly-installed state of a subsequent lifecycle for the
+    /// same rid.
+    ///
+    /// Returns `true` if the matching entry was removed and the
+    /// budget was released; `false` if the captured Arc no longer
+    /// matches what the DashMap holds.
+    fn release_request_if_matches(&self, request_id: &str, expected: &Arc<CdRequestState>) -> bool {
+        match self
+            .cd_request_state
+            .remove_if(request_id, |_, v| Arc::ptr_eq(expected, v))
+        {
+            Some((_, state)) => {
+                self.inflight_budget.release(state.reserved_tokens);
+                true
+            }
+            None => false,
         }
     }
 
@@ -978,10 +1049,13 @@ impl DecodeDisaggLeader {
         // vLLM treats as success). USAA is the first point we have
         // real G1 destinations to report — emit them as failed and
         // tear down without continuing the USAA bookkeeping.
-        let pending = self
+        let existing_wrapper = self
             .cd_request_state
             .get(request_id)
-            .and_then(|e| e.pending_failure.lock().clone());
+            .map(|e| Arc::clone(e.value()));
+        let pending = existing_wrapper
+            .as_ref()
+            .and_then(|s| s.pending_failure.lock().clone());
         if let Some(reason) = pending {
             // Only the EXTERNAL slice should be reported failed.
             // vLLM truncates `request.num_computed_tokens` at the
@@ -1017,6 +1091,16 @@ impl DecodeDisaggLeader {
             // side cleanup. Returning Ok lets vLLM's USAA bookkeeping
             // complete; the failure surfaces via finished_recving with
             // the failed_block_ids in the same forward pass.
+            //
+            // Capture both per-lifecycle Arcs BEFORE the spawn so the
+            // identity-checked release inside the task no-ops if a
+            // subsequent lifecycle (recompute reschedule of the same
+            // rid) has already replaced the DashMap entries. See
+            // `release_request_if_matches` /
+            // `ConditionalDisaggCoordinator::release_if_matches`.
+            let captured_wrapper =
+                existing_wrapper.expect("pending was Some, so the wrapper Arc must exist");
+            let captured_coord = self.coordinator.state_for_decode(request_id);
             let weak_self = self.weak_self.clone();
             let request_id_owned = request_id.to_string();
             self.tokio_handle.spawn(async move {
@@ -1032,8 +1116,11 @@ impl DecodeDisaggLeader {
                             "mark_failed_onboarding failed during USAA replay"
                         );
                     }
-                    this.release_request(&request_id_owned);
-                    this.coordinator.release(&request_id_owned);
+                    this.release_request_if_matches(&request_id_owned, &captured_wrapper);
+                    if let Some(coord) = captured_coord {
+                        this.coordinator
+                            .release_if_matches(&request_id_owned, &coord);
+                    }
                 }
             });
             return Ok(());
@@ -1165,6 +1252,12 @@ impl DecodeDisaggLeader {
                 num_total_g1_ids = block_ids.len(),
                 "commit_usaa1: replaying pre-USAA failure stashed after decode_usaa check"
             );
+            // Capture per-lifecycle Arcs so the spawn's release no-ops
+            // if a recompute reschedule replaces the entries before
+            // `mark_failed_onboarding.await` returns. See
+            // `release_request_if_matches`.
+            let captured_wrapper = Arc::clone(&existing);
+            let captured_coord = self.coordinator.state_for_decode(request_id);
             let weak_self = self.weak_self.clone();
             let request_id_owned = request_id.to_string();
             self.tokio_handle.spawn(async move {
@@ -1180,8 +1273,11 @@ impl DecodeDisaggLeader {
                             "mark_failed_onboarding failed during commit_usaa1 replay"
                         );
                     }
-                    this.release_request(&request_id_owned);
-                    this.coordinator.release(&request_id_owned);
+                    this.release_request_if_matches(&request_id_owned, &captured_wrapper);
+                    if let Some(coord) = captured_coord {
+                        this.coordinator
+                            .release_if_matches(&request_id_owned, &coord);
+                    }
                 }
             });
             return Ok(());
@@ -1315,6 +1411,17 @@ impl DecodeDisaggLeader {
                 num_external_g1_ids = external_g1_ids.len(),
                 "commit_usaa1: replaying stash that landed between outer re-check and insert"
             );
+            // Capture the NEW (`updated`) wrapper Arc — that's the
+            // one the DashMap currently holds at this point in
+            // `commit_usaa1`. OLD (`existing`) is no longer
+            // reachable via the map (the insert above replaced it).
+            // Capturing OLD would make the spawn's release no-op
+            // immediately on a single-lifecycle run. Capturing NEW
+            // makes it no-op only if a SUBSEQUENT lifecycle
+            // (recompute reschedule) further replaces the entry —
+            // the cross-lifecycle stale-release semantics we want.
+            let captured_wrapper = Arc::clone(&updated);
+            let captured_coord = self.coordinator.state_for_decode(request_id);
             let weak_self = self.weak_self.clone();
             let request_id_owned = request_id.to_string();
             self.tokio_handle.spawn(async move {
@@ -1330,8 +1437,11 @@ impl DecodeDisaggLeader {
                             "mark_failed_onboarding failed during post-insert replay"
                         );
                     }
-                    this.release_request(&request_id_owned);
-                    this.coordinator.release(&request_id_owned);
+                    this.release_request_if_matches(&request_id_owned, &captured_wrapper);
+                    if let Some(coord) = captured_coord {
+                        this.coordinator
+                            .release_if_matches(&request_id_owned, &coord);
+                    }
                 }
             });
             return Ok(());

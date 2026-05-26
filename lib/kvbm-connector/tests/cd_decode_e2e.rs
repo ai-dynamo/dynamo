@@ -1572,3 +1572,177 @@ fn _ensure_inner_used(h: &TestHarness) {
     let _ = h.inner.local_id();
     let _ = h.coordinator.active_count();
 }
+
+/// Install a second slot ("req-2") on an existing harness. Mirrors
+/// `build_harness`'s req-1 setup but with a different token seed so
+/// the two slots have distinct hash chains (and therefore distinct
+/// `Arc<CdRequestState>` / `Arc<CdRequest>` identities after GNMT).
+fn install_second_slot(h: &TestHarness) -> Vec<kvbm_logical::SequenceHash> {
+    let g2_manager = h.inner.g2_manager().clone();
+
+    let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 200);
+    let all_hashes = generate_sequence_hashes(&token_sequence);
+    let token_blocks: Vec<_> = token_sequence.blocks().to_vec();
+
+    let mutables = g2_manager
+        .allocate_blocks(LOCAL_BLOCKS)
+        .expect("allocate req-2 local match");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(token_blocks[COMPUTED_BLOCKS..COMPUTED_BLOCKS + LOCAL_BLOCKS].iter())
+        .map(|(mutable, tb)| mutable.complete(tb).expect("complete req-2 local match"))
+        .collect();
+    let local_match_g2 = g2_manager.register_blocks(completes);
+
+    let slot = MockSlot {
+        block_size: BLOCK_SIZE,
+        total_blocks: TOTAL_BLOCKS,
+        computed_blocks: COMPUTED_BLOCKS,
+        local_match_blocks: LOCAL_BLOCKS,
+        all_hashes: all_hashes.clone(),
+        token_blocks,
+        local_match_g2: parking_lot::Mutex::new(Some(local_match_g2)),
+        assigned_block_ids: parking_lot::Mutex::new(None),
+        gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
+        usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
+        transfer_params: parking_lot::Mutex::new(None),
+        ..MockSlot::default()
+    };
+    h.inner.install_slot("req-2", slot);
+    all_hashes
+}
+
+fn make_request_for(request_id: &str) -> Request {
+    Request::builder()
+        .request_id(request_id.to_string())
+        .tokens(dynamo_tokens::Tokens::from(Vec::<u32>::new()))
+        .build(None)
+        .expect("build request")
+}
+
+/// Stage 1 hardening: `release_request_if_matches` /
+/// `release_if_matches` MUST refuse to remove a DashMap entry whose
+/// `Arc` identity differs from the caller's captured snapshot. The
+/// production race this guards against is the cross-lifecycle stale
+/// release under `kv_load_failure_policy=recompute` — a spawn-replay
+/// task from a prior lifecycle parked in `mark_failed_onboarding`
+/// for unbounded time MUST NOT wipe the freshly-installed state of
+/// a subsequent lifecycle for the same rid.
+///
+/// This test reproduces the structural failure mode using two
+/// distinct rids ("req-1", "req-2"): cycle-1 captures `handle_a`,
+/// cycle-2 captures `handle_b`, and the cross-handle release calls
+/// must no-op. The Arc-identity predicate inside
+/// `DashMap::remove_if` is the same code path the cross-lifecycle
+/// case exercises — Arc-A captured, Arc-B currently at the key,
+/// `Arc::ptr_eq` is false, remove_if returns None.
+///
+/// Pre-fix code did not expose `release_*_if_matches` at all; the
+/// spawn-replays called `release_request` / `coordinator.release`
+/// by name, which would wipe whatever state currently lived at the
+/// rid regardless of identity. This test asserts both the
+/// negative (stale handle no-ops) and the positive (matching
+/// handle releases) for both wrapper and coordinator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_if_matches_enforces_arc_identity() -> Result<()> {
+    let h = build_harness();
+    install_second_slot(&h);
+
+    // Cycle-A: GNMT for req-1 installs state A in both maps.
+    h.wrapper.create_slot(make_request_for("req-1"))?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let handle_a = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-1")
+        .expect("wrapper state A");
+    let coord_a = h
+        .coordinator
+        .state_for_test("req-1")
+        .expect("coord state A");
+
+    // Cycle-B: GNMT for req-2 installs state B in both maps.
+    h.wrapper.create_slot(make_request_for("req-2"))?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-2", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let handle_b = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-2")
+        .expect("wrapper state B");
+    let coord_b = h
+        .coordinator
+        .state_for_test("req-2")
+        .expect("coord state B");
+
+    // Sanity: two distinct lifecycles must hold distinct Arcs.
+    assert!(
+        !handle_a.ptr_eq(&handle_b),
+        "distinct lifecycles must yield distinct wrapper Arcs"
+    );
+    assert!(
+        !Arc::ptr_eq(&coord_a, &coord_b),
+        "distinct lifecycles must yield distinct coordinator Arcs"
+    );
+
+    // Stale-Arc release attempts MUST no-op. Each call looks up the
+    // current entry at the target rid, observes that
+    // `Arc::ptr_eq(captured, current)` is false, and returns false
+    // without touching state.
+    assert!(
+        !h.wrapper
+            .release_request_if_matches_for_test("req-1", &handle_b),
+        "wrapper release with B's handle against req-1 must no-op"
+    );
+    assert!(
+        h.wrapper.has_active_cd_request("req-1"),
+        "req-1 wrapper state must survive stale release"
+    );
+    assert!(
+        !h.coordinator.release_if_matches("req-1", &coord_b),
+        "coordinator release with B's Arc against req-1 must no-op"
+    );
+    assert!(
+        h.coordinator.state_for_test("req-1").is_some(),
+        "req-1 coord state must survive stale release"
+    );
+
+    // Matching-Arc release MUST fire and remove the entry.
+    assert!(
+        h.wrapper
+            .release_request_if_matches_for_test("req-1", &handle_a),
+        "wrapper release with matching A handle must succeed"
+    );
+    assert!(
+        !h.wrapper.has_active_cd_request("req-1"),
+        "req-1 wrapper state must be removed after matching release"
+    );
+    assert!(
+        h.coordinator.release_if_matches("req-1", &coord_a),
+        "coordinator release with matching A Arc must succeed"
+    );
+    assert!(
+        h.coordinator.state_for_test("req-1").is_none(),
+        "req-1 coord state must be removed after matching release"
+    );
+
+    // Re-attempt with the same (now-stale) handles MUST no-op —
+    // the entry is gone, `DashMap::remove_if` returns None without
+    // running the predicate.
+    assert!(
+        !h.wrapper
+            .release_request_if_matches_for_test("req-1", &handle_a),
+        "wrapper release against missing entry must no-op"
+    );
+    assert!(
+        !h.coordinator.release_if_matches("req-1", &coord_a),
+        "coordinator release against missing entry must no-op"
+    );
+
+    // req-2 still alive; nothing has touched it.
+    assert!(h.wrapper.has_active_cd_request("req-2"));
+    assert!(h.coordinator.state_for_test("req-2").is_some());
+
+    Ok(())
+}

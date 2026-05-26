@@ -154,6 +154,27 @@ The 5 codex review iterations consolidated in commit `31fe4529245` are all examp
 
 All five address connector-internal tokio task races. **None** would be needed if vLLM were the only source of concurrency.
 
+### Cross-lifecycle stale-release race (recompute policy)
+
+Under `kv_load_failure_policy=recompute`, vLLM reuses the same `request_id` when a CD-bound request fails and gets rescheduled (`vllm/v1/core/sched/scheduler.py:1943-1973`: `failed_recving_kv_req_ids` is keyed by rid and the `Request` object is retained, with `num_computed_tokens` truncated and the request requeued). The four `ConditionalDisaggCoordinator::release(rid)` call sites partition by thread of origin:
+
+| # | Call site | Thread |
+|---|---|---|
+| 1 | `CdRequestStatePayload::Drop` (decode_leader.rs) | engine-core (fires from `process_finished_onboarding_take` via `update_connector_output`) |
+| 2 | `decode_usaa` pre-USAA replay spawn (decode_leader.rs) | tokio runtime |
+| 3 | `commit_usaa1` outer replay spawn (decode_leader.rs) | tokio runtime |
+| 4 | `commit_usaa1` post-insert replay spawn (decode_leader.rs) | tokio runtime |
+
+Sites #2–#4 all spawn a tokio task that awaits `worker_hook.mark_failed_onboarding` (potentially unbounded under back-pressure) and then calls `release_request` + `coordinator.release` by rid name. Under recompute, vLLM can reschedule the same rid while this await is parked; a fresh GNMT + USAA installs a new `Arc<CdRequestState>` and `Arc<CdRequest>` for the same rid. When the parked task eventually wakes and calls release-by-name, it wipes the new lifecycle's freshly-installed state and budget reservation.
+
+**Fix.** Sites #2–#4 capture the per-lifecycle Arcs at spawn time and use `release_request_if_matches(rid, &captured_wrapper)` / `coordinator.release_if_matches(rid, &captured_coord)`. Both methods atomic-remove via `DashMap::remove_if` with `Arc::ptr_eq` against the captured snapshot; a mismatch (subsequent lifecycle replaced the entry) returns `false` without touching state.
+
+Site #1 stays on `release` (by name) — `CdRequestStatePayload::Drop` is engine-core and serialized against `commit_usaa1` per the foundational invariant, so the cross-lifecycle window does not exist for it.
+
+Discriminating test: `cd_decode_e2e::release_if_matches_enforces_arc_identity` — two distinct rids capture two handles, cross-handle release calls no-op, matching-handle release fires.
+
+**Known parallel residual.** `ConditionalDisaggCoordinator::cleanup_failed_request` post-USAA branch (`driver.rs:460`) and the wrapper-side `DecodeDisaggLeader::cleanup_failed_request` (`decode_leader.rs:2198`) follow the same shape — `mark_failed_onboarding.await` followed by a by-name `states.remove` / `cd_request_state.remove`. Under recompute the same cross-lifecycle race applies and is NOT closed by the epoch-guard above. Scope-deferred: the symptom (a stale removal wiping a fresh lifecycle) is observable but recoverable via the standard CD failure path (peer observes session.close, runs its own cleanup, vLLM gets `mark_failed_onboarding` on the next attempt). If hit in production, capture per-lifecycle Arcs at the top of `cleanup_failed_request` and switch to `remove_if(rid, |_, v| Arc::ptr_eq(captured, v))`.
+
 ## Failure Surface
 
 Failures the connector must handle, and how vLLM surfaces them:
