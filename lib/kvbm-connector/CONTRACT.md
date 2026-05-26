@@ -200,23 +200,35 @@ These shapes ARE encouraged in tests:
 4. **Peer-failure injection** via `MockSession`'s paired-mode: detach, Frame::Error, watchdog. Asserts the lifecycle watcher fires and `cleanup_failed_request` runs without leaks or double-notifications.
 5. **`KVConnectorOutput` injection**: simulate the worker emitting finished_recving / finished_sending / failed-block-ids; assert `update_connector_output` routes them correctly.
 
-## Disagg-Internal Invariants (Stage 0)
+## Disagg-Internal Invariants
 
-These two invariants govern how the disagg path turns a vLLM GNMT call into a CD dispatch. They are not vLLM-facing — vLLM does not see them — but the connector code MUST hold them, and future refactors that weaken them will silently corrupt the protocol. The Primary Gap §Stage 1+ (G1→G2 promotion) widens the matched commit set; Stage 0 pins what the commit set means **today** so the widening is a deliberate change of contract, not an accidental drift.
+These invariants govern how the disagg path turns a vLLM GNMT call into a CD dispatch. They are not vLLM-facing — vLLM does not see them — but the connector code MUST hold them, and future refactors that weaken them will silently corrupt the protocol.
 
-### Invariant A — All-or-nothing prefix G2 advertisement
+### Invariant A — All-or-nothing prefix advertisement
 
-**Statement.** For the prefix window `[0, num_computed_tokens / block_size)`, decode advertises EITHER the full Vec of G2 blocks OR an empty Vec. Partial advertisement is forbidden.
+**Statement.** For the prefix window `[0, num_computed_tokens / block_size)`, decode advertises EITHER the full set of prefix hashes on the session OR no prefix at all. Partial advertisement is forbidden.
 
-**Enforced by.** `ConnectorLeader::find_prefix_g2_blocks` (`lib/kvbm-connector/src/connector/leader/mod.rs:551+`). On any miss (returned len `< num_prefix_blocks`), the function drops the partial hits (RAII returns them to G2's inactive pool) and returns `Ok(Vec::new())`. Emits the `prefix_g2_incomplete_skip` audit event.
+The full set is constructed from two sources:
 
-**Consumed by.** `DecodeDisaggLeader::commit_gnmt_remote` (`decode_leader.rs:702-718`). Treats an empty result as "no prefix advertised" — `commit_gnmt_remote` continues with local-match only, never errors. Empties are NOT propagated as failures.
+- **G2-resident prefix blocks** — returned by `ConnectorLeader::find_prefix_g2_blocks`. These are immediately made-available on the session at GNMT.
+- **G1-only prefix blocks** (Stage 1 promotion path) — when the G2 query misses, the promotion plan is captured at GNMT (canonical hashes from the slot's full sequence) and the actual G1→G2 transfer is fired as an uncancellable task at USAA. The promoted G2 blocks are made-available on the session as they land; the GNMT-time `session.commit` already includes their hashes so `finish_commits` seals the full planned set up front.
+
+**Enforced by.**
+
+- `ConnectorLeader::find_prefix_g2_blocks` (`lib/kvbm-connector/src/connector/leader/mod.rs`). On any G2 miss the function drops the partial hits (RAII returns them to G2's inactive pool) and returns `Ok(Vec::new())`. Emits `prefix_g2_incomplete_skip`.
+- `DecodeDisaggLeader::commit_gnmt_remote` (`decode_leader.rs`). When `find_prefix_g2_blocks` returns empty AND `num_computed_tokens > 0`, builds a `PendingG1Promotion { prefix_block_count, prefix_hashes }`. Plumbs the planned hashes to `begin_remote_prefill` and stashes the plan on `CdRequestState`.
+- `DecodeDisaggLeader::commit_usaa1` (`decode_leader.rs`). Pairs `block_ids[..prefix_block_count]` with the GNMT-time `prefix_hashes` to build `Vec<ExternalBlock<G1>>`, calls `inner.promote_g1_to_g2(source_blocks)`, spawns a task that awaits the future and drives `session.make_available` + `session.finish_availability` on the promoted G2 blocks.
+- `ConditionalDisaggCoordinator::begin_remote_prefill` (`coordinator/driver.rs`). Includes `pending_promotion_hashes` in the up-front `session.commit` (positionally first, ahead of `local_match`); calls `session.finish_commits` unconditionally; skips `session.finish_availability` when promotion is pending.
+
+**Consumed by.** Decode's `commit_gnmt_remote` treats an empty `find_prefix_g2_blocks` result as "plan a promotion" rather than "advertise nothing." Prefill's `ensure_started` pulls the full `[0, DNPT/BS)` hash range regardless of whether decode sourced each block from G2 directly or via the promotion path; both look identical on the session.
 
 **Why partial is forbidden.** Publishing `[0..M)` (the leading-contiguous G2-resident portion) to the session tells prefill "decode has prefix `[0..M)` available, not `[M..P)`." But decode's G1 holds the FULL prefix `[0..P)` — the "missing" `[M..P)` is a hole only in G2, not in the conversation state. Advertising the partial set creates an inconsistent view (prefill treats `[M..P)` as cache misses while decode actually has them in G1).
 
-**Intended recovery for the miss case.** G1→G2 backfill in `update_state_after_alloc`. Not wired today; until it is, "advertise empty" gives pre-merge functional parity (prefill recomputes the whole prefix itself).
+**Promotion failure handling.** `promote_g1_to_g2` Err (synchronous enqueue Err, `TransferHandle::wait` Err, or partial register after transfer) routes the task to `session.close(reason)`. The prefill peer's lifecycle watcher observes `Detached`/`Failed` and runs `cleanup_failed_request` through the standard CD failure path; vLLM is notified via `mark_failed_onboarding`. Decode's G2 cache is unaffected — only the in-flight transfer is lost.
 
-**Stage 1 widens this**: when the G1→G2 backfill arm lands, the commit set will include prefix blocks promoted from G1 alongside the G2-resident ones. The all-or-nothing rule on `find_prefix_g2_blocks`'s return value stays; the recovery path on its miss arm changes.
+**Promotion-task lifetime.** The promotion `JoinHandle` lives on `CdRequestState.pending_promotion_task` next to the session. Dropping it does NOT abort the task (tokio's `JoinHandle` detaches on drop). The task survives request teardown — the resulting G2 blocks remain registered in the cache and benefit future requests.
+
+**Audit events.** `prefix_g1_to_g2_promotion_planned` (GNMT), `prefix_g1_to_g2_promotion_enqueued` (USAA), `prefix_g2_promotion_landed` (task completion), `prefix_g2_promotion_failed` (task error).
 
 ### Invariant B — Sequential-left-to-right match terminating at first miss
 
@@ -230,9 +242,11 @@ These two invariants govern how the disagg path turns a vLLM GNMT call into a CD
 
 **Defense-in-depth.** The DNPT digest (`expected_hash_digest` on `RemotePrefillRequest`) covers the FULL `[0, DNPT/BS)` slice and is verified by prefill in `ensure_started` (`driver.rs:1651+`). A hash-chain divergence — including one introduced by a contiguity-violation refactor — fails loud at GNMT-handshake time rather than producing a wrong-block RDMA pull. Pinned by `cd_prefill_dnpt_digest_mismatch_rejected`.
 
-### Stage 0 status (no behavior change)
+### Multi-delta availability hardening (prefill side)
 
-These invariants are already enforced and tested in the current chain (through `ab6de74852b`). Stage 0 is the documentation pin — surfacing them in this CONTRACT so Stage 1/2 widening (G1→G2 / G3→G2 promotion in `update_state_after_alloc`) is a deliberate change of contract rather than an accidental drift from the current narrow-but-correct behavior.
+The session API permits availability to land in multiple `Available` deltas — CONTRACT (`lib/kvbm-engine/src/p2p/session/CONTRACT.md` §2.7/§2.8) specifies that delta order on the wire equals the holder's `make_available` call order, with no guarantee that a single delta covers a contiguous position range. Stage 1 is the first documented holder that splits availability (decode publishes local-match synchronously at GNMT and the promoted prefix later from the task); peers may legitimately do this in other future scenarios too.
+
+**Prefill consumer hardening.** `ConditionalDisaggCoordinator::kick_onboard` (`coordinator/driver.rs`) builds a `SequenceHash → position` map from `bits.expected_hashes` and sorts the registered G2 blocks by absolute position before taking the suffix paired with vLLM's positional G1 destinations. Without this, an arrival-order suffix would mis-pair the G2 sources under any multi-delta arrival — corrupting the K/V cache silently. Pinned by `cd_prefill_kick_onboard_robust_to_split_delta_availability`.
 
 ## Maintenance
 

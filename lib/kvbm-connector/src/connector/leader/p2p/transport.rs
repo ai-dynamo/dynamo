@@ -182,12 +182,14 @@ pub trait InnerLeaderShim: Send + Sync {
     ///
     /// Either the full `num_prefix_blocks` G2 blocks (every prefix block
     /// was G2-resident) or an empty Vec (any G2 miss → drop the partial
-    /// hits, advertise no prefix). Partial publication would tell prefill
-    /// "decode has prefix `[0..M)` but not `[M..P)`" while vLLM's G1
-    /// actually holds the full prefix — an inconsistent advertisement.
-    /// The intended recovery for misses is a G1→G2 copy in
-    /// `update_state_after_alloc`, **not yet wired**; the panic stub for
-    /// that arm belongs in USAA, not here.
+    /// hits). Partial publication would tell prefill "decode has prefix
+    /// `[0..M)` but not `[M..P)`" while vLLM's G1 actually holds the
+    /// full prefix — an inconsistent advertisement.
+    ///
+    /// The empty arm is the Stage 1 promotion trigger: the caller
+    /// (`decode_leader.rs::commit_gnmt_remote`) plans a G1→G2
+    /// promotion for the full prefix window and fires the actual
+    /// transfer at USAA via `Self::promote_g1_to_g2`.
     ///
     /// # Errors
     ///

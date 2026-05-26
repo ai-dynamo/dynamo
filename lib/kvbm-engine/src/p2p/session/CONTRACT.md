@@ -150,6 +150,30 @@ Same shape as `commits()` for `AvailabilityDelta`. `Drained`
 terminator instead of `Closed`. Same ordering / replay /
 subscribe-once invariants.
 
+**Consumer gotcha: deltas are arrival-ordered, NOT
+position-ordered.** A holder may publish availability in any
+number of `Available` deltas — `make_available([a, b])` followed
+by `make_available([c, d])` is equivalent to
+`make_available([a, b, c, d])` on the WIRE (a single drained
+set), but the puller's `availability()` stream surfaces them as
+two distinct deltas in call order. Any consumer that drains
+incrementally and **appends results to a flat log** (e.g., for
+later positional pairing with vLLM-allocated destinations) MUST
+re-sort by absolute position before treating the log as
+positionally indexed; appending in arrival order silently
+mis-pairs when the holder publishes in two-plus deltas.
+
+Holders that publish in a single `make_available` call mask this
+gotcha for the consumer, but no contract guarantee binds them to
+that shape — and any future per-tier promotion / chunked-output
+flow legitimately splits availability. Treat single-delta arrival
+as a coincidence, not an invariant.
+
+Pinned by `lib/kvbm-connector/tests/cd_prefill_e2e.rs::cd_prefill_kick_onboard_robust_to_split_delta_availability`
+(prefill `kick_onboard` consumer; broken pre-fix because it took
+`registered_g2.iter().skip(suffix_start)` in arrival order
+instead of sorting by `expected_hashes` position).
+
 ### 2.9 `peer_committed() -> PeerCommitted` (`mod.rs:273`)
 
 Puller-side snapshot of peer's committed set with seal status as

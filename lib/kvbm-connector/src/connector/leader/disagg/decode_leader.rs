@@ -694,23 +694,19 @@ impl DecodeDisaggLeader {
         //      (the session's `available_pins` owns the pin for the
         //      session's lifetime once we hand it to
         //      `begin_remote_prefill`).
-        //   2. Any miss — vLLM has the full prefix in G1, but G2 doesn't
-        //      back all of it. `find_prefix_g2_blocks` drops any partial
-        //      hits and returns empty; we advertise no prefix to prefill.
-        //      Publishing a partial set would tell prefill "decode has
-        //      prefix `[0..M)` available, not `[M..P)`" while decode's
-        //      G1 actually holds the full `[0..P)` — an inconsistent
-        //      advertisement.
-        //
-        // Recovery for the miss case is a G1→G2 copy in
-        // `update_state_after_alloc`. **That arm is not yet wired.**
-        // Until it is, "advertise none on any miss" = pre-merge
-        // functional parity: no prefix in session, prefill computes the
-        // whole prefix itself. The panic stub for the unimplemented
-        // G1→G2 backfill belongs in USAA when that code path is added,
-        // not at GNMT — bailing here would regress every PC-enabled CD
-        // request whose prefix isn't already in G2 (most of them on a
-        // fresh worker).
+        //   2. Any miss — vLLM has the full prefix in G1, but G2
+        //      doesn't back all of it. `find_prefix_g2_blocks` drops
+        //      any partial hits and returns empty; the empty arm
+        //      below plans a G1→G2 promotion task that fires at
+        //      USAA, when vLLM has handed us the actual G1
+        //      `block_ids`. The session's commit set includes the
+        //      planned-promoted hashes from the start (see
+        //      `begin_remote_prefill` — `pending_promotion_hashes`),
+        //      so `finish_commits` seals the full planned window up
+        //      front and the prefill peer never observes a partial
+        //      commit set. `session.finish_availability` is deferred
+        //      until the promotion task calls
+        //      `session.make_available` on the landed G2 blocks.
         //
         // Why prefix and local-match are passed to `begin_remote_prefill`
         // as SEPARATE Vecs (not concatenated) — two invariants:

@@ -509,8 +509,12 @@ impl ConnectorLeader {
     ///   full Vec and the wrapper publishes them all on the session.
     /// * **Any miss** (returned len `< num_prefix_blocks`, including 0) —
     ///   drops the partial G2 hits (RAII-release returns them to G2's
-    ///   inactive pool) and returns an empty Vec. The wrapper advertises
-    ///   no prefix blocks to prefill in this case.
+    ///   inactive pool) and returns an empty Vec. The wrapper handles
+    ///   the empty arm via the Stage 1 promotion plan (see
+    ///   `decode_leader.rs::commit_gnmt_remote`): the planned-promoted
+    ///   hashes are committed up front on the session and the actual
+    ///   G1→G2 transfer fires at USAA when vLLM hands over the G1
+    ///   `block_ids`.
     ///
     /// Why all-or-nothing rather than partial-publish: G2's first-hole
     /// policy returns the leading-contiguous G2-resident prefix. If
@@ -520,21 +524,8 @@ impl ConnectorLeader {
     /// for the FULL prefix `[0..P)` — the "missing" `[M..P)` is a hole
     /// only in G2, not in the conversation state. Advertising the partial
     /// set creates an inconsistent view: prefill would believe positions
-    /// `[M..P)` are unavailable and either treat them as cache misses or
-    /// fail contiguity checks, when in reality decode could serve them
-    /// once the G1→G2 backfill is wired.
-    ///
-    /// The intended recovery for any miss is a G1→G2 copy in
-    /// `update_state_after_alloc` (vLLM has the blocks in G1, decode just
-    /// hasn't materialized them in G2 yet). **That arm is not yet wired.**
-    /// Until it is, returning empty matches pre-prefix-backfill behavior:
-    /// no prefix in session, prefill computes the whole prefix itself.
-    ///
-    /// Per Ryan's directive: the panic stub for the unimplemented G1→G2
-    /// backfill arm belongs in `update_state_after_alloc`, not here.
-    /// Failing GNMT on a G2 miss would regress every PC-enabled CD request
-    /// whose prefix isn't already in G2 (typically most of them on a fresh
-    /// worker).
+    /// `[M..P)` are unavailable when in reality decode can serve them via
+    /// the promotion path.
     ///
     /// # Errors
     ///
@@ -585,16 +576,19 @@ impl ConnectorLeader {
         let g2 = leader.g2_manager().match_blocks(&prefix_hashes);
 
         if g2.len() != num_prefix_blocks {
-            // Any miss → advertise none (all-or-nothing). Publishing the
-            // partial leading-contiguous G2 hits would tell prefill
-            // "decode has [0..M) of the prefix" while vLLM's G1 actually
-            // holds the full [0..P) — an inconsistent advertisement that
-            // makes the holes look like real cache misses to prefill.
+            // Any miss → return empty (all-or-nothing). Publishing
+            // the partial leading-contiguous G2 hits would tell
+            // prefill "decode has [0..M) of the prefix" while
+            // vLLM's G1 actually holds the full [0..P) — an
+            // inconsistent advertisement that makes the holes look
+            // like real cache misses to prefill.
             //
-            // Drop the partial G2 hits (RAII returns them to the inactive
-            // pool intact, available for future requests). The G1→G2
-            // backfill that would close the gap belongs in USAA; until
-            // it's wired, "no prefix advertised" = pre-merge behavior.
+            // Drop the partial G2 hits (RAII returns them to the
+            // inactive pool intact, available for future requests).
+            // The caller (`commit_gnmt_remote`) plans a Stage 1
+            // G1→G2 promotion for the full prefix window in the
+            // empty arm — the actual transfer fires at USAA when
+            // vLLM hands over the G1 `block_ids`.
             let hits = g2.len();
             let misses = num_prefix_blocks - hits;
             drop(g2);
@@ -603,8 +597,7 @@ impl ConnectorLeader {
                 num_prefix_blocks,
                 hits,
                 misses,
-                "find_prefix_g2_blocks: incomplete G2 backing; advertising no prefix \
-                 (G1→G2 backfill unimplemented)"
+                "find_prefix_g2_blocks: incomplete G2 backing; deferring to Stage 1 promotion"
             );
             crate::audit!(
                 "prefix_g2_incomplete_skip",
