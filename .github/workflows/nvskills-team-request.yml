@@ -1,0 +1,193 @@
+name: Team Request NVSkills CI
+
+on:
+  workflow_call:
+    secrets:
+      NVSKILLS_CI_DISPATCH_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  request:
+    if: >
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/nvskills-ci')) ||
+      (github.event_name == 'push' &&
+        github.actor == (vars.NVSKILLS_SIGNATURE_PUSH_ACTOR || 'nv-nvskill-ci[bot]') &&
+        startsWith(github.event.head_commit.message, vars.NVSKILLS_SIGNATURE_COMMIT_TITLE || 'Attach NVSkills validation signatures'))
+    runs-on: ubuntu-latest
+    concurrency:
+      group: nvskills-ci-request-${{ github.repository }}-${{ github.event.issue.number || github.sha }}
+      cancel-in-progress: true
+    steps:
+      - name: Validate requester permission
+        if: ${{ github.event_name == 'issue_comment' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          permission="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/collaborators/${ACTOR}/permission" \
+            | jq -r '.permission')"
+          case "${permission}" in
+            admin|maintain) ;;
+            *) echo "Requester must have maintain or admin permission"; exit 1 ;;
+          esac
+
+      - name: Resolve request context
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          ISSUE_PR_NUMBER: ${{ github.event.issue.number || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
+          SIGNATURE_COMMIT_TITLE: ${{ vars.NVSKILLS_SIGNATURE_COMMIT_TITLE || 'Attach NVSkills validation signatures' }}
+          SIGNATURE_PUSH_ACTOR: ${{ vars.NVSKILLS_SIGNATURE_PUSH_ACTOR || 'nv-nvskill-ci[bot]' }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          owner="${REPO%%/*}"
+          repo="${REPO#*/}"
+          pr_number="${ISSUE_PR_NUMBER}"
+          commit_title="$(printf '%s' "${HEAD_COMMIT_MESSAGE}" | sed -n '1p')"
+
+          if [ "${EVENT_NAME}" = "push" ]; then
+            if [ "${commit_title}" != "${SIGNATURE_COMMIT_TITLE}" ]; then
+              echo "Push is not the configured NVSkills signature commit; skipping dispatch."
+              exit 0
+            fi
+            if [ "${ACTOR}" != "${SIGNATURE_PUSH_ACTOR}" ]; then
+              echo "Push actor ${ACTOR} is not the configured NVSkills signing actor; skipping dispatch."
+              exit 0
+            fi
+
+            prs_json="$(curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${owner}/${repo}/commits/${HEAD_SHA}/pulls")"
+            pr_number="$(printf '%s' "${prs_json}" | jq -r '[.[] | select(.state == "open")][0].number // empty')"
+            if [ -z "${pr_number}" ]; then
+              echo "No open pull request is associated with the signature commit; skipping dispatch."
+              exit 0
+            fi
+          fi
+
+          if [ -z "${pr_number}" ]; then
+            echo "Pull request number could not be resolved."
+            exit 1
+          fi
+
+          pr_json="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${owner}/${repo}/pulls/${pr_number}")"
+          head_sha="$(printf '%s' "${pr_json}" | jq -r '.head.sha')"
+          base_ref="$(printf '%s' "${pr_json}" | jq -r '.base.ref')"
+
+          if [ "${EVENT_NAME}" != "push" ]; then
+            commit_json="$(curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${owner}/${repo}/commits/${head_sha}")"
+            commit_title="$(printf '%s' "${commit_json}" | jq -r '.commit.message | split("\n")[0]')"
+          fi
+
+          has_watched_change=false
+          page=1
+          while true; do
+            files_json="$(curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${owner}/${repo}/pulls/${pr_number}/files?per_page=100&page=${page}")"
+            if printf '%s' "${files_json}" | jq -e '
+              any(.[]; .filename |
+                startswith("skills/") or
+                startswith("team-skills/") or
+                startswith("rules/team-rules/") or
+                startswith("plugins/")
+              )
+            ' >/dev/null; then
+              has_watched_change=true
+              break
+            fi
+            if [ "$(printf '%s' "${files_json}" | jq 'length')" -lt 100 ]; then
+              break
+            fi
+            page=$((page + 1))
+          done
+
+          if [ "${has_watched_change}" != "true" ]; then
+            {
+              echo "## NVSkills CI request"
+              echo
+              echo "Skipped: no changes under \`skills/\`, \`team-skills/\`, \`rules/team-rules/\`, or \`plugins/\`."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          {
+            echo "should_dispatch=true"
+            echo "pr_number=${pr_number}"
+            echo "head_sha=${head_sha}"
+            echo "base_ref=${base_ref}"
+            echo "commit_title=${commit_title}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Dispatch NVSkills CI
+        if: steps.context.outputs.should_dispatch == 'true'
+        env:
+          DISPATCH_TOKEN: ${{ secrets.NVSKILLS_CI_DISPATCH_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.context.outputs.pr_number }}
+          REQUEST_HEAD_SHA: ${{ steps.context.outputs.head_sha }}
+          REQUEST_BASE_REF: ${{ steps.context.outputs.base_ref }}
+          REQUEST_COMMIT_TITLE: ${{ steps.context.outputs.commit_title }}
+          REQUEST_COMMENT_ID: ${{ github.event.comment.id || '' }}
+          REQUEST_RUN_ID: ${{ github.run_id }}
+          REQUESTED_BY: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISPATCH_TOKEN}" ]; then
+            echo "Missing NVSKILLS_CI_DISPATCH_TOKEN secret."
+            exit 1
+          fi
+
+          owner="${REPO%%/*}"
+          repo="${REPO#*/}"
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/NVIDIA/nvskills-ci/actions/workflows/nvskills-ci.yml/dispatches" \
+            -d "$(jq -n \
+              --arg ref "main" \
+              --arg source_owner "${owner}" \
+              --arg source_repo "${repo}" \
+              --arg pr_number "${PR_NUMBER}" \
+              --arg request_run_id "${REQUEST_RUN_ID}" \
+              --arg request_head_sha "${REQUEST_HEAD_SHA}" \
+              --arg request_base_ref "${REQUEST_BASE_REF}" \
+              --arg request_commit_title "${REQUEST_COMMIT_TITLE}" \
+              --arg request_comment_id "${REQUEST_COMMENT_ID}" \
+              --arg requested_by "${REQUESTED_BY}" \
+              '{ref: $ref, inputs: {
+                source_owner: $source_owner,
+                source_repo: $source_repo,
+                pr_number: $pr_number,
+                request_run_id: $request_run_id,
+                request_head_sha: $request_head_sha,
+                request_base_ref: $request_base_ref,
+                request_commit_title: $request_commit_title,
+                request_comment_id: $request_comment_id,
+                requested_by: $requested_by
+              }}')"
