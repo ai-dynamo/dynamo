@@ -147,7 +147,7 @@ fn build_request_envelope<T>(
     recv_conn_info: ConnectionInfo,
     send_conn_info: Option<ConnectionInfo>,
     request: Option<&T>,
-) -> Result<(bytes::Bytes, &'static str), Error>
+) -> Result<bytes::Bytes, Error>
 where
     T: serde::Serialize + ?Sized,
 {
@@ -173,7 +173,7 @@ where
         None => None,
     };
 
-    let (msg, nvtx_label) = match &data {
+    let msg = match &data {
         Some(d) => {
             tracing::trace!(
                 request_id,
@@ -181,10 +181,7 @@ where
                 ctrl.len(),
                 d.len(),
             );
-            (
-                TwoPartMessage::from_parts(ctrl.into(), d.clone().into()),
-                "transport.tcp.send",
-            )
+            TwoPartMessage::from_parts(ctrl.into(), d.clone().into())
         }
         None => {
             tracing::trace!(
@@ -192,16 +189,13 @@ where
                 "packaging bidirectional header-only envelope; ctrl: {} bytes",
                 ctrl.len(),
             );
-            (
-                TwoPartMessage::from_header(ctrl.into()),
-                "transport.tcp.send_bidirectional",
-            )
+            TwoPartMessage::from_header(ctrl.into())
         }
     };
 
     let codec = TwoPartCodec::default();
     let buffer = codec.encode_message(msg)?;
-    Ok((buffer, nvtx_label))
+    Ok(buffer)
 }
 
 /// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
@@ -451,43 +445,24 @@ impl AddressedPushRouter {
         // worker decodes the control message, dials back for both streams,
         // and pulls frames off the request-stream as the engine asks for
         // them.
-        let (buffer, nvtx_label) = build_request_envelope::<()>(
+        let buffer = build_request_envelope::<()>(
             &ctx_unit,
             resp_stream_conn_info,
             req_stream_conn_info,
             None,
         )?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
+
         let tx_start = Instant::now();
-        self.dispatch_buffer(address, buffer, ctx_unit.id(), nvtx_label)
-            .await?;
+        self.dispatch_buffer(address, buffer, ctx_unit.id()).await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
-        // Await both call-home dials. Response side first (worker's prologue
-        // is the synchronization point — error or success); request side
-        // second (no prologue, resolves as soon as the worker dials in).
-        let response_stream = match response_stream_provider.await {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => {
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::CannotConnect)
-                        .message(format!(
-                            "Worker generate() failed before response stream: {e}"
-                        ))
-                        .build()
-                ));
-            }
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::Disconnected)
-                        .message("Worker disconnected before response stream was established")
-                        .build()
-                ));
-            }
-        };
-
+        // Resolve the request-stream dial-back first and spawn the forwarder
+        // immediately so frames start pre-loading into the worker's input
+        // buffer while the engine initialises in parallel. The response side
+        // carries the engine prologue and only resolves after
+        // `engine.generate()` returns — awaiting it second avoids stalling
+        // the request-side handshake on engine setup latency.
         if let Some(request_stream_provider) = request_stream_provider {
             let request_sender = match request_stream_provider.await {
                 Ok(Ok(sender)) => sender,
@@ -549,6 +524,28 @@ impl AddressedPushRouter {
                 }
             });
         }
+
+        let response_stream = match response_stream_provider.await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!(
+                            "Worker generate() failed before response stream: {e}"
+                        ))
+                        .build()
+                ));
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("Worker disconnected before response stream was established")
+                        .build()
+                ));
+            }
+        };
 
         cancel_guard.disarm();
         Ok(finalize_response_stream(
@@ -669,7 +666,6 @@ impl AddressedPushRouter {
         address: String,
         buffer: bytes::Bytes,
         request_id: &str,
-        nvtx_label: &'static str,
     ) -> Result<(), Error> {
         let mut headers = std::collections::HashMap::new();
         inject_trace_headers_into_map(&mut headers);
@@ -680,7 +676,7 @@ impl AddressedPushRouter {
             .as_nanos() as u64;
         headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
 
-        let _nvtx_send = dynamo_nvtx_range!(nvtx_label);
+        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
         self.req_client
             .send_request(address, buffer, headers)
             .await?;
@@ -728,12 +724,11 @@ where
         let cancel_guard =
             CancelGuard::arm(self.resp_transport.clone(), recv_subject, send_subject);
 
-        let (buffer, nvtx_label) =
-            build_request_envelope(&context, connection_info, None, Some(&request))?;
+        let buffer = build_request_envelope(&context, connection_info, None, Some(&request))?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
+
         let tx_start = Instant::now();
-        self.dispatch_buffer(address, buffer, context.id(), nvtx_label)
-            .await?;
+        self.dispatch_buffer(address, buffer, context.id()).await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
