@@ -40,7 +40,7 @@ use kvbm_connector::connector::leader::disagg::{
     AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, CoordinatorParts,
     DecodeDisaggLeader, HubWiring,
 };
-use kvbm_engine::p2p::session::{CommittedBlock, MockSessionFactory};
+use kvbm_engine::p2p::session::{CommittedBlock, LifecycleEvent, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
 use kvbm_logical::manager::BlockManager;
@@ -1069,6 +1069,109 @@ async fn cd_decode_commit_usaa1_post_insert_replays_late_stash() -> Result<()> {
     );
 
     assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+    Ok(())
+}
+
+/// P0 #9 — Decode-side mid-output peer failure. When the prefill
+/// peer crashes (or velo surfaces `Frame::Error`) mid-pull, the
+/// decode side observes `LifecycleEvent::Failed` on its session.
+/// The chain that follows:
+///
+/// 1. Decode's lifecycle watcher (`spawn_lifecycle_watcher` with
+///    role="decode") routes Failed through
+///    `invoke_decode_failure_sink_and_evict`.
+/// 2. The failure sink calls
+///    `DecodeDisaggLeader::cleanup_failed_request`.
+/// 3. The wrapper's `cleanup_claimed` CAS (added 8e9fc64a691) holds
+///    against concurrent cleanup callers.
+/// 4. Post-USAA branch emits `mark_failed_onboarding` with the
+///    unfilled external G1 slice; `release_request` removes the
+///    wrapper state + releases the inflight budget;
+///    `coordinator.release` removes coord state + finalizes the
+///    session.
+///
+/// Discriminating: this test runs a happy-path setup through USAA,
+/// then injects `LifecycleEvent::Failed` on the decode-side session
+/// AND a concurrent direct `on_session_failure` call (mirroring the
+/// race between the lifecycle watcher path and any other path that
+/// could surface a failure). Asserts EXACTLY ONE
+/// `mark_failed_onboarding` call (CAS guard), budget fully released,
+/// and coord/wrapper state evicted. Peer-failure injection: in scope
+/// per CONTRACT.md.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_peer_failure_mid_output_cleans_up() -> Result<()> {
+    use kvbm_connector::connector::leader::disagg::CdFailureSink;
+
+    let h = build_harness();
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    // USAA-1 installs the full G1 window. Wait for the local-kick
+    // spawn to land but do NOT resolve it — we want the failure to
+    // fire mid-flight with unfilled G1 ids on both the local-match
+    // slice AND the remote slice.
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+    h.transport.wait_onboard_count(1).await;
+
+    // Inject Failed via the decode session AND fire a concurrent
+    // failure-sink call. Either path independently triggers the
+    // wrapper's cleanup; the CAS collapses both to a single
+    // mark_failed_onboarding emission.
+    session.inject_lifecycle(LifecycleEvent::Failed {
+        reason: "induced prefill peer crash mid-pull".to_string(),
+    });
+    let sink: Arc<dyn CdFailureSink> = Arc::clone(&h.wrapper) as Arc<dyn CdFailureSink>;
+    let direct = tokio::spawn(async move {
+        sink.on_session_failure("req-1".to_string(), "induced via direct sink".to_string())
+            .await
+    });
+    let _ = direct.await;
+
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+
+    // Exactly one mark_failed_onboarding call (CAS guard).
+    let failed_calls: Vec<_> = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .collect();
+    assert_eq!(
+        failed_calls.len(),
+        1,
+        "Failed-lifecycle + direct sink call must collapse to ONE mark_failed_onboarding \
+         (got {} calls); the wrapper's cleanup_claimed CAS is the gate",
+        failed_calls.len(),
+    );
+
+    // The unfilled set covers the full external G1 slice (local-match
+    // + remote) because neither local-kick nor remote-pipeline has
+    // completed.
+    let mut got = failed_calls[0].block_ids.clone();
+    got.sort();
+    let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS..].to_vec();
+    want.sort();
+    assert_eq!(got, want);
+
+    // Wrapper state + budget reclaimed; coordinator state evicted.
+    wait_until(|| !h.wrapper.has_active_cd_request("req-1")).await;
+    assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+    wait_until(|| h.coordinator.active_count() == 0).await;
+
+    // mark_onboarding_complete must NOT fire.
+    assert!(
+        !h.workers.completed_contains("req-1"),
+        "failed request must not also signal onboarding-complete to vLLM"
+    );
+
     Ok(())
 }
 

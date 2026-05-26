@@ -21,7 +21,7 @@ use kvbm_connector::connector::leader::disagg::testing::{
 };
 use kvbm_connector::connector::leader::disagg::{ConditionalDisaggCoordinator, CoordinatorParts};
 use kvbm_connector::connector::leader::disagg::{ConnectorLeaderApi, PrefillDisaggLeader};
-use kvbm_engine::p2p::session::{CommittedBlock, MockSession, MockSessionFactory};
+use kvbm_engine::p2p::session::{CommittedBlock, LifecycleEvent, MockSession, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
 use kvbm_logical::blocks::ImmutableBlock;
@@ -1577,4 +1577,105 @@ fn _ensure_used(h: &TestHarness) {
         &h.output_blocks,
         Duration::from_secs(0),
     );
+}
+
+/// P0 #7 — `Frame::Error` / `LifecycleEvent::Failed` during the
+/// post-USAA window (chunked output is in flight; the session may
+/// have buffered or dispatched output_commits) must trigger the same
+/// cleanup chain as a direct `cleanup_failed_request` call:
+///
+/// 1. The lifecycle watcher (`spawn_lifecycle_watcher` -> `prefill`
+///    callback) routes `Failed { reason }` through
+///    `Self::lifecycle_failure_reason` -> `cleanup_failed_request`.
+/// 2. The CAS guard on `CdRequest.cleanup_claimed` ensures the
+///    cleanup runs at most once (covers the race against the
+///    `run_setup` spawn-catch path also routing to cleanup on Err).
+/// 3. Post-USAA branch: `mark_failed_onboarding` fires with the full
+///    G1 window (the unfilled set at the time of failure).
+/// 4. `coord.states.remove(rid)` drops the CdRequest Arc; the
+///    `pending_output_commits` buffer drains via Arc drop.
+///
+/// Discriminating test: post-USAA happy-path setup, then a single
+/// `LifecycleEvent::Failed` injection on the session. Asserts the
+/// watcher fires the cleanup, `mark_failed_onboarding` is called
+/// EXACTLY ONCE (CAS guard), state is evicted, and the failure
+/// reason propagates as the visible audit signal. Models the
+/// peer-side failure injection class CONTRACT.md calls out as
+/// in-scope for the connector test suite (velo-wire / peer crash,
+/// not vLLM API misuse).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_frame_error_mid_output_triggers_cleanup() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    let session = drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // USAA installs the full G1 window on the wrapper. Required so the
+    // post-USAA branch of cleanup_failed_request fires `mark_failed_
+    // onboarding` (pre-USAA would stash without notifying).
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+
+    // Two cleanup paths fired concurrently:
+    //  - LifecycleEvent::Failed via the session → watcher routes
+    //    through cleanup_failed_request.
+    //  - Direct cleanup_failed_request call (mirroring a spawn-catch
+    //    Err that surfaces independently — e.g., `run_setup` Err post-
+    //    USAA, or a future task observer chain).
+    // The CAS guard on `CdRequest.cleanup_claimed` collapses both to a
+    // single mark_failed_onboarding emission. Without the CAS, vLLM
+    // would be double-notified for the same failed G1 window.
+    session.inject_lifecycle(LifecycleEvent::Failed {
+        reason: "induced peer crash mid-output".to_string(),
+    });
+    let coord = Arc::clone(&h.coordinator);
+    let direct = tokio::spawn(async move {
+        coord
+            .cleanup_failed_request("req-1", "induced via spawn-catch path".to_string())
+            .await;
+    });
+    let _ = direct.await;
+
+    // The lifecycle watcher is a separate tokio task; allow it to
+    // observe Failed and dispatch cleanup_failed_request.
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+
+    // Post-USAA: mark_failed_onboarding called with the full G1 window
+    // vLLM allocated (not just the local-match prefix).
+    let failed_calls: Vec<_> = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .collect();
+    assert_eq!(
+        failed_calls.len(),
+        1,
+        "lifecycle Failed must route through cleanup_failed_request EXACTLY ONCE \
+         (CAS guard on cleanup_claimed); got {} calls",
+        failed_calls.len(),
+    );
+    assert_eq!(
+        failed_calls[0].block_ids, h.g1_block_ids,
+        "post-USAA cleanup must surface the full G1 window for vLLM to abort"
+    );
+
+    // The peer-failure routing MUST evict the request from the
+    // coordinator's state map.
+    wait_until(|| h.coordinator.active_count() == 0).await;
+    assert!(
+        h.coordinator.state_for_test("req-1").is_none(),
+        "coord.states[rid] must be removed after Failed lifecycle event"
+    );
+
+    // mark_onboarding_complete must NOT fire — the request failed.
+    assert!(
+        !h.workers.completed_contains("req-1"),
+        "failed request must not also signal onboarding-complete to vLLM"
+    );
+
+    Ok(())
 }
