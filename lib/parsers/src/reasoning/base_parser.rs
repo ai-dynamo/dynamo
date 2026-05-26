@@ -113,7 +113,11 @@ impl ReasoningParser for BasicReasoningParser {
         // consumed it). Without this, the `</think>` markup leaks into
         // normal_text. Matches vLLM's `partition()`-based behavior for the
         // same input.
-        let has_dangling_end = !has_think_tag && text.contains(&self.think_end_token);
+        let supports_dangling_end_recovery =
+            self.think_start_token == "<think>" && self.think_end_token == "</think>";
+        let has_dangling_end = supports_dangling_end_recovery
+            && !has_think_tag
+            && text.contains(&self.think_end_token);
         let in_reasoning = self._in_reasoning || has_think_tag || has_dangling_end;
         if !in_reasoning {
             return ParserResult {
@@ -574,6 +578,15 @@ mod tests {
         let result = parser.detect_and_parse_reasoning("normal text</think> more normal", &[]);
         assert_eq!(result.normal_text, "more normal");
         assert_eq!(result.reasoning_text, "normal text");
+    }
+
+    #[test] // REASONING.batch.4 — Kimi Unicode delimiters keep stray closer as normal text.
+    fn test_kimi_unicode_stray_closing_tag_passes_through() {
+        let mut parser =
+            BasicReasoningParser::new("◁think▷".to_string(), "◁/think▷".to_string(), false, true);
+        let result = parser.detect_and_parse_reasoning("normal◁/think▷answer", &[]);
+        assert_eq!(result.normal_text, "normal◁/think▷answer");
+        assert_eq!(result.reasoning_text, "");
     }
 
     #[test] // REASONING.batch.4
