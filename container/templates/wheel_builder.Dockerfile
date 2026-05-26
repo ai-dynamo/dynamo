@@ -116,10 +116,13 @@ RUN apt-get update -y \
 {% if device == "cuda" %}
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
+# --setopt=tsflags=nocontexts: skip SELinux file-context labeling. The manylinux
+# image lacks the SELinux policy store that some compute nodes expect; without
+# this flag, dnf fails with "ValueError: SELinux policy is not managed".
 RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
-    dnf install -y almalinux-release-synergy && \
+    dnf install -y --setopt=tsflags=nocontexts almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
-    dnf install -y \
+    dnf install -y --setopt=tsflags=nocontexts \
         # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
         autoconf \
         automake \
@@ -273,7 +276,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     apt-get update -y && apt-get install -y build-essential pkg-config xz-utils git yasm; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
     elif [ "$DEVICE" = "cuda" ]; then \
-    dnf install -y pkg-config xz git yasm; \
+    dnf install -y --setopt=tsflags=nocontexts pkg-config xz git yasm; \
     fi && \
     # nv-codec-headers: provides the NVENC/NVDEC API headers ffmpeg compiles against.
     # Header-only, no runtime dep here; libcuda/libnvidia-encode are loaded at runtime
@@ -388,6 +391,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
      ldconfig
 
 {% if device == "cuda" %}
+ARG NIXL_LIBFABRIC_REPO
 ARG NIXL_LIBFABRIC_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -397,7 +401,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone https://github.com/ofiwg/libfabric.git && \
+    git clone "${NIXL_LIBFABRIC_REPO}" && \
     cd libfabric && \
     git checkout $NIXL_LIBFABRIC_REF && \
     ./autogen.sh && \
@@ -417,6 +421,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
     echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
     ldconfig
+
+ENV PKG_CONFIG_PATH="/usr/local/libfabric/lib/pkgconfig:${PKG_CONFIG_PATH}"
 {% endif %}
 
 {% if framework == "vllm" and device == "cuda" %}
