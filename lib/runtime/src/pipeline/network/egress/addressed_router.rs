@@ -44,11 +44,10 @@ use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
 /// Wrap a response-stream `mpsc::Receiver<Bytes>` into the fully-shaped
-/// `ManyOut<U>` returned by both the unary `AsyncEngine::generate` impl and
-/// the bidirectional `generate_bidirectional` method: deserialize each frame
-/// as `NetworkStreamWrapper<U>`, emit per-stream TTFT + transport-roundtrip
-/// metrics on first response, and bridge the inflight-gauge from the
-/// caller-owned `InflightGuard` into a stream-lifetime `InflightDecStream`.
+/// `ManyOut<U>`: deserialize each frame, emit TTFT and transport-roundtrip
+/// metrics on first response, and hand off the `InflightGuard` to a
+/// stream-lifetime `InflightDecStream` so the inflight gauge stays accurate
+/// for the whole response lifetime.
 fn finalize_response_stream<U>(
     response_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
@@ -132,9 +131,7 @@ fn serialize_control_message(control_message: &RequestControlMessage) -> Result<
 }
 
 /// Build the request control envelope, optionally serialize the unary
-/// data payload, and encode the whole thing into a wire buffer. Returns
-/// the encoded `Bytes` and the NVTX span label that the caller should
-/// wrap the wire write with.
+/// data payload, and encode the whole thing into a wire buffer.
 ///
 /// Wire shape is inferred from the inputs:
 ///   - `send_conn_info = Some(_)` + `request = None` → header-only
@@ -412,18 +409,11 @@ impl<T> AddressedRequest<T> {
 }
 
 pub struct AddressedPushRouter {
-    // Request transport (unified trait object - works with all transports)
     req_client: Arc<dyn RequestPlaneClient>,
-
-    // Response transport (TCP streaming - unchanged)
     resp_transport: Arc<tcp::server::TcpStreamServer>,
 }
 
 impl AddressedPushRouter {
-    /// Create a new router with a request plane client
-    ///
-    /// This is the unified constructor that works with any transport type.
-    /// The client is provided as a trait object, hiding the specific implementation.
     pub fn new(
         req_client: Arc<dyn RequestPlaneClient>,
         resp_transport: Arc<tcp::server::TcpStreamServer>,
@@ -463,12 +453,9 @@ impl AddressedPushRouter {
             .await
     }
 
-    /// Bidirectional sibling of the `AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>>`
-    /// impl: dispatch a `ManyIn<T>` to a specific `(instance, address)` pair.
-    /// All input frames flow on the request-stream half of the call-home TCP
-    /// transport; the initial envelope is header-only. The caller (typically
-    /// `PushRouter`'s bidirectional impl) has already resolved the
-    /// `(instance, address)` pair.
+    /// Bidirectional dispatch to a specific `(instance, address)` pair. All
+    /// input frames flow on the request-stream half of the call-home TCP
+    /// transport; the initial envelope is header-only.
     pub async fn generate_bidirectional<T, U>(
         &self,
         instance: Instance,
@@ -496,18 +483,11 @@ impl AddressedPushRouter {
         .await
     }
 
-    /// Shared dispatch + receive + finalize core for both bidirectional and
-    /// unary requests. Owns the metric and inflight bookkeeping, registers the
-    /// response stream (and the request stream when `input_stream` is `Some` →
-    /// bidirectional), resolves subjects into a [`CancelGuard`], builds and
-    /// dispatches the wire envelope, spawns the request-frame forwarder when
-    /// applicable, awaits the response prologue, and assembles the final
-    /// `ManyOut<U>`.
-    ///
-    /// Wire shape is inferred from the inputs:
+    /// Shared dispatch core for both unary and bidirectional requests. Wire
+    /// shape is inferred from the inputs:
     ///   - `input_stream = Some(_)` + `request = None` → bidirectional,
     ///     header-only envelope. The worker dials back for both halves and
-    ///     pulls request frames off the forwarder as the engine asks for them.
+    ///     pulls request frames off the spawned forwarder.
     ///   - `input_stream = None` + `request = Some(_)` → unary, two-part
     ///     `[ctrl, data]` envelope. The payload travels in the data part.
     async fn dispatch_and_finalize<T, U>(
@@ -529,10 +509,6 @@ impl AddressedPushRouter {
 
         let enable_request_stream = input_stream.is_some();
 
-        // Register both halves on the response transport: a `send_stream`
-        // (upstream → worker, carrying subsequent request frames) and a
-        // `recv_stream` (worker → upstream, carrying response chunks). The
-        // send half is only present in bidirectional mode.
         let (pending_send_stream, pending_recv_stream) = self
             .register_streams(engine_ctx.clone(), enable_request_stream, true)
             .await;
@@ -566,12 +542,11 @@ impl AddressedPushRouter {
         self.dispatch_buffer(address, buffer, ctx_unit.id()).await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
-        // Bidirectional: spawn the forwarder before awaiting the response
-        // prologue so request frames pre-load into the worker's input buffer
-        // while the engine initialises in parallel. The response side carries
-        // the engine prologue and only resolves after `engine.generate()`
-        // returns — awaiting it second avoids stalling the request-side
-        // handshake on engine setup latency.
+        // Spawn the forwarder before awaiting the response prologue so request
+        // frames pre-load into the worker's input buffer while the engine
+        // initialises in parallel. The response provider only resolves after
+        // `engine.generate()` returns; awaiting it second avoids stalling the
+        // request-side handshake on engine setup latency.
         if let Some(stream) = input_stream {
             spawn_request_stream_forwarder(request_stream_provider, stream, engine_ctx.clone())
                 .await?;
@@ -580,17 +555,13 @@ impl AddressedPushRouter {
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id = ctx_unit.id(), "awaiting transport handshake");
 
-        // RecvError → migratable Disconnected (watcher cancelled the subject
-        // or the worker died before establishing the response stream).
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                // generate() failed before any response bytes; migrate via
-                // CannotConnect since the dominant cause is a worker-local
-                // setup/version issue. The wire prologue carries only an
-                // opaque string today, so app-level rejections also retry
-                // -- safe because no side effects are visible yet. Follow-up:
-                // structured prologue error type for finer routing.
+                // Migrate via CannotConnect: the dominant cause here is a
+                // worker-local setup/version issue, and the wire prologue
+                // carries only an opaque string today so app-level rejections
+                // also retry — safe because no side effects are visible yet.
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::CannotConnect)
@@ -663,20 +634,12 @@ impl AddressedPushRouter {
     }
 
     /// Resolve the TCP subjects from the recv-side (always present on TCP)
-    /// and the optional send-side connection-info, run the tombstone check
-    /// via `resp_transport.associate_instance`, and return an armed
-    /// [`CancelGuard`] owning those subjects. The caller holds the guard
-    /// for the lifetime of the dispatch and `disarm()`s it on the success
-    /// path; on any `?`-propagated failure between resolve and disarm, the
-    /// guard's `Drop` cancels both halves.
+    /// and the optional send-side connection-info, run the tombstone check,
+    /// and return an armed [`CancelGuard`] owning those subjects.
     ///
     /// On tombstone the guard is dropped before this function returns,
-    /// firing the same cleanup as any other failure path; the caller sees
-    /// a migratable `Disconnected` error.
-    ///
-    /// `send_conn_info` is `None` for the unary path; bidirectional dispatch
-    /// passes `Some` when the send half was registered. `instance` is `None`
-    /// for non-addressed unary callers; bidirectional always passes `Some`.
+    /// firing the same cleanup as any other dispatch failure; the caller
+    /// sees a migratable `Disconnected` error.
     async fn resolve_subjects(
         &self,
         recv_conn_info: &ConnectionInfo,
@@ -724,11 +687,9 @@ impl AddressedPushRouter {
         Ok(guard)
     }
 
-    /// Build the standard request-plane headers (trace propagation +
-    /// request-id + frontend send-timestamp) and dispatch the encoded
-    /// buffer through the request-plane client inside an `nvtx_label`
-    /// range. The wire-write step of a request-plane dispatch; the
-    /// envelope is built upstream by [`build_request_envelope`].
+    /// Build standard request-plane headers (trace propagation, request-id,
+    /// frontend send-timestamp) and write the encoded buffer through the
+    /// request-plane client.
     async fn dispatch_buffer(
         &self,
         address: String,
