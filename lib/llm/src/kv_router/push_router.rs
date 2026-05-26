@@ -356,7 +356,7 @@ impl KvPushRouter {
                     queued_isl_tokens,
                     max_queued_isl_tokens,
                 } => {
-                    // TODO(DEP-8189 / ai-dynamo#8189): classify queue-depth
+                    // TODO(#8189): classify queue-depth
                     // saturation distinctly from generic resource exhaustion
                     // (operator-facing 429 vs 503) once the shared rejection
                     // layer lands.
@@ -447,7 +447,7 @@ impl KvPushRouter {
                     queued_isl_tokens,
                     max_queued_isl_tokens,
                 } => {
-                    // TODO(DEP-8189 / ai-dynamo#8189): same classification
+                    // TODO(#8189): same classification
                     // refinement applies on the pinned-worker path.
                     return Err(DynamoError::builder()
                         .error_type(DynamoErrorType::ResourceExhausted)
