@@ -301,7 +301,9 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 
-	if pod.Status.Phase != corev1.PodRunning {
+	if pod.DeletionTimestamp != nil ||
+		pod.Status.Phase == corev1.PodSucceeded ||
+		pod.Status.Phase == corev1.PodFailed {
 		return
 	}
 

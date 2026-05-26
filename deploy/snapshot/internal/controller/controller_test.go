@@ -563,9 +563,27 @@ func TestReconcileRestorePod(t *testing.T) {
 			want:      false,
 		},
 		{
-			name:      "not running",
+			name:      "pending pod with status container id still restores",
 			nodeName:  testNodeName,
 			phase:     corev1.PodPending,
+			ready:     false,
+			hash:      "abc123",
+			createDir: true,
+			want:      true,
+		},
+		{
+			name:      "succeeded pod does not restore",
+			nodeName:  testNodeName,
+			phase:     corev1.PodSucceeded,
+			ready:     false,
+			hash:      "abc123",
+			createDir: true,
+			want:      false,
+		},
+		{
+			name:      "failed pod does not restore",
+			nodeName:  testNodeName,
+			phase:     corev1.PodFailed,
 			ready:     false,
 			hash:      "abc123",
 			createDir: true,
@@ -806,6 +824,40 @@ func TestReconcileRestorePodResolvesContainerBeforePodStatus(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected RestoreRequested event after node-runtime container resolution; actions=%#v", clientset.Actions())
+}
+
+func TestReconcileRestorePodPollsRuntimeBeforePodRunning(t *testing.T) {
+	labels := map[string]string{
+		snapshotprotocol.CheckpointIDLabel: "abc123",
+	}
+	w := makeTestController(t)
+	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
+	clientset := w.clientset.(*fake.Clientset)
+
+	pod := makePod("test-pod", "default", testNodeName, corev1.PodPending, false, labels, nil)
+	pod.Status.ContainerStatuses = nil
+	dir := filepath.Join(w.config.Storage.BasePath, "abc123", "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+
+	w.reconcileRestorePod(context.Background(), pod)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, action := range clientset.Actions() {
+			create, ok := action.(clientgotesting.CreateAction)
+			if !ok || create.GetResource().Resource != "events" {
+				continue
+			}
+			event, ok := create.GetObject().(*corev1.Event)
+			if ok && event.Reason == "RestoreRequested" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected RestoreRequested event from runtime polling before PodRunning; actions=%#v", clientset.Actions())
 }
 
 func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
