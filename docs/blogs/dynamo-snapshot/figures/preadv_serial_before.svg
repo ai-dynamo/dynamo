@@ -37,7 +37,7 @@
 <text class="card-title" x="610.0" y="230" text-anchor="middle">preadv() blocks per call</text>
 <rect x="545.0" y="317.0" width="130" height="30" fill="#b04040"/>
 <text class="vma-label" x="610.0" y="336.0" text-anchor="middle" fill="#ffffff">read offset 0, 64K</text>
-<text class="arrow-meta" x="610.0" y="369.0" text-anchor="middle" fill="#cdcdcd">1 read in flight &#183; the rest wait their turn</text>
+<text class="arrow-meta" x="610.0" y="369.0" text-anchor="middle" fill="#cdcdcd">caller blocks &#183; remaining jobs stay queued</text>
 <rect x="565.0" y="383.0" width="90" height="3" fill="#3a3a3a"/>
 <rect x="565.0" y="389.0" width="90" height="3" fill="#3a3a3a"/>
 <rect x="565.0" y="395.0" width="90" height="3" fill="#3a3a3a"/>
