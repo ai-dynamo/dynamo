@@ -1930,27 +1930,49 @@ svg.card-icon{
 .dynamo-technique-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
+    column-gap: 28px;
+    row-gap: 0;
 }
 
 .dynamo-technique-card {
     display: grid;
-    grid-template-columns: 46px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 12px;
     align-items: start;
     min-width: 0;
-    padding: 10px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 8px;
-    background: var(--nv-color-bg-default);
+    padding: 12px 0;
+    border: 0;
+    border-bottom: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    cursor: default;
 }
 
 .dark .dynamo-technique-card {
-    background: var(--nv-dark-grey-1);
+    background: transparent;
+}
+
+.dynamo-technique-card:nth-last-child(-n + 2) {
+    border-bottom: 0;
 }
 
 .dynamo-technique-card .dynamo-feature-symbol {
     flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    border-color: transparent;
+    border-radius: 0;
+    background: transparent;
+}
+
+.dark .dynamo-technique-card .dynamo-feature-symbol {
+    background: transparent;
+}
+
+.dynamo-technique-card .dynamo-feature-icon {
+    width: 28px;
+    height: 28px;
 }
 
 .dynamo-technique-card strong {
@@ -2502,12 +2524,20 @@ svg.card-icon{
     }
 
     .dynamo-technique-guide {
-        padding: 14px;
+        padding: 0;
     }
 
     .dynamo-technique-guide-header {
         display: grid;
         gap: 6px;
+    }
+
+    .dynamo-technique-card:nth-last-child(-n + 2) {
+        border-bottom: 1px solid var(--border, var(--grayscale-a5));
+    }
+
+    .dynamo-technique-card:last-child {
+        border-bottom: 0;
     }
 
     .dynamo-benchmark-card {
