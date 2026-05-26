@@ -12,75 +12,59 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 
 ## Installation Notes
 
-The Dynamo vLLM runtime expects LMCache to come from the underlying vLLM container or Python environment. As of vLLM `v0.21.0`, the upstream `vllm/vllm-openai` CUDA 13 x86_64 image includes a working LMCache wheel. The CUDA 12.9 x86_64 image includes `lmcache`, but its compiled `lmcache.c_ops` extension is linked against `libcudart.so.13`, while the image provides CUDA 12.9. LMCache also does not currently publish aarch64 wheels, so a wheel install is not enough for arm64/aarch64 containers.
-
-For CUDA 12.9 or arm64/aarch64 images, build LMCache from source in a dev image or temporary builder stage that matches the runtime image's Python, PyTorch, and CUDA stack, then install the resulting wheel into the runtime image. Follow the official [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html), and keep build isolation disabled so the build does not pull a different torch stack:
+Dynamo's vLLM runtime expects LMCache to be present in the same Python environment. On supported environments (x86_64, Python 3.10-3.13, PyTorch built against CUDA 12.x), the published wheel installs directly:
 
 ```bash
-git clone --depth 1 --branch v0.4.3 https://github.com/LMCache/LMCache.git /tmp/lmcache
-cd /tmp/lmcache
-
-# In the dev/builder image, install matching CUDA development headers first.
-# Example Debian package names for CUDA 12.9 images:
-apt-get update
-apt-get install -y --no-install-recommends \
-  build-essential \
-  libcublas-dev-12-9 \
-  libcusolver-dev-12-9 \
-  libcusparse-dev-12-9
-
-uv pip install --system --requirement requirements/build.txt
-
-# Choose architectures supported by the CUDA toolkit in the image.
-export TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0 12.0"
-CUDA_HOME=/usr/local/cuda \
-uv build --wheel --no-build-isolation --out-dir /tmp/lmcache-wheel
-
-# In the runtime image, install the wheel without changing the base dependency solve.
-uv pip install --system --no-deps --force-reinstall /tmp/lmcache-wheel/lmcache-*.whl
+uv pip install lmcache
 ```
 
-Once LMCache publishes compatible CUDA 12.9 and/or aarch64 wheels, prefer those wheels over a source build.
+LMCache only publishes x86_64 manylinux wheels linked against CUDA 12. For aarch64 hosts, or hosts running PyTorch built against a different CUDA major version, build LMCache from source against your matching torch + CUDA stack — see the official [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html).
 
 ## Aggregated Serving
 
 ### Configuration
 
-LMCache is enabled using the `--kv-transfer-config` flag:
+LMCache runs the cache engine as an out-of-process sidecar (`lmcache server`); the Dynamo worker connects to it via the `LMCacheMPConnector`. Start the sidecar, then launch the worker:
 
 ```bash
-python -m dynamo.vllm --model <model_name> --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+lmcache server --l1-size-gb 100 --eviction-policy LRU &
+
+python -m dynamo.vllm \
+  --model <model_name> \
+  --disable-hybrid-kv-cache-manager \
+  --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}'
 ```
 
 ### Customization
 
-LMCache configuration can be customized via environment variables listed [here](https://docs.lmcache.ai/api_reference/configurations.html).
+The LMCache MP server is configured via CLI arguments. See the [Configuration Reference](https://docs.lmcache.ai/mp/configuration.html) for the full list of `lmcache server` flags.
 
-For advanced configurations, LMCache supports multiple [storage backends](https://docs.lmcache.ai/index.html):
+LMCache MP uses a two-tier storage architecture: an in-memory L1 cache (sized with `--l1-size-gb`) plus optional persistent L2 adapters configured with `--l2-adapter`. The supported [L2 storage backends](https://docs.lmcache.ai/mp/l2_storage.html) are:
 
-- **CPU RAM**: Fast local memory offloading
-- **Local Storage**: Disk-based persistence
-- **Redis**: Distributed cache sharing
-- **GDS Backend**: GPU Direct Storage for high throughput
-- **InfiniStore/Mooncake**: Cloud-native storage solutions
+- **POSIX**: Standard POSIX file I/O on any file system
+- **GDS** / **GDS_MT**: NVIDIA GPU Direct Storage (single- and multi-threaded), bypassing the CPU for NVMe SSDs that support GDS
+- **HF3FS**: Distributed / shared file-system backend
+- **OBJ**: Object store backend
+- **AZURE_BLOB**: Azure Blob Storage
 
 ### Deployment
 
 Use the provided launch script for quick setup:
 
 ```bash
-./examples/backends/vllm/launch/agg_lmcache.sh
+./examples/backends/vllm/launch/agg_lmcache_mp.sh
 ```
 
 This will:
-1. Start the Dynamo frontend
-2. Launch a single vLLM worker with LMCache enabled
+1. Start the LMCache MP server
+2. Start the Dynamo frontend
+3. Launch a single vLLM worker with `LMCacheMPConnector` connected to the sidecar
 
 ### Architecture for Aggregated Mode
 
 In aggregated mode, the system uses:
 
-- **KV Connector**: `LMCacheConnectorV1`
+- **KV Connector**: `LMCacheMPConnector`
 - **KV Role**: `kv_both` (handles both reading and writing)
 
 ## Disaggregated Serving
@@ -122,6 +106,15 @@ This will:
 
 The system automatically configures KV transfer based on the deployment mode and worker type:
 
+#### Aggregated Mode
+
+```python
+kv_transfer_config = KVTransferConfig(
+    kv_connector="LMCacheMPConnector",
+    kv_role="kv_both"
+)
+```
+
 #### Prefill Worker (Disaggregated Mode)
 
 ```python
@@ -137,7 +130,7 @@ kv_transfer_config = KVTransferConfig(
 )
 ```
 
-#### Decode Worker or Aggregated Mode
+#### Decode Worker (Disaggregated Mode)
 
 ```python
 kv_transfer_config = KVTransferConfig(
@@ -162,17 +155,20 @@ kv_transfer_config = KVTransferConfig(
    - Sets up connector configurations based on worker type
 
 2. **Engine Setup** (`main.py`):
-   - Initializes LMCache environment variables
    - Creates vLLM engine with proper KV transfer config
    - Handles both aggregated and disaggregated modes
 
+3. **Sidecar Lifecycle** (launch script):
+   - Starts the `lmcache server` process before the Dynamo worker
+   - Tears it down on exit via the script's cleanup trap
+
 ### Best Practices
 
-1. **Chunk Size Tuning**: Adjust `LMCACHE_CHUNK_SIZE` based on your use case:
+1. **Chunk Size Tuning**: Pass `--chunk-size` to `lmcache server` based on your use case:
    - Smaller chunks (128-256): Better reuse granularity for varied content
    - Larger chunks (512-1024): More efficient for repetitive content patterns
 
-2. **Memory Allocation**: Set `LMCACHE_MAX_LOCAL_CPU_SIZE` conservatively:
+2. **Memory Allocation**: Set `--l1-size-gb` on `lmcache server` conservatively:
    - Leave sufficient RAM for other system processes
    - Monitor memory usage during peak loads
 
@@ -183,47 +179,17 @@ kv_transfer_config = KVTransferConfig(
 
 ## Metrics and Monitoring
 
-When LMCache is enabled with `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+The LMCache MP server records metrics through the OpenTelemetry SDK and exposes them on its own HTTP admin port (default `:8080/metrics`), prefixed `lmcache_mp_`:
 
-**Requirements to access LMCache metrics:**
+```bash
+curl -s localhost:8080/metrics | grep '^lmcache_mp_'
+```
 
-- `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` - Enables LMCache
-- `DYN_SYSTEM_PORT=8081` - Enables metrics HTTP endpoint
-- `PROMETHEUS_MULTIPROC_DIR` (optional) - If not set, Dynamo manages it internally
+vLLM and Dynamo metrics remain on Dynamo's `:8081/metrics` (set `DYN_SYSTEM_PORT=8081` on the worker to enable that endpoint).
 
 For detailed information on LMCache metrics, including the complete list of available metrics and how to access them, see the **[LMCache Metrics section](../backends/vllm/vllm-observability.md#lmcache-metrics)** in the vLLM Prometheus Metrics Guide.
 
 ## Troubleshooting
-
-### LMCache log: `PrometheusLogger instance already created with different metadata`
-
-You may see an error like:
-
-```text
-LMCache ERROR: PrometheusLogger instance already created with different metadata. This should not happen except in test
-```
-
-**Version note**: We reproduced this behavior with **vLLM v0.12.0**. We have not reproduced it with **vLLM v0.11.0**, so it may be specific to (or introduced in) v0.12.0.
-
-This is emitted by LMCache when the LMCache connector is initialized more than once in the same process (for example, once for a `WORKER` role and later for a `SCHEDULER` role). LMCache uses a process-global singleton for its Prometheus logger, so the second initialization can log this warning if its metadata differs.
-
-- **Impact**: This is a log-only error; in our testing it does not prevent vLLM/Dynamo from serving requests. If you care about LMCache metric labels, be aware the logger singleton uses the first-seen metadata.
-- **Repro without Dynamo** (vLLM v0.12.0):
-
-```bash
-vllm serve Qwen/Qwen3-0.6B \
-  --host 127.0.0.1 --port 18000 \
-  --gpu-memory-utilization 0.24 \
-  --enforce-eager \
-  --no-enable-prefix-caching \
-  --max-num-seqs 2 \
-  --kv-offloading-backend lmcache \
-  --kv-offloading-size 1 \
-  --disable-hybrid-kv-cache-manager
-```
-
-- **Mitigation (silence)**: set `LMCACHE_LOG_LEVEL=CRITICAL`.
-- **Upstream issue**: [vLLM issue #30996](https://github.com/vllm-project/vllm/issues/30996).
 
 ### vLLM log: `Found PROMETHEUS_MULTIPROC_DIR was set by user`
 
@@ -235,5 +201,5 @@ vLLM v1 uses `prometheus_client.multiprocess` and stores intermediate metric val
 ## References and Additional Resources
 
 - [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference
-- [Configuration Reference](https://docs.lmcache.ai/api_reference/configurations.html) - Detailed configuration options
-- [LMCache Observability Guide](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Metrics and monitoring details
+- [Configuration Reference](https://docs.lmcache.ai/mp/configuration.html) - `lmcache server` CLI arguments
+- [LMCache Observability Guide](https://docs.lmcache.ai/mp/observability.html) - Metrics and monitoring details
