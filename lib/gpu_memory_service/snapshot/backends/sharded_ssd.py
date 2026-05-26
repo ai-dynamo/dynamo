@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 SHARDED_SSD_ROOTS_CONFIG_KEY = "sharded_ssd_roots"
 SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY = "sharded_ssd_queues_per_root"
-DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT = 1
+DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT = 2
 
 
 def parse_sharded_ssd_roots(value: str | None) -> List[str]:

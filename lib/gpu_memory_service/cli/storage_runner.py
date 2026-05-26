@@ -24,7 +24,10 @@ import argparse
 import logging
 import sys
 
-from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
+from gpu_memory_service.snapshot.backends.sharded_ssd import (
+    DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
+    parse_sharded_ssd_roots,
+)
 from gpu_memory_service.snapshot.transfer import (
     DEFAULT_TRANSFER_BACKEND,
     TRANSFER_BACKEND_CHOICES,
@@ -145,6 +148,7 @@ def _run_load(args) -> None:
 # ---------------------------------------------------------------------------
 
 _SHARD_SIZE_DEFAULT = 4 * 1024**3  # 4 GiB
+_LOAD_WORKERS_DEFAULT = 16
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -255,8 +259,11 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p.add_argument(
         "--workers",
         type=int,
-        default=8,
-        help="Thread pool size for parallel shard reads (default: 8).",
+        default=_LOAD_WORKERS_DEFAULT,
+        help=(
+            "Thread pool size for parallel shard reads "
+            f"(default: {_LOAD_WORKERS_DEFAULT})."
+        ),
     )
     load_p.add_argument(
         "--transfer-backend",
@@ -278,11 +285,11 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p.add_argument(
         "--sharded-ssd-queues-per-root",
         type=int,
-        default=1,
+        default=DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
         help=(
             "Number of independent sharded-ssd restore queues per SSD root "
-            "(default: 1). Increase this to use multiple NIXL/POSIX workers "
-            "per local SSD root."
+            f"(default: {DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT}). Increase this "
+            "to use multiple NIXL/POSIX workers per local SSD root."
         ),
     )
     load_p.add_argument(

@@ -7,6 +7,7 @@ import pytest
 
 try:
     from gpu_memory_service.snapshot.backends.sharded_ssd import (
+        DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
         SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY,
         _group_sources_by_root,
         _queues_per_root_from_config,
@@ -35,7 +36,7 @@ def _source(path: str, byte_count: int) -> FileTransferSource:
     )
 
 
-def test_group_sources_by_root_preserves_single_queue_default():
+def test_group_sources_by_root_uses_two_queues_per_root_by_default():
     sources = [
         _source("/mnt/nvme0/gms/shard_0000.bin", 1),
         _source("/mnt/nvme0/gms/shard_0001.bin", 1),
@@ -45,6 +46,35 @@ def test_group_sources_by_root_preserves_single_queue_default():
     groups = _group_sources_by_root(
         sources,
         ["/mnt/nvme0/gms", "/mnt/nvme1/gms"],
+    )
+
+    assert set(groups) == {
+        "/mnt/nvme0/gms#q0",
+        "/mnt/nvme0/gms#q1",
+        "/mnt/nvme1/gms",
+    }
+    assert sorted(
+        file_path
+        for file_groups in groups.values()
+        for file_path, _sources in file_groups
+    ) == [
+        "/mnt/nvme0/gms/shard_0000.bin",
+        "/mnt/nvme0/gms/shard_0001.bin",
+        "/mnt/nvme1/gms/shard_0002.bin",
+    ]
+
+
+def test_group_sources_by_root_preserves_single_queue_when_requested():
+    sources = [
+        _source("/mnt/nvme0/gms/shard_0000.bin", 1),
+        _source("/mnt/nvme0/gms/shard_0001.bin", 1),
+        _source("/mnt/nvme1/gms/shard_0002.bin", 1),
+    ]
+
+    groups = _group_sources_by_root(
+        sources,
+        ["/mnt/nvme0/gms", "/mnt/nvme1/gms"],
+        queues_per_root=1,
     )
 
     assert list(groups) == ["/mnt/nvme0/gms", "/mnt/nvme1/gms"]
@@ -92,8 +122,8 @@ def test_group_sources_by_root_rejects_paths_outside_configured_roots():
 @pytest.mark.parametrize(
     ("raw_value", "expected"),
     [
-        (None, 1),
-        ("", 1),
+        (None, DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT),
+        ("", DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT),
         ("2", 2),
         (4, 4),
     ],
