@@ -267,6 +267,15 @@ impl TcpStreamServer {
         }
     }
 
+    /// Cancel one pending request-stream registration. Mirrors
+    /// [`Self::cancel_recv_stream`] for the `tx_subjects` map. Request
+    /// streams are not tracked in `subject_instance`/`instance_subjects`
+    /// (those serve the response-stream tombstone path only).
+    pub async fn cancel_send_stream(&self, subject: &str) {
+        let mut state = self.state.lock().await;
+        state.tx_subjects.remove(subject);
+    }
+
     /// Cancel all pending response streams for an instance and tombstone it
     /// so any racing `associate_instance()` for the same id cancels too.
     /// Returns the number of streams cancelled.
