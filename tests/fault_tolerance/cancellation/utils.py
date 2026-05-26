@@ -462,6 +462,63 @@ def verify_runtime_cancellation_metrics(
     )
 
 
+def _parse_labeled_metric(
+    metrics_text: str, metric_name: str, label_filters: Dict[str, str]
+) -> float | None:
+    """Return the first matching line's value, or None if not found."""
+    for line in metrics_text.splitlines():
+        if not line.startswith(f"{metric_name}{{"):
+            continue
+        if not all(f'{k}="{v}"' in line for k, v in label_filters.items()):
+            continue
+        parts = line.rsplit(None, 1)
+        if len(parts) == 2:
+            try:
+                return float(parts[1])
+            except ValueError:
+                pass
+    return None
+
+
+def read_worker_generate_summary(
+    worker_system_port: int,
+    component: str,
+) -> Dict[str, float]:
+    """
+    Read the dynamo-runtime ingress summary metrics for the worker `generate`
+    endpoint. `duration_count` increments only after RequestMetricsGuard::drop,
+    so it confirms the response stream fully drained (i.e. the request wasn't
+    aborted mid-flight).
+    """
+    worker_metrics_url = f"http://localhost:{worker_system_port}/metrics"
+    try:
+        response = requests.get(worker_metrics_url, timeout=5)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        pytest.fail(f"Failed to fetch worker metrics from {worker_metrics_url}: {e}")
+
+    text = response.text
+    filters = {"dynamo_component": component, "dynamo_endpoint": "generate"}
+    return {
+        "requests_total": _parse_labeled_metric(
+            text, "dynamo_component_requests_total", filters
+        )
+        or 0.0,
+        "duration_sum": _parse_labeled_metric(
+            text, "dynamo_component_request_duration_seconds_sum", filters
+        )
+        or 0.0,
+        "duration_count": _parse_labeled_metric(
+            text, "dynamo_component_request_duration_seconds_count", filters
+        )
+        or 0.0,
+        "response_bytes": _parse_labeled_metric(
+            text, "dynamo_component_response_bytes_total", filters
+        )
+        or 0.0,
+    }
+
+
 def read_log_content(log_path: str | None) -> str:
     """Read log content from a file"""
     if log_path is None:

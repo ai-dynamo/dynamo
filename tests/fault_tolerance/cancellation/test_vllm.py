@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import shutil
+import time
+from typing import Dict
 
 import pytest
 
@@ -20,6 +22,7 @@ from tests.fault_tolerance.cancellation.utils import (
     DynamoFrontendProcess,
     poll_for_pattern,
     read_streaming_responses,
+    read_worker_generate_summary,
     send_cancellable_request,
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
@@ -346,6 +349,8 @@ def test_request_cancellation_vllm_decode_cancel(
                     process=decode_worker,
                     pattern="Decode Request ID: ",
                     match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
                 )
 
                 # Verify same request ID reached prefill worker (as "Prefill Request ID")
@@ -398,19 +403,23 @@ def test_request_cancellation_vllm_decode_cancel(
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2
-def test_request_cancellation_vllm_prefill_cancel(
+def test_request_cancellation_vllm_prefill_disconnect_graceful(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
-    End-to-end test for request cancellation during prefill phase.
+    End-to-end test for graceful client disconnect during prefill phase.
 
-    This test verifies that when a request is cancelled by the client during the prefill phase,
-    the system properly handles the cancellation and cleans up resources
-    on both the decode and prefill workers in a disaggregated setup.
+    This test verifies that when a client disconnects during the prefill
+    phase in a disaggregated setup, the prefill worker still runs the
+    request to completion so KV blocks are released via the normal path
+    (rather than leaking on a torn-down NIXL transfer), and decode routing
+    still proceeds so the KV-transfer-complete guard can free the blocks.
 
-    Timing (Last Run: 2025-12-09): ~53s total (requires 2 GPUs)
+    Reference: PR ai-dynamo/dynamo#7489 / NVBugs 5969206.
+
+    Timing (Last Run: 2026-05-26): ~219s total (requires 2 GPUs)
     - Engine initialization: ~23s (decode + prefill workers)
-    - Testing cancellation during prefill: ~28s
+    - Testing graceful disconnect during prefill: ~83s
     - Teardown: ~2s
     """
 
@@ -430,76 +439,82 @@ def test_request_cancellation_vllm_prefill_cancel(
             ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
-                # Step 4: Test request cancellation during prefill phase
-                # Note: With the new architecture, prefill routing happens in the frontend,
-                # so the request goes directly to the prefill worker first
-                logger.info(
-                    "Testing completion request cancellation during prefill phase..."
-                )
-
-                # Send request with long prompt (non-blocking)
                 cancellable_req = send_cancellable_request(
                     frontend.frontend_port, "completion", use_long_prompt=True
                 )
 
-                # Poll for "Prefill Request ID" pattern in prefill worker (vLLM v2 pattern)
-                # With new architecture, prefill is routed by frontend's internal router
-                request_id, prefill_log_offset = poll_for_pattern(
+                request_id, post_start_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern="Prefill Request ID: ",
                     match_type="contains",
                 )
 
-                # Cancel during prefill phase
                 cancellable_req.cancel()
-                logger.info(f"Cancelled request ID: {request_id} during prefill")
+                logger.info(f"Cancelled request_id={request_id} during prefill")
 
-                # Poll for "Aborted Prefill Request ID" in prefill worker (where cancellation happens)
-                _, prefill_log_offset = poll_for_pattern(
+                # Prefill must complete despite client disconnect.
+                poll_for_pattern(
                     process=prefill_worker,
-                    pattern=f"Aborted Prefill Request ID: {request_id}",
-                    log_offset=prefill_log_offset,
+                    pattern=f"Prefill completed for request {request_id}",
+                    log_offset=post_start_offset,
+                    match_type="contains",
+                    max_wait_ms=15000,
+                    poll_interval_ms=50,
                 )
 
-                # Verify frontend log has kill message
-                _, frontend_log_offset = poll_for_pattern(
+                poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message control_msg=Kill",
+                    pattern="Connection closed unexpectedly",
+                    match_type="contains",
+                    max_wait_ms=2000,
+                    poll_interval_ms=50,
                 )
 
-                # Verify decode worker never received the request
-                pattern = "Request ID: "
-                try:
-                    _, decode_log_offset = poll_for_pattern(
-                        process=decode_worker,
-                        pattern=pattern,
-                        max_wait_ms=10,
-                        match_type="contains",
+                # Metrics-level confirmation that prefill ran to completion.
+                # `duration_count` increments on RequestMetricsGuard::drop, so
+                # a mid-flight abort would not show up here. Poll because the
+                # publisher may lag the "Prefill completed" log.
+                summary: Dict[str, float] = {}
+                deadline_ms = 5000
+                interval_ms = 100
+                elapsed_ms = 0
+                while elapsed_ms < deadline_ms:
+                    summary = read_worker_generate_summary(
+                        worker_system_port=prefill_worker.system_port,
+                        component="prefill",
                     )
-                    pytest.fail(
-                        "Decode worker received request cancelled during prefill phase"
-                    )
-                except AssertionError as e:
-                    assert str(e).startswith(
-                        f"Failed to find '{pattern}' pattern after 2 iterations "
-                    ), f"Unexpected error: {e}"
-
-                logger.info(
-                    "Completion request cancellation during prefill phase detected successfully"
+                    if summary["duration_count"] >= 1.0:
+                        break
+                    time.sleep(interval_ms / 1000.0)
+                    elapsed_ms += interval_ms
+                logger.info(f"Prefill generate summary: {summary}")
+                assert summary["duration_count"] == 1.0, (
+                    f"Prefill histogram count={summary['duration_count']} — "
+                    "request was aborted mid-flight or publisher lagged."
+                )
+                assert summary["duration_sum"] >= 0.1, (
+                    f"Prefill generate took only {summary['duration_sum']}s — "
+                    "suspiciously short."
+                )
+                assert summary["response_bytes"] > 0, (
+                    "Prefill sent 0 response bytes — handler exited before "
+                    "yielding KV-transfer params."
                 )
 
-                # Verify cancellation metrics
+                # Frontend observes the client disconnect and counts it.
                 verify_frontend_cancellation_metrics(
                     frontend_port=frontend.frontend_port,
                     request_type="completion",
                     expected_count=1,
                 )
-                verify_runtime_cancellation_metrics(
-                    worker_system_port=decode_worker.system_port,
-                    expected_count=0,
-                )
+                # No kill control message reaches the prefill worker.
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
-                    expected_count=1,
+                    expected_count=0,
                     component="prefill",
+                )
+                # The decode handler then records the cancellation.
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
                 )
