@@ -24,7 +24,11 @@ from tests.serve.multimodal_profiles.vllm_xpu import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.multimodal import IMAGE_COLOR_PROMPT, make_multimodal_configs
+from tests.utils.multimodal import (
+    IMAGE_COLOR_PROMPT,
+    LOCAL_VIDEO_TEST_URI,
+    make_multimodal_configs,
+)
 from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
@@ -571,6 +575,7 @@ def test_serve_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
+    image_server,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
