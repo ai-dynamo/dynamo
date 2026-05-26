@@ -374,36 +374,6 @@ async fn run_shutdown_phases(
     main_token.cancel();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn shutdown_phases_timeout_cancels_main_token() {
-        let endpoint_token = CancellationToken::new();
-        let main_token = CancellationToken::new();
-        let tracker = Arc::new(GracefulShutdownTracker::new());
-        tracker.register_endpoint();
-
-        run_shutdown_phases(
-            endpoint_token.clone(),
-            main_token.clone(),
-            tracker,
-            Duration::from_millis(20),
-        )
-        .await;
-
-        assert!(
-            endpoint_token.is_cancelled(),
-            "endpoint shutdown token should be cancelled first"
-        );
-        assert!(
-            main_token.is_cancelled(),
-            "main token should be cancelled after graceful timeout"
-        );
-    }
-}
-
 impl RuntimeType {
     /// Get [`tokio::runtime::Handle`] to runtime
     pub fn handle(&self) -> tokio::runtime::Handle {
@@ -451,5 +421,35 @@ impl Drop for RuntimeType {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_phases_timeout_cancels_main_token() {
+        let endpoint_token = CancellationToken::new();
+        let main_token = CancellationToken::new();
+        let tracker = Arc::new(GracefulShutdownTracker::new());
+        tracker.register_endpoint();
+
+        run_shutdown_phases(
+            endpoint_token.clone(),
+            main_token.clone(),
+            tracker,
+            Duration::from_millis(20),
+        )
+        .await;
+
+        assert!(
+            endpoint_token.is_cancelled(),
+            "endpoint shutdown token should be cancelled first"
+        );
+        assert!(
+            main_token.is_cancelled(),
+            "main token should be cancelled after graceful timeout"
+        );
     }
 }
