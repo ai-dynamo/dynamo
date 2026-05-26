@@ -7,6 +7,7 @@ use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank};
 use dynamo_runtime::{
     dynamo_nvtx_range,
+    error::{DynamoError, ErrorType as DynamoErrorType},
     metrics::frontend_perf::{STAGE_DISPATCH, STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
@@ -308,7 +309,7 @@ impl KvPushRouter {
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
-            let selection = self
+            let outcome = self
                 .chooser
                 .find_best_match_details(
                     Some(context_id),
@@ -324,10 +325,37 @@ impl KvPushRouter {
                     routing_constraints.clone(),
                 )
                 .await?;
-            let best_worker = selection.worker;
-            let effective_overlap_blocks = selection.cache_hit.effective_overlap_blocks;
-            let cached_tokens = selection.cache_hit.cached_tokens;
-            let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
+            let (best_worker, effective_overlap_blocks, cached_tokens, overlap_amount) =
+                match outcome {
+                    crate::kv_router::FindBestMatchOutcome::Routed {
+                        worker,
+                        overlap_blocks,
+                        effective_overlap_blocks,
+                        cached_tokens,
+                    } => (
+                        worker,
+                        effective_overlap_blocks,
+                        cached_tokens,
+                        overlap_blocks,
+                    ),
+                    crate::kv_router::FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    } => {
+                        // TODO(DEP-8189 / ai-dynamo#8189): classify queue-depth
+                        // saturation distinctly from generic resource exhaustion
+                        // (operator-facing 429 vs 503) once the shared rejection
+                        // layer lands.
+                        return Err(DynamoError::builder()
+                        .error_type(DynamoErrorType::ResourceExhausted)
+                        .message(format!(
+                            "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+                        ))
+                        .build()
+                        .into());
+                    }
+                };
 
             if !is_query_only {
                 let total_blocks = routing_token_ids
@@ -363,7 +391,7 @@ impl KvPushRouter {
             .map(|dp_rank| WorkerWithDpRank::new(pinned_worker_id, dp_rank));
 
         if !is_query_only && let Some(pinned_worker) = resolved_pinned_worker {
-            let selection = self
+            let outcome = self
                 .chooser
                 .find_best_match_details(
                     Some(context_id),
@@ -379,10 +407,35 @@ impl KvPushRouter {
                     routing_constraints.clone(),
                 )
                 .await?;
-            let best_worker = selection.worker;
-            let effective_overlap_blocks = selection.cache_hit.effective_overlap_blocks;
-            let cached_tokens = selection.cache_hit.cached_tokens;
-            let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
+            let (best_worker, effective_overlap_blocks, cached_tokens, overlap_amount) =
+                match outcome {
+                    crate::kv_router::FindBestMatchOutcome::Routed {
+                        worker,
+                        overlap_blocks,
+                        effective_overlap_blocks,
+                        cached_tokens,
+                    } => (
+                        worker,
+                        effective_overlap_blocks,
+                        cached_tokens,
+                        overlap_blocks,
+                    ),
+                    crate::kv_router::FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    } => {
+                        // TODO(DEP-8189 / ai-dynamo#8189): same classification
+                        // refinement applies on the pinned-worker path.
+                        return Err(DynamoError::builder()
+                        .error_type(DynamoErrorType::ResourceExhausted)
+                        .message(format!(
+                            "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+                        ))
+                        .build()
+                        .into());
+                    }
+                };
 
             return Ok(WorkerSelection {
                 instance_id: best_worker.worker_id,
@@ -565,16 +618,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             scheduler_tracked,
         } = selection;
 
-        // Record the routing decision into the indexer when:
-        //   - approximate mode (use_kv_events=false): primary indexer is the
-        //     only cache-state signal, so record there, or
-        //   - predict-on-route: Indexer dispatches the write to a side
-        //     approximate indexer whose entries expire after a short TTL.
-        // In event-only mode with no predicted TTL we
-        // skip recording — the engine's KV events are the source of truth.
-        let cfg = self.chooser.kv_router_config();
-        let should_record =
-            !is_query_only && (!cfg.use_kv_events || cfg.predict_on_route_enabled());
+        // The indexer owns route-time recording policy: primary approximate
+        // mode records into the primary, predict-on-route records into the
+        // side overlay, and event-only mode with no side overlay skips this.
+        let should_record = !is_query_only && self.chooser.indexer().records_routing_decisions();
         if should_record {
             let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
             let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();

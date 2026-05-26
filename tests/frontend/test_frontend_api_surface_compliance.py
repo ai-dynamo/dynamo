@@ -57,6 +57,7 @@ BUN_VERSION = "1.3.12"
 NODE_VERSION = "20.19.0"
 OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
 OPENRESPONSES_SHA = "fa29df5"
+OPENRESPONSES_MAX_OUTPUT_TOKENS = 512
 
 # Retry budget for network-touching installs. Exponential backoff starting
 # at 2s; 3 attempts caps the worst-case wait at ~6s before we surface a
@@ -285,6 +286,7 @@ def _openresponses_suite(_tools_cache, _bun_binary) -> Path:
             capture_output=True,
             text=True,
         )
+        _patch_openresponses_suite(install_dir)
         _retry_network_op(
             lambda: subprocess.run(
                 [str(_bun_binary), "install", "--frozen-lockfile"],
@@ -297,6 +299,56 @@ def _openresponses_suite(_tools_cache, _bun_binary) -> Path:
         )
         sentinel.touch()
     return install_dir
+
+
+def _patch_openresponses_suite(install_dir: Path) -> None:
+    """Bound upstream compliance generations so CI failures are deterministic."""
+    target = install_dir / "src" / "lib" / "compliance-tests.ts"
+    text = target.read_text()
+    old = "    body: JSON.stringify({ ...body, stream: streaming }),"
+    new = (
+        "    body: JSON.stringify({\n"
+        "      ...body,\n"
+        "      max_output_tokens: body.max_output_tokens ?? "
+        f"{OPENRESPONSES_MAX_OUTPUT_TOKENS},\n"
+        "      stream: streaming,\n"
+        "    }),"
+    )
+    if new in text:
+        return
+    if old not in text:
+        raise RuntimeError(
+            "OpenResponses compliance harness changed; update "
+            "_patch_openresponses_suite before running frontend compliance."
+        )
+    target.write_text(text.replace(old, new, 1))
+
+
+@pytest.mark.unit
+@pytest.mark.sglang
+@pytest.mark.core
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_patch_openresponses_suite_adds_output_cap(tmp_path):
+    """Assert the OpenResponses harness patch injects a deterministic output cap."""
+    source = tmp_path / "src" / "lib" / "compliance-tests.ts"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "export async function makeRequest() {\n"
+        "  return fetch(url, {\n"
+        "    body: JSON.stringify({ ...body, stream: streaming }),\n"
+        "  });\n"
+        "}\n"
+    )
+
+    _patch_openresponses_suite(tmp_path)
+
+    text = source.read_text()
+    assert (
+        f"max_output_tokens: body.max_output_tokens ?? "
+        f"{OPENRESPONSES_MAX_OUTPUT_TOKENS}" in text
+    )
+    assert "body: JSON.stringify({ ...body, stream: streaming })," not in text
 
 
 def _install_npm_cli(

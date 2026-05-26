@@ -4,9 +4,16 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use dynamo_kv_router::protocols::RoutingConstraints as RsRoutingConstraints;
+use dynamo_kv_router::protocols::{
+    KvTransferEnforcement as RsKvTransferEnforcement, RoutingConstraints as RsRoutingConstraints,
+};
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+use pyo3::exceptions::PyValueError;
+
+fn validate_model_runtime_config(config: &RsModelRuntimeConfig) -> PyResult<()> {
+    config.validate_config().map_err(PyValueError::new_err)
+}
 
 #[pyclass]
 #[derive(Clone, Debug, Default)]
@@ -56,13 +63,21 @@ pub struct ModelRuntimeConfig {
     pub(crate) inner: RsModelRuntimeConfig,
 }
 
+impl ModelRuntimeConfig {
+    pub(crate) fn validate_config(&self) -> PyResult<()> {
+        validate_model_runtime_config(&self.inner)
+    }
+}
+
 #[pymethods]
 impl ModelRuntimeConfig {
     #[new]
-    fn new() -> Self {
-        Self {
+    fn new() -> PyResult<Self> {
+        let config = Self {
             inner: RsModelRuntimeConfig::new(),
-        }
+        };
+        config.validate_config()?;
+        Ok(config)
     }
 
     #[setter]
@@ -121,6 +136,16 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_taints(&mut self, taints: HashSet<String>) {
         self.inner.taints = taints;
+    }
+
+    #[setter]
+    fn set_stable_routing_id(&mut self, stable_routing_id: Option<String>) {
+        self.inner.stable_routing_id = stable_routing_id;
+    }
+
+    #[getter]
+    fn get_stable_routing_id(&self) -> Option<String> {
+        self.inner.stable_routing_id.clone()
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
@@ -236,5 +261,83 @@ impl ModelRuntimeConfig {
     #[getter]
     fn taints(&self) -> HashSet<String> {
         self.inner.taints.clone()
+    }
+
+    #[getter]
+    fn topology_domains(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        for (key, value) in &self.inner.topology_domains {
+            dict.set_item(key, value)?;
+        }
+        Ok(dict.into())
+    }
+
+    #[setter]
+    fn set_topology_domains(&mut self, topology_domains: &Bound<'_, PyDict>) -> PyResult<()> {
+        let mut new_topology_domains = HashMap::new();
+        for (key, value) in topology_domains.iter() {
+            let key_str: String = key.extract()?;
+            let value_str: String = value.extract()?;
+            new_topology_domains.insert(key_str, value_str);
+        }
+        self.inner.topology_domains = new_topology_domains;
+        Ok(())
+    }
+
+    #[getter]
+    fn kv_transfer_domain(&self) -> Option<String> {
+        self.inner.kv_transfer_domain.clone()
+    }
+
+    #[setter]
+    fn set_kv_transfer_domain(&mut self, kv_transfer_domain: Option<String>) {
+        self.inner.kv_transfer_domain = kv_transfer_domain;
+    }
+
+    #[getter]
+    fn kv_transfer_enforcement(&self) -> Option<String> {
+        self.inner
+            .kv_transfer_enforcement
+            .map(|enforcement| match enforcement {
+                RsKvTransferEnforcement::Required => "required".to_string(),
+                RsKvTransferEnforcement::Preferred => "preferred".to_string(),
+            })
+    }
+
+    #[setter]
+    fn set_kv_transfer_enforcement(
+        &mut self,
+        kv_transfer_enforcement: Option<String>,
+    ) -> PyResult<()> {
+        let Some(kv_transfer_enforcement) = kv_transfer_enforcement else {
+            self.inner.kv_transfer_enforcement = None;
+            return Ok(());
+        };
+
+        self.inner.kv_transfer_enforcement = match kv_transfer_enforcement.as_str() {
+            "" => None,
+            "required" => Some(RsKvTransferEnforcement::Required),
+            "preferred" => Some(RsKvTransferEnforcement::Preferred),
+            value => {
+                return Err(PyValueError::new_err(format!(
+                    "kv_transfer_enforcement must be 'required' or 'preferred', got {value:?}"
+                )));
+            }
+        };
+        Ok(())
+    }
+
+    #[getter]
+    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
+        self.inner.kv_transfer_preferred_weight
+    }
+
+    #[setter]
+    fn set_kv_transfer_preferred_weight(
+        &mut self,
+        kv_transfer_preferred_weight: Option<f32>,
+    ) -> PyResult<()> {
+        self.inner.kv_transfer_preferred_weight = kv_transfer_preferred_weight;
+        Ok(())
     }
 }

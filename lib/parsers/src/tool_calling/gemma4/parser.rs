@@ -142,7 +142,7 @@ pub fn try_tool_call_parse_gemma4(
     //     return empty — Dynamo intentionally diverges from vLLM's
     //     exception-fallback (which echoes raw bytes) so tool-call markup
     //     never leaks into normal_text on malformed / truncated / orphan-
-    //     close / no-body inputs. Cases flagged by the parity chart's `↯`:
+    //     close / no-body inputs. Cases flagged by the parity table's `↯`:
     //     PARSER.batch.{4.a, 4.b, 4.c, 4.d, 5.a, 5.b, 5.c, 6.c}.
     //   - Plain-text path (zero calls AND no markup): return the message
     //     as-is.

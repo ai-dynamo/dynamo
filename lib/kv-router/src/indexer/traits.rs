@@ -28,7 +28,7 @@ pub trait SharedKvCache: Send + Sync {
 /// `worker_count` and `block_count` are always populated.
 /// `node_count` is populated only when the `shard-metrics` feature is enabled
 /// on the `dynamo-kv-router` crate; otherwise it is `0`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShardSizeSnapshot {
     /// Zero-based shard index.
     pub shard_idx: usize,

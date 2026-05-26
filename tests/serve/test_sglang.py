@@ -160,7 +160,9 @@ sglang_configs = {
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),  # actual profiled peak with kv-tokens
+            pytest.mark.profiled_vram_gib(
+                13.0
+            ),  # observed ~12.1 GiB with kv-tokens; rounded up
             pytest.mark.requested_sglang_kv_tokens(
                 37472
             ),  # KV cache cap (2x safety over min=18736)
@@ -205,7 +207,7 @@ sglang_configs = {
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.profiled_vram_gib(13.0),
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(420),
             pytest.mark.post_merge,
@@ -232,7 +234,7 @@ sglang_configs = {
         marks=[
             pytest.mark.router,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.profiled_vram_gib(13.0),
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(420),
             pytest.mark.post_merge,
@@ -616,6 +618,15 @@ sglang_configs = {
                 repeat_count=1,
                 expected_response=["Generated 3 embeddings with dimension"],
             ),
+            # Test `dimensions` truncation (Matryoshka). Qwen3-Embedding-4B
+            # has a hidden dim well above 128, so the truncated vector should
+            # be exactly 128 floats long.
+            embedding_payload(
+                input_text="Hello, world!",
+                repeat_count=1,
+                expected_response=["Generated 1 embeddings with dimension 128"],
+                extra_body={"dimensions": 128},
+            ),
         ],
     ),
     "completions_only": SGLangConfig(
@@ -626,11 +637,14 @@ sglang_configs = {
             pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(
-                14.7
-            ),  # actual peak at recommended token count
+                15.7
+            ),  # ~14.7 weights + ~1 GiB for 2048-token KV cache on deepseek-llm-7b
             pytest.mark.requested_sglang_kv_tokens(
-                64
-            ),  # KV cache cap (2x safety over min=32)
+                2048
+            ),  # >= prompt(~16) + max_tokens(1000) + scheduler reserve;
+            # SGLang 0.5.11 silently hangs when prompt+max_tokens nears
+            # max_total_tokens (bisected ~1040 for these payloads). Matches
+            # the "aggregated" config above.
             pytest.mark.timeout(341),  # profiled 57s on RTX 6000 Ada
             pytest.mark.post_merge,
         ],

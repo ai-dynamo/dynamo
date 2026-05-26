@@ -77,22 +77,23 @@ def _case_sort_key(case_id: str) -> tuple[int, str]:
     return (top, sub)
 
 
-def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
-    """Yields (family, case_id, case_dict) for every case across all families.
+def _load_fixtures() -> list[tuple[str, str, str, dict[str, Any]]]:
+    """Yields (family, mode, case_id, case_dict) for every parser fixture.
 
     Two file layouts coexist:
       <family>/PARSER.<mode>.yaml       — legacy flat: holds 1, 2, ..., 10
       <family>/PARSER.<mode>.<n>.yaml   — per-top-level-case: holds n.a, n.b, ...
 
-    Both schemas are
-        {family: "...", mode: "batch", cases: {PARSER.batch.<id>: {...}, ...}}
+    `_run_parity_case` dispatches from the fixture-level `mode`, matching the
+    `PARSER.batch.*` / `PARSER.stream.*` taxonomy directly.
     """
     out = []
     for fp in sorted(FIXTURES_ROOT.glob("*/PARSER.*.yaml")):
         doc = yaml.safe_load(fp.read_text())
+        mode = doc["mode"]
         for case_id, case in doc["cases"].items():
-            out.append((doc["family"], case_id, case))
-    out.sort(key=lambda t: (t[0], *_case_sort_key(t[1])))
+            out.append((doc["family"], mode, case_id, case))
+    out.sort(key=lambda t: (t[0], t[1], *_case_sort_key(t[2])))
     return out
 
 
@@ -108,6 +109,7 @@ def _is_na_stub(fixture: dict[str, Any]) -> bool:
 
 def _run_parity_case(
     family: str,
+    mode: str,
     case_id: str,
     fixture: dict[str, Any],
     impl_name: str,
@@ -130,13 +132,25 @@ def _run_parity_case(
             f"{impl_name}/{family}/{case_id}: n/a stub (no expected: block): "
             f"{fixture['reason']}"
         )
-    parse_mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
-    got = parse_mod.parse(family, fixture["model_text"], fixture.get("tools"))
-
     spec = fixture["expected"][impl_name]
 
     if "unavailable" in spec:
         pytest.skip(f"{impl_name} unavailable for {family}: {spec['unavailable']}")
+
+    parse_mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
+    if mode == "stream":
+        parse_tool_calls_stream = getattr(parse_mod, "parse_tool_calls_stream", None)
+        if parse_tool_calls_stream is None:
+            pytest.fail(
+                f"{impl_name}/{family}/{case_id}: wrapper has no parse_tool_calls_stream"
+            )
+        got = parse_tool_calls_stream(family, fixture["chunks"], fixture.get("tools"))
+    elif mode == "batch":
+        got = parse_mod.parse_tool_calls_batch(
+            family, fixture["model_text"], fixture.get("tools")
+        )
+    else:
+        pytest.fail(f"{impl_name}/{family}/{case_id}: unsupported parser mode {mode!r}")
 
     if "error" in spec:
         if got.error and spec["error"] in got.error:
@@ -167,15 +181,16 @@ def _run_parity_case(
 # Dynamo-only entry. No engine marker → runs in the default (dynamo-runtime)
 # CI lane. vLLM and SGLang have their own dedicated test functions below.
 @pytest.mark.parametrize(
-    "family,case_id,fixture",
-    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+    "family,mode,case_id,fixture",
+    [pytest.param(f, m, c, fx, id=f"{f}/{c}") for (f, m, c, fx) in FIXTURES],
 )
 def test_parity(
     family: str,
+    mode: str,
     case_id: str,
     fixture: dict[str, Any],
 ) -> None:
-    _run_parity_case(family, case_id, fixture, "dynamo")
+    _run_parity_case(family, mode, case_id, fixture, "dynamo")
 
 
 # vLLM-only entry: function-level `vllm` marker lets the vllm-runtime CI
@@ -184,26 +199,28 @@ def test_parity(
 # exercised here.
 @pytest.mark.vllm
 @pytest.mark.parametrize(
-    "family,case_id,fixture",
-    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+    "family,mode,case_id,fixture",
+    [pytest.param(f, m, c, fx, id=f"{f}/{c}") for (f, m, c, fx) in FIXTURES],
 )
 def test_parity_vllm(
     family: str,
+    mode: str,
     case_id: str,
     fixture: dict[str, Any],
 ) -> None:
-    _run_parity_case(family, case_id, fixture, "vllm")
+    _run_parity_case(family, mode, case_id, fixture, "vllm")
 
 
 # SGLang-only entry (sibling of test_parity_vllm; same shape).
 @pytest.mark.sglang
 @pytest.mark.parametrize(
-    "family,case_id,fixture",
-    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+    "family,mode,case_id,fixture",
+    [pytest.param(f, m, c, fx, id=f"{f}/{c}") for (f, m, c, fx) in FIXTURES],
 )
 def test_parity_sglang(
     family: str,
+    mode: str,
     case_id: str,
     fixture: dict[str, Any],
 ) -> None:
-    _run_parity_case(family, case_id, fixture, "sglang")
+    _run_parity_case(family, mode, case_id, fixture, "sglang")

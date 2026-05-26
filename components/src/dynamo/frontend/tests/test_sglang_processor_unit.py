@@ -49,12 +49,13 @@ from dynamo.frontend.utils import (
     random_uuid,
 )
 
-# Needs sglang packages (gpu_1 container).  No need for parallel marker.
+# Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -1298,10 +1299,6 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
         assert len(with_system.prompt_token_ids) > len(without_system.prompt_token_ids)
 
-    @pytest.mark.skip(
-        reason="DYN-3049: deepseek_v4 dispatch path requires sglang 0.5.12 support; "
-        "Dynamo is pinned to sglang 0.5.11. Unskip after the 0.5.12 bump lands."
-    )
     def test_deepseek_v4_uses_sglang_encoder_when_chat_template_missing(
         self, monkeypatch
     ):
@@ -1358,7 +1355,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             request,
             tokenizer=NoTemplateTokenizer(),
             tool_call_parser_name=None,
-            reasoning_parser_name="deepseek_v4",
+            reasoning_parser_name="deepseek-v4",
         )
 
         assert result.prompt_token_ids == [1, 2, 3]
@@ -1412,7 +1409,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             request,
             tokenizer=NoTemplateTokenizer(),
             tool_call_parser_name=None,
-            reasoning_parser_name="deepseek_v4",
+            reasoning_parser_name="deepseek-v4",
         )
 
         tools = captured["messages"][0]["tools"]
