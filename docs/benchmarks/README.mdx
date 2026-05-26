@@ -76,10 +76,11 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 
 <section className="dynamo-technique-guide" aria-labelledby="dynamo-technique-guide-title">
 <div className="dynamo-technique-guide-header">
-<h2 id="dynamo-technique-guide-title">Technique Guide</h2>
-<p>These are the Dynamo techniques and benchmark signals used across the cards below.</p>
+<h2 id="dynamo-technique-guide-title">Benchmark Guide</h2>
+<p>Serving features and topologies are the things under test. Metrics and experiment setup explain how to compare results.</p>
 </div>
 <div className="dynamo-technique-grid">
+<div className="dynamo-technique-subhead">Features and topologies</div>
 <div className="dynamo-technique-card">
 <span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
 <div>
@@ -136,6 +137,7 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <p>Runs serving workers across node boundaries to compare aggregate, single-node P/D, and multi-node P/D shapes.</p>
 </div>
 </div>
+<div className="dynamo-technique-subhead">Benchmark methods and metrics</div>
 <div className="dynamo-technique-card">
 <span className="dynamo-feature-symbol feature-gpu" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-gpu" /></svg></span>
 <div>

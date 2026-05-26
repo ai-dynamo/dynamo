@@ -1934,6 +1934,16 @@ svg.card-icon{
     gap: 8px;
 }
 
+.dynamo-technique-subhead {
+    grid-column: 1 / -1;
+    margin: 2px 0 0;
+    color: var(--pst-color-text-muted);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
 .dynamo-technique-card {
     display: grid;
     grid-template-columns: 46px minmax(0, 1fr);
