@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560" role="img" aria-label="Parallel AIO restore pipeline overlaps memory-region reads">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560" role="img" aria-label="Synchronous preadv loop restores one memory region at a time">
 <rect width="1280" height="560" fill="#000000"/>
 <style>
   .title { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 36px; font-weight: 300; fill: #ffffff; }
@@ -14,12 +14,12 @@
   .arrow-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 500; fill: #cdcdcd; }
   .arrow-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 10px; font-weight: 400; fill: #8c8c8c; }
 </style>
-<text class="title" x="40" y="58">Parallel AIO restores memory regions concurrently</text>
-<text class="subtitle" x="40" y="88">Native AIO context — up to 128 in-flight reads keep storage busy across VMAs.</text>
-<text class="panel-label" x="60" y="140" fill="#74b711">AFTER</text>
-<text class="panel-sub" x="60" y="160">AIO context fills the window across all VMAs</text>
+<text class="title" x="40" y="58">Serial preadv restores one region at a time</text>
+<text class="subtitle" x="40" y="88">Blocking preadv loop — one read in flight leaves storage idle between jobs.</text>
+<text class="panel-label" x="60" y="140" fill="#cdcdcd">BEFORE</text>
+<text class="panel-sub" x="60" y="160">Serial preadv() calls block one at a time</text>
 <text class="section-label" x="110.0" y="178">JOB LIST &#183; iocbs</text>
-<text class="section-label" x="380.0" y="178">AIO CONTEXT</text>
+<text class="section-label" x="380.0" y="178">KERNEL</text>
 <text class="section-label" x="890.0" y="178">PROCESS ADDRESS SPACE</text>
 <rect x="110.0" y="190" width="220" height="28" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <text class="item" x="122.0" y="208.0">offset 0,    64K -> heap</text>
@@ -36,56 +36,14 @@
 <rect x="110.0" y="382" width="220" height="28" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <text class="item" x="122.0" y="400.0">...</text>
 <rect x="380.0" y="190" width="460" height="284" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<text class="card-title" x="610.0" y="230" text-anchor="middle">Window: up to 128 in flight</text>
-<rect x="432.5" y="270" width="40" height="14" fill="#4a7500"/>
-<rect x="477.5" y="270" width="40" height="14" fill="#4a7500"/>
-<rect x="522.5" y="270" width="40" height="14" fill="#4a7500"/>
-<rect x="567.5" y="270" width="40" height="14" fill="#4a7500"/>
-<rect x="612.5" y="270" width="40" height="14" fill="#4a7500"/>
-<rect x="657.5" y="270" width="40" height="14" fill="#4a7500"/>
-<rect x="702.5" y="270" width="40" height="14" fill="#4a7500"/>
-<rect x="747.5" y="270" width="40" height="14" fill="#4a7500"/>
-<rect x="432.5" y="289" width="40" height="14" fill="#4a7500"/>
-<rect x="477.5" y="289" width="40" height="14" fill="#4a7500"/>
-<rect x="522.5" y="289" width="40" height="14" fill="#4a7500"/>
-<rect x="567.5" y="289" width="40" height="14" fill="#4a7500"/>
-<rect x="612.5" y="289" width="40" height="14" fill="#4a7500"/>
-<rect x="657.5" y="289" width="40" height="14" fill="#4a7500"/>
-<rect x="702.5" y="289" width="40" height="14" fill="#4a7500"/>
-<rect x="747.5" y="289" width="40" height="14" fill="#4a7500"/>
-<rect x="432.5" y="308" width="40" height="14" fill="#4a7500"/>
-<rect x="477.5" y="308" width="40" height="14" fill="#4a7500"/>
-<rect x="522.5" y="308" width="40" height="14" fill="#4a7500"/>
-<rect x="567.5" y="308" width="40" height="14" fill="#4a7500"/>
-<rect x="612.5" y="308" width="40" height="14" fill="#4a7500"/>
-<rect x="657.5" y="308" width="40" height="14" fill="#4a7500"/>
-<rect x="702.5" y="308" width="40" height="14" fill="#4a7500"/>
-<rect x="747.5" y="308" width="40" height="14" fill="#4a7500"/>
-<rect x="432.5" y="327" width="40" height="14" fill="#3a3a3a"/>
-<rect x="477.5" y="327" width="40" height="14" fill="#3a3a3a"/>
-<rect x="522.5" y="327" width="40" height="14" fill="#3a3a3a"/>
-<rect x="567.5" y="327" width="40" height="14" fill="#3a3a3a"/>
-<rect x="612.5" y="327" width="40" height="14" fill="#3a3a3a"/>
-<rect x="657.5" y="327" width="40" height="14" fill="#3a3a3a"/>
-<rect x="702.5" y="327" width="40" height="14" fill="#3a3a3a"/>
-<rect x="747.5" y="327" width="40" height="14" fill="#3a3a3a"/>
-<rect x="432.5" y="346" width="40" height="14" fill="#3a3a3a"/>
-<rect x="477.5" y="346" width="40" height="14" fill="#3a3a3a"/>
-<rect x="522.5" y="346" width="40" height="14" fill="#3a3a3a"/>
-<rect x="567.5" y="346" width="40" height="14" fill="#3a3a3a"/>
-<rect x="612.5" y="346" width="40" height="14" fill="#3a3a3a"/>
-<rect x="657.5" y="346" width="40" height="14" fill="#3a3a3a"/>
-<rect x="702.5" y="346" width="40" height="14" fill="#3a3a3a"/>
-<rect x="747.5" y="346" width="40" height="14" fill="#3a3a3a"/>
-<rect x="432.5" y="365" width="40" height="14" fill="#2a2a2a"/>
-<rect x="477.5" y="365" width="40" height="14" fill="#2a2a2a"/>
-<rect x="522.5" y="365" width="40" height="14" fill="#2a2a2a"/>
-<rect x="567.5" y="365" width="40" height="14" fill="#2a2a2a"/>
-<rect x="612.5" y="365" width="40" height="14" fill="#2a2a2a"/>
-<rect x="533.0" y="393" width="8" height="8" fill="#4a7500"/>
-<text class="arrow-meta" x="547.0" y="400" fill="#cdcdcd">in flight</text>
-<rect x="623.0" y="393" width="8" height="8" fill="#3a3a3a"/>
-<text class="arrow-meta" x="637.0" y="400" fill="#cdcdcd">queued</text>
+<text class="card-title" x="610.0" y="230" text-anchor="middle">preadv() blocks per call</text>
+<rect x="545.0" y="317.0" width="130" height="30" fill="#b04040"/>
+<text class="vma-label" x="610.0" y="336.0" text-anchor="middle" fill="#ffffff">read offset 0, 64K</text>
+<text class="arrow-meta" x="610.0" y="369.0" text-anchor="middle" fill="#cdcdcd">1 read in flight &#183; the rest wait their turn</text>
+<rect x="565.0" y="383.0" width="90" height="3" fill="#3a3a3a"/>
+<rect x="565.0" y="389.0" width="90" height="3" fill="#3a3a3a"/>
+<rect x="565.0" y="395.0" width="90" height="3" fill="#3a3a3a"/>
+<text class="arrow-meta" x="610.0" y="407.0" text-anchor="middle" fill="#5a5a5a">queued</text>
 <rect x="890.0" y="190.0" width="280" height="40" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <text class="vma-label" x="904.0" y="214.0">heap</text>
 <text class="vma-addr" x="1156.0" y="214.0" text-anchor="end">0x55...000</text>
@@ -103,6 +61,6 @@
 <text class="vma-addr" x="1156.0" y="398.0" text-anchor="end">0x7f3...000</text>
 <line x1="334.0" y1="302.0" x2="372.0" y2="302.0" stroke="#7a7a7a" stroke-width="1.5"/>
 <polygon points="372.0,297.0 379.0,302.0 372.0,307.0" fill="#7a7a7a"/>
-<line x1="844.0" y1="302.0" x2="882.0" y2="302.0" stroke="#74b711" stroke-width="1.5"/>
-<polygon points="882.0,297.0 889.0,302.0 882.0,307.0" fill="#74b711"/>
+<line x1="844.0" y1="302.0" x2="882.0" y2="302.0" stroke="#7a7a7a" stroke-width="1.5"/>
+<polygon points="882.0,297.0 889.0,302.0 882.0,307.0" fill="#7a7a7a"/>
 </svg>

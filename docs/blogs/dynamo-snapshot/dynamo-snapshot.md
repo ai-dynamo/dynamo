@@ -128,7 +128,9 @@ In upstream CRIU, that fill was a synchronous `preadv` loop. The restorer pulls 
 
 We replaced the `preadv` loop with Linux native AIO. CRIU builds a list of read jobs ahead of time — each job is an `iocb` describing a file offset, a byte count, and an `iovec` pointing at the destination VMA pages. The restorer creates an AIO context, which holds many distinct read transactions simultaneously, allowing the storage device to run them concurrently across its internal channels. The restorer then submits a batch of those iocbs with `io_submit`, and keeps a window of up to 128 in flight. As completions come back via `io_getevents`, new submissions backfill the window until every job is done.
 
-![Before: a synchronous preadv loop has one read in flight at a time, leaving the storage device idle between requests. After: a native AIO pipeline keeps up to 128 reads in flight via io_submit and io_getevents, running them concurrently across the storage device's internal channels.](./figures/aio_pipeline_after.svg)
+![Before: a synchronous preadv loop has one read in flight at a time, leaving the storage device idle between requests.](./figures/preadv_serial_before.svg)
+
+![After: a native AIO pipeline keeps up to 128 reads in flight via io_submit and io_getevents, running them concurrently across the storage device's internal channels.](./figures/aio_pipeline_after.svg)
 
 
 #### Direct I/O and the Page Cache

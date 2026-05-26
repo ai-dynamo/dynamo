@@ -38,6 +38,7 @@ plotted boundary starts at that first worker log.
 | `k8s_checkpoint_restore_lifecycle.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `worker_agent_quiesce_resume_sequence.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `kv_cache_unmap_release.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
+| `preadv_serial_before.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `aio_pipeline_after.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `gms_checkpoint_restore_flow.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `gms_combined_dataflow.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
