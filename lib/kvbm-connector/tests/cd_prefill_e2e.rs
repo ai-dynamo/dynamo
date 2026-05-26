@@ -66,6 +66,19 @@ fn cd_transfer_params(
     initiator_instance_id: kvbm_connector::InstanceId,
     num_provided_blocks: usize,
 ) -> TransferParams {
+    cd_transfer_params_with_digest(session_id, initiator_instance_id, num_provided_blocks, None)
+}
+
+/// Variant that lets a caller pin a specific `expected_hash_digest`. Used
+/// by the digest-mismatch reject test; existing callers use the
+/// `cd_transfer_params` wrapper which defaults to `None` (skip
+/// verification — mock fixtures don't compute the canonical digest).
+fn cd_transfer_params_with_digest(
+    session_id: SessionId,
+    initiator_instance_id: kvbm_connector::InstanceId,
+    num_provided_blocks: usize,
+    expected_hash_digest: Option<u64>,
+) -> TransferParams {
     TransferParams::remote_prefill(RemotePrefillParams {
         protocol_version: DISAGG_PROTOCOL_VERSION,
         session_id,
@@ -73,9 +86,7 @@ fn cd_transfer_params(
         decode_endpoint: Some(synthetic_decode_endpoint()),
         num_provided_tokens: num_provided_blocks * BLOCK_SIZE,
         request: KvHashingRequestEnvelope::default(),
-        // Mock fixtures don't compute the canonical digest; skip the
-        // verifier (production paths populate this and assert).
-        expected_hash_digest: None,
+        expected_hash_digest,
     })
 }
 
@@ -146,7 +157,7 @@ fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -
         assigned_block_ids: parking_lot::Mutex::new(None),
         gnmt_result: (Some(7 * BLOCK_SIZE), false),
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-        transfer_params,
+        transfer_params: parking_lot::Mutex::new(transfer_params),
         ..MockSlot::default()
     };
     inner.install_slot("req-1", slot);
@@ -451,7 +462,7 @@ fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness
         assigned_block_ids: parking_lot::Mutex::new(None),
         gnmt_result: inner_gnmt,
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-        transfer_params,
+        transfer_params: parking_lot::Mutex::new(transfer_params),
         ..MockSlot::default()
     };
     inner.install_slot("req-1", slot);
@@ -1418,6 +1429,69 @@ async fn cd_prefill_multiple_observer_commits_before_attach_accumulate() -> Resu
     let avails = session.make_available_calls();
     assert_eq!(avails.len(), 1);
     assert_eq!(avails[0], expected_hashes);
+
+    Ok(())
+}
+
+/// Pins the DNPT-digest verifier contract: when decode ships an
+/// `expected_hash_digest` and prefill's locally-recomputed digest does
+/// NOT match (e.g. salt/LoRA propagation drift, hasher version skew),
+/// `ensure_started` must fail loud at GNMT — before any pull begins —
+/// with a message naming "CD hash divergence". The check sits at
+/// `coordinator/driver.rs::ensure_started` ~line 1450; this test fires
+/// it via the wrapper's GNMT entry point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_dnpt_digest_mismatch_rejected() -> Result<()> {
+    // Build a harness whose slot's TransferParams carries an
+    // intentionally-wrong `expected_hash_digest`. Production decode
+    // ships `digest_provided_hashes(&[hash_0, hash_1, ...])`; here we
+    // ship a sentinel that cannot collide with any real digest, so the
+    // verifier always fires.
+    const WRONG_DIGEST: u64 = 0xDEAD_BEEF_DEAD_BEEF;
+
+    let h = build_harness(false);
+    let session_id = uuid::Uuid::new_v4();
+    let decode_instance_id: kvbm_connector::InstanceId = uuid::Uuid::new_v4().into();
+    let bad_transfer_params = cd_transfer_params_with_digest(
+        session_id,
+        decode_instance_id,
+        h.all_hashes.len(),
+        Some(WRONG_DIGEST),
+    );
+
+    // Install the bad params on the mock slot so the wrapper's GNMT
+    // sees them and routes through ensure_started → verifier.
+    {
+        let slot = h.inner.slot("req-1").unwrap();
+        *slot.transfer_params.lock() = Some(bad_transfer_params);
+    }
+
+    h.wrapper.create_slot(make_request())?;
+    let err = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", 0)
+        .expect_err("GNMT must surface the digest mismatch as Err");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("CD hash divergence"),
+        "error must name the contract: {msg}"
+    );
+    assert!(
+        msg.contains(&format!("0x{WRONG_DIGEST:016x}")),
+        "error must include decode_digest in hex: {msg}"
+    );
+    assert!(
+        msg.contains("req-1"),
+        "error must include request_id for triage: {msg}"
+    );
+
+    // No state should have been inserted, no session opened.
+    assert_eq!(
+        h.coordinator.active_count(),
+        0,
+        "verifier must reject before coordinator state is installed"
+    );
 
     Ok(())
 }

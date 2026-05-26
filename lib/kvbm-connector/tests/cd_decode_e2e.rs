@@ -115,7 +115,7 @@ fn build_harness() -> TestHarness {
         assigned_block_ids: parking_lot::Mutex::new(None),
         gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-        transfer_params: None,
+        transfer_params: parking_lot::Mutex::new(None),
         ..MockSlot::default()
     };
     inner.install_slot("req-1", slot);

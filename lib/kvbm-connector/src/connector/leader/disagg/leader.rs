@@ -545,9 +545,8 @@ mod tests {
             request_id,
             MockSlot {
                 block_size: TEST_BLOCK_SIZE,
-                transfer_params: Some(TransferParams::remote_prefill(RemotePrefillParams::new(
-                    uuid::Uuid::new_v4(),
-                    uuid::Uuid::new_v4().into(),
+                transfer_params: parking_lot::Mutex::new(Some(TransferParams::remote_prefill(
+                    RemotePrefillParams::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4().into()),
                 ))),
                 ..MockSlot::default()
             },

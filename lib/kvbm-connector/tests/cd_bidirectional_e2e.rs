@@ -251,7 +251,7 @@ fn install_decode_slot(inst: &DualRoleInstance, request_id: &str, seq: &RequestS
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: None,
+            transfer_params: parking_lot::Mutex::new(None),
             ..MockSlot::default()
         },
     );
@@ -290,15 +290,17 @@ fn install_prefill_slot(
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(0), false),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: Some(TransferParams::remote_prefill(RemotePrefillParams {
-                protocol_version: DISAGG_PROTOCOL_VERSION,
-                session_id,
-                initiator_instance_id,
-                decode_endpoint: Some(decode_endpoint),
-                num_provided_tokens: (COMPUTED_BLOCKS + local_hashes.len()) * BLOCK_SIZE,
-                request: KvHashingRequestEnvelope::default(),
-                expected_hash_digest: None,
-            })),
+            transfer_params: parking_lot::Mutex::new(Some(TransferParams::remote_prefill(
+                RemotePrefillParams {
+                    protocol_version: DISAGG_PROTOCOL_VERSION,
+                    session_id,
+                    initiator_instance_id,
+                    decode_endpoint: Some(decode_endpoint),
+                    num_provided_tokens: (COMPUTED_BLOCKS + local_hashes.len()) * BLOCK_SIZE,
+                    request: KvHashingRequestEnvelope::default(),
+                    expected_hash_digest: None,
+                },
+            ))),
             ..MockSlot::default()
         },
     );
@@ -640,7 +642,7 @@ async fn bidirectional_concurrent_same_instance() -> Result<()> {
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: None,
+            transfer_params: parking_lot::Mutex::new(None),
             ..MockSlot::default()
         },
     );
@@ -669,7 +671,7 @@ async fn bidirectional_concurrent_same_instance() -> Result<()> {
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: None,
+            transfer_params: parking_lot::Mutex::new(None),
             ..MockSlot::default()
         },
     );
@@ -750,15 +752,17 @@ async fn bidirectional_concurrent_same_instance() -> Result<()> {
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(0), false),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: Some(TransferParams::remote_prefill(RemotePrefillParams {
-                protocol_version: DISAGG_PROTOCOL_VERSION,
-                session_id: x_session_id,
-                initiator_instance_id: instance_a.inner.local_id(),
-                decode_endpoint: Some(x_decode_endpoint),
-                num_provided_tokens: (COMPUTED_BLOCKS + x_local_h.len()) * BLOCK_SIZE,
-                request: KvHashingRequestEnvelope::default(),
-                expected_hash_digest: None,
-            })),
+            transfer_params: parking_lot::Mutex::new(Some(TransferParams::remote_prefill(
+                RemotePrefillParams {
+                    protocol_version: DISAGG_PROTOCOL_VERSION,
+                    session_id: x_session_id,
+                    initiator_instance_id: instance_a.inner.local_id(),
+                    decode_endpoint: Some(x_decode_endpoint),
+                    num_provided_tokens: (COMPUTED_BLOCKS + x_local_h.len()) * BLOCK_SIZE,
+                    request: KvHashingRequestEnvelope::default(),
+                    expected_hash_digest: None,
+                },
+            ))),
             ..MockSlot::default()
         },
     );
@@ -778,15 +782,17 @@ async fn bidirectional_concurrent_same_instance() -> Result<()> {
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(0), false),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: Some(TransferParams::remote_prefill(RemotePrefillParams {
-                protocol_version: DISAGG_PROTOCOL_VERSION,
-                session_id: y_session_id,
-                initiator_instance_id: instance_b.inner.local_id(),
-                decode_endpoint: Some(y_decode_endpoint),
-                num_provided_tokens: (COMPUTED_BLOCKS + y_local_h.len()) * BLOCK_SIZE,
-                request: KvHashingRequestEnvelope::default(),
-                expected_hash_digest: None,
-            })),
+            transfer_params: parking_lot::Mutex::new(Some(TransferParams::remote_prefill(
+                RemotePrefillParams {
+                    protocol_version: DISAGG_PROTOCOL_VERSION,
+                    session_id: y_session_id,
+                    initiator_instance_id: instance_b.inner.local_id(),
+                    decode_endpoint: Some(y_decode_endpoint),
+                    num_provided_tokens: (COMPUTED_BLOCKS + y_local_h.len()) * BLOCK_SIZE,
+                    request: KvHashingRequestEnvelope::default(),
+                    expected_hash_digest: None,
+                },
+            ))),
             ..MockSlot::default()
         },
     );

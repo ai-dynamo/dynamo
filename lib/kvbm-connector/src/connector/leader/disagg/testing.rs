@@ -233,7 +233,11 @@ pub struct MockSlot {
     pub assigned_block_ids: Mutex<Option<Vec<crate::BlockId>>>,
     pub gnmt_result: (Option<usize>, bool),
     pub usaa_passthrough_calls: Mutex<Vec<(Vec<crate::BlockId>, usize)>>,
-    pub transfer_params: Option<TransferParams>,
+    /// Wrapped in a mutex so tests that need to swap transfer params
+    /// post-`install_slot` (e.g. the digest-mismatch verifier reject
+    /// test) can do so without re-installing the whole slot. Production
+    /// inner shims don't share this shape — this is a mock-only choice.
+    pub transfer_params: Mutex<Option<TransferParams>>,
     /// Recorded request_ids for which a CD onboarding payload was
     /// installed via `install_cd_onboarding_payload`. Order
     /// preserved.
@@ -257,7 +261,7 @@ impl Default for MockSlot {
             assigned_block_ids: Mutex::new(None),
             gnmt_result: (None, false),
             usaa_passthrough_calls: Mutex::new(Vec::new()),
-            transfer_params: None,
+            transfer_params: Mutex::new(None),
             installed_cd_payloads: Mutex::new(Vec::new()),
             installed_cd_payload: Mutex::new(None),
         }
@@ -466,7 +470,7 @@ impl InnerLeaderShim for MockInnerLeaderShim {
 
     fn slot_transfer_params(&self, request_id: &str) -> Result<Option<TransferParams>> {
         let slot = self.require_slot(request_id)?;
-        Ok(slot.transfer_params.clone())
+        Ok(slot.transfer_params.lock().clone())
     }
 
     fn allocate_g2_blocks(&self, count: usize) -> Result<Vec<MutableBlock<G2>>> {

@@ -105,7 +105,7 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: None,
+            transfer_params: parking_lot::Mutex::new(None),
             ..MockSlot::default()
         },
     );
@@ -216,7 +216,7 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(0), false),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: Some(p_transfer),
+            transfer_params: parking_lot::Mutex::new(Some(p_transfer)),
             ..MockSlot::default()
         },
     );
