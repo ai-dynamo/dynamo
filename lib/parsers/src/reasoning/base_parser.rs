@@ -135,6 +135,7 @@ impl ReasoningParser for BasicReasoningParser {
         let mut normal_parts = Vec::new();
         let mut cursor = 0;
         let mut currently_reasoning = self._in_reasoning;
+        let mut exited_on_tool_start = false;
 
         while cursor < text.len() {
             if currently_reasoning {
@@ -157,6 +158,7 @@ impl ReasoningParser for BasicReasoningParser {
                         normal_parts.push(&text[cursor + t..]);
                         cursor = text.len();
                         currently_reasoning = false;
+                        exited_on_tool_start = true;
                     }
                     (Some(e), _) => {
                         reasoning_parts.push(&text[cursor..cursor + e]);
@@ -169,6 +171,7 @@ impl ReasoningParser for BasicReasoningParser {
                         normal_parts.push(&text[cursor + t..]);
                         cursor = text.len();
                         currently_reasoning = false;
+                        exited_on_tool_start = true;
                     }
                     (None, None) => {
                         // No end token — rest is reasoning (truncated)
@@ -190,7 +193,12 @@ impl ReasoningParser for BasicReasoningParser {
             }
         }
 
-        let reasoning_text = reasoning_parts.join("").trim().to_string();
+        let joined_reasoning_text = reasoning_parts.join("");
+        let reasoning_text = if exited_on_tool_start {
+            joined_reasoning_text.trim_start().to_string()
+        } else {
+            joined_reasoning_text.trim().to_string()
+        };
         let normal_text = normal_parts.join("").trim().to_string();
 
         // Note: self._in_reasoning is intentionally NOT updated here. This method is
@@ -1158,7 +1166,7 @@ mod tests {
     #[rstest] // REASONING.batch.3.b — Kimi K2 split
     #[case(
         "thinking text <|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>",
-        "thinking text",
+        "thinking text ",
         "<|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"
     )]
     #[case("r</think>a", "r", "a")]

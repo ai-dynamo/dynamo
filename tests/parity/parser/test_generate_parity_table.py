@@ -89,7 +89,7 @@ def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> N
         html,
     )
     assert re.search(
-        r'<td class="cell research[^"]*"[^>]*><a href="fixtures/kimi_k25/REASONING\.batch\.yaml">V\?</a>'
+        r'<td class="cell ok[^"]*"[^>]*><a href="fixtures/kimi_k25/REASONING\.batch\.yaml">=</a>'
         r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.3\.b — kimi_k25',
         html,
     )
