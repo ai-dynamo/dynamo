@@ -279,16 +279,14 @@ struct CdRequestState {
     /// no record of the prefix. Consumed at USAA, where the actual
     /// G1 `block_ids` arrive and the promotion task is spawned.
     /// `None` outside this path (the common case).
+    ///
+    /// The actual `JoinHandle` for the spawned task lives on the
+    /// COORDINATOR-side `DecodeBits.pending_promotion_task`, not
+    /// here — `coordinator.release` awaits the handle before
+    /// calling `session.finalize` (finalize would otherwise emit
+    /// `CommitsClosed + Drained` per session CONTRACT §2.13 and
+    /// pre-empt the task's `make_available`).
     pending_g1_promotion: Option<PendingG1Promotion>,
-
-    /// Live JoinHandle for the uncancellable promotion task
-    /// spawned at USAA. Stored next to `session` so any path that
-    /// inspects per-request state can see the in-flight promotion;
-    /// dropping the handle does **not** abort the task (tokio's
-    /// `JoinHandle` detaches on drop). The task survives request
-    /// teardown — the resulting G2 blocks stay in the cache and
-    /// benefit future requests.
-    pending_promotion_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl CdRequestState {
@@ -842,7 +840,6 @@ impl DecodeDisaggLeader {
             pending_failure: Mutex::new(None),
             cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
             pending_g1_promotion: pending_g1_promotion.clone(),
-            pending_promotion_task: Mutex::new(None),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&new_state));
@@ -1272,7 +1269,6 @@ impl DecodeDisaggLeader {
             // paths observing a single source of truth via the latest
             // per-request Arc.
             pending_g1_promotion: existing.pending_g1_promotion.clone(),
-            pending_promotion_task: Mutex::new(None),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&updated));
@@ -1482,6 +1478,35 @@ impl DecodeDisaggLeader {
         // completes, the resulting G2 blocks remain registered in
         // the cache and benefit future requests.
         if let Some(plan) = updated.pending_g1_promotion.clone() {
+            // Lookup the coordinator-side state FIRST so we can
+            // skip the spawn entirely when cleanup has already
+            // evicted state — a non-gated promotion task would
+            // race `coordinator.release`'s finalize (no handle to
+            // await means release would proceed unconditionally).
+            // If state is gone, the session is already closing
+            // (cleanup_failed_request → session.close); the
+            // promotion is moot.
+            let coord_state = match self.coordinator.state_for_decode(request_id) {
+                Some(s) => s,
+                None => {
+                    tracing::warn!(
+                        request_id,
+                        "coord state missing at promotion-spawn; cleanup ran first — \
+                         skipping Stage 1 promotion"
+                    );
+                    return Ok(());
+                }
+            };
+            let bits_arc = coord_state.clone();
+            let Some(_check_decode_role) = bits_arc.as_decode() else {
+                tracing::error!(
+                    request_id,
+                    "promotion-spawn: coordinator state is not decode-role; \
+                     skipping Stage 1 promotion"
+                );
+                return Ok(());
+            };
+
             let inner = Arc::clone(&self.inner);
             let session = updated.session.lock().clone();
             let request_id_owned = request_id.to_string();
@@ -1508,13 +1533,27 @@ impl DecodeDisaggLeader {
                 prefix_block_count
             );
             let promotion_fut = inner.promote_g1_to_g2(source_blocks);
-            let handle = self.tokio_handle.spawn(async move {
+            // Task returns `bool` consumed by `coordinator.release`'s
+            // deferred-finalize path:
+            //
+            //   `true`  — promotion landed cleanly; release MUST call
+            //             `session.finalize` to close streams.
+            //   `false` — task already called `session.close(reason)`;
+            //             release MUST skip finalize (`finalize` on
+            //             a closed session is undefined protocol
+            //             behavior — emits Frame::Finished after the
+            //             close terminators).
+            //
+            // See `DecodeBits.pending_promotion_task` doc.
+            let promotion_task = async move {
                 let Some(session) = session else {
                     tracing::warn!(
                         request_id = %request_id_owned,
                         "promotion task: session unset on per-request state; dropping"
                     );
-                    return;
+                    // No session to finalize; return true is harmless
+                    // (the deferred-release path has no session either).
+                    return true;
                 };
                 match promotion_fut.await {
                     Ok(g2_blocks) => {
@@ -1535,17 +1574,22 @@ impl DecodeDisaggLeader {
                             tracing::warn!(
                                 request_id = %request_id_owned,
                                 error = %err,
-                                "promotion task: session.make_available failed"
+                                "promotion task: session.make_available failed; closing session"
                             );
-                            return;
+                            session.close(Some(format!("make_available: {err}")));
+                            return false;
                         }
                         if let Err(err) = session.finish_availability() {
                             tracing::warn!(
                                 request_id = %request_id_owned,
                                 error = %err,
-                                "promotion task: session.finish_availability failed"
+                                "promotion task: session.finish_availability failed; closing"
                             );
+                            session.close(Some(format!("finish_availability: {err}")));
+                            return false;
                         }
+                        // Success — release should finalize cooperatively.
+                        true
                     }
                     Err(err) => {
                         crate::audit!(
@@ -1559,10 +1603,25 @@ impl DecodeDisaggLeader {
                         // set, so the prefill peer observes a
                         // terminal lifecycle event and bails.
                         session.close(Some(format!("g1->g2 promotion: {err}")));
+                        false
                     }
                 }
-            });
-            *updated.pending_promotion_task.lock() = Some(handle);
+            };
+            // Stash the JoinHandle on the coordinator's
+            // `DecodeBits.pending_promotion_task` ATOMICALLY with
+            // the spawn — hold the slot lock across both ops so
+            // no concurrent observer (e.g., `coordinator.release`
+            // on the same rid via `CdRequestStatePayload::Drop`)
+            // can observe `pending_promotion_task == None` while
+            // a task is in flight. `tokio_handle.spawn` is sync
+            // (no awaits) so holding the parking_lot Mutex
+            // across it is safe; the task body never touches
+            // this lock (it operates on `session` + `prefix_hashes`).
+            let bits = bits_arc.as_decode().expect("decode role re-verified above");
+            let mut slot_guard = bits.pending_promotion_task.lock();
+            let handle = self.tokio_handle.spawn(promotion_task);
+            *slot_guard = Some(handle);
+            drop(slot_guard);
         }
 
         Ok(())

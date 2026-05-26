@@ -1391,6 +1391,11 @@ impl ConditionalDisaggCoordinator {
             remote_slot_index: HashMap::new(),
             remote_pipeline_complete: std::sync::atomic::AtomicBool::new(false),
             completed: std::sync::atomic::AtomicBool::new(false),
+            // Populated by the wrapper's `commit_usaa1` when a
+            // Stage 1 promotion is planned. `coordinator.release`
+            // takes the handle and defers `session.finalize`
+            // until the task completes.
+            pending_promotion_task: Mutex::new(None),
         };
 
         let state = CdRequest::new_decode(
@@ -1554,8 +1559,57 @@ impl ConditionalDisaggCoordinator {
                 *status = CdRequestStatus::Released;
             }
             drop(status);
+
+            // Stage 1: when a Stage 1 G1→G2 promotion task is in
+            // flight, defer `session.finalize` until the task has
+            // landed (or failed). `finalize` implies
+            // `CommitsClosed + Drained` per session CONTRACT §2.13
+            // — sending Drained before the promotion's
+            // `make_available` lands would close the availability
+            // stream on the prefill peer and strand it with
+            // unfillable hashes. Awaiting the JoinHandle here keeps
+            // the finalize ordered after the task's session ops.
+            //
+            // `state` is the Arc<CdRequest> we just removed from
+            // the DashMap; the spawned task moves it in to hold
+            // the Mutex<JoinHandle> alive. The promotion task
+            // itself holds the session Arc independently — even if
+            // the request is torn down, the task runs to completion
+            // and the G2 blocks remain in cache.
+            let promotion_handle = state
+                .as_decode()
+                .and_then(|bits| bits.pending_promotion_task.lock().take());
+
             if let Some(session) = session_opt {
-                session.finalize(Some("released".to_string()));
+                if let Some(promotion) = promotion_handle {
+                    self.runtime.spawn(async move {
+                        // The task's bool return signals whether
+                        // finalize is needed (true) or already
+                        // subsumed by an in-task `session.close`
+                        // (false). A panicked / cancelled JoinHandle
+                        // (JoinError) is treated as "skip finalize"
+                        // — we cannot prove the session is still in
+                        // a finalize-able state, and the lifecycle
+                        // watcher will surface the failure path.
+                        match promotion.await {
+                            Ok(true) => {
+                                session.finalize(Some("released after promotion".to_string()));
+                            }
+                            Ok(false) => {
+                                // promotion task called session.close; nothing to do.
+                            }
+                            Err(join_err) => {
+                                tracing::warn!(
+                                    error = %join_err,
+                                    "promotion task join error in deferred release; \
+                                     skipping finalize"
+                                );
+                            }
+                        }
+                    });
+                } else {
+                    session.finalize(Some("released".to_string()));
+                }
             }
         }
     }

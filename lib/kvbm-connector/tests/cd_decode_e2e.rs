@@ -285,14 +285,35 @@ async fn cd_decode_happy_path() -> Result<()> {
     wait_until(|| h.workers.completed_contains("req-1")).await;
     assert_eq!(h.wrapper.inflight_available(), usize::MAX);
     assert!(!h.wrapper.has_active_cd_request("req-1"));
+
+    // Stage 1: with COMPUTED_BLOCKS > 0, the GNMT-time
+    // `find_prefix_g2_blocks` returns empty → a promotion task is
+    // in flight. `coordinator.release` defers `session.finalize`
+    // until the task completes (per session CONTRACT §2.13,
+    // finalize would otherwise emit Drained and pre-empt the
+    // task's make_available). Resolve the promotion here so the
+    // finalize-defer chain can run to completion.
+    h.inner.wait_promotion_count(1).await;
+    let slot = h.inner.slot("req-1").expect("slot installed");
+    let prefix_token_blocks: Vec<_> = slot.token_blocks[..COMPUTED_BLOCKS].to_vec();
+    let mutables = h
+        .inner
+        .g2_manager()
+        .allocate_blocks(COMPUTED_BLOCKS)
+        .expect("allocate prefix G2");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(prefix_token_blocks.iter())
+        .map(|(m, tb)| m.complete(tb).expect("complete prefix G2"))
+        .collect();
+    let promoted_g2 = h.inner.g2_manager().register_blocks(completes);
+    h.inner.resolve_promotion(0, Ok(promoted_g2));
+
     // Decode now signals cooperative finalize, NOT close().
     // close() is reserved for the abort path; happy-path
     // shutdown goes through finalize() and waits for the
     // peer's symmetric finalize to fire the rendezvous.
-    assert!(
-        session.finished_reason().is_some(),
-        "decode coordinator must signal session.finalize() on cooperative end"
-    );
+    wait_until(|| session.finished_reason().is_some()).await;
     assert!(
         session.closed_reason().is_none(),
         "decode must NOT call session.close() on the happy path"
@@ -1356,6 +1377,191 @@ async fn cd_decode_promotes_g1_prefix_to_g2_at_usaa() -> Result<()> {
         make_avail[1],
         prefix_hashes(&h),
         "second make_available is the promoted prefix",
+    );
+
+    Ok(())
+}
+
+/// Stage 1 race: `request_finished` (and the implicit drop chain
+/// `CdRequestStatePayload::Drop → coordinator.release →
+/// session.finalize`) MUST NOT pre-empt an in-flight prefix
+/// promotion task. Per session CONTRACT §2.13, `finalize` sends
+/// `CommitsClosed` + `Drained` if not already sent — which would
+/// arrive on the prefill peer BEFORE the promoted prefix blocks
+/// are exposed via `session.make_available`, stranding prefill
+/// with an unfillable expected_hashes window.
+///
+/// The release path must defer `session.finalize` until the
+/// promotion task has finished (success or failure). This test
+/// pins that ordering.
+///
+/// Scenario:
+///   1. GNMT spawns the promotion task (NOT yet resolved).
+///   2. `request_finished` fires — release_request +
+///      coordinator.release run.
+///   3. Assert `session.finished_reason()` is `None` (finalize
+///      deferred — task is still in flight).
+///   4. Resolve the promotion → task drives make_available +
+///      finish_availability + then triggers the deferred
+///      finalize.
+///   5. Assert `session.finished_reason()` is now `Some` AND
+///      make_available_calls includes the promoted prefix.
+///
+/// Reproducer-first: MUST FAIL on the pre-fix codebase where
+/// coordinator.release calls session.finalize unconditionally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_finalize_deferred_until_promotion_lands() -> Result<()> {
+    let h = build_harness();
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    h.inner.wait_promotion_count(1).await;
+
+    // Fire request_finished BEFORE resolving the promotion.
+    // Under the broken (pre-fix) flow this triggers
+    // coordinator.release → session.finalize, which closes
+    // the availability stream before the promotion's
+    // make_available lands.
+    let _ = h.wrapper.request_finished("req-1");
+
+    // Give the runtime a moment to settle the release chain.
+    // session.finalize would have been called synchronously
+    // inside coordinator.release; if the fix is in place it
+    // must be deferred.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        session.finished_reason().is_none(),
+        "session.finalize must NOT fire while promotion task is in flight \
+         (got finished_reason={:?})",
+        session.finished_reason()
+    );
+    assert!(
+        !session.finish_availability_called(),
+        "finish_availability must NOT fire while promotion task is in flight",
+    );
+
+    // Now resolve the promotion. The task should drive
+    // make_available + finish_availability, then the deferred
+    // finalize fires.
+    let slot = h.inner.slot("req-1").expect("slot installed");
+    let prefix_token_blocks: Vec<_> = slot.token_blocks[..COMPUTED_BLOCKS].to_vec();
+    let mutables = h
+        .inner
+        .g2_manager()
+        .allocate_blocks(COMPUTED_BLOCKS)
+        .expect("allocate prefix G2");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(prefix_token_blocks.iter())
+        .map(|(m, tb)| m.complete(tb).expect("complete prefix G2"))
+        .collect();
+    let promoted_g2 = h.inner.g2_manager().register_blocks(completes);
+    h.inner.resolve_promotion(0, Ok(promoted_g2));
+
+    // After the task lands the promotion AND the deferred
+    // finalize fires, both observables must hold.
+    wait_until(|| session.finished_reason().is_some()).await;
+
+    let make_avail = session.make_available_calls();
+    assert!(
+        make_avail.iter().any(|v| v == &prefix_hashes(&h)),
+        "promoted prefix must be made-available BEFORE the deferred finalize fires; \
+         observed make_available_calls = {make_avail:?}"
+    );
+    assert!(
+        session.finish_availability_called(),
+        "finish_availability must be called by the promotion task before deferred finalize",
+    );
+
+    Ok(())
+}
+
+/// Stage 1 corner: when the promotion task FAILS, it calls
+/// `session.close(reason)` — which per CONTRACT §2.14 implies
+/// `finish_commits + finish_availability` and sends a Detached
+/// lifecycle event. If `request_finished` then fires (or already
+/// fired and the deferred release awaits the failed task), the
+/// deferred-release path MUST NOT also call `session.finalize` —
+/// `finalize` on an already-closed session sends `Frame::Finished`
+/// after the close terminators (undefined protocol behavior;
+/// MockSession surfaces it as `finished_reason=Some` on top of
+/// `closed_reason=Some`, both observable on the same session).
+///
+/// The promotion task must signal to the deferred-release path
+/// whether it closed the session, so the deferred-release path can
+/// skip the redundant finalize.
+///
+/// Scenario:
+///   1. GNMT spawns the promotion task (not yet resolved).
+///   2. `request_finished` fires — deferred release spawns,
+///      awaits the task.
+///   3. Resolve the promotion with `Err` — task calls
+///      `session.close(reason)`. closed_reason becomes Some.
+///   4. Deferred release wakes up after task completion.
+///   5. Assert: `session.finished_reason()` stays None (no
+///      finalize-after-close).
+///
+/// Reproducer-first: MUST FAIL on the current code where the
+/// deferred release calls finalize unconditionally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_deferred_release_skips_finalize_after_promotion_failure() -> Result<()> {
+    let h = build_harness();
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    h.inner.wait_promotion_count(1).await;
+
+    // Fire request_finished BEFORE resolving promotion — the
+    // deferred-release path spawns and awaits the task.
+    let _ = h.wrapper.request_finished("req-1");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Resolve promotion with an error — the task calls
+    // session.close(reason), draining both streams.
+    h.inner
+        .resolve_promotion(0, Err(anyhow::anyhow!("simulated promotion failure")));
+
+    // Wait for close to land.
+    wait_until(|| session.closed_reason().is_some()).await;
+    // Give the deferred release a moment to (incorrectly) call
+    // finalize on top of the close. If the fix is in place the
+    // deferred release observes the task's "closed the session"
+    // signal and skips finalize.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        session.closed_reason().is_some(),
+        "promotion failure must call session.close"
+    );
+    assert!(
+        session.finished_reason().is_none(),
+        "deferred release must NOT call session.finalize after the promotion task \
+         already closed the session — got finished_reason={:?} alongside \
+         closed_reason={:?}",
+        session.finished_reason(),
+        session.closed_reason(),
     );
 
     Ok(())

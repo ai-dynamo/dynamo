@@ -131,6 +131,32 @@ pub struct DecodeBits {
     pub remote_slot_index: HashMap<SequenceHash, usize>,
     pub remote_pipeline_complete: AtomicBool,
     pub completed: AtomicBool,
+
+    /// Stage 1 G1→G2 prefix promotion task spawned at USAA. Lives
+    /// here (vs. on the wrapper's `CdRequestState`) so that
+    /// `coordinator.release` can defer `session.finalize` until
+    /// the task completes — `finalize` implies
+    /// `CommitsClosed + Drained` per session CONTRACT §2.13, which
+    /// would close the availability stream before the promotion's
+    /// `make_available` lands and strand the prefill peer.
+    ///
+    /// The task's bool return value signals what the
+    /// deferred-release path should do:
+    ///
+    /// - `true` — promotion succeeded; deferred release MUST call
+    ///   `session.finalize` to close the streams cooperatively.
+    /// - `false` — promotion failed and the task already called
+    ///   `session.close(reason)` (which per CONTRACT §2.14
+    ///   implies `finish_commits + finish_availability` + drives
+    ///   the Detached lifecycle event). Deferred release MUST
+    ///   skip `finalize` — calling it on a closed session emits
+    ///   `Frame::Finished` after the close terminators, which is
+    ///   undefined protocol behavior.
+    ///
+    /// Dropping the JoinHandle does NOT abort the task (tokio
+    /// detaches on drop). The task survives request teardown —
+    /// the G2 blocks remain registered in the cache.
+    pub pending_promotion_task: Mutex<Option<tokio::task::JoinHandle<bool>>>,
 }
 
 /// Prefill-side state.
@@ -332,6 +358,7 @@ mod tests {
             remote_slot_index: HashMap::new(),
             remote_pipeline_complete: AtomicBool::new(false),
             completed: AtomicBool::new(false),
+            pending_promotion_task: Mutex::new(None),
         }
     }
 
