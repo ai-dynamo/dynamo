@@ -130,6 +130,80 @@ fn serialize_control_message(control_message: &RequestControlMessage) -> Result<
     Ok(ctrl)
 }
 
+/// Build the request control envelope, optionally serialize the unary
+/// data payload, and encode the whole thing into a wire buffer. Returns
+/// the encoded `Bytes` and the NVTX span label that the caller should
+/// wrap the wire write with.
+///
+/// Wire shape is inferred from the inputs:
+///   - `send_conn_info = Some(_)` + `request = None` → header-only
+///     envelope, `RequestType::ManyIn`. The worker dials back via the
+///     attached connection info for inbound frames.
+///   - `send_conn_info = None` + `request = Some(_)` → two-part
+///     `[ctrl, data]` envelope, `RequestType::SingleIn`. The payload
+///     travels in the data part.
+fn build_request_envelope<T>(
+    context: &context::Context<()>,
+    recv_conn_info: ConnectionInfo,
+    send_conn_info: Option<ConnectionInfo>,
+    request: Option<&T>,
+) -> Result<(bytes::Bytes, &'static str), Error>
+where
+    T: serde::Serialize + ?Sized,
+{
+    let request_id = context.id();
+    let request_type = if send_conn_info.is_some() {
+        RequestType::ManyIn
+    } else {
+        RequestType::SingleIn
+    };
+    let control_message = RequestControlMessage {
+        id: request_id.to_string(),
+        request_type,
+        response_type: ResponseType::ManyOut,
+        connection_info: recv_conn_info,
+        metadata: context.metadata().clone(),
+        frontend_send_ts_ns: None,
+        request_stream_connection_info: send_conn_info,
+    };
+
+    let ctrl = serialize_control_message(&control_message)?;
+    let data: Option<Vec<u8>> = match request {
+        Some(req) => Some(serde_json::to_vec(req)?),
+        None => None,
+    };
+
+    let (msg, nvtx_label) = match &data {
+        Some(d) => {
+            tracing::trace!(
+                request_id,
+                "packaging two-part message; ctrl: {} bytes, data: {} bytes",
+                ctrl.len(),
+                d.len(),
+            );
+            (
+                TwoPartMessage::from_parts(ctrl.into(), d.clone().into()),
+                "transport.tcp.send",
+            )
+        }
+        None => {
+            tracing::trace!(
+                request_id,
+                "packaging bidirectional header-only envelope; ctrl: {} bytes",
+                ctrl.len(),
+            );
+            (
+                TwoPartMessage::from_header(ctrl.into()),
+                "transport.tcp.send_bidirectional",
+            )
+        }
+    };
+
+    let codec = TwoPartCodec::default();
+    let buffer = codec.encode_message(msg)?;
+    Ok((buffer, nvtx_label))
+}
+
 /// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
 /// Protects against gauge leaks when `?` operators cause early returns between
 /// the increment and `InflightDecStream` construction.
@@ -377,16 +451,17 @@ impl AddressedPushRouter {
         // worker decodes the control message, dials back for both streams,
         // and pulls frames off the request-stream as the engine asks for
         // them.
-        let tx_start = self
-            .dispatch_request_envelope::<()>(
-                address,
-                &ctx_unit,
-                resp_stream_conn_info,
-                req_stream_conn_info,
-                None,
-                queue_start,
-            )
+        let (buffer, nvtx_label) = build_request_envelope::<()>(
+            &ctx_unit,
+            resp_stream_conn_info,
+            req_stream_conn_info,
+            None,
+        )?;
+        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
+        let tx_start = Instant::now();
+        self.dispatch_buffer(address, buffer, ctx_unit.id(), nvtx_label)
             .await?;
+        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         // Await both call-home dials. Response side first (worker's prologue
         // is the synchronization point — error or success); request side
@@ -584,100 +659,11 @@ impl AddressedPushRouter {
         Ok((recv_subject, send_subject))
     }
 
-    /// Build the request control envelope, optionally serialize the unary
-    /// data payload, then dispatch it over the request plane. Observes
-    /// queue-duration / send-duration metrics, injects trace + request-id
-    /// + send-timestamp headers.
-    ///
-    /// Wire shape is inferred from the inputs:
-    ///   - `send_conn_info = Some(_)` and `request = None` → header-only
-    ///     envelope with `RequestType::ManyIn` (bidirectional). The worker
-    ///     dials back via the attached connection info for inbound frames.
-    ///   - `send_conn_info = None` and `request = Some(_)` → two-part
-    ///     `[ctrl, data]` envelope with `RequestType::SingleIn` (unary).
-    ///     The payload travels in the data part.
-    ///
-    /// Returns the `Instant` captured immediately before the wire write so
-    /// callers can compute downstream phase metrics (e.g. transport TTFT).
-    /// On any failure the caller's `CancelGuard` handles cleanup; this
-    /// helper just propagates the error via `?`.
-    async fn dispatch_request_envelope<T>(
-        &self,
-        address: String,
-        context: &crate::pipeline::context::Context<()>,
-        recv_conn_info: ConnectionInfo,
-        send_conn_info: Option<ConnectionInfo>,
-        request: Option<&T>,
-        queue_start: Instant,
-    ) -> Result<Instant, Error>
-    where
-        T: Serialize + ?Sized,
-    {
-        let request_id = context.id();
-        let request_type = if send_conn_info.is_some() {
-            RequestType::ManyIn
-        } else {
-            RequestType::SingleIn
-        };
-        let control_message = RequestControlMessage {
-            id: request_id.to_string(),
-            request_type,
-            response_type: ResponseType::ManyOut,
-            connection_info: recv_conn_info,
-            metadata: context.metadata().clone(),
-            frontend_send_ts_ns: None,
-            request_stream_connection_info: send_conn_info,
-        };
-
-        let ctrl = serialize_control_message(&control_message)?;
-        let data: Option<Vec<u8>> = match request {
-            Some(req) => Some(serde_json::to_vec(req)?),
-            None => None,
-        };
-
-        let (msg, nvtx_label) = match &data {
-            Some(d) => {
-                tracing::trace!(
-                    request_id,
-                    "packaging two-part message; ctrl: {} bytes, data: {} bytes",
-                    ctrl.len(),
-                    d.len(),
-                );
-                (
-                    TwoPartMessage::from_parts(ctrl.into(), d.clone().into()),
-                    "transport.tcp.send",
-                )
-            }
-            None => {
-                tracing::trace!(
-                    request_id,
-                    "packaging bidirectional header-only envelope; ctrl: {} bytes",
-                    ctrl.len(),
-                );
-                (
-                    TwoPartMessage::from_header(ctrl.into()),
-                    "transport.tcp.send_bidirectional",
-                )
-            }
-        };
-
-        let codec = TwoPartCodec::default();
-        let buffer = codec.encode_message(msg)?;
-
-        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
-        let tx_start = Instant::now();
-        self.dispatch_buffer(address, buffer, request_id, nvtx_label)
-            .await?;
-        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
-
-        Ok(tx_start)
-    }
-
     /// Build the standard request-plane headers (trace propagation +
     /// request-id + frontend send-timestamp) and dispatch the encoded
     /// buffer through the request-plane client inside an `nvtx_label`
-    /// range. Used by [`Self::dispatch_request_envelope`] for the wire
-    /// write step.
+    /// range. The wire-write step of a request-plane dispatch; the
+    /// envelope is built upstream by [`build_request_envelope`].
     async fn dispatch_buffer(
         &self,
         address: String,
@@ -742,16 +728,13 @@ where
         let cancel_guard =
             CancelGuard::arm(self.resp_transport.clone(), recv_subject, send_subject);
 
-        let tx_start = self
-            .dispatch_request_envelope(
-                address,
-                &context,
-                connection_info,
-                None,
-                Some(&request),
-                queue_start,
-            )
+        let (buffer, nvtx_label) =
+            build_request_envelope(&context, connection_info, None, Some(&request))?;
+        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
+        let tx_start = Instant::now();
+        self.dispatch_buffer(address, buffer, context.id(), nvtx_label)
             .await?;
+        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
