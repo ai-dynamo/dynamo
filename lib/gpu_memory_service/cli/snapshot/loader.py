@@ -19,7 +19,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
+from gpu_memory_service.snapshot.backends.sharded_ssd import (
+    DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
+    parse_sharded_ssd_roots,
+)
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 from gpu_memory_service.snapshot.transfer import (
     CHECKPOINT_DIR_TRANSFER_BACKENDS,
@@ -32,6 +35,8 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+DEFAULT_LOAD_WORKERS = 16
 
 
 def _load_device(
@@ -80,8 +85,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=8,
-        help="Shard load workers per device.",
+        default=DEFAULT_LOAD_WORKERS,
+        help=f"Shard load workers per device (default: {DEFAULT_LOAD_WORKERS}).",
     )
     parser.add_argument(
         "--transfer-backend",
@@ -97,10 +102,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sharded-ssd-queues-per-root",
         type=int,
-        default=1,
+        default=DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
         help=(
             "Number of independent sharded-ssd restore queues per SSD root. "
-            "Default is 1, preserving one worker group per root."
+            f"Default is {DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT}."
         ),
     )
     return parser
