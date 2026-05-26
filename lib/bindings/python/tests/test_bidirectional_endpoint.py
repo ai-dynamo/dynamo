@@ -80,12 +80,16 @@ async def test_serve_bidirectional_endpoint_starts(temp_file_store, runtime):
     # timeout here means the worker has booted and is waiting for work.
     # A returned coroutine means setup failed before reaching the serve
     # loop, which surfaces as an early exception we want to bubble up.
+    #
+    # `asyncio.shield` prevents `wait_for` from cancelling `server_task`
+    # when the timeout fires; without it the task would always be in the
+    # cancelled state by the time the assertion below runs.
     try:
-        await asyncio.wait_for(server_task, timeout=0.5)
+        await asyncio.wait_for(asyncio.shield(server_task), timeout=0.5)
     except asyncio.TimeoutError:
         pass
 
-    assert not server_task.done() or server_task.exception() is None, (
+    assert not server_task.done(), (
         f"serve_bidirectional_endpoint exited unexpectedly: "
         f"{server_task.exception()!r}"
     )
