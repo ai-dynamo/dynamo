@@ -21,6 +21,9 @@ pub use dynamo_runtime::{
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
+use crate::PyAsyncRequestStream;
+use dynamo_runtime::pipeline::ManyIn;
+
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::py_exception_to_backend_error;
 
@@ -363,4 +366,216 @@ where
     let response = Annotated::from_data(response);
 
     Ok(response)
+}
+
+/// Channel depth between the inbound forwarder and the Python iterator.
+/// Mirrors the depth used by the wire-side bidirectional ingress forwarder
+/// in `lib/runtime/src/pipeline/network/ingress/push_handler.rs`.
+const BIDIRECTIONAL_INPUT_CHANNEL_DEPTH: usize = 8;
+
+/// Rust-side adapter that bridges a Python `async def generate(request_stream, context)`
+/// callable into an [`AsyncEngine`] of the streaming-input / streaming-output
+/// shape (`ManyIn<serde_json::Value>` → `ManyOut<serde_json::Value>`).
+///
+/// The adapter:
+///
+/// 1. Takes ownership of the inbound `RequestStream<serde_json::Value>` and
+///    spawns a forwarder that pythonizes each frame and pushes it onto an
+///    mpsc consumed by a [`PyAsyncRequestStream`]. Cancellation is not
+///    threaded through the forwarder — when the engine returns and the
+///    `PyAsyncRequestStream` is dropped, the receiver closes and the
+///    forwarder exits passively on the next `tx.send`. Cancellation
+///    observation is the Python engine's responsibility via the `context`
+///    argument, matching the unary engine pattern.
+/// 2. Invokes the Python generator with `(request_stream, context)`, then
+///    wraps the returned async generator with
+///    [`pyo3_async_runtimes::tokio::into_stream_with_locals_v1`] to obtain
+///    a Rust `Stream<Item = PyResult<PyObject>>`.
+/// 3. Depythonizes each item into a `serde_json::Value` and forwards it on
+///    the response stream.
+///
+/// Wire types are fixed to `serde_json::Value` — the Python user works
+/// with dicts on both sides and any schema enforcement lives in Python.
+pub struct PythonBidirectionalEngine {
+    generator: Arc<PyObject>,
+    event_loop: Arc<PyObject>,
+    has_context: bool,
+}
+
+impl PythonBidirectionalEngine {
+    /// Build the adapter from a Python callable and an event loop. The
+    /// callable should be an `async def generate(request_stream)` or
+    /// `async def generate(request_stream, context)` returning an async
+    /// generator of JSON-shaped response frames.
+    pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
+        let has_context = Python::with_gil(|py| {
+            let callable = generator.bind(py);
+            callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
+        });
+        Ok(Self {
+            generator: Arc::new(generator),
+            event_loop: Arc::new(event_loop),
+            has_context,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<serde_json::Value>, Error>
+    for PythonBidirectionalEngine
+{
+    async fn generate(
+        &self,
+        input: ManyIn<serde_json::Value>,
+    ) -> Result<ManyOut<serde_json::Value>, Error> {
+        let request_id = input.context().id().to_string();
+        let ctx = input.context();
+        let metadata = input.metadata().clone();
+        let (request_stream, ctx_unit) = input.into_parts();
+        let mut inbound = request_stream
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("RequestStream::take returned None"))?;
+
+        // Capture trace context once, while we still hold the
+        // dispatching task; needed when constructing the Python `Context`.
+        let current_trace_context = get_distributed_tracing_context();
+
+        // Forwarder: pull `serde_json::Value` frames off the inbound
+        // stream, pythonize each, and hand the resulting `PyObject` to the
+        // Python iterator. No cancellation arm; the channel close on the
+        // consumer side is the natural exit signal.
+        let (frame_tx, frame_rx) = mpsc::channel::<PyObject>(BIDIRECTIONAL_INPUT_CHANNEL_DEPTH);
+        let forwarder_request_id = request_id.clone();
+        tokio::spawn(async move {
+            while let Some(value) = inbound.next().await {
+                let pyobj = match Python::with_gil(|py| {
+                    pythonize(py, &value).map(|bound| bound.unbind())
+                }) {
+                    Ok(pyobj) => pyobj,
+                    Err(e) => {
+                        tracing::error!(
+                            request_id = %forwarder_request_id,
+                            error = %e,
+                            "failed to pythonize bidirectional request frame; \
+                             closing input forwarder"
+                        );
+                        break;
+                    }
+                };
+                if frame_tx.send(pyobj).await.is_err() {
+                    tracing::debug!(
+                        request_id = %forwarder_request_id,
+                        "python engine dropped request stream; input forwarder exiting"
+                    );
+                    break;
+                }
+            }
+        });
+
+        let py_request_stream = PyAsyncRequestStream::new(frame_rx);
+
+        let generator = self.generator.clone();
+        let event_loop = self.event_loop.clone();
+        let has_context = self.has_context;
+        let ctx_python = ctx_unit.context();
+
+        // Acquire the GIL on a blocking task so the tokio reactor is not
+        // parked while waiting on it. Once inside the GIL: build the
+        // Python `Context`, build the `PyAsyncRequestStream` py handle,
+        // call the user callable, then convert the returned async
+        // generator into a Rust stream of `PyObject`.
+        let stream = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let py_request_stream_obj = Py::new(py, py_request_stream)?;
+                let py_ctx = Py::new(
+                    py,
+                    Context::new(ctx_python.clone(), current_trace_context, None, metadata),
+                )?;
+                let gen_result = if has_context {
+                    let kwarg = PyDict::new(py);
+                    kwarg.set_item("context", &py_ctx)?;
+                    generator.call(py, (py_request_stream_obj,), Some(&kwarg))
+                } else {
+                    generator.call1(py, (py_request_stream_obj,))
+                }?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
+                    locals,
+                    gen_result.into_bound(py),
+                )
+            })
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to offload python call to blocking task: {e}"))??;
+
+        let stream = Box::pin(stream);
+
+        let (resp_tx, resp_rx) = mpsc::channel::<serde_json::Value>(128);
+        let response_request_id = request_id.clone();
+        let response_ctx = ctx.clone();
+        tokio::spawn(async move {
+            tracing::debug!(
+                request_id = %response_request_id,
+                "starting bidirectional python response stream task"
+            );
+            let mut stream = stream;
+            while let Some(item) = stream.next().await {
+                let item = match item {
+                    Ok(item) => item,
+                    Err(e) => {
+                        tracing::error!(
+                            request_id = %response_request_id,
+                            error = %e,
+                            "python bidirectional generator yielded an error; \
+                             ending response stream"
+                        );
+                        break;
+                    }
+                };
+
+                let value = match tokio::task::spawn_blocking(move || {
+                    Python::with_gil(|py| depythonize::<serde_json::Value>(&item.into_bound(py)))
+                })
+                .await
+                {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(e)) => {
+                        tracing::error!(
+                            request_id = %response_request_id,
+                            error = %e,
+                            "failed to depythonize bidirectional response frame; \
+                             stopping generator"
+                        );
+                        response_ctx.stop_generating();
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            request_id = %response_request_id,
+                            error = %e,
+                            "failed to offload depythonize to blocking task"
+                        );
+                        break;
+                    }
+                };
+
+                if resp_tx.send(value).await.is_err() {
+                    tracing::debug!(
+                        request_id = %response_request_id,
+                        "bidirectional response channel closed; exiting response task"
+                    );
+                    break;
+                }
+            }
+            tracing::debug!(
+                request_id = %response_request_id,
+                "finished bidirectional python response stream task"
+            );
+        });
+
+        Ok(ResponseStream::new(
+            Box::pin(ReceiverStream::new(resp_rx)),
+            ctx,
+        ))
+    }
 }
