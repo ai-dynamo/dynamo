@@ -172,6 +172,15 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_event_channel(instance.clone())?;
             }
+            DiscoveryInstance::VeloPeer { peer_info, .. } => {
+                tracing::info!(
+                    "Registering Velo peer: dynamo_instance_id={:x}, velo_instance_id={}, velo_worker_id={}",
+                    instance_id,
+                    peer_info.instance_id(),
+                    peer_info.worker_id()
+                );
+                metadata.register_velo_peer(instance.clone())?;
+            }
         }
 
         // Build and apply the CR with the updated metadata
@@ -249,6 +258,15 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.unregister_event_channel(&instance)?;
+            }
+            DiscoveryInstance::VeloPeer { peer_info, .. } => {
+                tracing::info!(
+                    "Unregistering Velo peer: dynamo_instance_id={:x}, velo_instance_id={}, velo_worker_id={}",
+                    instance_id,
+                    peer_info.instance_id(),
+                    peer_info.worker_id()
+                );
+                metadata.unregister_velo_peer(&instance)?;
             }
         }
 

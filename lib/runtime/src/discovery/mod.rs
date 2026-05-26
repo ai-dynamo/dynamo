@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use ::velo::{InstanceId as VeloInstanceId, PeerInfo as VeloPeerInfo, WorkerId as VeloWorkerId};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::Stream;
@@ -231,6 +232,16 @@ pub enum DiscoveryQuery {
     },
     /// Unified event channel query with optional scope filters
     EventChannels(EventChannelQuery),
+    /// Query all Velo peers.
+    AllVeloPeers,
+    /// Query a Velo peer by Velo instance ID.
+    VeloPeerByInstance {
+        instance_id: VeloInstanceId,
+    },
+    /// Query a Velo peer by Velo worker ID.
+    VeloPeerByWorker {
+        worker_id: VeloWorkerId,
+    },
 }
 
 /// Unified query for event channels with optional scope filters
@@ -336,6 +347,11 @@ pub enum DiscoverySpec {
         /// Event transport type (NATS subject prefix or ZMQ endpoint)
         transport: EventTransport,
     },
+    /// Velo peer specification.
+    ///
+    /// This is registered once per process-level Velo runtime and lets Velo
+    /// resolve peers through the same discovery plane as Dynamo services.
+    VeloPeer { peer_info: VeloPeerInfo },
 }
 
 impl DiscoverySpec {
@@ -418,6 +434,10 @@ impl DiscoverySpec {
                 instance_id,
                 transport,
             },
+            Self::VeloPeer { peer_info } => DiscoveryInstance::VeloPeer {
+                instance_id,
+                peer_info,
+            },
         }
     }
 }
@@ -451,6 +471,13 @@ pub enum DiscoveryInstance {
         /// Event transport type (NATS subject prefix or ZMQ endpoint)
         transport: EventTransport,
     },
+    /// Registered Velo peer.
+    VeloPeer {
+        /// Dynamo discovery instance ID that owns this peer registration.
+        instance_id: u64,
+        /// Velo peer info used by the Velo runtime to connect to the peer.
+        peer_info: VeloPeerInfo,
+    },
 }
 
 impl DiscoveryInstance {
@@ -460,6 +487,7 @@ impl DiscoveryInstance {
             Self::Endpoint(inst) => inst.instance_id,
             Self::Model { instance_id, .. } => *instance_id,
             Self::EventChannel { instance_id, .. } => *instance_id,
+            Self::VeloPeer { instance_id, .. } => *instance_id,
         }
     }
 
@@ -476,6 +504,9 @@ impl DiscoveryInstance {
             }
             Self::EventChannel { .. } => {
                 anyhow::bail!("Cannot deserialize model from EventChannel instance")
+            }
+            Self::VeloPeer { .. } => {
+                anyhow::bail!("Cannot deserialize model from VeloPeer instance")
             }
         }
     }
@@ -515,6 +546,14 @@ impl DiscoveryInstance {
                 component: component.clone(),
                 topic: topic.clone(),
                 instance_id: *instance_id,
+            }),
+            Self::VeloPeer {
+                instance_id,
+                peer_info,
+            } => DiscoveryInstanceId::VeloPeer(VeloPeerInstanceId {
+                instance_id: *instance_id,
+                velo_instance_id: peer_info.instance_id(),
+                velo_worker_id: peer_info.worker_id(),
             }),
         }
     }
@@ -577,6 +616,47 @@ pub struct EventChannelInstanceId {
     /// Topic name for this channel (e.g., "kv-events", "kv-metrics")
     pub topic: String,
     pub instance_id: u64,
+}
+
+/// Unique identifier for a Velo peer registration.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VeloPeerInstanceId {
+    pub instance_id: u64,
+    pub velo_instance_id: VeloInstanceId,
+    pub velo_worker_id: VeloWorkerId,
+}
+
+impl VeloPeerInstanceId {
+    /// Converts to a path string: `{velo_worker_id}/{velo_instance_id}/{instance_id:x}`.
+    pub fn to_path(&self) -> String {
+        format!(
+            "{}/{}/{:x}",
+            self.velo_worker_id.as_u64(),
+            self.velo_instance_id.as_uuid(),
+            self.instance_id
+        )
+    }
+
+    /// Parses from a path string: `{velo_worker_id}/{velo_instance_id}/{instance_id:x}`.
+    pub fn from_path(path: &str) -> Result<Self> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() != 3 {
+            anyhow::bail!(
+                "Invalid VeloPeerInstanceId path: expected 3 parts, got {}",
+                parts.len()
+            );
+        }
+        Ok(Self {
+            velo_worker_id: VeloWorkerId::from_u64(
+                parts[0]
+                    .parse::<u64>()
+                    .map_err(|e| anyhow::anyhow!("Invalid Velo worker_id: {}", e))?,
+            ),
+            velo_instance_id: VeloInstanceId::from(uuid::Uuid::parse_str(parts[1])?),
+            instance_id: u64::from_str_radix(parts[2], 16)
+                .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
+        })
+    }
 }
 
 impl EventChannelInstanceId {
@@ -648,6 +728,7 @@ pub enum DiscoveryInstanceId {
     Endpoint(EndpointInstanceId),
     Model(ModelCardInstanceId),
     EventChannel(EventChannelInstanceId),
+    VeloPeer(VeloPeerInstanceId),
 }
 
 impl DiscoveryInstanceId {
@@ -657,6 +738,7 @@ impl DiscoveryInstanceId {
             Self::Endpoint(eid) => eid.instance_id,
             Self::Model(mid) => mid.instance_id,
             Self::EventChannel(ecid) => ecid.instance_id,
+            Self::VeloPeer(vpid) => vpid.instance_id,
         }
     }
 
@@ -666,6 +748,7 @@ impl DiscoveryInstanceId {
             Self::Endpoint(eid) => Ok(eid),
             Self::Model(_) => anyhow::bail!("Expected Endpoint variant, got Model"),
             Self::EventChannel(_) => anyhow::bail!("Expected Endpoint variant, got EventChannel"),
+            Self::VeloPeer(_) => anyhow::bail!("Expected Endpoint variant, got VeloPeer"),
         }
     }
 
@@ -675,6 +758,7 @@ impl DiscoveryInstanceId {
             Self::Model(mid) => Ok(mid),
             Self::Endpoint(_) => anyhow::bail!("Expected Model variant, got Endpoint"),
             Self::EventChannel(_) => anyhow::bail!("Expected Model variant, got EventChannel"),
+            Self::VeloPeer(_) => anyhow::bail!("Expected Model variant, got VeloPeer"),
         }
     }
 
@@ -684,6 +768,17 @@ impl DiscoveryInstanceId {
             Self::EventChannel(ecid) => Ok(ecid),
             Self::Endpoint(_) => anyhow::bail!("Expected EventChannel variant, got Endpoint"),
             Self::Model(_) => anyhow::bail!("Expected EventChannel variant, got Model"),
+            Self::VeloPeer(_) => anyhow::bail!("Expected EventChannel variant, got VeloPeer"),
+        }
+    }
+
+    /// Extracts the VeloPeerInstanceId, returning an error if this is another variant.
+    pub fn extract_velo_peer_id(&self) -> Result<&VeloPeerInstanceId> {
+        match self {
+            Self::VeloPeer(vpid) => Ok(vpid),
+            Self::Endpoint(_) => anyhow::bail!("Expected VeloPeer variant, got Endpoint"),
+            Self::Model(_) => anyhow::bail!("Expected VeloPeer variant, got Model"),
+            Self::EventChannel(_) => anyhow::bail!("Expected VeloPeer variant, got EventChannel"),
         }
     }
 }

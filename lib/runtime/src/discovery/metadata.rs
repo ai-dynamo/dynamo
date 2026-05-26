@@ -42,6 +42,9 @@ pub struct DiscoveryMetadata {
     /// Registered event channel instances (key: path string from EventChannelInstanceId::to_path())
     #[serde(default, deserialize_with = "deserialize_null_default")]
     event_channels: HashMap<String, DiscoveryInstance>,
+    /// Registered Velo peers (key: path string from VeloPeerInstanceId::to_path())
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    velo_peers: HashMap<String, DiscoveryInstance>,
 }
 
 impl DiscoveryMetadata {
@@ -51,6 +54,7 @@ impl DiscoveryMetadata {
             endpoints: HashMap::new(),
             model_cards: HashMap::new(),
             event_channels: HashMap::new(),
+            velo_peers: HashMap::new(),
         }
     }
 
@@ -66,6 +70,9 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot register EventChannel instance as endpoint")
+            }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot register VeloPeer instance as endpoint")
             }
         }
     }
@@ -83,6 +90,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot register EventChannel instance as model card")
             }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot register VeloPeer instance as model card")
+            }
         }
     }
 
@@ -98,6 +108,9 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot unregister EventChannel instance as endpoint")
+            }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot unregister VeloPeer instance as endpoint")
             }
         }
     }
@@ -115,6 +128,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot unregister EventChannel instance as model card")
             }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot unregister VeloPeer instance as model card")
+            }
         }
     }
 
@@ -131,6 +147,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot register Model instance as event channel")
             }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot register VeloPeer instance as event channel")
+            }
         }
     }
 
@@ -146,6 +165,47 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot unregister Model instance as event channel")
+            }
+            DiscoveryInstanceId::VeloPeer(_) => {
+                anyhow::bail!("Cannot unregister VeloPeer instance as event channel")
+            }
+        }
+    }
+
+    /// Register a Velo peer instance
+    pub fn register_velo_peer(&mut self, instance: DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::VeloPeer(key) => {
+                self.velo_peers.insert(key.to_path(), instance);
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot register Endpoint instance as Velo peer")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot register Model instance as Velo peer")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot register EventChannel instance as Velo peer")
+            }
+        }
+    }
+
+    /// Unregister a Velo peer instance
+    pub fn unregister_velo_peer(&mut self, instance: &DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::VeloPeer(key) => {
+                self.velo_peers.remove(&key.to_path());
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot unregister Endpoint instance as Velo peer")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot unregister Model instance as Velo peer")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot unregister EventChannel instance as Velo peer")
             }
         }
     }
@@ -165,12 +225,18 @@ impl DiscoveryMetadata {
         self.event_channels.values().cloned().collect()
     }
 
+    /// Get all registered Velo peers
+    pub fn get_all_velo_peers(&self) -> Vec<DiscoveryInstance> {
+        self.velo_peers.values().cloned().collect()
+    }
+
     /// Get all registered instances (endpoints, model cards, and event channels)
     pub fn get_all(&self) -> Vec<DiscoveryInstance> {
         self.endpoints
             .values()
             .chain(self.model_cards.values())
             .chain(self.event_channels.values())
+            .chain(self.velo_peers.values())
             .cloned()
             .collect()
     }
@@ -190,6 +256,10 @@ impl DiscoveryMetadata {
 
             // EventChannel queries now return actual event channels
             DiscoveryQuery::EventChannels(_) => self.get_all_event_channels(),
+
+            DiscoveryQuery::AllVeloPeers
+            | DiscoveryQuery::VeloPeerByInstance { .. }
+            | DiscoveryQuery::VeloPeerByWorker { .. } => self.get_all_velo_peers(),
         };
 
         filter_instances(all_instances, query)
@@ -307,6 +377,31 @@ fn filter_instances(
                 _ => false,
             })
             .collect(),
+
+        DiscoveryQuery::AllVeloPeers => instances
+            .into_iter()
+            .filter(|inst| matches!(inst, DiscoveryInstance::VeloPeer { .. }))
+            .collect(),
+
+        DiscoveryQuery::VeloPeerByInstance { instance_id } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::VeloPeer { peer_info, .. } => {
+                    peer_info.instance_id() == *instance_id
+                }
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::VeloPeerByWorker { worker_id } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::VeloPeer { peer_info, .. } => {
+                    peer_info.worker_id() == *worker_id
+                }
+                _ => false,
+            })
+            .collect(),
     }
 }
 
@@ -392,6 +487,19 @@ mod tests {
     use super::*;
     use crate::component::{Instance, TransportType};
     use crate::discovery::EventChannelQuery;
+    use ::velo::{InstanceId as VeloInstanceId, PeerInfo, WorkerAddress};
+    use bytes::Bytes;
+    use std::collections::HashMap;
+
+    fn dummy_velo_peer() -> PeerInfo {
+        let instance_id = VeloInstanceId::new_v4();
+        let mut entries = HashMap::<String, Vec<u8>>::new();
+        entries.insert("tcp".to_string(), b"127.0.0.1:0".to_vec());
+        let address = WorkerAddress::from_encoded(Bytes::from(
+            rmp_serde::to_vec(&entries).expect("encode worker address"),
+        ));
+        PeerInfo::new(instance_id, address)
+    }
 
     #[test]
     fn test_metadata_serde() {
@@ -539,6 +647,35 @@ mod tests {
         };
         metadata.unregister_event_channel(&instance).unwrap();
         assert_eq!(metadata.get_all_event_channels().len(), 2);
+    }
+
+    #[test]
+    fn test_velo_peer_registration_and_filtering() {
+        let mut metadata = DiscoveryMetadata::new();
+        let peer = dummy_velo_peer();
+        let instance = DiscoveryInstance::VeloPeer {
+            instance_id: 42,
+            peer_info: peer.clone(),
+        };
+
+        metadata.register_velo_peer(instance.clone()).unwrap();
+
+        assert_eq!(metadata.get_all_velo_peers(), vec![instance.clone()]);
+        assert_eq!(
+            metadata.filter(&DiscoveryQuery::VeloPeerByInstance {
+                instance_id: peer.instance_id()
+            }),
+            vec![instance.clone()]
+        );
+        assert_eq!(
+            metadata.filter(&DiscoveryQuery::VeloPeerByWorker {
+                worker_id: peer.worker_id()
+            }),
+            vec![instance.clone()]
+        );
+
+        metadata.unregister_velo_peer(&instance).unwrap();
+        assert!(metadata.get_all_velo_peers().is_empty());
     }
 
     #[tokio::test]

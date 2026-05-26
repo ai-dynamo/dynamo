@@ -119,6 +119,15 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
                 && query.component.as_ref().is_none_or(|c| c == inst_comp)
                 && query.topic.as_ref().is_none_or(|t| t == inst_topic)
         }
+        (DiscoveryInstance::VeloPeer { .. }, DiscoveryQuery::AllVeloPeers) => true,
+        (
+            DiscoveryInstance::VeloPeer { peer_info, .. },
+            DiscoveryQuery::VeloPeerByInstance { instance_id },
+        ) => peer_info.instance_id() == *instance_id,
+        (
+            DiscoveryInstance::VeloPeer { peer_info, .. },
+            DiscoveryQuery::VeloPeerByWorker { worker_id },
+        ) => peer_info.worker_id() == *worker_id,
 
         // Cross-type matches return false
         (
@@ -127,7 +136,10 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. }
-            | DiscoveryQuery::EventChannels(_),
+            | DiscoveryQuery::EventChannels(_)
+            | DiscoveryQuery::AllVeloPeers
+            | DiscoveryQuery::VeloPeerByInstance { .. }
+            | DiscoveryQuery::VeloPeerByWorker { .. },
         ) => false,
         (
             DiscoveryInstance::Model { .. },
@@ -135,7 +147,10 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
             | DiscoveryQuery::Endpoint { .. }
-            | DiscoveryQuery::EventChannels(_),
+            | DiscoveryQuery::EventChannels(_)
+            | DiscoveryQuery::AllVeloPeers
+            | DiscoveryQuery::VeloPeerByInstance { .. }
+            | DiscoveryQuery::VeloPeerByWorker { .. },
         ) => false,
         (
             DiscoveryInstance::EventChannel { .. },
@@ -146,7 +161,22 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
-            | DiscoveryQuery::EndpointModels { .. },
+            | DiscoveryQuery::EndpointModels { .. }
+            | DiscoveryQuery::AllVeloPeers
+            | DiscoveryQuery::VeloPeerByInstance { .. }
+            | DiscoveryQuery::VeloPeerByWorker { .. },
+        ) => false,
+        (
+            DiscoveryInstance::VeloPeer { .. },
+            DiscoveryQuery::AllEndpoints
+            | DiscoveryQuery::NamespacedEndpoints { .. }
+            | DiscoveryQuery::ComponentEndpoints { .. }
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllModels
+            | DiscoveryQuery::NamespacedModels { .. }
+            | DiscoveryQuery::ComponentModels { .. }
+            | DiscoveryQuery::EndpointModels { .. }
+            | DiscoveryQuery::EventChannels(_),
         ) => false,
     }
 }

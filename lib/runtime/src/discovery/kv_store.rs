@@ -12,13 +12,14 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId,
-    ModelCardInstanceId,
+    ModelCardInstanceId, VeloPeerInstanceId,
 };
 use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
+const VELO_PEERS_BUCKET: &str = "v1/velo_peers";
 
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
@@ -52,6 +53,16 @@ impl KVStoreDiscovery {
         instance_id: u64,
     ) -> String {
         format!("{}/{}/{}/{:x}", namespace, component, topic, instance_id)
+    }
+
+    /// Build the key path for a Velo peer relative to bucket, not absolute.
+    fn velo_peer_key(instance_id: u64, peer_info: &::velo::PeerInfo) -> String {
+        VeloPeerInstanceId {
+            instance_id,
+            velo_instance_id: peer_info.instance_id(),
+            velo_worker_id: peer_info.worker_id(),
+        }
+        .to_path()
     }
 
     /// Extract prefix for querying based on discovery query
@@ -110,6 +121,12 @@ impl KVStoreDiscovery {
                 }
                 path
             }
+            DiscoveryQuery::AllVeloPeers | DiscoveryQuery::VeloPeerByInstance { .. } => {
+                VELO_PEERS_BUCKET.to_string()
+            }
+            DiscoveryQuery::VeloPeerByWorker { worker_id } => {
+                format!("{}/{}", VELO_PEERS_BUCKET, worker_id.as_u64())
+            }
         }
     }
 
@@ -147,6 +164,24 @@ impl KVStoreDiscovery {
     fn parse_instance(value: &[u8]) -> Result<DiscoveryInstance> {
         let instance: DiscoveryInstance = serde_json::from_slice(value)?;
         Ok(instance)
+    }
+
+    fn instance_matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
+        match (instance, query) {
+            (DiscoveryInstance::VeloPeer { .. }, DiscoveryQuery::AllVeloPeers) => true,
+            (
+                DiscoveryInstance::VeloPeer { peer_info, .. },
+                DiscoveryQuery::VeloPeerByInstance { instance_id },
+            ) => peer_info.instance_id() == *instance_id,
+            (
+                DiscoveryInstance::VeloPeer { peer_info, .. },
+                DiscoveryQuery::VeloPeerByWorker { worker_id },
+            ) => peer_info.worker_id() == *worker_id,
+            (_, DiscoveryQuery::AllVeloPeers)
+            | (_, DiscoveryQuery::VeloPeerByInstance { .. })
+            | (_, DiscoveryQuery::VeloPeerByWorker { .. }) => false,
+            _ => true,
+        }
     }
 }
 
@@ -241,6 +276,20 @@ impl Discovery for KVStoreDiscovery {
                     key
                 );
                 (EVENT_CHANNELS_BUCKET, key)
+            }
+            DiscoveryInstance::VeloPeer {
+                instance_id,
+                peer_info,
+            } => {
+                let key = Self::velo_peer_key(*instance_id, peer_info);
+                tracing::debug!(
+                    "KVStoreDiscovery::register: Registering Velo peer dynamo_instance_id={}, velo_instance_id={}, worker_id={}, key={}",
+                    instance_id,
+                    peer_info.instance_id(),
+                    peer_info.worker_id(),
+                    key
+                );
+                (VELO_PEERS_BUCKET, key)
             }
         };
 
@@ -354,6 +403,20 @@ impl Discovery for KVStoreDiscovery {
                 );
                 (EVENT_CHANNELS_BUCKET, key)
             }
+            DiscoveryInstance::VeloPeer {
+                instance_id,
+                peer_info,
+            } => {
+                let key = Self::velo_peer_key(*instance_id, peer_info);
+                tracing::debug!(
+                    "KVStoreDiscovery::unregister: Unregistering Velo peer dynamo_instance_id={}, velo_instance_id={}, worker_id={}, key={}",
+                    instance_id,
+                    peer_info.instance_id(),
+                    peer_info.worker_id(),
+                    key
+                );
+                (VELO_PEERS_BUCKET, key)
+            }
         };
 
         // Get the bucket - if it doesn't exist, the instance is already removed from the KV store
@@ -379,6 +442,8 @@ impl Discovery for KVStoreDiscovery {
             INSTANCES_BUCKET
         } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
             EVENT_CHANNELS_BUCKET
+        } else if prefix.starts_with(VELO_PEERS_BUCKET) {
+            VELO_PEERS_BUCKET
         } else {
             MODELS_BUCKET
         };
@@ -409,7 +474,10 @@ impl Discovery for KVStoreDiscovery {
         for (key, value) in entries {
             if Self::matches_prefix(key.as_ref(), &prefix, bucket_name) {
                 match Self::parse_instance(&value) {
-                    Ok(instance) => instances.push(instance),
+                    Ok(instance) if Self::instance_matches_query(&instance, &query) => {
+                        instances.push(instance)
+                    }
+                    Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(%key, error = %e, "Failed to parse discovery instance");
                     }
@@ -430,6 +498,8 @@ impl Discovery for KVStoreDiscovery {
             INSTANCES_BUCKET
         } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
             EVENT_CHANNELS_BUCKET
+        } else if prefix.starts_with(VELO_PEERS_BUCKET) {
+            VELO_PEERS_BUCKET
         } else {
             MODELS_BUCKET
         };
@@ -462,9 +532,10 @@ impl Discovery for KVStoreDiscovery {
                         }
 
                         match Self::parse_instance(kv.value()) {
-                            Ok(instance) => {
+                            Ok(instance) if Self::instance_matches_query(&instance, &query) => {
                                 Some(DiscoveryEvent::Added(instance))
                             },
+                            Ok(_) => None,
                             Err(e) => {
                                 tracing::warn!(
                                     key = %kv.key_str(),
@@ -489,15 +560,14 @@ impl Discovery for KVStoreDiscovery {
                         // - Endpoints: "namespace/component/endpoint/{instance_id:x}"
                         // - Models: "namespace/component/endpoint/{instance_id:x}"
                         // - LoRA models: "namespace/component/endpoint/{instance_id:x}/{lora_slug}"
-                        // - EventChannels: "namespace/component/{instance_id:x}"
+                        // - EventChannels: "namespace/component/topic/{instance_id:x}"
+                        // - VeloPeers: "{worker_id}/{velo_instance_id}/{instance_id:x}"
                         //
                         // Use strip_bucket_prefix for consistency with matches_prefix().
                         let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
                         let key_parts: Vec<&str> = relative_key.split('/').collect();
 
-                        // EventChannels need 4 parts (namespace/component/topic/instance_id)
-                        // Endpoints/Models need at least 4 parts
-                        let min_parts = 4;
+                        let min_parts = if bucket_name == VELO_PEERS_BUCKET { 2 } else { 4 };
                         if key_parts.len() < min_parts {
                             tracing::warn!(
                                 key = %key_str,
@@ -510,11 +580,23 @@ impl Discovery for KVStoreDiscovery {
                             continue;
                         }
 
-                        let namespace = key_parts[0].to_string();
-                        let component = key_parts[1].to_string();
+                        let id = if bucket_name == VELO_PEERS_BUCKET {
+                            match VeloPeerInstanceId::from_path(relative_key) {
+                                Ok(id) => DiscoveryInstanceId::VeloPeer(id),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        key = %key_str,
+                                        error = %e,
+                                        "Failed to parse Velo peer id from deleted key"
+                                    );
+                                    continue;
+                                }
+                            }
+                        } else {
+                            let namespace = key_parts[0].to_string();
+                            let component = key_parts[1].to_string();
 
-                        // Handle EventChannel (4 parts: namespace/component/topic/instance_id) vs Endpoints/Models
-                        let id = if bucket_name == EVENT_CHANNELS_BUCKET {
+                            if bucket_name == EVENT_CHANNELS_BUCKET {
                             // EventChannel keys: namespace/component/topic/{instance_id:x}
                             let topic = key_parts[2].to_string();
                             let instance_id_hex = key_parts[3];
@@ -537,7 +619,7 @@ impl Discovery for KVStoreDiscovery {
                                     continue;
                                 }
                             }
-                        } else {
+                            } else {
                             let endpoint = key_parts[2].to_string();
                             let instance_id_hex = key_parts[3];
 
@@ -573,7 +655,17 @@ impl Discovery for KVStoreDiscovery {
                                     continue;
                                 }
                             }
+                            }
                         };
+
+                        if let (
+                            DiscoveryInstanceId::VeloPeer(velo_peer_id),
+                            DiscoveryQuery::VeloPeerByInstance { instance_id },
+                        ) = (&id, &query)
+                            && velo_peer_id.velo_instance_id != *instance_id
+                        {
+                            continue;
+                        }
 
                         tracing::debug!(
                             "KVStoreDiscovery::list_and_watch: Emitting Removed event for {:?}, key={}",
@@ -601,6 +693,19 @@ impl Discovery for KVStoreDiscovery {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use ::velo::{InstanceId as VeloInstanceId, PeerInfo, WorkerAddress};
+    use bytes::Bytes;
+    use std::collections::HashMap;
+
+    fn dummy_velo_peer() -> PeerInfo {
+        let instance_id = VeloInstanceId::new_v4();
+        let mut entries = HashMap::<String, Vec<u8>>::new();
+        entries.insert("tcp".to_string(), b"127.0.0.1:0".to_vec());
+        let address = WorkerAddress::from_encoded(Bytes::from(
+            rmp_serde::to_vec(&entries).expect("encode worker address"),
+        ));
+        PeerInfo::new(instance_id, address)
+    }
 
     #[tokio::test]
     async fn test_kv_store_discovery_register_endpoint() {
@@ -728,5 +833,57 @@ mod tests {
 
         register_task.await.unwrap();
         cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_kv_store_discovery_register_velo_peer() {
+        let store = kv::Manager::memory();
+        let cancel_token = CancellationToken::new();
+        let client = KVStoreDiscovery::new(store, cancel_token);
+        let peer = dummy_velo_peer();
+
+        let instance = client
+            .register(DiscoverySpec::VeloPeer {
+                peer_info: peer.clone(),
+            })
+            .await
+            .unwrap();
+
+        match &instance {
+            DiscoveryInstance::VeloPeer {
+                instance_id,
+                peer_info,
+            } => {
+                assert_eq!(*instance_id, client.instance_id());
+                assert_eq!(peer_info, &peer);
+            }
+            _ => panic!("Expected VeloPeer instance"),
+        }
+
+        let by_instance = client
+            .list(DiscoveryQuery::VeloPeerByInstance {
+                instance_id: peer.instance_id(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_instance, vec![instance.clone()]);
+
+        let by_worker = client
+            .list(DiscoveryQuery::VeloPeerByWorker {
+                worker_id: peer.worker_id(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_worker, vec![instance.clone()]);
+
+        client.unregister(instance).await.unwrap();
+
+        let after_unregister = client
+            .list(DiscoveryQuery::VeloPeerByInstance {
+                instance_id: peer.instance_id(),
+            })
+            .await
+            .unwrap();
+        assert!(after_unregister.is_empty());
     }
 }

@@ -8,7 +8,7 @@
 //! local runtime initialization; request dispatch still uses the existing
 //! request-plane transports.
 
-pub mod kv_discovery;
+pub mod dynamo_peer_discovery;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -19,8 +19,8 @@ use ::velo::backend::tcp::TcpTransportBuilder;
 use ::velo::discovery::PeerDiscovery;
 pub use ::velo::{InstanceId, PeerInfo, StreamAnchorHandle, Velo, WorkerId};
 
-pub use self::kv_discovery::{KvPeerDiscovery, KvPeerRegistrationGuard, VELO_PEERS_BUCKET};
-use crate::storage::kv;
+pub use self::dynamo_peer_discovery::{DynamoPeerDiscovery, DynamoPeerRegistrationGuard};
+use crate::discovery::Discovery;
 
 /// Process-wide Velo instance shared by frontend, router, and worker response
 /// stream code in this process.
@@ -82,10 +82,10 @@ impl VeloRuntimeConfig {
 /// Owning handle for the process-wide Velo instance.
 ///
 /// The registration guard keeps this process' Velo peer entry visible in the
-/// KV-backed peer registry for the lifetime of the handle.
+/// Dynamo discovery plane for the lifetime of the handle.
 pub struct VeloHandle {
     velo: Arc<Velo>,
-    _registration: KvPeerRegistrationGuard,
+    _registration: DynamoPeerRegistrationGuard,
 }
 
 impl VeloHandle {
@@ -107,11 +107,11 @@ impl VeloHandle {
 
 /// Initialize or fetch the process-wide Velo runtime.
 pub async fn global_velo(
-    kv_manager: kv::Manager,
+    discovery: Arc<dyn Discovery>,
     config: VeloRuntimeConfig,
 ) -> Result<&'static VeloHandle> {
     GLOBAL_VELO
-        .get_or_try_init(|| async move { build_velo_handle(kv_manager, config).await })
+        .get_or_try_init(|| async move { build_velo_handle(discovery, config).await })
         .await
 }
 
@@ -124,7 +124,7 @@ pub fn current_velo_instance_id() -> Result<InstanceId> {
 }
 
 async fn build_velo_handle(
-    kv_manager: kv::Manager,
+    discovery: Arc<dyn Discovery>,
     config: VeloRuntimeConfig,
 ) -> Result<VeloHandle> {
     let bind_addr = config.messenger_bind_addr();
@@ -142,7 +142,7 @@ async fn build_velo_handle(
             .with_context(|| format!("building Velo TCP transport on {bind_addr}"))?,
     );
 
-    let discovery = Arc::new(KvPeerDiscovery::new(kv_manager));
+    let discovery = Arc::new(DynamoPeerDiscovery::new(discovery));
     let discovery_for_velo: Arc<dyn PeerDiscovery> = discovery.clone();
 
     let velo = Velo::builder()

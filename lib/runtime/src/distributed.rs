@@ -56,7 +56,6 @@ pub struct DistributedRuntime {
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
-    velo_kv_manager: Option<kv::Manager>,
 
     // Discovery metadata (only used for Kubernetes backend)
     // Shared with system status server to expose via /metadata endpoint
@@ -148,7 +147,7 @@ impl DistributedRuntime {
         )));
 
         // Initialize discovery client based on backend configuration
-        let (discovery_client, discovery_metadata, velo_kv_manager) = match discovery_backend {
+        let (discovery_client, discovery_metadata) = match discovery_backend {
             DiscoveryBackend::Kubernetes => {
                 tracing::info!("Initializing Kubernetes discovery backend");
                 let metadata = Arc::new(tokio::sync::RwLock::new(
@@ -162,7 +161,7 @@ impl DistributedRuntime {
                 .inspect_err(
                     |err| tracing::error!(%err, "Failed to initialize Kubernetes discovery client"),
                 )?;
-                (Arc::new(client) as Arc<dyn Discovery>, Some(metadata), None)
+                (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
             }
             DiscoveryBackend::KvStore(kv_selector) => {
                 tracing::info!("Initializing KV store discovery backend: {kv_selector}");
@@ -177,12 +176,10 @@ impl DistributedRuntime {
                     kv::Selector::Memory => kv::Manager::memory(),
                 };
                 use crate::discovery::KVStoreDiscovery;
-                let velo_kv_manager = Some(store.clone());
                 (
                     Arc::new(KVStoreDiscovery::new(store, runtime.primary_token()))
                         as Arc<dyn Discovery>,
                     None,
-                    velo_kv_manager,
                 )
             }
         };
@@ -204,7 +201,6 @@ impl DistributedRuntime {
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
-            velo_kv_manager,
             discovery_metadata,
             component_registry,
             endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -367,17 +363,8 @@ impl DistributedRuntime {
     }
 
     /// Lazily initialize or fetch the process-wide Velo runtime.
-    ///
-    /// This uses the same KV backend as Dynamo service discovery for the
-    /// temporary Velo peer registry. Kubernetes-backed discovery will need a
-    /// first-class Velo peer discovery integration before this can be enabled.
     pub async fn velo(&self) -> Result<&'static VeloHandle> {
-        let kv_manager = self.velo_kv_manager.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Velo peer discovery is only wired for KV-backed discovery in this milestone"
-            )
-        })?;
-        global_velo(kv_manager, VeloRuntimeConfig::from_env()).await
+        global_velo(self.discovery(), VeloRuntimeConfig::from_env()).await
     }
 
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
