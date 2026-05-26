@@ -12,8 +12,6 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 from uuid import uuid4
-
-import torch
 from gpu_memory_service.common.cuda_utils import (
     align_to_granularity,
     cuda_ensure_initialized,
@@ -129,8 +127,10 @@ class GMSAllocationManager:
             # time + free GPU memory, so a stuck retry loop is observable
             # rather than silent.
             try:
+                import torch
+
                 free_b, total_b = torch.cuda.mem_get_info(self._device)
-            except RuntimeError:
+            except (ImportError, RuntimeError):
                 logger.debug(
                     "torch.cuda.mem_get_info(%d) failed", self._device, exc_info=True
                 )
