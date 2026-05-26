@@ -51,7 +51,12 @@ from gpu_memory_service.common.cuda_utils import (
     cumem_unmap,
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.common.protocol.messages import (
+    CreatePackedLayoutRequest,
+    CreatePackedLayoutResponse,
+    ExportAllocationResponse,
+    GetAllocationResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +122,7 @@ class LocalMapping:
     handle: int  # 0 if unmapped but VA reserved
     tag: str
     layout_slot: int
+    mapping_offset: int = 0
 
     def with_handle(self, handle: int) -> "LocalMapping":
         return LocalMapping(
@@ -127,6 +133,7 @@ class LocalMapping:
             handle,
             self.tag,
             self.layout_slot,
+            self.mapping_offset,
         )
 
     def with_server_identity(
@@ -142,6 +149,19 @@ class LocalMapping:
             self.handle,
             self.tag,
             layout_slot,
+            self.mapping_offset,
+        )
+
+    def with_mapping_offset(self, mapping_offset: int) -> "LocalMapping":
+        return LocalMapping(
+            self.allocation_id,
+            self.va,
+            self.size,
+            self.aligned_size,
+            self.handle,
+            self.tag,
+            self.layout_slot,
+            mapping_offset,
         )
 
 
@@ -300,6 +320,12 @@ class GMSClientMemoryManager:
         """Export allocation as POSIX FD."""
         return self._client_rpc.export(allocation_id)
 
+    def export_handle_info(
+        self, allocation_id: str
+    ) -> tuple[ExportAllocationResponse, int]:
+        """Export allocation as POSIX FD plus placement metadata."""
+        return self._client_rpc.export_info(allocation_id)
+
     def get_handle_info(self, allocation_id: str):
         """Query allocation info from server."""
         return self._client_rpc.get_allocation(allocation_id)
@@ -345,6 +371,12 @@ class GMSClientMemoryManager:
     def list_handles(self, tag: Optional[str] = None) -> List[GetAllocationResponse]:
         return self._client_rpc.list_allocations(tag)
 
+    def create_packed_layout(
+        self, request: CreatePackedLayoutRequest
+    ) -> CreatePackedLayoutResponse:
+        self._require_rw()
+        return self._client_rpc.create_packed_layout(request)
+
     # ==================== Tier 1: Metadata ====================
 
     def metadata_put(
@@ -376,6 +408,7 @@ class GMSClientMemoryManager:
         allocation_id: str,
         tag: str,
         layout_slot: int,
+        mapping_offset: int = 0,
     ) -> int:
         """Import FD + cuMemMap + set access + track.
 
@@ -384,7 +417,7 @@ class GMSClientMemoryManager:
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
         handle = cumem_import_from_shareable_handle_close_fd(fd)
-        cumem_map(va, aligned_size, handle)
+        cumem_map(va, aligned_size, handle, mapping_offset)
         cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
         self._track_mapping(
             LocalMapping(
@@ -395,6 +428,7 @@ class GMSClientMemoryManager:
                 handle=handle,
                 tag=tag,
                 layout_slot=layout_slot,
+                mapping_offset=mapping_offset,
             )
         )
         return handle
@@ -463,19 +497,35 @@ class GMSClientMemoryManager:
             alloc_tag = str(getattr(info, "tag", "default"))
             layout_slot = int(info.layout_slot)
 
-            fd = self.export_handle(allocation_id)
+            export_info, fd = self.export_handle_info(allocation_id)
             va = self.reserve_va(aligned_size)
-            self.map_va(fd, va, alloc_size, allocation_id, alloc_tag, layout_slot)
+            self.map_va(
+                fd,
+                va,
+                alloc_size,
+                allocation_id,
+                alloc_tag,
+                layout_slot,
+                int(export_info.mapping_offset),
+            )
             return va
 
         # Allocate path
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
         alloc_id, layout_slot = self.allocate_handle(size, tag)
-        fd = self.export_handle(alloc_id)
+        export_info, fd = self.export_handle_info(alloc_id)
         aligned_size = align_to_granularity(size, self.granularity)
         va = self.reserve_va(aligned_size)
-        self.map_va(fd, va, size, alloc_id, tag, layout_slot)
+        self.map_va(
+            fd,
+            va,
+            size,
+            alloc_id,
+            tag,
+            layout_slot,
+            int(export_info.mapping_offset),
+        )
         return va
 
     def destroy_mapping(self, va: int) -> None:
@@ -576,9 +626,10 @@ class GMSClientMemoryManager:
                     f"{mapping.tag} vs {alloc_info.tag}"
                 )
 
-            fd = self.export_handle(alloc_info.allocation_id)
+            export_info, fd = self.export_handle_info(alloc_info.allocation_id)
             handle = cumem_import_from_shareable_handle_close_fd(fd)
-            cumem_map(va, mapping.aligned_size, handle)
+            mapping_offset = int(export_info.mapping_offset)
+            cumem_map(va, mapping.aligned_size, handle, mapping_offset)
             cumem_set_access(
                 va, mapping.aligned_size, self.device, self._granted_lock_type
             )
@@ -589,7 +640,7 @@ class GMSClientMemoryManager:
             self._mappings[va] = mapping.with_server_identity(
                 alloc_info.allocation_id,
                 int(alloc_info.layout_slot),
-            ).with_handle(handle)
+            ).with_mapping_offset(mapping_offset).with_handle(handle)
             self._inverse_mapping[alloc_info.allocation_id] = va
             remapped_count += 1
             total_bytes += mapping.aligned_size
@@ -722,6 +773,7 @@ class GMSClientMemoryManager:
                 handle=0,
                 tag=scratch.tag,
                 layout_slot=0,
+                mapping_offset=0,
             )
         migrated = len(self._scratch_mappings)
         self._scratch_mappings.clear()

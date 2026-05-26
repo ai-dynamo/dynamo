@@ -15,6 +15,8 @@ from gpu_memory_service.common.protocol.messages import (
     AllocateResponse,
     CommitRequest,
     CommitResponse,
+    CreatePackedLayoutRequest,
+    CreatePackedLayoutResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
     FreeAllocationRequest,
@@ -144,7 +146,12 @@ class _GMSClientSession:
         response = self.allocate_info(size=size, tag=tag)
         return response.allocation_id, response.aligned_size
 
-    def export(self, allocation_id: str) -> int:
+    def create_packed_layout(
+        self, request: CreatePackedLayoutRequest
+    ) -> CreatePackedLayoutResponse:
+        return self._transport.request(request, CreatePackedLayoutResponse)
+
+    def export_info(self, allocation_id: str) -> tuple[ExportAllocationResponse, int]:
         response, fd = self._transport.request_with_fd(
             ExportAllocationRequest(allocation_id=allocation_id),
             ExportAllocationResponse,
@@ -153,6 +160,10 @@ class _GMSClientSession:
             raise RuntimeError(
                 f"GMS export returned no FD for allocation_id={allocation_id}"
             )
+        return response, fd
+
+    def export(self, allocation_id: str) -> int:
+        _, fd = self.export_info(allocation_id)
         return fd
 
     def get_allocation(self, allocation_id: str) -> GetAllocationResponse:

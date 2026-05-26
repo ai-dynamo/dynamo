@@ -154,8 +154,8 @@ def cumem_address_free(va: int, size: int) -> None:
     cuda_check_result(result, "cuMemAddressFree")
 
 
-def cumem_map(va: int, size: int, handle: int) -> None:
-    (result,) = cuda.cuMemMap(va, size, 0, handle, 0)
+def cumem_map(va: int, size: int, handle: int, offset: int = 0) -> None:
+    (result,) = cuda.cuMemMap(va, size, offset, handle, 0)
     cuda_check_result(result, "cuMemMap")
 
 

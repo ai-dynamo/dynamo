@@ -41,15 +41,34 @@ from gpu_memory_service.snapshot.transfer import (
 
 logger = logging.getLogger(__name__)
 
+PACKED_RESTORE_SLAB_SIZE_BYTES = 16 * 1024**3
+
 try:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+    from gpu_memory_service.common.cuda_utils import (
+        align_to_granularity,
+        cumem_address_free,
+        cumem_address_reserve,
+        cumem_import_from_shareable_handle_close_fd,
+        cumem_map,
+        cumem_release,
+        cumem_set_access,
+        cumem_unmap,
+        cuda_synchronize,
+    )
     from gpu_memory_service.common.locks import RequestedLockType
+    from gpu_memory_service.common.protocol.messages import (
+        CreatePackedLayoutRequest,
+        PackedRestorePlacement,
+    )
 
     _GMS_CORE_IMPORTS_AVAILABLE = True
 except ImportError:
     _GMS_CORE_IMPORTS_AVAILABLE = False
     GMSClientMemoryManager = None  # type: ignore[assignment,misc]
     RequestedLockType = None  # type: ignore[assignment]
+    CreatePackedLayoutRequest = None  # type: ignore[assignment,misc]
+    PackedRestorePlacement = None  # type: ignore[assignment,misc]
 
 
 def _decode_metadata(raw_meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -282,6 +301,139 @@ class GMSStorageClient:
         )
         return id_map, targets
 
+    def _pack_restore_allocations(
+        self,
+        mm: Any,
+        manifest: SaveManifest,
+    ) -> Tuple[List[int], List[Any]]:
+        granularity = int(mm.granularity)
+        target_slab_size = align_to_granularity(
+            PACKED_RESTORE_SLAB_SIZE_BYTES, granularity
+        )
+        backing_sizes: List[int] = []
+        placements: List[Any] = []
+        current_index = -1
+        current_offset = 0
+
+        for entry in manifest.allocations:
+            aligned_size = align_to_granularity(int(entry.aligned_size), granularity)
+            if aligned_size <= 0:
+                raise RuntimeError(
+                    f"Invalid allocation size in manifest for {entry.allocation_id}: "
+                    f"{entry.aligned_size}"
+                )
+
+            if (
+                current_index < 0
+                or current_offset + aligned_size > backing_sizes[current_index]
+            ):
+                backing_size = max(target_slab_size, aligned_size)
+                backing_sizes.append(backing_size)
+                current_index = len(backing_sizes) - 1
+                current_offset = 0
+
+            placements.append(
+                PackedRestorePlacement(
+                    size=int(entry.size),
+                    aligned_size=aligned_size,
+                    tag=str(entry.tag),
+                    backing_index=current_index,
+                    backing_offset=current_offset,
+                )
+            )
+            current_offset += aligned_size
+
+        if backing_sizes and current_index >= 0:
+            backing_sizes[current_index] = max(
+                align_to_granularity(current_offset, granularity), granularity
+            )
+
+        return backing_sizes, placements
+
+    def _allocate_packed_restore_targets(
+        self,
+        mm: Any,
+        manifest: SaveManifest,
+    ) -> Tuple[Dict[str, str], Dict[str, GMSTransferTarget], List[Tuple[int, int, int]]]:
+        t0 = time.monotonic()
+        backing_sizes, placements = self._pack_restore_allocations(mm, manifest)
+        if not placements:
+            return {}, {}, []
+
+        response = mm.create_packed_layout(
+            CreatePackedLayoutRequest(
+                backing_sizes=backing_sizes,
+                placements=placements,
+            )
+        )
+        if len(response.allocations) != len(manifest.allocations):
+            raise RuntimeError(
+                "Packed restore response allocation count mismatch: "
+                f"{len(response.allocations)} vs {len(manifest.allocations)}"
+            )
+
+        slab_vas: List[int] = []
+        slab_handles: List[int] = []
+        mapped_slabs: List[Tuple[int, int, int]] = []
+        try:
+            for backing_index, backing_size in enumerate(backing_sizes):
+                # Any published allocation placed in this backing slab can export
+                # the slab FD.  Use the first such allocation as the export key.
+                export_alloc_index = next(
+                    index
+                    for index, placement in enumerate(placements)
+                    if int(placement.backing_index) == backing_index
+                )
+                export_alloc = response.allocations[export_alloc_index]
+                export_info, fd = mm.export_handle_info(export_alloc.allocation_id)
+                if int(export_info.mapping_offset) != int(
+                    placements[export_alloc_index].backing_offset
+                ):
+                    raise RuntimeError(
+                        "Packed restore export offset mismatch for backing "
+                        f"{backing_index}: {export_info.mapping_offset} vs "
+                        f"{placements[export_alloc_index].backing_offset}"
+                    )
+                handle = cumem_import_from_shareable_handle_close_fd(fd)
+                va = cumem_address_reserve(backing_size, int(mm.granularity))
+                cumem_map(va, backing_size, handle, 0)
+                if mm.granted_lock_type is None:
+                    raise RuntimeError("GMS lock is not active while mapping slabs")
+                cumem_set_access(va, backing_size, self.device, mm.granted_lock_type)
+                slab_vas.append(va)
+                slab_handles.append(handle)
+                mapped_slabs.append((va, backing_size, handle))
+
+            id_map: Dict[str, str] = {}
+            targets: Dict[str, GMSTransferTarget] = {}
+            for entry, placement, alloc in zip(
+                manifest.allocations, placements, response.allocations, strict=True
+            ):
+                old_id = entry.allocation_id
+                id_map[old_id] = alloc.allocation_id
+                targets[old_id] = GMSTransferTarget(
+                    allocation_id=old_id,
+                    va=slab_vas[int(placement.backing_index)]
+                    + int(placement.backing_offset),
+                    device=self.device,
+                    byte_count=int(entry.aligned_size),
+                )
+            logger.info(
+                "Phase A complete: packed %d GMS VAs into %d slab(s) "
+                "(%.2f GiB backing) in %.3fs",
+                len(targets),
+                len(backing_sizes),
+                sum(backing_sizes) / (1 << 30),
+                time.monotonic() - t0,
+            )
+            return id_map, targets, mapped_slabs
+        except Exception:
+            for va, size, handle in reversed(mapped_slabs):
+                cumem_unmap(va, size)
+                cumem_release(handle)
+                cumem_address_free(va, size)
+            raise
+
     def load_to_gms(
         self,
         input_dir: str,
@@ -308,6 +460,7 @@ class GMSStorageClient:
         )
         session = None
         id_map: Dict[str, str] = {}
+        packed_slab_mappings: List[Tuple[int, int, int]] = []
 
         try:
             manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
@@ -318,17 +471,39 @@ class GMSStorageClient:
                 if clear_existing:
                     logger.info("RW connect cleared any previously committed GMS state")
 
-                id_map, targets = self._allocate_restore_targets(mm, manifest)
-                session.restore(targets)
-                logger.info(
-                    "Phase B complete: %s restored %d allocations to GMS memory",
-                    backend.name,
-                    len(manifest.allocations),
-                )
+                try:
+                    id_map, targets, packed_slab_mappings = (
+                        self._allocate_packed_restore_targets(mm, manifest)
+                    )
+                    session.restore(targets)
+                    logger.info(
+                        "Phase B complete: %s restored %d allocations to GMS memory",
+                        backend.name,
+                        len(manifest.allocations),
+                    )
 
-                self._restore_metadata(mm, saved_metadata, id_map)
-                if not mm.commit():
-                    raise RuntimeError("GMS commit failed after restore")
+                    self._restore_metadata(mm, saved_metadata, id_map)
+                    # The manual slab mappings are not tracked by
+                    # GMSClientMemoryManager.  Keep the same publish barrier as
+                    # mm.commit(): synchronize writer-side GPU work, unmap the
+                    # writer's local slab mappings, then publish the committed
+                    # layout.  This lets the restored main remap the published
+                    # allocation views while the loader releases its temporary
+                    # slab VAs.
+                    cuda_synchronize()
+                    for va, size, handle in reversed(packed_slab_mappings):
+                        cumem_unmap(va, size)
+                        cumem_release(handle)
+                        cumem_address_free(va, size)
+                    packed_slab_mappings = []
+                    if not mm.commit():
+                        raise RuntimeError("GMS commit failed after restore")
+                finally:
+                    for va, size, handle in reversed(packed_slab_mappings):
+                        cumem_unmap(va, size)
+                        cumem_release(handle)
+                        cumem_address_free(va, size)
+                    packed_slab_mappings = []
         finally:
             if session is not None:
                 session.close()

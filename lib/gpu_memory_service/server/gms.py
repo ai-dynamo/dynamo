@@ -17,6 +17,8 @@ from gpu_memory_service.common.protocol.messages import (
     AllocateResponse,
     CommitRequest,
     CommitResponse,
+    CreatePackedLayoutRequest,
+    CreatePackedLayoutResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
     FreeAllocationRequest,
@@ -275,6 +277,48 @@ class GMS:
                 False,
             )
 
+        if msg_type is CreatePackedLayoutRequest:
+            if self.state != ServerState.RW:
+                raise AssertionError("RW state is not active")
+
+            infos = await self._allocations.create_packed_layout(
+                backing_sizes=[int(size) for size in msg.backing_sizes],
+                placements=[
+                    (
+                        int(placement.size),
+                        int(placement.aligned_size),
+                        str(placement.tag),
+                        int(placement.backing_index),
+                        int(placement.backing_offset),
+                    )
+                    for placement in msg.placements
+                ],
+                is_connected=is_connected,
+                on_oom=lambda: self._events.append(
+                    GMSRuntimeEvent(
+                        kind="allocation_oom",
+                        allocation_count=self._allocations.allocation_count,
+                    )
+                ),
+            )
+            return (
+                CreatePackedLayoutResponse(
+                    allocations=[
+                        AllocateResponse(
+                            allocation_id=info.allocation_id,
+                            size=info.size,
+                            aligned_size=info.aligned_size,
+                            layout_slot=info.layout_slot,
+                        )
+                        for info in infos
+                    ],
+                    backing_count=len(msg.backing_sizes),
+                    backing_bytes=sum(int(size) for size in msg.backing_sizes),
+                ),
+                -1,
+                False,
+            )
+
         if msg_type is GetLockStateRequest:
             snapshot = self._sessions.snapshot()
             return (
@@ -309,6 +353,7 @@ class GMS:
                     aligned_size=info.aligned_size,
                     tag=info.tag,
                     layout_slot=info.layout_slot,
+                    mapping_offset=info.backing_offset,
                 ),
                 fd,
                 False,
@@ -330,6 +375,7 @@ class GMS:
                     aligned_size=info.aligned_size,
                     tag=info.tag,
                     layout_slot=info.layout_slot,
+                    mapping_offset=info.backing_offset,
                 ),
                 -1,
                 False,
@@ -345,6 +391,7 @@ class GMS:
                             aligned_size=info.aligned_size,
                             tag=info.tag,
                             layout_slot=info.layout_slot,
+                            mapping_offset=info.backing_offset,
                         )
                         for info in self._allocations.list_allocations(msg.tag)
                     ]
