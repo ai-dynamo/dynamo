@@ -2,6 +2,9 @@ name: 'Setup Dynamo Operator'
 description: 'Create a vCluster, install the Dynamo platform operator inside it via Helm'
 
 inputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for host cluster access'
+    required: false
   vcluster_name:
     description: 'Name for the vCluster instance (auto-generated from github.run_id if empty)'
     required: false
@@ -74,6 +77,14 @@ runs:
 
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
 
+    - name: Setup host kubeconfig
+      id: setup-host-kubeconfig
+      if: inputs.kubeconfig_base64 != ''
+      shell: bash
+      run: |
+        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host
+        chmod 600 ${{ github.workspace }}/.kubeconfig-host
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
 
     - name: Install vCluster CLI
       uses: ./.github/actions/install-vcluster-cli
