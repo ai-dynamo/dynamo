@@ -126,6 +126,7 @@ def _run_load(args) -> None:
         timeout_ms=args.timeout_ms,
         transfer_backend=args.transfer_backend,
         sharded_ssd_roots=_parse_sharded_ssd_roots(args.sharded_ssd_roots),
+        sharded_ssd_queues_per_root=args.sharded_ssd_queues_per_root,
     )
 
     id_map = client.load_to_gms(
@@ -273,6 +274,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sharded-ssd-roots",
         default=None,
         help="Comma-separated SSD roots for the sharded-ssd transfer backend.",
+    )
+    load_p.add_argument(
+        "--sharded-ssd-queues-per-root",
+        type=int,
+        default=1,
+        help=(
+            "Number of independent sharded-ssd restore queues per SSD root "
+            "(default: 1). Increase this to use multiple NIXL/POSIX workers "
+            "per local SSD root."
+        ),
     )
     load_p.add_argument(
         "--no-clear",
