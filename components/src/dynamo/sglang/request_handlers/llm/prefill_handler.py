@@ -8,7 +8,6 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -138,7 +137,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
             dp_rank = None
 
-        trace_header = build_trace_headers(context) if self.enable_trace else None
+        trace_header = context.trace_headers() if self.enable_trace else None
 
         lora_path = self._resolve_lora(inner_request)
         if lora_path:

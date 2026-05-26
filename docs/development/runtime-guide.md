@@ -31,11 +31,11 @@ cargo test
 
 The simplest way to deploy the pre-requisite services is using
 [docker-compose](https://docs.docker.com/compose/install/linux/),
-defined in [deploy/docker-compose.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml).
+defined in [dev/docker-compose.yml](../../dev/docker-compose.yml).
 
 ```
 # At the root of the repository:
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 This will deploy a [NATS.io](https://nats.io/) server and an [etcd](https://etcd.io/)

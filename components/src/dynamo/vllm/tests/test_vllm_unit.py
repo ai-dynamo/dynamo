@@ -728,6 +728,46 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
+@pytest.mark.asyncio
+async def test_health_check_decode_opts_out_with_warning():
+    # mock.patch the module logger directly: dynamo's logging setup
+    # turns off propagation on per-module loggers, so pytest's caplog
+    # (which attaches at root) doesn't see these warnings.
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.DECODE,
+        served_model_name="test",
+        component="backend",
+    )
+    with patch("dynamo.vllm.llm_engine.logger") as mock_logger:
+        payload = await engine.health_check_payload()
+
+    assert payload is None
+    assert mock_logger.warning.call_count == 1
+    msg = mock_logger.warning.call_args.args[0]
+    assert "DECODE worker: health-check canary disabled" in msg
+
+
+@pytest.mark.asyncio
+async def test_health_check_aggregated_returns_canary():
+    from dynamo.common.backend.health_check import HEALTH_CHECK_KEY
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        served_model_name="test",
+        component="backend",
+    )
+    payload = await engine.health_check_payload()
+
+    assert payload is not None
+    assert payload[HEALTH_CHECK_KEY] is True
+    assert payload["token_ids"]
+
+
 def test_build_sampling_params_maps_max_thinking_tokens():
     from dynamo.vllm.handlers import build_sampling_params
 
@@ -819,3 +859,70 @@ class TestRunnerPreservation:
         update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
         assert not hasattr(engine_cfg, "runner")
+
+
+class TestEmbeddingWorkerFlag:
+    """Parsing + validation for --embedding-worker."""
+
+    def test_default_false(self, mock_vllm_cli):
+        """Without --embedding-worker, the flag is False."""
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+        config = parse_args()
+        assert config.embedding_worker is False
+
+    def test_flag_sets_true(self, mock_vllm_cli):
+        """--embedding-worker on its own with default agg mode parses cleanly."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+        )
+        config = parse_args()
+        assert config.embedding_worker is True
+
+    def test_rejects_prefill_disagg(self, mock_vllm_cli):
+        """--embedding-worker combined with --disaggregation-mode prefill is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--disaggregation-mode",
+            "prefill",
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        )
+        with pytest.raises(ValueError, match="--embedding-worker is only valid"):
+            parse_args()
+
+    def test_rejects_decode_disagg(self, mock_vllm_cli):
+        """--embedding-worker combined with --disaggregation-mode decode is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--disaggregation-mode",
+            "decode",
+        )
+        with pytest.raises(ValueError, match="--embedding-worker is only valid"):
+            parse_args()
+
+    def test_rejects_multimodal_combo(self, mock_vllm_cli):
+        """--embedding-worker combined with multimodal flags is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--enable-multimodal",
+        )
+        with pytest.raises(
+            ValueError, match="--embedding-worker cannot be combined with multimodal"
+        ):
+            parse_args()

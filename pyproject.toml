@@ -63,13 +63,15 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.11",
+    "sglang[diffusion]==0.5.12.post1",
+    # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
+    "accelerate>=0.17.0",
     "nixl[cu12]>=1.0.0,<1.1.0",
     "cupy-cuda12x>=13.0.0",
 ]
 
 mocker = [
-    "aiconfigurator>=0.7.0",
+    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@2103aa286a822d112ea83781ad14e3e022b603d9",
 ]
 
 [project.entry-points.pytest11]
@@ -163,6 +165,7 @@ addopts = [
     "--showlocals",
     "--strict-markers",
     "--strict-config",
+    "-p", "no:schemathesis",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
