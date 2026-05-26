@@ -337,56 +337,21 @@ impl AddressedPushRouter {
         };
 
         // Bidirectional envelope is header-only: every request frame
-        // (including the first) flows uniformly on the request-stream
-        // socket, so the wire shape doesn't have to mirror the unary
-        // `[control_msg, request]` two-part layout. The worker decodes
-        // the control message, dials back for both streams, and pulls
-        // frames off the request-stream as the engine asks for them.
-        let ctrl = match serde_json::to_vec(&control_message) {
-            Ok(v) => v,
-            Err(e) => {
-                self.cancel_both(&recv_subject, &send_subject).await;
-                return Err(e.into());
-            }
-        };
-
-        tracing::trace!(
-            request_id,
-            "packaging bidirectional header-only envelope; ctrl: {} bytes",
-            ctrl.len(),
-        );
-
-        let msg = TwoPartMessage::from_header(ctrl.into());
-        let codec = TwoPartCodec::default();
-        let buffer = match codec.encode_message(msg) {
-            Ok(v) => v,
-            Err(e) => {
-                self.cancel_both(&recv_subject, &send_subject).await;
-                return Err(e.into());
-            }
-        };
-
-        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
-        let tx_start = Instant::now();
-
-        let mut headers = std::collections::HashMap::new();
-        inject_trace_headers_into_map(&mut headers);
-        headers.insert("request-id".to_string(), request_id.clone());
-        let send_ts_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
-
-        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send_bidirectional");
-        let send_result = self.req_client.send_request(address, buffer, headers).await;
-        drop(_nvtx_send);
-
-        if let Err(e) = send_result {
-            self.cancel_both(&recv_subject, &send_subject).await;
-            return Err(e);
-        }
-        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+        // (including the first) flows on the request-stream socket. The
+        // worker decodes the control message, dials back for both streams,
+        // and pulls frames off the request-stream as the engine asks for
+        // them.
+        let tx_start = self
+            .dispatch_request_envelope::<()>(
+                address,
+                &control_message,
+                None,
+                &request_id,
+                queue_start,
+                &recv_subject,
+                &send_subject,
+            )
+            .await?;
 
         // Await both call-home dials. Response side first (worker's prologue
         // is the synchronization point — error or success); request side
@@ -585,6 +550,112 @@ impl AddressedPushRouter {
 
         Ok((recv_subject, send_subject))
     }
+
+    /// Encode the request envelope (header-only when `request` is `None`,
+    /// otherwise a two-part `[ctrl, data]` message) and dispatch it over the
+    /// request plane. Observes the queue-duration and send-duration metrics,
+    /// injects trace + request-id + send-timestamp headers, and on any failure
+    /// (control-message serialize, payload serialize, codec encode, or
+    /// `send_request`) invokes `cancel_both` before bubbling the error up.
+    ///
+    /// `request = None` is the bidirectional header-only shape; `request =
+    /// Some(...)` is the unary two-part shape. The nvtx range label is
+    /// derived from this.
+    ///
+    /// Returns the `Instant` captured immediately before the wire write so
+    /// callers can compute downstream phase metrics (e.g. transport TTFT).
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_request_envelope<T>(
+        &self,
+        address: String,
+        control_message: &RequestControlMessage,
+        request: Option<&T>,
+        request_id: &str,
+        queue_start: Instant,
+        recv_subject: &Option<String>,
+        send_subject: &Option<String>,
+    ) -> Result<Instant, Error>
+    where
+        T: Serialize + ?Sized,
+    {
+        let ctrl = match serialize_control_message(control_message) {
+            Ok(v) => v,
+            Err(e) => {
+                self.cancel_both(recv_subject, send_subject).await;
+                return Err(e);
+            }
+        };
+
+        let data: Option<Vec<u8>> = match request {
+            Some(req) => match serde_json::to_vec(req) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    self.cancel_both(recv_subject, send_subject).await;
+                    return Err(e.into());
+                }
+            },
+            None => None,
+        };
+
+        let (msg, nvtx_label) = match &data {
+            Some(d) => {
+                tracing::trace!(
+                    request_id,
+                    "packaging two-part message; ctrl: {} bytes, data: {} bytes",
+                    ctrl.len(),
+                    d.len(),
+                );
+                (
+                    TwoPartMessage::from_parts(ctrl.into(), d.clone().into()),
+                    "transport.tcp.send",
+                )
+            }
+            None => {
+                tracing::trace!(
+                    request_id,
+                    "packaging bidirectional header-only envelope; ctrl: {} bytes",
+                    ctrl.len(),
+                );
+                (
+                    TwoPartMessage::from_header(ctrl.into()),
+                    "transport.tcp.send_bidirectional",
+                )
+            }
+        };
+
+        let codec = TwoPartCodec::default();
+        let buffer = match codec.encode_message(msg) {
+            Ok(v) => v,
+            Err(e) => {
+                self.cancel_both(recv_subject, send_subject).await;
+                return Err(e.into());
+            }
+        };
+
+        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
+        let tx_start = Instant::now();
+
+        let mut headers = std::collections::HashMap::new();
+        inject_trace_headers_into_map(&mut headers);
+        headers.insert("request-id".to_string(), request_id.to_string());
+        let send_ts_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
+
+        let _nvtx_send = dynamo_nvtx_range!(nvtx_label);
+        let send_result = self.req_client.send_request(address, buffer, headers).await;
+        drop(_nvtx_send);
+
+        if let Err(e) = send_result {
+            self.cancel_both(recv_subject, send_subject).await;
+            return Err(e);
+        }
+        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+
+        Ok(tx_start)
+    }
 }
 
 #[async_trait::async_trait]
@@ -638,89 +709,17 @@ where
             request_stream_connection_info: None,
         };
 
-        // next build the two part message where we package the connection info and the request into
-        // a single Vec<u8> that can be sent over the wire.
-        // --- package this up in the WorkQueuePublisher ---
-        let ctrl = match serialize_control_message(&control_message) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
-                return Err(e);
-            }
-        };
-        let data = match serde_json::to_vec(&request) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
-                return Err(e.into());
-            }
-        };
-
-        tracing::trace!(
-            request_id,
-            "packaging two-part message; ctrl: {} bytes, data: {} bytes",
-            ctrl.len(),
-            data.len()
-        );
-
-        let msg = TwoPartMessage::from_parts(ctrl.into(), data.into());
-
-        // the request plane / work queue should provide a two part message codec that can be used
-        // or it should take a two part message directly
-        // todo - update this
-        let codec = TwoPartCodec::default();
-        let buffer = match codec.encode_message(msg) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
-                return Err(e.into());
-            }
-        };
-
-        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
-        let tx_start = Instant::now();
-
-        // TRANSPORT ABSTRACT REQUIRED - END HERE
-
-        // Send request using unified client interface
-        tracing::trace!(
-            request_id,
-            transport = self.req_client.transport_name(),
-            address = %address,
-            "Sending request via request plane client"
-        );
-
-        // Prepare trace headers using shared helper
-        let mut headers = std::collections::HashMap::new();
-        inject_trace_headers_into_map(&mut headers);
-        headers.insert("request-id".to_string(), request_id.clone());
-
-        // Stamp send time right before the transport write so the network
-        // transit metric excludes serialization/encoding overhead.
-        let send_ts_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
-
-        // Phase A: Frontend → Backend (network + queue + ack)
-        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
-        let send_result = self.req_client.send_request(address, buffer, headers).await;
-        drop(_nvtx_send);
-
-        if let Err(e) = send_result {
-            if let Some(subject) = &recv_subject {
-                self.resp_transport.cancel_recv_stream(subject).await;
-            }
-            return Err(e);
-        }
-        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+        let tx_start = self
+            .dispatch_request_envelope(
+                address,
+                &control_message,
+                Some(&request),
+                &request_id,
+                queue_start,
+                &recv_subject,
+                &None,
+            )
+            .await?;
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
