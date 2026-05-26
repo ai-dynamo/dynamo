@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    any::Any,
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
@@ -22,6 +23,16 @@ use super::{
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
+
+fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = panic_payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "Unknown panic payload".to_string()
+    }
+}
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
 ///
@@ -155,9 +166,31 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
             let backend = Arc::clone(&backend);
             let metrics = metrics.clone();
+            let worker_idx = thread_handles.len();
 
             let handle = std::thread::spawn(move || {
-                backend.worker(event_receiver, metrics).unwrap();
+                // This is observability, not recovery: if the worker panics, log
+                // through tracing and then preserve the panic for join().
+                let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Err(error) = backend.worker(event_receiver, metrics) {
+                        tracing::error!(
+                            worker_thread_index = worker_idx,
+                            ?error,
+                            "Thread pool worker exited with an error; worker thread is now dead"
+                        );
+                    }
+                }));
+
+                if let Err(panic_payload) = panic_result {
+                    let panic_msg = panic_payload_message(&*panic_payload);
+                    tracing::error!(
+                        target: "dynamo_kv_router::thread_pool_worker_panic",
+                        worker_thread_index = worker_idx,
+                        panic_message = %panic_msg,
+                        "Thread pool worker panicked; worker thread is now dead"
+                    );
+                    std::panic::resume_unwind(panic_payload);
+                }
             });
             thread_handles.push(handle);
         }

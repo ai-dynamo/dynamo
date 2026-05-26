@@ -4,7 +4,7 @@
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
-use std::{sync::Arc, time::Duration};
+use std::{any::Any, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
@@ -36,6 +36,16 @@ fn apply_event_with_counters(
         );
     }
     counters.inc(kind, result);
+}
+
+fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = panic_payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "Unknown panic payload".to_string()
+    }
 }
 
 fn apply_routing_decision_with_prune_tracking(
@@ -221,157 +231,168 @@ impl KvIndexer {
         let cancel_clone = token.clone();
 
         std::thread::spawn(move || {
-            // Create a single-threaded tokio runtime
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create indexer runtime");
 
-            runtime.block_on(async move {
-                let cancel = cancel_clone;
-                let mut match_rx = match_rx;
-                let mut match_details_rx = match_details_rx;
-                let mut event_rx = event_rx;
-                let mut remove_worker_rx = remove_worker_rx;
-                let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
-                let mut get_workers_rx = get_workers_rx;
-                let mut dump_rx = dump_rx;
-                let mut flush_rx = flush_rx;
-                let mut trie = RadixTree::new_with_frequency(expiration_duration);
+                runtime.block_on(async move {
+                    let cancel = cancel_clone;
+                    let mut match_rx = match_rx;
+                    let mut match_details_rx = match_details_rx;
+                    let mut event_rx = event_rx;
+                    let mut remove_worker_rx = remove_worker_rx;
+                    let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
+                    let mut get_workers_rx = get_workers_rx;
+                    let mut dump_rx = dump_rx;
+                    let mut flush_rx = flush_rx;
+                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
 
-                let prune_manager = prune_config.map(WorkerPruneManager::new);
-                let mut prune_ready_rx = prune_manager.as_ref().map(|pm| pm.subscribe_ready());
-                let mut event_id_counter = 0u64;
-                let counters = metrics.prebind();
+                    let prune_manager = prune_config.map(WorkerPruneManager::new);
+                    let mut prune_ready_rx = prune_manager.as_ref().map(|pm| pm.subscribe_ready());
+                    let mut event_id_counter = 0u64;
+                    let counters = metrics.prebind();
 
-                loop {
-                    tokio::select! {
-                        biased;
+                    loop {
+                        tokio::select! {
+                            biased;
 
-                        _ = cancel.cancelled() => {
-                            tracing::debug!("KvCacheIndexer progress loop shutting down");
-                            return;
-                        }
-
-                        Some(worker) = remove_worker_rx.recv() => {
-                            trie.remove_worker(worker);
-                            if let Some(pm) = &prune_manager {
-                                pm.remove_worker(worker);
+                            _ = cancel.cancelled() => {
+                                tracing::debug!("KvCacheIndexer progress loop shutting down");
+                                return;
                             }
-                        }
 
-                        Some((worker_id, dp_rank)) = remove_worker_dp_rank_rx.recv() => {
-                            trie.remove_worker_dp_rank(worker_id, dp_rank);
-                            if let Some(pm) = &prune_manager {
-                                pm.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
-                            }
-                        }
-
-                        Some(event) = event_rx.recv() => {
-                            apply_event_with_counters(&mut trie, event, &counters);
-                        }
-
-                        Some(get_workers_req) = get_workers_rx.recv() => {
-                            let workers = trie.get_workers();
-                            let _ = get_workers_req.resp.send(workers);
-                        }
-
-                        Some(dump_req) = dump_rx.recv() => {
-                            drain_pending_mutations(
-                                &mut trie,
-                                PendingMutationReceivers {
-                                    event_rx: &mut event_rx,
-                                    remove_worker_rx: &mut remove_worker_rx,
-                                    remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
-                                    routing_rx: &mut routing_rx,
-                                },
-                                &counters,
-                                &prune_manager,
-                                &mut event_id_counter,
-                            );
-                            let events = trie.dump_tree_as_events();
-                            let _ = dump_req.resp.send(events);
-                        }
-
-                        Some(flush_req) = flush_rx.recv() => {
-                            drain_pending_mutations(
-                                &mut trie,
-                                PendingMutationReceivers {
-                                    event_rx: &mut event_rx,
-                                    remove_worker_rx: &mut remove_worker_rx,
-                                    remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
-                                    routing_rx: &mut routing_rx,
-                                },
-                                &counters,
-                                &prune_manager,
-                                &mut event_id_counter,
-                            );
-                            let _ = flush_req.resp.send(());
-                        }
-
-                        Some(routing_req) = routing_rx.recv() => {
-                            apply_routing_decision_with_prune_tracking(
-                                &mut trie,
-                                routing_req,
-                                &prune_manager,
-                                &mut event_id_counter,
-                            );
-                        }
-
-                        _ = async {
-                            if let Some(rx) = prune_ready_rx.as_mut() {
-                                let _ = rx.changed().await;
-                            } else {
-                                std::future::pending::<()>().await;
-                            }
-                        } => {
-                            if let Some(pm) = &prune_manager {
-                                loop {
-                                    let entries = pm.drain_pending_removes();
-                                    if entries.is_empty() {
-                                        break;
-                                    }
-                                    apply_prune_removes(
-                                        &mut trie,
-                                        entries,
-                                        &mut event_id_counter,
-                                    );
+                            Some(worker) = remove_worker_rx.recv() => {
+                                trie.remove_worker(worker);
+                                if let Some(pm) = &prune_manager {
+                                    pm.remove_worker(worker);
                                 }
                             }
+
+                            Some((worker_id, dp_rank)) = remove_worker_dp_rank_rx.recv() => {
+                                trie.remove_worker_dp_rank(worker_id, dp_rank);
+                                if let Some(pm) = &prune_manager {
+                                    pm.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+                                }
+                            }
+
+                            Some(event) = event_rx.recv() => {
+                                apply_event_with_counters(&mut trie, event, &counters);
+                            }
+
+                            Some(get_workers_req) = get_workers_rx.recv() => {
+                                let workers = trie.get_workers();
+                                let _ = get_workers_req.resp.send(workers);
+                            }
+
+                            Some(dump_req) = dump_rx.recv() => {
+                                drain_pending_mutations(
+                                    &mut trie,
+                                    PendingMutationReceivers {
+                                        event_rx: &mut event_rx,
+                                        remove_worker_rx: &mut remove_worker_rx,
+                                        remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
+                                        routing_rx: &mut routing_rx,
+                                    },
+                                    &counters,
+                                    &prune_manager,
+                                    &mut event_id_counter,
+                                );
+                                let events = trie.dump_tree_as_events();
+                                let _ = dump_req.resp.send(events);
+                            }
+
+                            Some(flush_req) = flush_rx.recv() => {
+                                drain_pending_mutations(
+                                    &mut trie,
+                                    PendingMutationReceivers {
+                                        event_rx: &mut event_rx,
+                                        remove_worker_rx: &mut remove_worker_rx,
+                                        remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
+                                        routing_rx: &mut routing_rx,
+                                    },
+                                    &counters,
+                                    &prune_manager,
+                                    &mut event_id_counter,
+                                );
+                                let _ = flush_req.resp.send(());
+                            }
+
+                            Some(routing_req) = routing_rx.recv() => {
+                                apply_routing_decision_with_prune_tracking(
+                                    &mut trie,
+                                    routing_req,
+                                    &prune_manager,
+                                    &mut event_id_counter,
+                                );
+                            }
+
+                            _ = async {
+                                if let Some(rx) = prune_ready_rx.as_mut() {
+                                    let _ = rx.changed().await;
+                                } else {
+                                    std::future::pending::<()>().await;
+                                }
+                            } => {
+                                if let Some(pm) = &prune_manager {
+                                    loop {
+                                        let entries = pm.drain_pending_removes();
+                                        if entries.is_empty() {
+                                            break;
+                                        }
+                                        apply_prune_removes(
+                                            &mut trie,
+                                            entries,
+                                            &mut event_id_counter,
+                                        );
+                                    }
+                                }
+                            }
+
+                            Some(req) = match_rx.recv() => {
+                                #[cfg(feature = "bench")]
+                                let queue_wait = req.created_at.elapsed();
+                                #[cfg(feature = "bench")]
+                                let seq_len = req.sequence.len();
+
+                                #[cfg(feature = "bench")]
+                                let process_start = Instant::now();
+                                let matches = trie.find_matches(req.sequence, req.early_exit);
+                                #[cfg(feature = "bench")]
+                                let process_time = process_start.elapsed();
+
+                                #[cfg(feature = "bench")]
+                                tracing::info!(
+                                    seq_len,
+                                    queue_wait_us = queue_wait.as_micros() as u64,
+                                    process_us = process_time.as_micros() as u64,
+                                    "indexer: processed find_matches"
+                                );
+                                let _ = req.resp.send(matches);
+                            }
+
+                            Some(req) = match_details_rx.recv() => {
+                                let matches = trie.find_match_details(req.sequence, req.early_exit);
+                                let _ = req.resp.send(matches);
+                            }
+
                         }
-
-                        Some(req) = match_rx.recv() => {
-                            #[cfg(feature = "bench")]
-                            let queue_wait = req.created_at.elapsed();
-                            #[cfg(feature = "bench")]
-                            let seq_len = req.sequence.len();
-
-                            #[cfg(feature = "bench")]
-                            let process_start = Instant::now();
-                            let matches = trie.find_matches(req.sequence, req.early_exit);
-                            #[cfg(feature = "bench")]
-                            let process_time = process_start.elapsed();
-
-                            #[cfg(feature = "bench")]
-                            tracing::info!(
-                                seq_len,
-                                queue_wait_us = queue_wait.as_micros() as u64,
-                                process_us = process_time.as_micros() as u64,
-                                "indexer: processed find_matches"
-                            );
-                            let _ = req.resp.send(matches);
-                        }
-
-                        Some(req) = match_details_rx.recv() => {
-                            let matches = trie.find_match_details(req.sequence, req.early_exit);
-                            let _ = req.resp.send(matches);
-                        }
-
                     }
-                }
-            });
+                });
 
-            tracing::debug!("KvCacheIndexer task completed");
+                tracing::debug!("KvCacheIndexer task completed");
+            }));
+
+            if let Err(panic_payload) = panic_result {
+                let panic_msg = panic_payload_message(&*panic_payload);
+                tracing::error!(
+                    target: "dynamo_kv_router::indexer_panic",
+                    panic_message = %panic_msg,
+                    "KV indexer thread panicked; indexer is now dead and will not process events"
+                );
+                std::panic::resume_unwind(panic_payload);
+            }
         });
 
         Self {
