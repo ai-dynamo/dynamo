@@ -40,7 +40,6 @@ pub(crate) fn metadata_header_prefix() -> &'static str {
         std::env::var(DYNAMO_METADATA_HEADER_ENV)
             .ok()
             .map(|prefix| prefix.trim().to_ascii_lowercase())
-            .filter(|prefix| !prefix.is_empty())
             .unwrap_or_else(|| DYNAMO_METADATA_HEADER_PREFIX_DEFAULT.to_string())
     })
 }
