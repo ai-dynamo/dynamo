@@ -12,6 +12,31 @@ use dynamo_kv_router::{
 
 use super::{Indexer, SideIndexer, TieredMatchDetails, remote::RemoteIndexer};
 
+pub(super) enum HashInput<'a> {
+    Borrowed(&'a [LocalBlockHash]),
+    Owned(Vec<LocalBlockHash>),
+}
+
+impl<'a> HashInput<'a> {
+    pub(super) fn as_slice(&self) -> &[LocalBlockHash] {
+        match self {
+            Self::Borrowed(sequence) => sequence,
+            Self::Owned(sequence) => sequence,
+        }
+    }
+
+    pub(super) fn clone_for_boundary(&self) -> Vec<LocalBlockHash> {
+        self.as_slice().to_vec()
+    }
+
+    pub(super) fn into_owned_at_boundary(self) -> Vec<LocalBlockHash> {
+        match self {
+            Self::Borrowed(sequence) => sequence.to_vec(),
+            Self::Owned(sequence) => sequence,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum PrimaryLookup<'a> {
     KvIndexer(&'a KvIndexer),
@@ -65,21 +90,14 @@ impl Indexer {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn find_matches(
-        &self,
-        sequence: Vec<LocalBlockHash>,
-    ) -> Result<OverlapScores, KvRouterError> {
-        self.find_match_details(sequence)
-            .await
-            .map(|details| details.overlap_scores)
-    }
-
+    #[cfg(test)]
     pub(crate) async fn find_match_details(
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<MatchDetails, KvRouterError> {
-        self.lookup_pipeline().find_match_details(sequence).await
+        self.lookup_pipeline()
+            .find_match_details(HashInput::Owned(sequence))
+            .await
     }
 
     pub(crate) async fn find_primary_match_details(
@@ -87,7 +105,7 @@ impl Indexer {
         sequence: Vec<LocalBlockHash>,
     ) -> Result<MatchDetails, KvRouterError> {
         self.lookup_pipeline()
-            .find_primary_match_details(sequence)
+            .find_primary_match_details(HashInput::Owned(sequence))
             .await
     }
 
@@ -95,7 +113,18 @@ impl Indexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
-        self.lookup_pipeline().find_matches_by_tier(sequence).await
+        self.lookup_pipeline()
+            .find_matches_by_tier(HashInput::Owned(sequence))
+            .await
+    }
+
+    pub(crate) async fn find_matches_by_tier_ref(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.lookup_pipeline()
+            .find_matches_by_tier(HashInput::Borrowed(sequence))
+            .await
     }
 
     pub(crate) async fn find_primary_matches_by_tier(
@@ -103,30 +132,35 @@ impl Indexer {
         sequence: Vec<LocalBlockHash>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         self.lookup_pipeline()
-            .find_primary_matches_by_tier(sequence)
+            .find_primary_matches_by_tier(HashInput::Owned(sequence))
             .await
     }
 }
 
 impl<'a> LookupPipeline<'a> {
+    #[cfg(test)]
     async fn find_match_details(
         &self,
-        sequence: Vec<LocalBlockHash>,
+        sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
-        let primary_details = self.find_primary_match_details(sequence.clone()).await?;
+        if self.side.is_none() {
+            return self.find_primary_match_details(sequence).await;
+        }
+
+        let primary_details = self.primary.find_match_details_retained(&sequence).await?;
         Ok(merge_side_or_warn(self.side, primary_details, sequence).await)
     }
 
     async fn find_primary_match_details(
         &self,
-        sequence: Vec<LocalBlockHash>,
+        sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
         self.primary.find_match_details(sequence).await
     }
 
     async fn find_matches_by_tier(
         &self,
-        sequence: Vec<LocalBlockHash>,
+        sequence: HashInput<'_>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self.primary {
             PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
@@ -138,8 +172,8 @@ impl<'a> LookupPipeline<'a> {
                 // them as lower-tier anchors would over-credit host/disk cache
                 // hits and break the score/hash lockstep `query_lower_tiers`
                 // expects.
-                let primary_device = self.find_primary_match_details(sequence.clone()).await?;
-                let lt = query_lower_tiers(lower_tier, &sequence, &primary_device);
+                let primary_device = self.primary.find_match_details_retained(&sequence).await?;
+                let lt = query_lower_tiers(lower_tier, sequence.as_slice(), &primary_device);
                 let device = merge_side_or_warn(self.side, primary_device, sequence).await;
 
                 Ok(TieredMatchDetails {
@@ -148,14 +182,23 @@ impl<'a> LookupPipeline<'a> {
                 })
             }
             PrimaryLookup::Remote(primary) => {
+                let Some(side) = self.side else {
+                    return primary
+                        .find_matches_by_tier(sequence.into_owned_at_boundary(), false)
+                        .await
+                        .map_err(|e| {
+                            tracing::warn!(error = %e, "Remote indexer tiered query failed");
+                            KvRouterError::IndexerOffline
+                        });
+                };
                 let mut tiered = primary
-                    .find_matches_by_tier(sequence.clone(), false)
+                    .find_matches_by_tier(sequence.clone_for_boundary(), false)
                     .await
                     .map_err(|e| {
                         tracing::warn!(error = %e, "Remote indexer tiered query failed");
                         KvRouterError::IndexerOffline
                     })?;
-                tiered.device = merge_side_or_warn(self.side, tiered.device, sequence).await;
+                tiered.device = merge_side_or_warn(Some(side), tiered.device, sequence).await;
                 Ok(tiered)
             }
             PrimaryLookup::None => Ok(TieredMatchDetails::default()),
@@ -164,22 +207,22 @@ impl<'a> LookupPipeline<'a> {
 
     async fn find_primary_matches_by_tier(
         &self,
-        sequence: Vec<LocalBlockHash>,
+        sequence: HashInput<'_>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self.primary {
             PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
                 let Some(lower_tier) = self.lower_tier else {
                     return Ok(TieredMatchDetails::default());
                 };
-                let device = self.find_primary_match_details(sequence.clone()).await?;
-                let lt = query_lower_tiers(lower_tier, &sequence, &device);
+                let device = self.primary.find_match_details_retained(&sequence).await?;
+                let lt = query_lower_tiers(lower_tier, sequence.as_slice(), &device);
                 Ok(TieredMatchDetails {
                     device,
                     lower_tier: lt,
                 })
             }
             PrimaryLookup::Remote(primary) => primary
-                .find_matches_by_tier(sequence.clone(), false)
+                .find_matches_by_tier(sequence.into_owned_at_boundary(), false)
                 .await
                 .map_err(|e| {
                     tracing::warn!(error = %e, "Remote indexer tiered query failed");
@@ -193,16 +236,49 @@ impl<'a> LookupPipeline<'a> {
 impl<'a> PrimaryLookup<'a> {
     async fn find_match_details(
         &self,
-        sequence: Vec<LocalBlockHash>,
+        sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
         let primary_details = match self {
-            Self::KvIndexer(primary) => primary.find_match_details(sequence.clone()).await?,
-            Self::Concurrent(primary) => {
-                primary.backend().find_match_details_impl(&sequence, false)
+            Self::KvIndexer(primary) => {
+                primary
+                    .find_match_details(sequence.into_owned_at_boundary())
+                    .await?
             }
+            Self::Concurrent(primary) => primary
+                .backend()
+                .find_match_details_impl(sequence.as_slice(), false),
             Self::Remote(primary) => {
                 let tiered = primary
-                    .find_matches_by_tier(sequence.clone(), true)
+                    .find_matches_by_tier(sequence.into_owned_at_boundary(), true)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "Remote indexer query failed");
+                        KvRouterError::IndexerOffline
+                    })?;
+                tiered.device
+            }
+            Self::None => return Ok(MatchDetails::new()),
+        };
+
+        Ok(primary_details)
+    }
+
+    async fn find_match_details_retained(
+        &self,
+        sequence: &HashInput<'_>,
+    ) -> Result<MatchDetails, KvRouterError> {
+        let primary_details = match self {
+            Self::KvIndexer(primary) => {
+                primary
+                    .find_match_details(sequence.clone_for_boundary())
+                    .await?
+            }
+            Self::Concurrent(primary) => primary
+                .backend()
+                .find_match_details_impl(sequence.as_slice(), false),
+            Self::Remote(primary) => {
+                let tiered = primary
+                    .find_matches_by_tier(sequence.clone_for_boundary(), true)
                     .await
                     .map_err(|e| {
                         tracing::warn!(error = %e, "Remote indexer query failed");
@@ -262,12 +338,12 @@ fn merge_overlap_scores(mut primary: MatchDetails, side: OverlapScores) -> Match
 async fn merge_side_or_warn(
     side: Option<&SideIndexer>,
     primary: MatchDetails,
-    sequence: Vec<LocalBlockHash>,
+    sequence: HashInput<'_>,
 ) -> MatchDetails {
     let Some(side) = side else {
         return primary;
     };
-    match side.find_matches(sequence).await {
+    match side.find_matches_input(sequence).await {
         Ok(side_scores) => merge_overlap_scores(primary, side_scores),
         Err(error) => {
             tracing::warn!(

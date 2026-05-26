@@ -29,11 +29,13 @@ cases:
           arguments:
             location: NYC
         normal_text: ''
+        reason: SGLang recovers a call before the required `<tool_call|>` end marker; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.
       vllm:
         calls:
         - name: get_weather
           arguments: '{"location": "NYC'
         normal_text: ''
+        reason: vLLM emits partial arguments before the required `<tool_call|>` end marker; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.
   PARSER.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from PARSER.batch.5.c
@@ -58,8 +60,10 @@ cases:
         - name: get_weather
           arguments: {}
         normal_text: ''
+        reason: SGLang emits the function name from a mid-body truncated call; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.
       vllm:
         calls:
         - name: get_weather
           arguments: '{"location": "N'
         normal_text: ''
+        reason: vLLM emits partial arguments from a mid-body truncated call; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.

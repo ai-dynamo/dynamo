@@ -283,6 +283,23 @@ pub struct IndexerRecordRoutingDecisionRequest {
     pub sequence_hashes: Vec<SequenceHash>,
 }
 
+/// Precomputed hashes for recording a route-time indexer update.
+#[derive(Debug, Clone)]
+pub struct RoutingDecisionHashes {
+    pub local_hashes: Vec<LocalBlockHash>,
+    pub sequence_hashes: Vec<SequenceHash>,
+}
+
+impl RoutingDecisionHashes {
+    pub fn from_local_hashes(local_hashes: Vec<LocalBlockHash>) -> Self {
+        let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+        Self {
+            local_hashes,
+            sequence_hashes,
+        }
+    }
+}
+
 /// Response from a served approximate-mode routing-decision endpoint.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IndexerRecordRoutingDecisionResponse {
