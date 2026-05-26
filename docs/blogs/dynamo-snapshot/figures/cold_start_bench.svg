@@ -3,31 +3,31 @@
 <style>
   .title { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 36px; font-weight: 300; fill: #ffffff; }
   .subtitle { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 17px; font-weight: 300; fill: #cdcdcd; }
-  .model { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 500; fill: #ffffff; }
+  .model { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 500; fill: #ffffff; }
   .phase { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #ffffff; }
-  .num { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; fill: #ffffff; }
+  .num { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 500; fill: #ffffff; }
   .num-dark { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; fill: #000000; }
   .num-small { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 10px; font-weight: 400; fill: #cdcdcd; }
-  .total { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 13px; font-weight: 500; fill: #ffffff; }
+  .total { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 14px; font-weight: 500; fill: #ffffff; }
   .axis { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #8c8c8c; }
-  .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
+  .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 400; fill: #cdcdcd; }
 </style>
 <text class="title" x="40" y="58">Cold start</text>
 <text class="subtitle" x="40" y="88">Single-GPU (1xB200); excludes base container startup</text>
-<line x1="170.0" y1="160" x2="170.0" y2="470" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="170.0" y="488" text-anchor="middle">0s</text>
-<line x1="335.8" y1="160" x2="335.8" y2="470" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="335.8" y="488" text-anchor="middle">15s</text>
-<line x1="501.6" y1="160" x2="501.6" y2="470" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="501.6" y="488" text-anchor="middle">30s</text>
-<line x1="667.4" y1="160" x2="667.4" y2="470" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="667.4" y="488" text-anchor="middle">45s</text>
-<line x1="833.2" y1="160" x2="833.2" y2="470" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="833.2" y="488" text-anchor="middle">60s</text>
-<line x1="998.9" y1="160" x2="998.9" y2="470" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="998.9" y="488" text-anchor="middle">75s</text>
-<line x1="1164.7" y1="160" x2="1164.7" y2="470" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="1164.7" y="488" text-anchor="middle">90s</text>
+<line x1="170.0" y1="160" x2="170.0" y2="590" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="170.0" y="608" text-anchor="middle">0s</text>
+<line x1="335.8" y1="160" x2="335.8" y2="590" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="335.8" y="608" text-anchor="middle">15s</text>
+<line x1="501.6" y1="160" x2="501.6" y2="590" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="501.6" y="608" text-anchor="middle">30s</text>
+<line x1="667.4" y1="160" x2="667.4" y2="590" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="667.4" y="608" text-anchor="middle">45s</text>
+<line x1="833.2" y1="160" x2="833.2" y2="590" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="833.2" y="608" text-anchor="middle">60s</text>
+<line x1="998.9" y1="160" x2="998.9" y2="590" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="998.9" y="608" text-anchor="middle">75s</text>
+<line x1="1164.7" y1="160" x2="1164.7" y2="590" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="1164.7" y="608" text-anchor="middle">90s</text>
 <text class="model" x="40" y="210.0">Qwen3 0.6B</text>
 <rect x="170" y="160" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <rect x="170.0" y="181.0" width="110.8" height="48" fill="#7a5030"/>
@@ -45,44 +45,44 @@
 <rect x="720.3" y="181.0" width="32.0" height="48" fill="#4a7500"/>
 <text class="num" x="736.3" y="209.0" text-anchor="middle">2.9s</text>
 <text class="total" x="764.3" y="210.0">52.7s</text>
-<text class="model" x="40" y="320.0">Qwen3 8B</text>
-<rect x="170" y="270" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<rect x="170.0" y="291.0" width="110.7" height="48" fill="#7a5030"/>
-<text class="num" x="225.3" y="319.0" text-anchor="middle">10.0s</text>
-<rect x="280.8" y="291.0" width="178.0" height="48" fill="#0a4a80"/>
-<text class="num" x="369.9" y="319.0" text-anchor="middle">16.1s</text>
-<rect x="458.9" y="291.0" width="41.8" height="48" fill="#3a1050"/>
-<text class="num" x="479.8" y="319.0" text-anchor="middle">3.8s</text>
-<rect x="500.7" y="291.0" width="41.8" height="48" fill="#005a40"/>
-<text class="num" x="521.6" y="319.0" text-anchor="middle">3.8s</text>
-<rect x="542.5" y="291.0" width="1.3" height="48" fill="#555555"/>
-<rect x="543.9" y="291.0" width="209.4" height="48" fill="#702828"/>
-<text class="num" x="648.6" y="319.0" text-anchor="middle">18.9s</text>
-<rect x="753.3" y="291.0" width="18.4" height="48" fill="#555555"/>
-<rect x="772.0" y="291.0" width="1.7" height="48" fill="#9a7800"/>
-<rect x="773.7" y="291.0" width="44.7" height="48" fill="#4a7500"/>
-<text class="num" x="796.0" y="319.0" text-anchor="middle">4.0s</text>
-<text class="total" x="830.4" y="320.0">58.7s</text>
-<text class="model" x="40" y="430.0">gpt-oss-120b</text>
-<rect x="170" y="380" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<rect x="170.0" y="401.0" width="110.9" height="48" fill="#7a5030"/>
-<text class="num" x="225.5" y="429.0" text-anchor="middle">10.0s</text>
-<rect x="281.3" y="401.0" width="189.9" height="48" fill="#0a4a80"/>
-<text class="num" x="376.2" y="429.0" text-anchor="middle">17.2s</text>
-<rect x="471.2" y="401.0" width="41.9" height="48" fill="#3a1050"/>
-<text class="num" x="492.1" y="429.0" text-anchor="middle">3.8s</text>
-<rect x="513.1" y="401.0" width="150.0" height="48" fill="#005a40"/>
-<text class="num" x="588.1" y="429.0" text-anchor="middle">13.6s</text>
-<rect x="663.1" y="401.0" width="1.4" height="48" fill="#555555"/>
-<rect x="664.5" y="401.0" width="173.2" height="48" fill="#702828"/>
-<text class="num" x="751.1" y="429.0" text-anchor="middle">15.7s</text>
-<rect x="837.7" y="401.0" width="26.5" height="48" fill="#555555"/>
-<text class="num" x="850.9" y="429.0" text-anchor="middle">2.4s</text>
-<rect x="864.3" y="401.0" width="106.3" height="48" fill="#9a7800"/>
-<text class="num" x="917.5" y="429.0" text-anchor="middle">9.6s</text>
-<rect x="970.7" y="401.0" width="144.0" height="48" fill="#4a7500"/>
-<text class="num" x="1042.7" y="429.0" text-anchor="middle">13.0s</text>
-<text class="total" x="1126.7" y="430.0">85.5s</text>
+<text class="model" x="40" y="365.0">Qwen3 8B</text>
+<rect x="170" y="315.0" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<rect x="170.0" y="336.0" width="110.7" height="48" fill="#7a5030"/>
+<text class="num" x="225.3" y="364.0" text-anchor="middle">10.0s</text>
+<rect x="280.8" y="336.0" width="178.0" height="48" fill="#0a4a80"/>
+<text class="num" x="369.9" y="364.0" text-anchor="middle">16.1s</text>
+<rect x="458.9" y="336.0" width="41.8" height="48" fill="#3a1050"/>
+<text class="num" x="479.8" y="364.0" text-anchor="middle">3.8s</text>
+<rect x="500.7" y="336.0" width="41.8" height="48" fill="#005a40"/>
+<text class="num" x="521.6" y="364.0" text-anchor="middle">3.8s</text>
+<rect x="542.5" y="336.0" width="1.3" height="48" fill="#555555"/>
+<rect x="543.9" y="336.0" width="209.4" height="48" fill="#702828"/>
+<text class="num" x="648.6" y="364.0" text-anchor="middle">18.9s</text>
+<rect x="753.3" y="336.0" width="18.4" height="48" fill="#555555"/>
+<rect x="772.0" y="336.0" width="1.7" height="48" fill="#9a7800"/>
+<rect x="773.7" y="336.0" width="44.7" height="48" fill="#4a7500"/>
+<text class="num" x="796.0" y="364.0" text-anchor="middle">4.0s</text>
+<text class="total" x="830.4" y="365.0">58.7s</text>
+<text class="model" x="40" y="520.0">gpt-oss-120b</text>
+<rect x="170" y="470.0" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<rect x="170.0" y="491.0" width="110.9" height="48" fill="#7a5030"/>
+<text class="num" x="225.5" y="519.0" text-anchor="middle">10.0s</text>
+<rect x="281.3" y="491.0" width="189.9" height="48" fill="#0a4a80"/>
+<text class="num" x="376.2" y="519.0" text-anchor="middle">17.2s</text>
+<rect x="471.2" y="491.0" width="41.9" height="48" fill="#3a1050"/>
+<text class="num" x="492.1" y="519.0" text-anchor="middle">3.8s</text>
+<rect x="513.1" y="491.0" width="150.0" height="48" fill="#005a40"/>
+<text class="num" x="588.1" y="519.0" text-anchor="middle">13.6s</text>
+<rect x="663.1" y="491.0" width="1.4" height="48" fill="#555555"/>
+<rect x="664.5" y="491.0" width="173.2" height="48" fill="#702828"/>
+<text class="num" x="751.1" y="519.0" text-anchor="middle">15.7s</text>
+<rect x="837.7" y="491.0" width="26.5" height="48" fill="#555555"/>
+<text class="num" x="850.9" y="519.0" text-anchor="middle">2.4s</text>
+<rect x="864.3" y="491.0" width="106.3" height="48" fill="#9a7800"/>
+<text class="num" x="917.5" y="519.0" text-anchor="middle">9.6s</text>
+<rect x="970.7" y="491.0" width="144.0" height="48" fill="#4a7500"/>
+<text class="num" x="1042.7" y="519.0" text-anchor="middle">13.0s</text>
+<text class="total" x="1126.7" y="520.0">85.5s</text>
 <rect x="349.5" y="654" width="12" height="12" fill="#7a5030"/>
 <text class="legend" x="367.5" y="664">Python/Dynamo boot</text>
 <rect x="511.5" y="654" width="12" height="12" fill="#0a4a80"/>
