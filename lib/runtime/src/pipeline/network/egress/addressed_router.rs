@@ -484,7 +484,6 @@ impl AddressedPushRouter {
         let inflight_guard = InflightGuard::new();
 
         let engine_ctx = input.context();
-        let engine_ctx_for_forwarder = engine_ctx.clone();
         let (request_stream, ctx_unit) = input.into_parts();
         let input_stream = request_stream
             .take()
@@ -509,15 +508,13 @@ impl AddressedPushRouter {
             (None, None)
         };
 
-        let (recv_subject, send_subject) = self
+        let cancel_guard = self
             .resolve_subjects(
                 &resp_stream_conn_info,
                 req_stream_conn_info.as_ref(),
                 Some(&instance),
             )
             .await?;
-        let cancel_guard =
-            CancelGuard::arm(self.resp_transport.clone(), recv_subject, send_subject);
 
         // Bidirectional envelope is header-only: every request frame
         // (including the first) flows on the request-stream socket. The
@@ -542,12 +539,8 @@ impl AddressedPushRouter {
         // carries the engine prologue and only resolves after
         // `engine.generate()` returns — awaiting it second avoids stalling
         // the request-side handshake on engine setup latency.
-        spawn_request_stream_forwarder(
-            request_stream_provider,
-            input_stream,
-            engine_ctx_for_forwarder,
-        )
-        .await?;
+        spawn_request_stream_forwarder(request_stream_provider, input_stream, engine_ctx.clone())
+            .await?;
 
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
@@ -579,19 +572,6 @@ impl AddressedPushRouter {
             tx_start,
             inflight_guard,
         ))
-    }
-
-    /// Cancel both halves of a registration on the data plane. Used by
-    /// [`Self::resolve_subjects`] on the tombstone-detected branch where
-    /// the per-call [`CancelGuard`] hasn't been armed yet; all other
-    /// cleanup paths go through that guard's `Drop`.
-    async fn cancel_both(&self, recv_subject: &Option<String>, send_subject: &Option<String>) {
-        if let Some(s) = recv_subject {
-            self.resp_transport.cancel_recv_stream(s).await;
-        }
-        if let Some(s) = send_subject {
-            self.resp_transport.cancel_send_stream(s).await;
-        }
     }
 
     /// Register the requested halves of a data-plane stream with the response
@@ -634,10 +614,16 @@ impl AddressedPushRouter {
     }
 
     /// Resolve the TCP subjects from the recv-side (always present on TCP)
-    /// and the optional send-side connection-info, then run the tombstone
-    /// check via `resp_transport.associate_instance`. On tombstone, defensively
-    /// invokes `cancel_both` (idempotent with the transport's internal cleanup)
-    /// before returning a migratable `Disconnected` error.
+    /// and the optional send-side connection-info, run the tombstone check
+    /// via `resp_transport.associate_instance`, and return an armed
+    /// [`CancelGuard`] owning those subjects. The caller holds the guard
+    /// for the lifetime of the dispatch and `disarm()`s it on the success
+    /// path; on any `?`-propagated failure between resolve and disarm, the
+    /// guard's `Drop` cancels both halves.
+    ///
+    /// On tombstone the guard is dropped before this function returns,
+    /// firing the same cleanup as any other failure path; the caller sees
+    /// a migratable `Disconnected` error.
     ///
     /// `send_conn_info` is `None` for the unary path; bidirectional dispatch
     /// passes `Some` when the send half was registered. `instance` is `None`
@@ -647,7 +633,7 @@ impl AddressedPushRouter {
         recv_conn_info: &ConnectionInfo,
         send_conn_info: Option<&ConnectionInfo>,
         instance: Option<&Instance>,
-    ) -> Result<(Option<String>, Option<String>), Error> {
+    ) -> Result<CancelGuard, Error> {
         let recv_subject: Option<String> =
             serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&recv_conn_info.info)
                 .ok()
@@ -657,6 +643,15 @@ impl AddressedPushRouter {
                 .ok()
                 .map(|ci| ci.subject)
         });
+
+        // Arm the guard before the tombstone check so the tombstone-Err
+        // path goes through the same Drop-based cleanup as every other
+        // dispatch failure.
+        let guard = CancelGuard::arm(
+            self.resp_transport.clone(),
+            recv_subject.clone(),
+            send_subject.clone(),
+        );
 
         if let (Some(subject), Some(inst)) = (&recv_subject, instance)
             && !self
@@ -668,7 +663,7 @@ impl AddressedPushRouter {
                 )
                 .await
         {
-            self.cancel_both(&recv_subject, &send_subject).await;
+            // guard drops on return → spawns cancel for both halves
             return Err(anyhow::anyhow!(
                 DynamoError::builder()
                     .error_type(ErrorType::Disconnected)
@@ -677,7 +672,7 @@ impl AddressedPushRouter {
             ));
         }
 
-        Ok((recv_subject, send_subject))
+        Ok(guard)
     }
 
     /// Build the standard request-plane headers (trace propagation +
@@ -742,11 +737,9 @@ where
         let (connection_info, response_stream_provider) =
             pending_response_stream.unwrap().into_parts();
 
-        let (recv_subject, send_subject) = self
+        let cancel_guard = self
             .resolve_subjects(&connection_info, None, instance_info.as_ref())
             .await?;
-        let cancel_guard =
-            CancelGuard::arm(self.resp_transport.clone(), recv_subject, send_subject);
 
         let buffer = build_request_envelope(&context, connection_info, None, Some(&request))?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
