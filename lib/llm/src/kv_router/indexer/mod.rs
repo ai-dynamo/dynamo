@@ -414,7 +414,7 @@ mod tests {
     use dynamo_kv_router::{
         ConcurrentRadixTreeCompressed, ThreadPoolIndexer,
         approx::PruneConfig,
-        indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics},
+        indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, RoutingDecisionHashes},
         protocols::{
             BlockHashOptions, LocalBlockHash, StorageTier, TokensWithHashes, WorkerWithDpRank,
             compute_block_hash_for_seq, compute_seq_hash_for_block,
@@ -698,6 +698,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_records_precomputed_routing_hashes() {
+        let indexer = make_test_concurrent_approx_indexer();
+        assert!(indexer.records_routing_decisions());
+
+        let worker = WorkerWithDpRank::new(7, 0);
+        let local_hashes = vec![LocalBlockHash(91), LocalBlockHash(92)];
+        let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+        indexer
+            .record_routing_decision_hashes(
+                worker,
+                RoutingDecisionHashes {
+                    local_hashes: local_hashes.clone(),
+                    sequence_hashes,
+                },
+            )
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+
+        let matches = indexer.find_matches_by_tier(local_hashes).await.unwrap();
+        assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&2));
+    }
+
+    #[tokio::test]
     async fn event_driven_primary_without_side_skips_route_recording() {
         let indexer = make_test_indexer();
         assert!(!indexer.records_routing_decisions());
@@ -852,6 +876,97 @@ mod tests {
         assert!(
             !host.next_continuations.contains_key(&side_only_worker),
             "side-only worker must not appear in lower-tier continuations"
+        );
+    }
+
+    #[tokio::test]
+    async fn borrowed_tiered_lookup_matches_owned_with_lower_tier_and_side_overlay() {
+        let primary = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            4,
+        ));
+        let side = Arc::new(ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            1,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        ));
+        let side_for_flush = side.clone();
+        let indexer = Indexer::Concurrent {
+            primary,
+            lower_tier: LowerTierIndexers::new(2, 4),
+            approx: Some(super::SideIndexer::Concurrent(side)),
+            primary_records_routing_decisions: false,
+        };
+
+        let primary_worker = WorkerWithDpRank::new(10, 0);
+        let side_worker = WorkerWithDpRank::new(20, 0);
+        indexer
+            .apply_event(store_event(10, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(
+                10,
+                0,
+                2,
+                &[11, 12],
+                &[13],
+                StorageTier::HostPinned,
+            ))
+            .await;
+
+        let side_hashes = vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)];
+        indexer
+            .record_routing_decision_hashes(
+                side_worker,
+                RoutingDecisionHashes {
+                    local_hashes: side_hashes.clone(),
+                    sequence_hashes: compute_seq_hash_for_block(&side_hashes),
+                },
+            )
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+        side_for_flush.flush().await;
+
+        let query = vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)];
+        let borrowed = indexer.find_matches_by_tier_ref(&query).await.unwrap();
+        let owned = indexer.find_matches_by_tier(query).await.unwrap();
+
+        assert_eq!(
+            borrowed.device.overlap_scores.scores,
+            owned.device.overlap_scores.scores
+        );
+        assert_eq!(
+            borrowed
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .map(|tier| &tier.hits),
+            owned
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .map(|tier| &tier.hits)
+        );
+        assert_eq!(
+            borrowed
+                .device
+                .overlap_scores
+                .scores
+                .get(&primary_worker)
+                .copied(),
+            Some(2)
+        );
+        assert_eq!(
+            borrowed
+                .device
+                .overlap_scores
+                .scores
+                .get(&side_worker)
+                .copied(),
+            Some(3)
         );
     }
 

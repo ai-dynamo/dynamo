@@ -29,7 +29,7 @@ from tests.parity.markup import colorize_markup
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = REPO_ROOT / "tests/parity/reasoning/fixtures"
-PARSER_FIXTURES = REPO_ROOT / "tests/parity/parser/fixtures"
+PARSER_FIXTURES = REPO_ROOT / "tests/parity/toolcalling/fixtures"
 REASONING_CASES_MD = REPO_ROOT / "lib/parsers/REASONING_CASES.md"
 SCRIPT_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = REPO_ROOT / "tests/parity"
@@ -509,7 +509,7 @@ def _load() -> tuple[dict[str, dict[str, Any]], list[str], dict[tuple[str, str],
 
 def _load_parser_labels() -> dict[str, str]:
     labels = {}
-    for fp in sorted(PARSER_FIXTURES.glob("*/PARSER.batch.yaml")):
+    for fp in sorted(PARSER_FIXTURES.glob("*/TOOLCALLING.batch.yaml")):
         doc = yaml.safe_load(fp.read_text())
         labels[doc["family"]] = doc.get("model_label", doc["family"])
     return labels

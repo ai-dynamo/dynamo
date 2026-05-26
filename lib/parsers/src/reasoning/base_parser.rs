@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
     }
 
-    #[test] // REASONING.batch.2.e, PARSER.fmt.2
+    #[test] // REASONING.batch.2.e, TOOLCALLING.fmt.2
     fn test_whitespace_only_reasoning_block() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);

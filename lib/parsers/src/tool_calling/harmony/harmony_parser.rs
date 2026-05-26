@@ -503,8 +503,8 @@ mod tests {
         (call.function.name, args)
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/harmony/PARSER.batch.yaml.
-    #[tokio::test] // PARSER.batch.1, PARSER.harmony.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1 in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.yaml.
+    #[tokio::test] // TOOLCALLING.batch.1, TOOLCALLING.harmony.2
     async fn test_parse_tool_calls_harmony_complete_basic() {
         let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -518,8 +518,8 @@ mod tests {
         assert_eq!(args["format"], "celsius");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/harmony/PARSER.batch.4.yaml.
-    #[tokio::test] // PARSER.batch.4, PARSER.harmony.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.4.yaml.
+    #[tokio::test] // TOOLCALLING.batch.4, TOOLCALLING.harmony.2
     async fn test_parse_tools_harmony_without_start_token() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -530,8 +530,8 @@ mod tests {
         assert_eq!(tool_calls.len(), 0);
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d, PARSER.batch.8.a in tests/parity/parser/fixtures/harmony/PARSER.batch.7.yaml, tests/parity/parser/fixtures/harmony/PARSER.batch.8.yaml.
-    #[tokio::test] // PARSER.batch.7, PARSER.batch.8, PARSER.harmony.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.d, TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.7.yaml, tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.8.yaml.
+    #[tokio::test] // TOOLCALLING.batch.7, TOOLCALLING.batch.8, TOOLCALLING.harmony.2
     async fn test_parse_tool_calls_harmony_with_multi_args() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -546,8 +546,8 @@ mod tests {
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.a in tests/parity/parser/fixtures/harmony/PARSER.batch.8.yaml.
-    #[tokio::test] // PARSER.batch.8, PARSER.batch.8, PARSER.harmony.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.8.yaml.
+    #[tokio::test] // TOOLCALLING.batch.8, TOOLCALLING.batch.8, TOOLCALLING.harmony.2
     async fn test_parse_tool_calls_harmony_with_normal_text() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
-    #[tokio::test] // PARSER.batch.3 — gpt-oss
+    #[tokio::test] // TOOLCALLING.batch.3 — gpt-oss
     async fn test_parse_harmony_bare_text_without_final_message_is_dropped() {
         let text = "Hello, how can I help you today?";
         let (tool_calls, normal_content) =
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(normal_content, Some("".to_string()));
     }
 
-    #[tokio::test] // PARSER.batch.3 — gpt-oss
+    #[tokio::test] // TOOLCALLING.batch.3 — gpt-oss
     async fn test_parse_harmony_final_message_returns_normal_text() {
         let text = r#"<|channel|>final<|message|>Hello, how can I help you today?<|return|>"#;
         let (tool_calls, normal_content) =
@@ -634,8 +634,8 @@ mod tests {
     // Harmony's strict tokenizer rejects two back-to-back commentary
     // blocks, so EOF recovery falls back to regex extraction and pins that
     // both calls are surfaced without leaking the raw envelopes.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b in tests/parity/parser/fixtures/harmony/PARSER.batch.2.yaml.
-    #[tokio::test] // PARSER.batch.2 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.2.yaml.
+    #[tokio::test] // TOOLCALLING.batch.2 — gpt-oss
     async fn test_parse_harmony_multiple_calls_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|><|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y":2}<|call|>"#;
         let (tool_calls, _normal) =
@@ -651,8 +651,8 @@ mod tests {
         assert_eq!(a1["y"], 2);
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.a in tests/parity/parser/fixtures/harmony/PARSER.batch.4.yaml.
-    #[tokio::test] // PARSER.batch.4 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.4.yaml.
+    #[tokio::test] // TOOLCALLING.batch.4 — gpt-oss
     async fn test_parse_harmony_malformed_json_preserves_raw_arguments() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at all<|call|>"#;
         let (tool_calls, _normal) =
@@ -664,8 +664,8 @@ mod tests {
         assert_eq!(tool_calls[0].function.arguments, "not json at all");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b in tests/parity/parser/fixtures/harmony/PARSER.batch.4.yaml.
-    #[tokio::test] // PARSER.batch.4 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.b in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.4.yaml.
+    #[tokio::test] // TOOLCALLING.batch.4 — gpt-oss
     async fn test_parse_harmony_unterminated_json_preserves_raw_arguments() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>"#;
         let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
@@ -683,11 +683,11 @@ mod tests {
         assert_eq!(tool_calls[0].function.arguments, r#"{"location":"NYC"#);
     }
 
-    // Bare-envelope PARSER.batch.5: no preceding `analysis` block, no `<|call|>`
+    // Bare-envelope TOOLCALLING.batch.5: no preceding `analysis` block, no `<|call|>`
     // at the end. Harmony requires the explicit call stop token, so fallback
     // must not accept EOS as a synthetic close.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/harmony/PARSER.batch.5.yaml.
-    #[tokio::test] // PARSER.batch.5 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.5.yaml.
+    #[tokio::test] // TOOLCALLING.batch.5 — gpt-oss
     async fn test_parse_harmony_bare_envelope_no_call_token_drops() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
         let (tool_calls, normal) = parse_tool_calls_harmony_complete(
@@ -791,8 +791,8 @@ mod tests {
         );
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a, PARSER.batch.8.a in tests/parity/parser/fixtures/harmony/PARSER.batch.5.yaml, tests/parity/parser/fixtures/harmony/PARSER.batch.8.yaml.
-    #[tokio::test] // PARSER.batch.4, PARSER.batch.5, PARSER.harmony.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a, TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.5.yaml, tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.8.yaml.
+    #[tokio::test] // TOOLCALLING.batch.4, TOOLCALLING.batch.5, TOOLCALLING.harmony.2
     async fn test_parse_tool_calls_harmony_without_call_token() {
         let text = r#"<|channel|>analysis<|message|>We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"San Francisco, CA","unit":"celsius"}"#;
         let (tool_calls, normal_content) =
@@ -818,10 +818,10 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
     }
 
-    /// PARSER.batch.6 — empty args. A no-arg harmony call (`{}`) must still surface
+    /// TOOLCALLING.batch.6 — empty args. A no-arg harmony call (`{}`) must still surface
     /// the function name.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/harmony/PARSER.batch.6.yaml.
-    #[tokio::test] // PARSER.batch.6 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.6.yaml.
+    #[tokio::test] // TOOLCALLING.batch.6 — gpt-oss
     async fn test_parse_harmony_empty_args() {
         let text = r#"<|channel|>commentary to=functions.current_time <|constrain|>json<|message|>{}<|call|>"#;
         let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
@@ -833,13 +833,13 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
-    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
+    /// TOOLCALLING.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls. Unlike the
     /// XML/JSON parsers (which trim whitespace down to `Some("")`), the
     /// harmony parser passes the input verbatim through to normal_text —
     /// pin that distinction here.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/harmony/PARSER.batch.yaml.
-    #[tokio::test] // PARSER.batch.9 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.yaml.
+    #[tokio::test] // TOOLCALLING.batch.9 — gpt-oss
     async fn test_parse_harmony_empty_and_whitespace_inputs() {
         for input in &["", " ", "\n", "\t\n  \t"] {
             let (tool_calls, normal) =
@@ -860,12 +860,12 @@ mod tests {
         }
     }
 
-    /// PARSER.batch.10 — duplicate calls (same function name twice). Two
+    /// TOOLCALLING.batch.10 — duplicate calls (same function name twice). Two
     /// back-to-back commentary blocks for the same function. Pin
     /// parser-level behavior — both calls returned with distinct ids
     /// and distinct args.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/harmony/PARSER.batch.yaml.
-    #[tokio::test] // PARSER.batch.10 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.10 in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.yaml.
+    #[tokio::test] // TOOLCALLING.batch.10 — gpt-oss
     async fn test_parse_harmony_duplicate_calls_same_name() {
         let text = r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"NYC"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"LA"}<|call|>"#;
         let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
@@ -919,7 +919,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // helper, PARSER.stream.3
+    #[test] // helper, TOOLCALLING.stream.3
     fn test_detect_tool_call_start_harmony_partial_tokens() {
         // Test partial token detection for streaming scenarios
         let config = JsonParserConfig {
