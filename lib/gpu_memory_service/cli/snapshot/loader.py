@@ -18,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
@@ -56,6 +57,11 @@ def _load_device(
         max_workers,
     )
     t0 = time.monotonic()
+    # NIXL/POSIX staging setup may happen in background worker threads, but
+    # GMSStorageClient still publishes the restored layout from this thread.
+    # Ensure the loader's main per-device thread has a current CUDA context for
+    # the final synchronize/unmap/commit path.
+    cuda_utils.cuda_runtime_set_device(device)
     client = GMSStorageClient(
         socket_path=get_socket_path(device),
         device=device,
@@ -135,9 +141,7 @@ def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
             checkpoint_dir,
         )
 
-    from gpu_memory_service.common.cuda_utils import list_devices
-
-    return list_devices()
+    return cuda_utils.list_devices()
 
 
 def main(argv: list[str] | None = None) -> None:

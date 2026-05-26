@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 from uuid import uuid4
+
 from gpu_memory_service.common.cuda_utils import (
     align_to_granularity,
     cuda_ensure_initialized,

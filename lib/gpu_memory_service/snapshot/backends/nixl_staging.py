@@ -78,7 +78,9 @@ def _positive_int_config(
     try:
         value = int(raw_value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be a positive integer, got {raw_value!r}") from exc
+        raise ValueError(
+            f"{key} must be a positive integer, got {raw_value!r}"
+        ) from exc
     if value <= 0:
         raise ValueError(f"{key} must be a positive integer, got {raw_value!r}")
     return value
