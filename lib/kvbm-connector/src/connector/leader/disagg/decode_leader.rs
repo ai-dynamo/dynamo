@@ -408,6 +408,37 @@ impl DecodeDisaggLeader {
         }
     }
 
+    /// Test-only: force-set the wrapper's per-request
+    /// `pending_failure` stash. Returns `false` if no entry exists.
+    /// Used to simulate the racy "cleanup_failed_request landed
+    /// between decode_usaa's pending check and commit_usaa1's read"
+    /// scenario without timing fragility — see the
+    /// commit_usaa1-race-replay test in `tests/cd_decode_e2e.rs`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn force_pending_failure_for_test(&self, request_id: &str, reason: Option<String>) -> bool {
+        if let Some(e) = self.cd_request_state.get(request_id) {
+            *e.value().pending_failure.lock() = reason;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Test-only: enter `commit_usaa1` directly, bypassing
+    /// `decode_usaa`'s outer pending_failure check. Lets tests
+    /// simulate the race where a `cleanup_failed_request` stashes
+    /// `pending_failure` AFTER `decode_usaa` already observed
+    /// `None` — exercising the inner re-check inside commit_usaa1.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn commit_usaa1_for_test(
+        &self,
+        request_id: &str,
+        block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
+    ) -> Result<()> {
+        self.commit_usaa1(request_id, block_ids, num_external_tokens)
+    }
+
     fn release_request(&self, request_id: &str) {
         if let Some((_, state)) = self.cd_request_state.remove(request_id) {
             self.inflight_budget.release(state.reserved_tokens);
@@ -991,10 +1022,11 @@ impl DecodeDisaggLeader {
         let expected_remote_hashes = split.expected_remote_hashes();
         let remote_range = split.remote_range();
 
-        self.inner.apply_block_assignments(request_id, block_ids)?;
-
-        // Drain stashed local-match pins + ids and rebuild per-
-        // request state with the USAA-1 derived fields.
+        // Resolve the wrapper's gnmt-time state BEFORE any state
+        // mutation (block assignments, pin drain, remote_slots
+        // rebuild). The pending_failure re-check below short-circuits
+        // out without mutating anything if a concurrent cleanup
+        // stashed a failure between decode_usaa's check and ours.
         //
         // CD USAA-1 race (read side): under
         // `kv_load_failure_policy=recompute`, a sibling
@@ -1026,6 +1058,68 @@ impl DecodeDisaggLeader {
                 return Ok(());
             }
         };
+
+        // Race re-check: `decode_usaa`'s pending_failure check happens
+        // BEFORE entering `commit_usaa1`. A concurrent
+        // `cleanup_failed_request` firing between that check and here
+        // stashes pending_failure=Some on `existing` (pre-USAA branch
+        // does NOT release). Without this re-check, commit_usaa1
+        // would call apply_block_assignments, drain
+        // local_match_g2_pins, build remote_slots, and spawn the
+        // local-kick + remote-pipeline. Those tasks could complete
+        // successfully, fire mark_onboarding_complete, and report
+        // the failed request to vLLM as a SUCCESS — the stash would
+        // never reach mark_failed_onboarding. Take the same replay
+        // path `decode_usaa` uses for pre-USAA stashes, BEFORE any
+        // mutation.
+        let pending = existing.pending_failure.lock().clone();
+        if let Some(reason) = pending {
+            let external_blocks = if block_size > 0 {
+                num_external_tokens / block_size
+            } else {
+                0
+            };
+            let external_slice_start = block_ids.len().saturating_sub(external_blocks);
+            let external_g1_ids: Vec<BlockId> = block_ids[external_slice_start..].to_vec();
+            crate::audit!(
+                "commit_usaa1_replay_pending_failure",
+                role = "decode",
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len(),
+                num_total_g1_ids = block_ids.len()
+            );
+            tracing::warn!(
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len(),
+                num_total_g1_ids = block_ids.len(),
+                "commit_usaa1: replaying pre-USAA failure stashed after decode_usaa check"
+            );
+            let weak_self = self.weak_self.clone();
+            let request_id_owned = request_id.to_string();
+            self.tokio_handle.spawn(async move {
+                if let Some(this) = weak_self.upgrade() {
+                    if let Err(err) = this
+                        .worker_hook
+                        .mark_failed_onboarding(request_id_owned.clone(), external_g1_ids)
+                        .await
+                    {
+                        tracing::error!(
+                            request_id = request_id_owned,
+                            error = %err,
+                            "mark_failed_onboarding failed during commit_usaa1 replay"
+                        );
+                    }
+                    this.release_request(&request_id_owned);
+                    this.coordinator.release(&request_id_owned);
+                }
+            });
+            return Ok(());
+        }
+
+        self.inner.apply_block_assignments(request_id, block_ids)?;
+
         let local_match_g2_pins = existing.local_match_g2_pins.lock().take().ok_or_else(|| {
             anyhow!(
                 "CD USAA-1: local_match_g2_pins already drained for {} (USAA called twice?)",

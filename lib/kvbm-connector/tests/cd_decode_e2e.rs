@@ -924,6 +924,81 @@ async fn cd_decode_usaa1_rebuild_resets_cleanup_claimed() -> Result<()> {
     Ok(())
 }
 
+/// `commit_usaa1` must re-check `pending_failure` after reading the
+/// existing `cd_request_state` entry. Without the re-check, a
+/// concurrent `cleanup_failed_request` that stashed a failure
+/// between `decode_usaa`'s pending-check and `commit_usaa1`'s read
+/// would proceed to apply block assignments, drain
+/// `local_match_g2_pins`, build `remote_slots`, and spawn the
+/// local-kick + remote-pipeline. If those happen to complete
+/// successfully, `maybe_complete` fires `mark_onboarding_complete`
+/// — vLLM is told the load SUCCEEDED for a request that was
+/// supposed to be reported as a failure. The stash is never
+/// surfaced.
+///
+/// Test enters `commit_usaa1` directly via a feature-gated test
+/// helper to bypass `decode_usaa`'s outer pending_failure check —
+/// the production race requires a stash to be observed by
+/// commit_usaa1 but NOT by decode_usaa, which is microsecond
+/// timing-fragile in real production code but trivially simulated
+/// here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_commit_usaa1_replays_late_pending_failure() -> Result<()> {
+    let h = build_harness();
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    // Simulate a racing cleanup_failed_request landing between
+    // decode_usaa's pending-failure check (None) and
+    // commit_usaa1's read.
+    assert!(
+        h.wrapper
+            .force_pending_failure_for_test("req-1", Some("late race failure".to_string())),
+        "test accessor must find the gnmt-time entry"
+    );
+
+    // Enter commit_usaa1 directly — production decode_usaa would
+    // catch the stash and replay there, but we are exercising the
+    // race window inside commit_usaa1 itself.
+    h.wrapper.commit_usaa1_for_test(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Post-commit_usaa1: the inner replay path must have emitted
+    // mark_failed_onboarding. The happy-path local-kick must NOT
+    // have spawned — if it had, mark_onboarding_complete could
+    // race the failure and report success.
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").expect("failure surfaced");
+
+    let mut got = failed.block_ids.clone();
+    got.sort();
+    let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS..].to_vec();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "commit_usaa1 replay must report the full external G1 slice as failed"
+    );
+
+    // Confirm the happy path did NOT race to completion: no
+    // mark_onboarding_complete for this request.
+    assert!(
+        !h.workers.completed_contains("req-1"),
+        "mark_onboarding_complete must NOT fire for a stashed-failure request — \
+         pre-fix the local-kick + remote-pipeline would spawn and could race the \
+         failure to report SUCCESS to vLLM",
+    );
+
+    // Budget released.
+    assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_inner_used(h: &TestHarness) {
     let _ = h.inner.local_id();
