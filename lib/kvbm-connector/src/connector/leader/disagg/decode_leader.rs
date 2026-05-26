@@ -1497,15 +1497,38 @@ impl DecodeDisaggLeader {
                     return Ok(());
                 }
             };
-            let bits_arc = coord_state.clone();
-            let Some(_check_decode_role) = bits_arc.as_decode() else {
-                tracing::error!(
-                    request_id,
-                    "promotion-spawn: coordinator state is not decode-role; \
-                     skipping Stage 1 promotion"
-                );
-                return Ok(());
+            let bits = match coord_state.as_decode() {
+                Some(b) => b,
+                None => {
+                    tracing::error!(
+                        request_id,
+                        "promotion-spawn: coordinator state is not decode-role; \
+                         skipping Stage 1 promotion"
+                    );
+                    return Ok(());
+                }
             };
+
+            // Acquire the slot's Mutex IMMEDIATELY after the lookup
+            // and hold it across all subsequent work (build source
+            // blocks, call `promote_g1_to_g2`, build task closure,
+            // spawn, store handle, release lock). This closes any
+            // window between "coordinator state is alive with no
+            // pending task" and "pending task is stored" — a
+            // concurrent observer of `DecodeBits.pending_promotion_task`
+            // (e.g., `coordinator.release` via
+            // `CdRequestStatePayload::Drop` on another thread) sees
+            // either None-before-promotion or Some(handle), never an
+            // in-between None state where the gate is missed but a
+            // task is actually in flight.
+            //
+            // All operations under the lock are sync (no awaits):
+            // `promote_g1_to_g2` returns a BoxFuture without
+            // side-effecting the session, the closure is built
+            // without polling it, `tokio_handle.spawn` is sync.
+            // Holding parking_lot across them is safe — the task
+            // body never touches this lock.
+            let mut slot_guard = bits.pending_promotion_task.lock();
 
             let inner = Arc::clone(&self.inner);
             let session = updated.session.lock().clone();
@@ -1607,18 +1630,9 @@ impl DecodeDisaggLeader {
                     }
                 }
             };
-            // Stash the JoinHandle on the coordinator's
-            // `DecodeBits.pending_promotion_task` ATOMICALLY with
-            // the spawn — hold the slot lock across both ops so
-            // no concurrent observer (e.g., `coordinator.release`
-            // on the same rid via `CdRequestStatePayload::Drop`)
-            // can observe `pending_promotion_task == None` while
-            // a task is in flight. `tokio_handle.spawn` is sync
-            // (no awaits) so holding the parking_lot Mutex
-            // across it is safe; the task body never touches
-            // this lock (it operates on `session` + `prefix_hashes`).
-            let bits = bits_arc.as_decode().expect("decode role re-verified above");
-            let mut slot_guard = bits.pending_promotion_task.lock();
+            // `slot_guard` was acquired at the top of this block,
+            // before any of the lookup/build/spawn work — see the
+            // comment there. Store and drop now.
             let handle = self.tokio_handle.spawn(promotion_task);
             *slot_guard = Some(handle);
             drop(slot_guard);
