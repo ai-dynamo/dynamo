@@ -26,6 +26,10 @@ spec:
               value: "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"  # Remove FP8 for BF16 variant
             - name: HF_HOME
               value: /home/dynamo/.cache/huggingface
+            # HF_XET_HIGH_PERFORMANCE=1 enables high-performance parallel XET downloads and can
+            # use up to 64 GB of RAM for in-memory reconstruction buffers. On nodes with lower
+            # memory footprints, set value: "0" to cap reconstruction buffers at 8 GB instead.
+            # See: https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             - name: HF_XET_RECONSTRUCTION_DOWNLOAD_BUFFER_LIMIT
