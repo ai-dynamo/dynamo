@@ -582,12 +582,9 @@ class VllmProcessor:
                 output_request_ids[output_idx] = child_request_id
                 registered_request_ids.append(child_request_id)
 
-        # Per-request running totals needed by the HTTP-service metric
-        # observer (lib/llm/src/http/service/metrics.rs) to record TTFT
-        # and ITL. The default Rust postprocessor emits an equivalent
-        # LLMMetricAnnotation per chunk; this Python path replaces that
-        # postprocessor for vllm-specific tokenization, so it must emit
-        # the annotation itself or the observer sees no samples.
+        # Totals for the llm_metrics annotation emitted below — the
+        # Rust postprocessor that normally produces these is bypassed
+        # on the vllm chat processor path.
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
 
@@ -701,29 +698,18 @@ class VllmProcessor:
 
                     yield dynamo_out
 
-                    # Emit an llm_metrics annotation envelope on the
-                    # same stream. The FFI shim recognises the
-                    # `_dynamo_annotated` sentinel and forwards the
-                    # event/comment fields verbatim into an
-                    # `Annotated<T>`; the HTTP-service observer reads
-                    # the comment payload to update TTFT/ITL/OSL
-                    # histograms and then strips the annotation before
-                    # it reaches the client.
                     chunk_tokens = len(engine_response.get("token_ids") or [])
                     if chunk_tokens > 0:
                         cumulative_output_tokens += chunk_tokens
+                        metrics = {
+                            "input_tokens": input_tokens,
+                            "output_tokens": cumulative_output_tokens,
+                            "chunk_tokens": chunk_tokens,
+                        }
                         yield {
                             "_dynamo_annotated": True,
                             "event": "llm_metrics",
-                            "comment": [
-                                json.dumps(
-                                    {
-                                        "input_tokens": input_tokens,
-                                        "output_tokens": cumulative_output_tokens,
-                                        "chunk_tokens": chunk_tokens,
-                                    }
-                                )
-                            ],
+                            "comment": [json.dumps(metrics)],
                         }
             _nvtx.end_range(rng_stream)
         except Exception as e:
