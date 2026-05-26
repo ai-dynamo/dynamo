@@ -159,6 +159,7 @@ def test_kv_cache_behavior():
 @pytest.mark.requested_sglang_kv_tokens(96)     # KV cache cap (2x safety over min=48)
 @pytest.mark.timeout(265)
 @pytest.mark.sglang
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_sglang_aggregated():
     ...
 ```
@@ -172,6 +173,7 @@ def test_sglang_aggregated():
 @pytest.mark.requested_trtllm_kv_tokens(2592)   # KV cache cap (2x safety over min=1296)
 @pytest.mark.timeout(300)
 @pytest.mark.trtllm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_trtllm_aggregated():
     ...
 ```
@@ -181,6 +183,7 @@ def test_trtllm_aggregated():
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.multimodal  # video output → multimodal component
 # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens doesn't apply
 # and requested_trtllm_vram_gib (KvCacheConfig.max_gpu_total_bytes) has no effect —
 # the VRAM is model weights + activations. Only profiled_vram_gib is meaningful.
