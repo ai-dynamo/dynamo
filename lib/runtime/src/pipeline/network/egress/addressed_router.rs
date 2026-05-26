@@ -337,10 +337,8 @@ impl AddressedPushRouter {
         let inflight_guard = InflightGuard::new();
 
         let engine_ctx = input.context();
-        let request_id = engine_ctx.id().to_string();
         let engine_ctx_for_forwarder = engine_ctx.clone();
-        let metadata = input.metadata().clone();
-        let (request_stream, _ctx_unit) = input.into_parts();
+        let (request_stream, ctx_unit) = input.into_parts();
         let mut input_stream = request_stream
             .take()
             .expect("RequestStream::take called twice on bidirectional dispatch input");
@@ -374,20 +372,6 @@ impl AddressedPushRouter {
         let cancel_guard =
             CancelGuard::arm(self.resp_transport.clone(), recv_subject, send_subject);
 
-        let control_message = RequestControlMessage {
-            id: engine_ctx.id().to_string(),
-            request_type: if enable_request_stream {
-                RequestType::ManyIn
-            } else {
-                RequestType::SingleIn
-            },
-            response_type: ResponseType::ManyOut,
-            connection_info: resp_stream_conn_info,
-            metadata,
-            frontend_send_ts_ns: None,
-            request_stream_connection_info: req_stream_conn_info,
-        };
-
         // Bidirectional envelope is header-only: every request frame
         // (including the first) flows on the request-stream socket. The
         // worker decodes the control message, dials back for both streams,
@@ -396,9 +380,10 @@ impl AddressedPushRouter {
         let tx_start = self
             .dispatch_request_envelope::<()>(
                 address,
-                &control_message,
+                &ctx_unit,
+                resp_stream_conn_info,
+                req_stream_conn_info,
                 None,
-                &request_id,
                 queue_start,
             )
             .await?;
@@ -599,16 +584,18 @@ impl AddressedPushRouter {
         Ok((recv_subject, send_subject))
     }
 
-    /// Encode the request envelope (header-only when `request` is `None`,
-    /// otherwise a two-part `[ctrl, data]` message) and dispatch it over the
-    /// request plane. Observes the queue-duration and send-duration metrics,
-    /// injects trace + request-id + send-timestamp headers, and on any failure
-    /// (control-message serialize, payload serialize, codec encode, or
-    /// `send_request`) invokes `cancel_both` before bubbling the error up.
+    /// Build the request control envelope, optionally serialize the unary
+    /// data payload, then dispatch it over the request plane. Observes
+    /// queue-duration / send-duration metrics, injects trace + request-id
+    /// + send-timestamp headers.
     ///
-    /// `request = None` is the bidirectional header-only shape; `request =
-    /// Some(...)` is the unary two-part shape. The nvtx range label is
-    /// derived from this.
+    /// Wire shape is inferred from the inputs:
+    ///   - `send_conn_info = Some(_)` and `request = None` → header-only
+    ///     envelope with `RequestType::ManyIn` (bidirectional). The worker
+    ///     dials back via the attached connection info for inbound frames.
+    ///   - `send_conn_info = None` and `request = Some(_)` → two-part
+    ///     `[ctrl, data]` envelope with `RequestType::SingleIn` (unary).
+    ///     The payload travels in the data part.
     ///
     /// Returns the `Instant` captured immediately before the wire write so
     /// callers can compute downstream phase metrics (e.g. transport TTFT).
@@ -617,15 +604,32 @@ impl AddressedPushRouter {
     async fn dispatch_request_envelope<T>(
         &self,
         address: String,
-        control_message: &RequestControlMessage,
+        context: &crate::pipeline::context::Context<()>,
+        recv_conn_info: ConnectionInfo,
+        send_conn_info: Option<ConnectionInfo>,
         request: Option<&T>,
-        request_id: &str,
         queue_start: Instant,
     ) -> Result<Instant, Error>
     where
         T: Serialize + ?Sized,
     {
-        let ctrl = serialize_control_message(control_message)?;
+        let request_id = context.id();
+        let request_type = if send_conn_info.is_some() {
+            RequestType::ManyIn
+        } else {
+            RequestType::SingleIn
+        };
+        let control_message = RequestControlMessage {
+            id: request_id.to_string(),
+            request_type,
+            response_type: ResponseType::ManyOut,
+            connection_info: recv_conn_info,
+            metadata: context.metadata().clone(),
+            frontend_send_ts_ns: None,
+            request_stream_connection_info: send_conn_info,
+        };
+
+        let ctrl = serialize_control_message(&control_message)?;
         let data: Option<Vec<u8>> = match request {
             Some(req) => Some(serde_json::to_vec(req)?),
             None => None,
@@ -722,26 +726,13 @@ where
         let cancel_guard =
             CancelGuard::arm(self.resp_transport.clone(), recv_subject, send_subject);
 
-        // package up the connection info as part of the "header" component of the two part message
-        // used to issue the request on the
-        // todo -- this object should be automatically created by the register call, and achieved by to the two into_parts()
-        // calls. all the information here is provided by the [`StreamOptions`] object and/or the dataplane object
-        let control_message = RequestControlMessage {
-            id: engine_ctx.id().to_string(),
-            request_type,
-            response_type,
-            connection_info,
-            metadata: context.metadata().clone(),
-            frontend_send_ts_ns: None,
-            request_stream_connection_info: None,
-        };
-
         let tx_start = self
             .dispatch_request_envelope(
                 address,
-                &control_message,
+                &context,
+                connection_info,
+                None,
                 Some(&request),
-                &request_id,
                 queue_start,
             )
             .await?;
