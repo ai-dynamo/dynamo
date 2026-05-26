@@ -853,6 +853,77 @@ async fn cd_decode_concurrent_cleanup_marks_failed_once() -> Result<()> {
     Ok(())
 }
 
+/// `commit_usaa1`'s state rebuild must START the new state with
+/// `cleanup_claimed=false`, regardless of the existing state's value.
+///
+/// Bug it prevents: `decode_usaa` reads `pending_failure` once at the
+/// top, then calls `commit_usaa1` which reads it again at rebuild
+/// time. A concurrent `cleanup_failed_request` that fires between
+/// those two reads stashes `pending_failure=Some` AND sets the
+/// existing state's `cleanup_claimed=true`. If commit_usaa1 threads
+/// the flag forward, the new state inherits `cleanup_claimed=true`
+/// while also carrying the freshly-stashed `pending_failure`. The
+/// replay branch in `decode_usaa` was already bypassed, and no
+/// future `cleanup_failed_request` can pass the CAS to surface the
+/// stash — vLLM is never notified of the failure.
+///
+/// This test simulates the race without timing fragility by
+/// directly mutating the existing state's `cleanup_claimed` via a
+/// test-only accessor before driving USAA. Asserts the post-USAA
+/// state's flag is `false` so a subsequent failure can be reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_usaa1_rebuild_resets_cleanup_claimed() -> Result<()> {
+    let h = build_harness();
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    // After GNMT, the wrapper has the gnmt-time state with
+    // cleanup_claimed=false. Force it to true to simulate a
+    // concurrent cleanup_failed_request landing between
+    // decode_usaa's pending-failure check and commit_usaa1's
+    // rebuild.
+    assert_eq!(
+        h.wrapper.cleanup_claimed_for_test("req-1"),
+        Some(false),
+        "gnmt-time state must start with cleanup_claimed=false"
+    );
+    assert!(
+        h.wrapper.force_cleanup_claimed_for_test("req-1", true),
+        "force_cleanup_claimed_for_test must find the gnmt-time entry"
+    );
+
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Post-USAA: the new state must start with cleanup_claimed=false
+    // so a future cleanup_failed_request can pass the CAS.
+    assert_eq!(
+        h.wrapper.cleanup_claimed_for_test("req-1"),
+        Some(false),
+        "USAA-1 rebuild must reset cleanup_claimed to false; pre-fix would thread \
+         the existing `true` forward and silently swallow future failures"
+    );
+
+    // Exercise the recovered cleanup path end-to-end: forcing the
+    // local-kick to fail must surface mark_failed_onboarding.
+    h.transport.wait_onboard_count(1).await;
+    h.transport
+        .resolve_onboard(0, Err(anyhow::anyhow!("post-rebuild local kick failure")));
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").expect("failure surfaced");
+    assert!(
+        !failed.block_ids.is_empty(),
+        "mark_failed_onboarding must be called with the unfilled G1 slice"
+    );
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_inner_used(h: &TestHarness) {
     let _ = h.inner.local_id();

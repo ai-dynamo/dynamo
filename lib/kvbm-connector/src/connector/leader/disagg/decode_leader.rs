@@ -379,6 +379,35 @@ impl DecodeDisaggLeader {
         self.cd_request_state.contains_key(request_id)
     }
 
+    /// Test-only: read the wrapper's per-request `cleanup_claimed`
+    /// CAS flag. Returns `None` if no `cd_request_state` entry exists.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn cleanup_claimed_for_test(&self, request_id: &str) -> Option<bool> {
+        self.cd_request_state.get(request_id).map(|e| {
+            e.value()
+                .cleanup_claimed
+                .load(std::sync::atomic::Ordering::Acquire)
+        })
+    }
+
+    /// Test-only: force-set the wrapper's per-request
+    /// `cleanup_claimed` flag. Returns `false` if no entry exists.
+    /// Used to simulate the racy "existing state had a CAS claimed
+    /// before commit_usaa1's rebuild" scenario without timing
+    /// fragility — see the rebuild-loses-stash test in
+    /// `tests/cd_decode_e2e.rs`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn force_cleanup_claimed_for_test(&self, request_id: &str, value: bool) -> bool {
+        if let Some(e) = self.cd_request_state.get(request_id) {
+            e.value()
+                .cleanup_claimed
+                .store(value, std::sync::atomic::Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
     fn release_request(&self, request_id: &str) {
         if let Some((_, state)) = self.cd_request_state.remove(request_id) {
             self.inflight_budget.release(state.reserved_tokens);
@@ -1045,16 +1074,39 @@ impl DecodeDisaggLeader {
             session: Mutex::new(existing.session.lock().clone()),
             // Carry over any pre-USAA stash from the gnmt-time state;
             // commit_usaa1 replaces the Arc entry so we must thread it.
+            //
+            // RACE: `decode_usaa` reads `pending_failure` once and, if
+            // None, calls `commit_usaa1` which reads it AGAIN here. A
+            // concurrent `cleanup_failed_request` firing between those
+            // two reads stashes `Some(reason)` on the existing state,
+            // which we then thread into the new state. The replay
+            // path in `decode_usaa` was already bypassed, so nothing
+            // surfaces this stash to vLLM UNLESS a future
+            // `cleanup_failed_request` re-runs and claims the CAS
+            // fresh. That requires `cleanup_claimed` to be `false` on
+            // the new state — see the field initializer below.
             pending_failure: Mutex::new(existing.pending_failure.lock().clone()),
-            // Thread the cleanup_claimed flag through the USAA-1
-            // state rebuild so any cleanup already claimed against
-            // the gnmt-time state keeps its winner — the wrapper
-            // entry being replaced must NOT reopen the CAS window.
-            cleanup_claimed: std::sync::atomic::AtomicBool::new(
-                existing
-                    .cleanup_claimed
-                    .load(std::sync::atomic::Ordering::Acquire),
-            ),
+            // ALWAYS start the new state with `cleanup_claimed=false`.
+            // Threading the flag forward looks attractive (a cleanup
+            // already claimed against the gnmt-time state should not
+            // re-claim), but it loses pre-USAA failure stashes during
+            // the rebuild race documented on `pending_failure` above:
+            // if the new state inherits `cleanup_claimed=true` while
+            // also carrying a freshly-stashed `pending_failure=Some`,
+            // no future `cleanup_failed_request` can pass the CAS to
+            // emit `mark_failed_onboarding` with the now-known G1
+            // ids — vLLM is never notified.
+            //
+            // Starting fresh is safe: a fully-completed cleanup would
+            // have called `release_request`, removing the
+            // `cd_request_state` entry; then commit_usaa1's `get` of
+            // `existing` would fail and we wouldn't reach here. So
+            // reaching this point with `existing.cleanup_claimed=true`
+            // means the cleanup is mid-flight (stashed pre-USAA, did
+            // not release) — and the correct downstream behavior is
+            // for the next cleanup to surface that stash via the CAS
+            // on the new state.
+            cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&updated));
