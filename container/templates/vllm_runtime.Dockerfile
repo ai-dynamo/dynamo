@@ -49,17 +49,21 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/l
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% else %}
-# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel on
-# LD_LIBRARY_PATH so dlopen() can find it from processes that don't import
-# the `nixl` Python package — chiefly `dynamo.frontend`, which is pure-Rust
-# from a process perspective. Without this, Rust nixl-sys's stub-mode runtime
-# loader returns is_stub()=true and the frontend rejects any model card
-# carrying a `media_decoder` (i.e. workers launched with --frontend-decoding)
-# with "OpenAIPreprocessor.new_with_parts: NIXL is not supported in stub mode".
-# The wheel installs libnixl.so under a hidden ".libs/" sibling that only the
-# wheel's own RPATH knows about; standard LD search can't find it without help.
+# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
+# stable prefix so non-Python consumers use the same NIXL copy that Python imports.
+# This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
+# processes that do not import the nixl Python package first.
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
-ENV LD_LIBRARY_PATH=${SITE_PACKAGES}/.nixl_cu${CUDA_MAJOR}.mesonpy.libs:${LD_LIBRARY_PATH:-}
+ENV NIXL_PREFIX=/opt/dynamo/nixl \
+    NIXL_LIB_DIR=/opt/dynamo/nixl \
+    NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
+COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
+RUN install_nixl_from_wheel \
+    --cuda-major "${CUDA_MAJOR}" \
+    --site-packages "${SITE_PACKAGES}" \
+    --prefix "${NIXL_PREFIX}" \
+    --skip-headers
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
 # Install NATS and ETCD

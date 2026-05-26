@@ -392,7 +392,7 @@ pytest tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -v --tb=
 pytest tests/serve/test_trtllm.py::test_deployment[aggregated-2] -v --tb=short
 ```
 
-**Pre-merge CI equivalent** -- this is what [`container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml) runs on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
+**Pre-merge CI equivalent** -- this is what [`pr.yaml`](../.github/workflows/pr.yaml) runs via [`dynamo-pipeline.yml`](../.github/workflows/dynamo-pipeline.yml) on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
 ```bash
 # Parallel pre-merge tests (4 workers, CPU-only; typically <5min)
 pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" -n 4 --dist=loadscope -v --tb=short
@@ -454,14 +454,14 @@ It is highly recommended that you run tests thoroughly on your local machine bef
 
 Source workflow files (see [`.github/workflows/`](../.github/workflows/) for the full set):
 - **Pre-merge (Rust):** [`.github/workflows/pre-merge.yml`](../.github/workflows/pre-merge.yml)
-- **Pre-merge (Python):** [`.github/workflows/container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml)
-- **Post-merge:** [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml) -> [`.github/workflows/build-test-distribute-flavor.yml`](../.github/workflows/build-test-distribute-flavor.yml)
+- **Pre-merge (Python):** [`.github/workflows/pr.yaml`](../.github/workflows/pr.yaml) -> [`.github/workflows/dynamo-pipeline.yml`](../.github/workflows/dynamo-pipeline.yml)
+- **Post-merge:** [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml)
 - **Nightly:** [`.github/workflows/nightly-ci.yml`](../.github/workflows/nightly-ci.yml)
 - **Pytest action:** [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml)
 
 ### Pre-merge (every PR)
 
-Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml).
+Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`pr.yaml`](../.github/workflows/pr.yaml).
 
 **Rust checks** (only if Rust files changed) -- runs `pre-commit`, then the full sequence from [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 4 workspace dirs (`.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`): format, clippy, cargo-deny, machete, compile, doc tests, unit tests.
 

@@ -202,6 +202,7 @@ ARG TARGETARCH
 {% if framework == "vllm" and device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
+COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
 RUN --mount=from=wheel_builder,target=/wheel_builder \
     set -eux; \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
@@ -216,29 +217,11 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
         echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
 {% if framework == "vllm" and device == "cuda" %}
     elif [ "${FRAMEWORK}" = "vllm" ]; then \
-        wheel_lib_dir="/usr/local/lib/python${PYTHON_VERSION}/dist-packages/.nixl_cu${CUDA_MAJOR}.mesonpy.libs"; \
-        if [ ! -d "${wheel_lib_dir}" ]; then \
-            echo "ERROR: expected upstream vLLM NIXL wheel libs at ${wheel_lib_dir}; update vLLM NIXL dev-image path handling." >&2; \
-            exit 1; \
-        fi; \
-        for lib in libnixl.so libnixl_build.so libnixl_common.so libserdes.so libstream.so; do \
-            if [ ! -f "${wheel_lib_dir}/${lib}" ]; then \
-                echo "ERROR: missing ${wheel_lib_dir}/${lib}; upstream vLLM NIXL wheel layout changed." >&2; \
-                exit 1; \
-            fi; \
-        done; \
-        if [ ! -d "${wheel_lib_dir}/plugins" ]; then \
-            echo "ERROR: missing ${wheel_lib_dir}/plugins; upstream vLLM NIXL wheel layout changed." >&2; \
-            exit 1; \
-        fi; \
-        test -d /wheel_builder/opt/nvidia/nvda_nixl/include; \
-        if [ ! -f "${wheel_lib_dir}/include/nixl.h" ]; then \
-            rm -rf "${wheel_lib_dir}/include"; \
-            cp -r /wheel_builder/opt/nvidia/nvda_nixl/include "${wheel_lib_dir}/include"; \
-        fi; \
-        test -f "${wheel_lib_dir}/include/nixl.h"; \
-        mkdir -p /opt/dynamo; \
-        ln -sfn "${wheel_lib_dir}" /opt/dynamo/nixl; \
+        install_nixl_from_wheel \
+            --cuda-major "${CUDA_MAJOR}" \
+            --python-version "${PYTHON_VERSION}" \
+            --prefix /opt/dynamo/nixl \
+            --headers-src /wheel_builder/opt/nvidia/nvda_nixl/include; \
 {% endif %}
     fi
 
