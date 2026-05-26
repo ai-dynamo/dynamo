@@ -20,7 +20,6 @@ spec:
           image: python:3.10-slim
           command: ["sh", "-c"]
           env:
-            # Uses up to 64 GB RAM for XET buffers; set "0" on low-memory nodes (8 GB cap): https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             # Optional: create with: kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<token> -n <namespace>
