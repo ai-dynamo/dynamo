@@ -2624,6 +2624,7 @@ class backend:
         Aggregated: "backend.DisaggregationMode"
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
+        Encode: "backend.DisaggregationMode"
 
     class EngineConfig:
         def __init__(
@@ -2694,6 +2695,7 @@ class backend:
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
             health_check_payload: Optional[Dict[str, Any]] = None,
+            route_to_encoder: bool = ...,
         ) -> None: ...
 
     class Worker:
