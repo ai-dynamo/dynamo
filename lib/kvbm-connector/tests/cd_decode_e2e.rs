@@ -230,7 +230,16 @@ async fn cd_decode_happy_path() -> Result<()> {
     );
 
     let session = h.factory.last_opened().expect("decode opened a session");
-    assert_eq!(session.commit_calls(), vec![local_match_hashes(&h)]);
+    // Stage 1: the GNMT-time commit covers BOTH the planned-promoted
+    // prefix and the local-match window (the prefix is in vLLM's G1
+    // but not yet in decode's G2 — `MockInnerLeaderShim`'s
+    // `find_prefix_g2_blocks` returns empty, which triggers the
+    // promotion planner). `make_available` at GNMT still exposes
+    // only the currently-G2-resident set (local match); the
+    // promotion task lands the prefix G2 blocks at USAA.
+    let mut expected_first_commit = h.all_hashes[..COMPUTED_BLOCKS].to_vec();
+    expected_first_commit.extend(local_match_hashes(&h));
+    assert_eq!(session.commit_calls(), vec![expected_first_commit]);
     assert_eq!(session.make_available_calls(), vec![local_match_hashes(&h)]);
 
     // 2. USAA-1 — local kick spawns; remote pull pipeline subscribes.

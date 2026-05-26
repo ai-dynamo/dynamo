@@ -176,6 +176,32 @@ impl Drop for CdRequestStatePayload {
     }
 }
 
+/// Decision recorded at decode GNMT when the slot's prefix range is
+/// known to vLLM (G1) but not yet backed by decode's G2 cache. The
+/// promotion fires at USAA — when vLLM has handed the wrapper the
+/// actual G1 `block_ids` — and runs as an uncancellable task that
+/// completes the alloc + transfer + register flow then publishes the
+/// resulting G2 blocks on the open CD session.
+///
+/// `prefix_hashes` are the canonical hashes from the slot's full
+/// sequence; they are committed up-front in `begin_remote_prefill`
+/// alongside the local-match hashes (so the prefill peer observes
+/// the full planned set when `finish_commits` seals the commit set)
+/// and re-asserted when the promotion task calls `session.commit`
+/// with the same hashes (which deduplicates against the up-front
+/// commit — see `lib/kvbm-engine/src/p2p/session/CONTRACT.md` §3.2
+/// "Monotonic-add sets"). `session.finish_availability` is
+/// **deferred** at GNMT — it only fires once the promotion task
+/// reaches `session.make_available(promoted_g2)`.
+#[derive(Debug, Clone)]
+struct PendingG1Promotion {
+    /// Width of the prefix slice — `num_computed_tokens / block_size`.
+    prefix_block_count: usize,
+    /// Canonical sequence hashes for blocks `[0..prefix_block_count)`,
+    /// in absolute-position order.
+    prefix_hashes: Vec<SequenceHash>,
+}
+
 struct CdRequestState {
     reserved_tokens: usize,
 
@@ -247,6 +273,22 @@ struct CdRequestState {
     /// losers early-return so vLLM is not double-notified. Mirrors
     /// the prefill-side guard on `CdRequest.cleanup_claimed`.
     cleanup_claimed: std::sync::atomic::AtomicBool,
+
+    /// Stage 1 G1→G2 prefix promotion plan, captured at GNMT when
+    /// vLLM reports `num_computed_tokens > 0` but decode's G2 has
+    /// no record of the prefix. Consumed at USAA, where the actual
+    /// G1 `block_ids` arrive and the promotion task is spawned.
+    /// `None` outside this path (the common case).
+    pending_g1_promotion: Option<PendingG1Promotion>,
+
+    /// Live JoinHandle for the uncancellable promotion task
+    /// spawned at USAA. Stored next to `session` so any path that
+    /// inspects per-request state can see the in-flight promotion;
+    /// dropping the handle does **not** abort the task (tokio's
+    /// `JoinHandle` detaches on drop). The task survives request
+    /// teardown — the resulting G2 blocks stay in the cache and
+    /// benefit future requests.
+    pending_promotion_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl CdRequestState {
@@ -718,6 +760,28 @@ impl DecodeDisaggLeader {
             );
         }
 
+        // Stage 1: when G2 didn't cover the prefix but vLLM is
+        // claiming one (`num_computed_tokens > 0`), plan a G1→G2
+        // promotion to fire at USAA. The slot's full sequence is
+        // the source of truth for the prefix hashes; vLLM will
+        // hand us the corresponding G1 `block_ids` at USAA.
+        let pending_g1_promotion = if prefix_g2.is_empty() && num_prefix_blocks > 0 {
+            let prefix_hashes: Vec<SequenceHash> =
+                split.all_sequence_hashes[..num_prefix_blocks].to_vec();
+            crate::audit!(
+                "prefix_g1_to_g2_promotion_planned",
+                role = "decode",
+                request_id,
+                prefix_block_count = num_prefix_blocks
+            );
+            Some(PendingG1Promotion {
+                prefix_block_count: num_prefix_blocks,
+                prefix_hashes,
+            })
+        } else {
+            None
+        };
+
         let num_local_match_hashes = local_g2.len();
         let local_match_g2_block_ids: Vec<BlockId> =
             local_g2.iter().map(|b| b.block_id()).collect();
@@ -781,6 +845,8 @@ impl DecodeDisaggLeader {
             session: Mutex::new(None),
             pending_failure: Mutex::new(None),
             cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
+            pending_g1_promotion: pending_g1_promotion.clone(),
+            pending_promotion_task: Mutex::new(None),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&new_state));
@@ -829,6 +895,10 @@ impl DecodeDisaggLeader {
         let salt = self.inner.slot_salt(request_id).inspect_err(|_| {
             self.release_request(request_id);
         })?;
+        let pending_promotion_hashes_for_session = pending_g1_promotion
+            .as_ref()
+            .map(|p| p.prefix_hashes.clone())
+            .unwrap_or_default();
         match self.coordinator.begin_remote_prefill(
             RemotePrefillStart {
                 request_id,
@@ -839,6 +909,7 @@ impl DecodeDisaggLeader {
                 prefill_token_ids,
                 lora_name,
                 salt,
+                pending_promotion_hashes: pending_promotion_hashes_for_session,
             },
             install_payload,
         ) {
@@ -1019,6 +1090,11 @@ impl DecodeDisaggLeader {
         }
         let local_match_g1: Vec<BlockId> = block_ids[split.local_match_range()].to_vec();
         let remote_g1: Vec<BlockId> = block_ids[split.remote_range()].to_vec();
+        // Stage 1: capture the prefix slice now (before
+        // `apply_block_assignments` consumes `block_ids`). The
+        // promotion task built at the bottom of `commit_usaa1`
+        // pairs these G1 ids with the GNMT-time `prefix_hashes`.
+        let prefix_g1_block_ids: Vec<BlockId> = block_ids[..split.computed_blocks].to_vec();
         let expected_remote_hashes = split.expected_remote_hashes();
         let remote_range = split.remote_range();
 
@@ -1194,6 +1270,13 @@ impl DecodeDisaggLeader {
             // `existing` would fail and we wouldn't reach here.
             pending_failure: Mutex::new(None),
             cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
+            // Carry the GNMT-time promotion plan forward — the task
+            // is spawned BELOW (after the post-insert pending_failure
+            // re-check). Threading it through `updated` keeps cleanup
+            // paths observing a single source of truth via the latest
+            // per-request Arc.
+            pending_g1_promotion: existing.pending_g1_promotion.clone(),
+            pending_promotion_task: Mutex::new(None),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&updated));
@@ -1390,6 +1473,100 @@ impl DecodeDisaggLeader {
                         .await;
                 }
             });
+        }
+
+        // Stage 1: spawn the uncancellable G1→G2 prefix promotion
+        // task. Independent of the local-kick and remote-pipeline
+        // spawns above — it only drives the session's deferred
+        // availability close (`begin_remote_prefill` skipped
+        // `session.finish_availability` because we promised more
+        // blocks would land). The task survives request teardown:
+        // dropping its `JoinHandle` detaches but does not abort.
+        // Even if the session has been closed by the time it
+        // completes, the resulting G2 blocks remain registered in
+        // the cache and benefit future requests.
+        if let Some(plan) = updated.pending_g1_promotion.clone() {
+            let inner = Arc::clone(&self.inner);
+            let session = updated.session.lock().clone();
+            let request_id_owned = request_id.to_string();
+            let prefix_block_count = plan.prefix_block_count;
+            let prefix_hashes = plan.prefix_hashes.clone();
+            // Pair vLLM's G1 block_ids for the prefix slice with
+            // the canonical hashes captured at GNMT. The hash
+            // carried by each `ExternalBlock<G1>` is what the
+            // offload pipeline registers the resulting G2 block
+            // with — the same hash `promote_g1_to_g2`'s future
+            // uses to re-query the G2 manager after transfer.
+            debug_assert_eq!(prefix_g1_block_ids.len(), prefix_block_count);
+            let source_blocks: Vec<kvbm_engine::offload::ExternalBlock<crate::G1>> =
+                prefix_g1_block_ids
+                    .iter()
+                    .copied()
+                    .zip(prefix_hashes.iter().copied())
+                    .map(|(bid, h)| kvbm_engine::offload::ExternalBlock::<crate::G1>::new(bid, h))
+                    .collect();
+            crate::audit!(
+                "prefix_g1_to_g2_promotion_enqueued",
+                role = "decode",
+                request_id,
+                prefix_block_count
+            );
+            let promotion_fut = inner.promote_g1_to_g2(source_blocks);
+            let handle = self.tokio_handle.spawn(async move {
+                let Some(session) = session else {
+                    tracing::warn!(
+                        request_id = %request_id_owned,
+                        "promotion task: session unset on per-request state; dropping"
+                    );
+                    return;
+                };
+                match promotion_fut.await {
+                    Ok(g2_blocks) => {
+                        crate::audit!(
+                            "prefix_g2_promotion_landed",
+                            role = "decode",
+                            request_id = %request_id_owned,
+                            promoted = g2_blocks.len()
+                        );
+                        // `prefix_hashes` were committed up-front in
+                        // `begin_remote_prefill`, and `finish_commits`
+                        // sealed the committed set there too — calling
+                        // `session.commit` here would error per
+                        // CONTRACT §2.3 (commit after finish_commits).
+                        // Drop straight to `make_available`.
+                        let _ = &prefix_hashes;
+                        if let Err(err) = session.make_available(g2_blocks) {
+                            tracing::warn!(
+                                request_id = %request_id_owned,
+                                error = %err,
+                                "promotion task: session.make_available failed"
+                            );
+                            return;
+                        }
+                        if let Err(err) = session.finish_availability() {
+                            tracing::warn!(
+                                request_id = %request_id_owned,
+                                error = %err,
+                                "promotion task: session.finish_availability failed"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        crate::audit!(
+                            "prefix_g2_promotion_failed",
+                            role = "decode",
+                            request_id = %request_id_owned,
+                            error = %err
+                        );
+                        // session.close implies finish_commits +
+                        // finish_availability with `closed_reason`
+                        // set, so the prefill peer observes a
+                        // terminal lifecycle event and bails.
+                        session.close(Some(format!("g1->g2 promotion: {err}")));
+                    }
+                }
+            });
+            *updated.pending_promotion_task.lock() = Some(handle);
         }
 
         Ok(())

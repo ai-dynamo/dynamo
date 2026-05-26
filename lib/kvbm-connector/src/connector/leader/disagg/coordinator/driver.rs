@@ -70,6 +70,14 @@ pub struct RemotePrefillStart<'a> {
     /// Raw salt string from the slot's request. Same purpose as
     /// `lora_name` — feeds the prefill-side hasher.
     pub salt: Option<String>,
+    /// Stage 1 planned G1→G2 prefix promotion hashes. When
+    /// non-empty, `begin_remote_prefill` commits these alongside
+    /// `prefix_g2` + `local_match_g2` on the session up-front
+    /// (Monotonic-add per session CONTRACT §3.2) and **defers**
+    /// `session.finish_availability` — the per-request promotion
+    /// task spawned at USAA is responsible for publishing the
+    /// landed G2 blocks and sealing availability.
+    pub pending_promotion_hashes: Vec<SequenceHash>,
 }
 
 /// Shared dependencies every coordinator constructor needs. Bundled so the
@@ -1229,6 +1237,7 @@ impl ConditionalDisaggCoordinator {
             prefill_token_ids,
             lora_name,
             salt,
+            pending_promotion_hashes,
         } = start;
 
         // Loud-fail guards for not-yet-wired CD inputs at the decode
@@ -1296,9 +1305,22 @@ impl ConditionalDisaggCoordinator {
         // located via hash lookup against the session's available_pins.
         let prefix_hashes: Vec<SequenceHash> =
             prefix_g2.iter().map(|b| b.sequence_hash()).collect();
-        let mut session_hashes: Vec<SequenceHash> =
-            Vec::with_capacity(prefix_hashes.len() + local_match_hashes.len());
+        let promotion_pending = !pending_promotion_hashes.is_empty();
+        let mut session_hashes: Vec<SequenceHash> = Vec::with_capacity(
+            prefix_hashes.len() + pending_promotion_hashes.len() + local_match_hashes.len(),
+        );
+        // Stage 1: the promoted-prefix hashes occupy the same
+        // conceptual `[0, num_prefix_blocks)` slot as `prefix_g2`
+        // — they go BEFORE `local_match_hashes` (which lives at
+        // `[num_prefix_blocks, num_prefix_blocks + local_match)`)
+        // to preserve absolute-position ordering across the
+        // committed set. Including them up-front lets
+        // `finish_commits` seal the full planned set; the
+        // promotion task spawned at USAA will land the
+        // corresponding G2 blocks and call `session.make_available`
+        // + `session.finish_availability` then.
         session_hashes.extend_from_slice(&prefix_hashes);
+        session_hashes.extend_from_slice(&pending_promotion_hashes);
         session_hashes.extend_from_slice(&local_match_hashes);
         let session_g2: Vec<ImmutableBlock<G2>> =
             prefix_g2.into_iter().chain(local_match_g2).collect();
@@ -1306,11 +1328,18 @@ impl ConditionalDisaggCoordinator {
         let session_id = uuid::Uuid::new_v4();
         let session = self.session_factory.open(session_id)?;
 
-        // Holder side: publish commit + availability, then close terminators.
+        // Holder side: publish commit + availability, then close
+        // terminators. `finish_availability` is DEFERRED when a
+        // Stage 1 promotion is pending — the prefill peer drains
+        // availability until the close terminator lands, so we
+        // delay closing until the promotion task has called
+        // `session.make_available` with the promoted G2 blocks.
         session.commit(session_hashes)?;
         session.make_available(session_g2)?;
         session.finish_commits()?;
-        session.finish_availability()?;
+        if !promotion_pending {
+            session.finish_availability()?;
+        }
 
         // Build DecodeBits — remote_slots / remote_slot_index are empty at
         // this point; they get populated at USAA-1 in decode_leader.rs.
