@@ -1851,12 +1851,12 @@ svg.card-icon{
 
 .dynamo-benchmark-index {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px;
-    margin: 24px 0 18px;
+    gap: 10px;
+    margin: 24px 0 28px;
 }
 
 .dynamo-benchmark-lane,
+.dynamo-benchmark-row,
 .dynamo-benchmark-card,
 .dynamo-benchmark-hero,
 .dynamo-benchmark-facts div {
@@ -1866,6 +1866,7 @@ svg.card-icon{
 }
 
 .dark .dynamo-benchmark-lane,
+.dark .dynamo-benchmark-row,
 .dark .dynamo-benchmark-card,
 .dark .dynamo-benchmark-hero,
 .dark .dynamo-benchmark-facts div {
@@ -1890,6 +1891,55 @@ svg.card-icon{
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
     margin: 24px 0 28px;
+}
+
+.dynamo-benchmark-index-header,
+.dynamo-benchmark-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(128px, 0.75fr) minmax(130px, 0.8fr) minmax(150px, 0.95fr) 34px;
+    gap: 10px;
+    align-items: center;
+}
+
+.dynamo-benchmark-index-header {
+    padding: 0 14px 2px;
+    color: var(--pst-color-text-muted);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-benchmark-row {
+    min-height: 108px;
+    padding: 13px 14px;
+    color: var(--pst-color-text-base);
+    text-decoration: none;
+}
+
+.dynamo-benchmark-row:hover,
+.dynamo-benchmark-row:focus-visible {
+    border-color: var(--nv-color-green);
+    text-decoration: none;
+}
+
+.dynamo-benchmark-row:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--nv-color-green) 72%, transparent);
+    outline-offset: 2px;
+}
+
+.dynamo-benchmark-main h2 {
+    margin: 0 0 4px;
+    color: var(--pst-color-text-base);
+    font-size: 16px;
+    line-height: 1.22;
+}
+
+.dynamo-benchmark-main p {
+    margin: 0;
+    color: var(--pst-color-text-muted);
+    font-size: 12.5px;
+    line-height: 1.35;
 }
 
 .dynamo-technique-guide {
@@ -2185,16 +2235,15 @@ svg.card-icon{
     grid-template-columns: 38px minmax(0, 1fr);
     gap: 8px;
     align-items: center;
-    flex: 1 1 auto;
     min-width: 0;
-    padding: 8px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 8px;
-    background: var(--nv-color-bg-default);
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
 }
 
 .dark .dynamo-benchmark-model {
-    background: var(--nv-dark-grey-1);
+    background: transparent;
 }
 
 .dynamo-benchmark-model .dynamo-model-logo {
@@ -2207,24 +2256,22 @@ svg.card-icon{
     display: block;
     margin: 0;
     color: var(--pst-color-text-base);
-    font-size: 15px;
+    font-size: 13px;
     line-height: 1.2;
     overflow-wrap: break-word;
 }
 
 .dynamo-benchmark-kind {
-    display: inline-flex;
-    align-items: center;
-    flex: 0 0 auto;
-    margin: 0;
-    padding: 5px 8px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 999px;
-    background: var(--nv-color-bg-default);
+    display: block;
+    margin: 0 0 4px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
 }
 
 .dark .dynamo-benchmark-kind {
-    background: var(--nv-dark-grey-1);
+    background: transparent;
 }
 
 .dynamo-benchmark-card h2 {
@@ -2248,40 +2295,87 @@ svg.card-icon{
 .dynamo-benchmark-features {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
-    margin: 12px 0;
-    padding-top: 2px;
+    gap: 5px;
+    margin: 0;
+    padding: 0;
 }
 
 .dynamo-feature-pair {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    min-height: 40px;
-    padding: 4px 10px 4px 4px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 999px;
-    background: var(--nv-color-bg-default);
+    gap: 5px;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
     color: var(--pst-color-text-base);
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 11.5px;
+    font-weight: 700;
     line-height: 1.2;
+    pointer-events: none;
 }
 
 .dark .dynamo-feature-pair {
-    background: var(--nv-dark-grey-1);
+    background: transparent;
 }
 
 .dynamo-feature-pair .dynamo-feature-symbol {
     flex: 0 0 auto;
-    width: 32px;
-    height: 32px;
-    border-radius: 10px;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--nv-color-green) 18%, var(--nv-color-bg-default));
+}
+
+.dark .dynamo-feature-pair .dynamo-feature-symbol {
+    background: color-mix(in srgb, var(--nv-color-green) 24%, var(--nv-dark-grey-1));
 }
 
 .dynamo-feature-pair .dynamo-feature-icon {
-    width: 24px;
-    height: 24px;
+    width: 17px;
+    height: 17px;
+}
+
+.dynamo-benchmark-target {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.dynamo-benchmark-target span {
+    display: grid;
+    gap: 1px;
+    min-width: 0;
+}
+
+.dynamo-benchmark-target b {
+    color: var(--pst-color-text-muted);
+    font-size: 10px;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-benchmark-target strong {
+    color: var(--pst-color-text-base);
+    font-size: 12.5px;
+    line-height: 1.2;
+    overflow-wrap: break-word;
+}
+
+.dynamo-benchmark-open {
+    justify-self: end;
+    color: color-mix(in srgb, var(--nv-color-green) 72%, var(--pst-color-text-base));
+    font-size: 12.5px;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.dynamo-benchmark-open::after {
+    content: " ->";
 }
 
 .dynamo-benchmark-targets {
@@ -2532,6 +2626,36 @@ svg.card-icon{
         gap: 6px;
     }
 
+    .dynamo-technique-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        column-gap: 14px;
+        row-gap: 0;
+    }
+
+    .dynamo-technique-card {
+        grid-template-columns: 22px minmax(0, 1fr);
+        gap: 7px;
+        padding: 8px 0;
+    }
+
+    .dynamo-technique-card .dynamo-feature-symbol {
+        width: 22px;
+        height: 22px;
+    }
+
+    .dynamo-technique-card .dynamo-feature-icon {
+        width: 20px;
+        height: 20px;
+    }
+
+    .dynamo-technique-card strong {
+        font-size: 12.5px;
+    }
+
+    .dynamo-technique-card p {
+        display: none !important;
+    }
+
     .dynamo-technique-card:nth-last-child(-n + 2) {
         border-bottom: 1px solid var(--border, var(--grayscale-a5));
     }
@@ -2550,13 +2674,27 @@ svg.card-icon{
         min-height: 0;
     }
 
+    .dynamo-benchmark-index-header {
+        display: none;
+    }
+
+    .dynamo-benchmark-row {
+        grid-template-columns: 1fr;
+        align-items: start;
+        gap: 10px;
+        min-height: 0;
+        padding: 14px;
+    }
+
     .dynamo-feature-symbol-row,
     .dynamo-benchmark-model,
     .dynamo-benchmark-kind,
     .dynamo-benchmark-card h2,
     .dynamo-benchmark-card p,
     .dynamo-benchmark-features,
-    .dynamo-benchmark-targets {
+    .dynamo-benchmark-target,
+    .dynamo-benchmark-targets,
+    .dynamo-benchmark-open {
         grid-column: 1;
         grid-row: auto;
     }
@@ -2569,5 +2707,9 @@ svg.card-icon{
 
     .dynamo-benchmark-targets {
         grid-template-columns: 1fr;
+    }
+
+    .dynamo-benchmark-open {
+        justify-self: start;
     }
 }
