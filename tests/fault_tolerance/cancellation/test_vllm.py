@@ -13,8 +13,6 @@ import json
 import logging
 import os
 import shutil
-import time
-from typing import Dict
 
 import pytest
 
@@ -403,11 +401,11 @@ def test_request_cancellation_vllm_decode_cancel(
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2
-def test_request_cancellation_vllm_prefill_disconnect_graceful(
+def test_request_cancellation_vllm_prefill_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
-    End-to-end test for graceful client disconnect during prefill phase.
+    End-to-end test for request cancellation during prefill phase.
 
     This test verifies that when a client disconnects during the prefill
     phase in a disaggregated setup, the prefill worker still runs the
@@ -439,24 +437,33 @@ def test_request_cancellation_vllm_prefill_disconnect_graceful(
             ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
+                # Step 4: Test request cancellation during prefill phase
+                # Note: With the new architecture, prefill routing happens in the frontend,
+                # so the request goes directly to the prefill worker first
+                logger.info(
+                    "Testing completion request cancellation during prefill phase..."
+                )
+
+                # Send request with long prompt (non-blocking)
                 cancellable_req = send_cancellable_request(
                     frontend.frontend_port, "completion", use_long_prompt=True
                 )
 
-                request_id, post_start_offset = poll_for_pattern(
+                request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern="Prefill Request ID: ",
                     match_type="contains",
                 )
 
+                # Cancel during prefill phase
                 cancellable_req.cancel()
-                logger.info(f"Cancelled request_id={request_id} during prefill")
+                logger.info(f"Cancelled request ID: {request_id} during prefill")
 
                 # Prefill must complete despite client disconnect.
                 poll_for_pattern(
                     process=prefill_worker,
                     pattern=f"Prefill completed for request {request_id}",
-                    log_offset=post_start_offset,
+                    log_offset=prefill_log_offset,
                     match_type="contains",
                     max_wait_ms=15000,
                     poll_interval_ms=50,
@@ -470,27 +477,25 @@ def test_request_cancellation_vllm_prefill_disconnect_graceful(
                     poll_interval_ms=50,
                 )
 
-                # Metrics-level confirmation that prefill ran to completion.
-                # `duration_count` increments on RequestMetricsGuard::drop, so
-                # a mid-flight abort would not show up here. Poll because the
-                # publisher may lag the "Prefill completed" log.
-                summary: Dict[str, float] = {}
-                deadline_ms = 5000
-                interval_ms = 100
-                elapsed_ms = 0
-                while elapsed_ms < deadline_ms:
-                    summary = read_worker_generate_summary(
-                        worker_system_port=prefill_worker.system_port,
-                        component="prefill",
-                    )
-                    if summary["duration_count"] >= 1.0:
-                        break
-                    time.sleep(interval_ms / 1000.0)
-                    elapsed_ms += interval_ms
+                # Wait for the runtime to log "request completed" for our request — this
+                # fires on the same RequestMetricsGuard::drop that observes the histogram,
+                # so once we see this log line the metric is already up to date.
+                poll_for_pattern(
+                    process=prefill_worker,
+                    pattern=f"request completed request_id={request_id}",
+                    log_offset=prefill_log_offset,
+                    match_type="contains",
+                    max_wait_ms=5000,
+                    poll_interval_ms=100,
+                )
+                summary = read_worker_generate_summary(
+                    worker_system_port=prefill_worker.system_port,
+                    component="prefill",
+                )
                 logger.info(f"Prefill generate summary: {summary}")
                 assert summary["duration_count"] == 1.0, (
                     f"Prefill histogram count={summary['duration_count']} — "
-                    "request was aborted mid-flight or publisher lagged."
+                    "request was aborted mid-flight."
                 )
                 assert summary["duration_sum"] >= 0.1, (
                     f"Prefill generate took only {summary['duration_sum']}s — "
@@ -501,20 +506,18 @@ def test_request_cancellation_vllm_prefill_disconnect_graceful(
                     "yielding KV-transfer params."
                 )
 
-                # Frontend observes the client disconnect and counts it.
+                # Verify cancellation metrics
                 verify_frontend_cancellation_metrics(
                     frontend_port=frontend.frontend_port,
                     request_type="completion",
                     expected_count=1,
                 )
-                # No kill control message reaches the prefill worker.
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
+                )
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
                     expected_count=0,
                     component="prefill",
-                )
-                # The decode handler then records the cancellation.
-                verify_runtime_cancellation_metrics(
-                    worker_system_port=decode_worker.system_port,
-                    expected_count=1,
                 )
