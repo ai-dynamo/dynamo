@@ -14,15 +14,15 @@ Welcome to the Dynamo Deploy project! This guide will help you get started with 
 The deploy directory contains several key components:
 
 ```
-├── discovery # How to use Dynamo kubernetes discovery backend
 ├── helm
 │   └── charts
 │       ├── crds # Dynamo CRD helm chart
 │       ├── platform # Dynamo platform helm chart
-├── inference-gateway # Dynamo intregration with inference gateway
+├── inference-gateway # Dynamo integration with inference gateway
 ├── observability # Observability tools for Dynamo k8s
 ├── operator # Source code for the Dynamo operator
 ├── pre-deployment # Pre-deployment scripts to check your k8s cluster meets the requirements for deploying Dynamo
+├── snapshot # Dynamo snapshot tooling
 └── utils # Utilities and manifests for Dynamo benchmarking and profiling workflows
 ```
 
