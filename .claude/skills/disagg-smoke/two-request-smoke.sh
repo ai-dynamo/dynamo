@@ -67,7 +67,12 @@ echo "EXP=$ROOT"
 echo "$ROOT" > /tmp/cd-trace-current-exp
 
 # Tear down anything stale (best-effort).
+# Prefill now launches via `python -m kvbm.vllm.prefill` (wrapper), so the
+# vanilla `vllm.entrypoints.openai` pattern misses it. Kill all known
+# Prefill launch shapes so we don't collide with stragglers from prior runs.
 pkill -f "vllm.entrypoints.openai" 2>/dev/null || true
+pkill -f "kvbm.vllm.prefill"        2>/dev/null || true
+pkill -f "dynamo.vllm"               2>/dev/null || true
 sleep 3
 PIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d ' ' | grep -v '^$' || true)
 [ -n "$PIDS" ] && echo "$PIDS" | xargs -r kill -9 2>/dev/null || true
@@ -86,6 +91,8 @@ fail_dump() {
     tail -n 30 "$2" | sed 's/\x1b\[[0-9;]*m//g' >&2
   fi
   pkill -f "vllm.entrypoints.openai" 2>/dev/null || true
+  pkill -f "kvbm.vllm.prefill"        2>/dev/null || true
+  pkill -f "dynamo.vllm"               2>/dev/null || true
   pkill -9 -f kvbm_hub 2>/dev/null || true
   exit 1
 }
@@ -110,7 +117,7 @@ echo "HUB UP $(date)"
 
 # Now launch the vLLMs against the live hub.
 RUST_LOG=${RUST_LOG:-info,kvbm_connector=debug,kvbm_audit=info} \
-  bash $SKILL_BRINGUP/launch-prefill.sh > "$ROOT/prefill.log" 2>&1 &
+  bash $SKILL_BRINGUP/launch-prefill-kvbm-wrap.sh > "$ROOT/prefill.log" 2>&1 &
 PREFILL_PID=$!
 RUST_LOG=${RUST_LOG:-info,kvbm_connector=debug,kvbm_audit=info} \
   bash $SKILL_BRINGUP/launch-decode.sh > "$ROOT/decode.log" 2>&1 &

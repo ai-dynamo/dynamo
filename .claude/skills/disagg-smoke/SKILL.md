@@ -38,8 +38,13 @@ Do NOT dump full logs back — return under 300 words.
 
 Steps:
 1. From /home/ryan/repos/dynamo/.claude/worktrees/page-size (or
-   whatever the user's worktree is), tear down any stale processes:
+   whatever the user's worktree is), tear down any stale processes.
+   Prefill launches via three possible shapes (vanilla, kvbm-wrap,
+   dynamo); kill all three patterns so the wrapper/dynamo paths
+   don't leave zombies:
      pkill -f vllm.entrypoints.openai 2>/dev/null
+     pkill -f kvbm.vllm.prefill 2>/dev/null
+     pkill -f dynamo.vllm 2>/dev/null
      pkill -9 -f kvbm_hub 2>/dev/null
      sleep 3
 2. (Optional, if bindings/hub need rebuild) Source env.sh and run
