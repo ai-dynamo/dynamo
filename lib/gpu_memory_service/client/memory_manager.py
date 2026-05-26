@@ -553,6 +553,7 @@ class GMSClientMemoryManager:
 
         remapped_count = 0
         total_bytes = 0
+        remapped_vas: list[int] = []
         for va, mapping in sorted(
             self._mappings.items(), key=lambda item: item[1].layout_slot
         ):
@@ -581,8 +582,7 @@ class GMSClientMemoryManager:
             cumem_set_access(
                 va, mapping.aligned_size, self.device, self._granted_lock_type
             )
-            cuda_synchronize()
-            cuda_validate_pointer(va)
+            remapped_vas.append(va)
 
             if mapping.allocation_id != alloc_info.allocation_id:
                 self._inverse_mapping.pop(mapping.allocation_id, None)
@@ -593,6 +593,11 @@ class GMSClientMemoryManager:
             self._inverse_mapping[alloc_info.allocation_id] = va
             remapped_count += 1
             total_bytes += mapping.aligned_size
+
+        if remapped_vas:
+            cuda_synchronize()
+            for va in remapped_vas:
+                cuda_validate_pointer(va)
 
         self._va_preserved = False
         self._unmapped = False
