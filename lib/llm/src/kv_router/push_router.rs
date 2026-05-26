@@ -502,6 +502,8 @@ impl KvPushRouter {
             return None;
         }
 
+        // Open/close lifecycle actions only peek so failed opens or closes do not
+        // renew stale affinity. Action-less session turns refresh TTL as active use.
         match sc.action.as_ref() {
             Some(crate::protocols::openai::nvext::SessionAction::Open)
             | Some(crate::protocols::openai::nvext::SessionAction::Close) => {
@@ -707,6 +709,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .as_ref()
                 .and_then(|r| r.session_control.as_ref())
         {
+            // Bind/rebind only after the worker accepted open_session. This keeps
+            // first ambiguous opens on normal KV routing while repeated opens renew
+            // the timeout for the selected worker/rank.
             self.sticky_sessions.bind(
                 &sc.session_id,
                 WorkerWithDpRank::new(instance_id, dp_rank),
@@ -846,6 +851,9 @@ fn sticky_allowed_for_phase(phase: RequestPhase, routing: Option<&RoutingHints>)
         return false;
     }
 
+    // Routing precedence: caller-visible pins win over sticky affinity. Sticky is
+    // only considered for requests with session_control, so the default KV/direct
+    // routing paths stay unchanged.
     match phase {
         RequestPhase::Prefill => {
             routing.prefill_worker_id.is_none()

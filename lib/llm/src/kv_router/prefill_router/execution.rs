@@ -34,6 +34,8 @@ impl PrefillRouter {
             return PrefillResolveDecision::NotActivated;
         }
 
+        // Treat a preselected prefill worker as a caller/external pin. Otherwise,
+        // sticky affinity wins before this router writes generated bootstrap hints.
         let sticky_worker = if preselected_worker.is_none() {
             self.resolve_sticky_prefill_worker(context_id, req).await
         } else {

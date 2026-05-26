@@ -28,6 +28,10 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 type ExpiryHandler = Arc<dyn Fn(String, u64) + Send + Sync>;
 
 /// Trait for session affinity storage backends.
+///
+/// Stores `(worker, dp_rank)` as an atomic routing target. `get` is the
+/// action-less-turn path and refreshes sliding TTL; `peek` is for lifecycle
+/// actions that must not extend affinity until the worker confirms success.
 pub trait AffinityStore: Send + Sync {
     /// Look up the `(worker, dp_rank)` for a session. Returns `None` if unknown
     /// or expired. Implementations should refresh the TTL on hit.
