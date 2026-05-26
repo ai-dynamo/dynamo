@@ -13,7 +13,7 @@
   .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
 </style>
 <text class="title" x="40" y="58">Cold start</text>
-<text class="subtitle" x="40" y="88">Per-phase breakdown of cold start &#8212; boot, engine init, weight load, compile, and warmup all happen on every cold start; snapshot skips them all</text>
+<text class="subtitle" x="40" y="88">Single-GPU (1xB200); excludes base container startup</text>
 <line x1="170.0" y1="160" x2="170.0" y2="470" stroke="#1a1a1a" stroke-width="1"/>
 <text class="axis" x="170.0" y="488" text-anchor="middle">0s</text>
 <line x1="335.8" y1="160" x2="335.8" y2="470" stroke="#1a1a1a" stroke-width="1"/>
