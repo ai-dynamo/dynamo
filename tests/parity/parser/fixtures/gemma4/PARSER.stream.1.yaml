@@ -30,6 +30,7 @@ cases:
       vllm:
         calls: []
         normal_text: ''
+        reason: vLLM's Gemma4 streaming parser misses a complete one-chunk tool call when start and end markers arrive in the same delta; Dynamo and SGLang parse the complete call.
   PARSER.stream.1.b:
     description: Complete tool call split across parser-significant boundaries
     ref: derived from PARSER.batch.1
