@@ -71,6 +71,7 @@ async def graceful_shutdown_with_discovery(
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
     drain_callback: Optional[Callable[[], Coroutine]] = None,
+    drain_timeout_s: Optional[float] = None,
     cleanup_callback: Optional[Callable[[], Coroutine]] = None,
 ) -> None:
     """Perform graceful shutdown with endpoint unregistration and optional drain.
@@ -87,6 +88,10 @@ async def graceful_shutdown_with_discovery(
             from segfaulting due to use-after-free on freed GPU memory (#7319).
             Any exception raised by drain_callback is logged and swallowed so that
             shutdown still proceeds even if draining times out or fails.
+        drain_timeout_s: Outer ``asyncio.wait_for`` cap on ``drain_callback``.
+            Callers whose drain is already bounded internally should pass their
+            own deadline (plus a small scheduling buffer) so this outer cap does
+            not silently truncate it. Defaults to 30s for backward compatibility.
         cleanup_callback: Optional async callable awaited after drain_callback
             but *before* runtime.shutdown(). Used by unified backends to release
             engine resources (GPU memory, PyTorch process groups) before the Rust
@@ -111,18 +116,19 @@ async def graceful_shutdown_with_discovery(
         await asyncio.sleep(grace_period_s)
 
     if drain_callback is not None:
+        effective_drain_timeout_s = (
+            _DEFAULT_DRAIN_TIMEOUT_SECS if drain_timeout_s is None else drain_timeout_s
+        )
         logger.info(
             "Draining in-flight transfers before shutdown (issue #7319 safeguard)"
         )
         try:
-            await asyncio.wait_for(
-                drain_callback(), timeout=_DEFAULT_DRAIN_TIMEOUT_SECS
-            )
+            await asyncio.wait_for(drain_callback(), timeout=effective_drain_timeout_s)
             logger.info("Drain complete")
         except asyncio.TimeoutError:
             logger.warning(
                 "Drain callback timed out after %.0fs, proceeding with shutdown",
-                _DEFAULT_DRAIN_TIMEOUT_SECS,
+                effective_drain_timeout_s,
             )
         except Exception:
             logger.exception(
@@ -159,6 +165,7 @@ def install_signal_handlers(
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
     drain_callback: Optional[Callable[[], Coroutine]] = None,
+    drain_timeout_s: Optional[float] = None,
     cleanup_callback: Optional[Callable[[], Coroutine]] = None,
 ) -> None:
     shutdown_task: Optional[asyncio.Task[None]] = None
@@ -188,6 +195,7 @@ def install_signal_handlers(
                 shutdown_event=shutdown_event,
                 grace_period_s=grace_period_s,
                 drain_callback=drain_callback,
+                drain_timeout_s=drain_timeout_s,
                 cleanup_callback=cleanup_callback,
             )
         )

@@ -21,7 +21,11 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.utils.drain import prefill_drain_context
+from dynamo.common.utils.drain import (
+    DRAIN_WAIT_FOR_BUFFER_S,
+    prefill_drain_context,
+    resolve_drain_timeout_s,
+)
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -169,14 +173,17 @@ async def worker() -> None:
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
     drain_callback = None
+    drain_timeout_s = None
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
         drain_callback = _prefill_drain_callback
+        drain_timeout_s = resolve_drain_timeout_s() + DRAIN_WAIT_FOR_BUFFER_S
     install_signal_handlers(
         loop,
         runtime,
         shutdown_endpoints,
         shutdown_event,
         drain_callback=drain_callback,
+        drain_timeout_s=drain_timeout_s,
     )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags

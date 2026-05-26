@@ -8,7 +8,11 @@ from typing import Callable, Coroutine
 
 import uvloop
 
-from dynamo.common.utils.drain import prefill_drain_context
+from dynamo.common.utils.drain import (
+    DRAIN_WAIT_FOR_BUFFER_S,
+    prefill_drain_context,
+    resolve_drain_timeout_s,
+)
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging, get_bool_env_var
@@ -86,8 +90,10 @@ async def worker():
     # memory is not freed while transfers are active.
     engine_holder: list = []
     drain_callback = None
+    drain_timeout_s = None
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
         drain_callback = _make_drain_callback(engine_holder)
+        drain_timeout_s = resolve_drain_timeout_s() + DRAIN_WAIT_FOR_BUFFER_S
 
     install_signal_handlers(
         loop,
@@ -95,6 +101,7 @@ async def worker():
         shutdown_endpoints,
         shutdown_event,
         drain_callback=drain_callback,
+        drain_timeout_s=drain_timeout_s,
     )
 
     logging.info(f"Initializing the worker with config: {config}")

@@ -31,6 +31,16 @@ from typing import AsyncIterator
 DRAIN_TIMEOUT_ENV = "DYN_PREFILL_DRAIN_TIMEOUT_S"
 DEFAULT_DRAIN_TIMEOUT_S = 30.0
 HEARTBEAT_INTERVAL_S = 5.0
+# Buffer for the outer asyncio.wait_for in graceful_shutdown to absorb
+# scheduling jitter without truncating the inner drain.
+DRAIN_WAIT_FOR_BUFFER_S = 5.0
+
+
+def resolve_drain_timeout_s() -> float:
+    """Public accessor for the drain timeout. Used by the legacy paths to
+    size the outer ``asyncio.wait_for`` so the inner drain isn't silently
+    truncated."""
+    return _resolve_timeout_s()
 
 
 def _resolve_timeout_s() -> float:
