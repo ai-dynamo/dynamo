@@ -8,8 +8,7 @@ use figment::{
     providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::sync::OnceLock;
+use std::{fmt, str::FromStr, sync::OnceLock};
 use validator::Validate;
 
 pub mod environment_names;
@@ -463,6 +462,28 @@ pub fn env_is_falsey(env: &str) -> bool {
     }
 }
 
+/// Parse an environment variable, warning and returning `default` when it is
+/// present but invalid.
+pub fn env_parse_or_default<T>(env: &str, default: T) -> T
+where
+    T: Copy + fmt::Display + FromStr,
+    T::Err: fmt::Display,
+{
+    match std::env::var(env) {
+        Ok(raw) => raw.parse::<T>().unwrap_or_else(|err| {
+            tracing::warn!(
+                env_var = env,
+                value = %raw,
+                error = %err,
+                default = %default,
+                "Invalid environment variable; using default"
+            );
+            default
+        }),
+        Err(_) => default,
+    }
+}
+
 /// Check whether JSONL logging enabled
 /// Set the `DYN_LOGGING_JSONL` environment variable a [`is_truthy`] value
 pub fn jsonl_logging_enabled() -> bool {
@@ -704,6 +725,21 @@ mod tests {
         temp_env::with_vars(vec![("TEST_MISSING", None::<&str>)], || {
             assert!(!env_is_truthy("TEST_MISSING"));
             assert!(!env_is_falsey("TEST_MISSING"));
+        });
+    }
+
+    #[test]
+    fn test_env_parse_or_default() {
+        temp_env::with_vars(vec![("TEST_PARSE_ENV", Some("42"))], || {
+            assert_eq!(env_parse_or_default("TEST_PARSE_ENV", 7_u64), 42);
+        });
+
+        temp_env::with_vars(vec![("TEST_PARSE_ENV", Some("invalid"))], || {
+            assert_eq!(env_parse_or_default("TEST_PARSE_ENV", 7_u64), 7);
+        });
+
+        temp_env::with_vars(vec![("TEST_PARSE_ENV", None::<&str>)], || {
+            assert_eq!(env_parse_or_default("TEST_PARSE_ENV", 7_u64), 7);
         });
     }
 }
