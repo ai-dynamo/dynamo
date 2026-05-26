@@ -11,15 +11,18 @@ try:
     from gpu_memory_service.snapshot.backends.nixl_staging import (
         DEFAULT_POSIX_IOS_POOL_SIZE,
         DEFAULT_POSIX_KERNEL_QUEUE_SIZE,
-        NixlFileGroup,
         POSIX_IOS_POOL_SIZE_CONFIG_KEY,
         POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY,
+        NixlFileGroup,
         NixlWorkGroup,
         _NixlPosixStagingTransferSession,
         _posix_backend_params_from_config,
         _split_work_groups,
     )
-    from gpu_memory_service.snapshot.transfer import FileTransferSource, GMSTransferTarget
+    from gpu_memory_service.snapshot.transfer import (
+        FileTransferSource,
+        GMSTransferTarget,
+    )
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",

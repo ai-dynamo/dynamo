@@ -79,7 +79,9 @@ def _positive_int_config(
     try:
         value = int(raw_value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be a positive integer, got {raw_value!r}") from exc
+        raise ValueError(
+            f"{key} must be a positive integer, got {raw_value!r}"
+        ) from exc
     if value <= 0:
         raise ValueError(f"{key} must be a positive integer, got {raw_value!r}")
     return value
@@ -119,9 +121,7 @@ def _split_root_file_groups(
     if queue_count == 1:
         return [list(file_groups)]
 
-    bucket_file_groups: List[List[NixlFileGroup]] = [
-        [] for _ in range(queue_count)
-    ]
+    bucket_file_groups: List[List[NixlFileGroup]] = [[] for _ in range(queue_count)]
     bucket_bytes = [0] * queue_count
     sized_groups = [
         (_file_group_size(file_group), index, file_group)
