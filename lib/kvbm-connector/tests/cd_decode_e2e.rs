@@ -784,6 +784,75 @@ async fn cd_decode_commits_closed_short_fails_request() -> Result<()> {
     Ok(())
 }
 
+/// Concurrent `cleanup_failed_request` must invoke
+/// `mark_failed_onboarding` at most once for the same request_id.
+/// Five connector-spawned paths race here in production: the lifecycle
+/// watcher's failure-sink route, commit_usaa1's local-kick / remote-
+/// pipeline / session-missing spawns, and the enqueue-spawn Err.
+/// Without the `cleanup_claimed` CAS on `CdRequestState`, two paths
+/// can both observe non-empty `unfilled_ids` and both push a
+/// `mark_failed_onboarding` call before either's `release_request`
+/// removes the wrapper entry — vLLM gets double-notified for the
+/// same failed G1 window.
+///
+/// Reproducer-first: with N=8 concurrent spawns on a multi-thread
+/// runtime, the race reliably fires pre-CAS (verified by probing
+/// with the guard temporarily disabled — got 2 calls instead of 1).
+/// With the CAS, no concurrent invocation count produces more than
+/// one `mark_failed_onboarding` call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cd_decode_concurrent_cleanup_marks_failed_once() -> Result<()> {
+    use kvbm_connector::connector::leader::disagg::CdFailureSink;
+
+    let h = build_harness();
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    const N: usize = 8;
+    let sink: Arc<dyn CdFailureSink> = Arc::clone(&h.wrapper) as Arc<dyn CdFailureSink>;
+    let mut handles = Vec::with_capacity(N);
+    for i in 0..N {
+        let s = Arc::clone(&sink);
+        handles.push(tokio::spawn(async move {
+            s.on_session_failure("req-1".to_string(), format!("race-{i}"))
+                .await
+        }));
+    }
+    for h_ in handles {
+        let _ = h_.await;
+    }
+
+    let calls: Vec<_> = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "{N} concurrent cleanup_failed_request invocations must collapse to a single \
+         mark_failed_onboarding call (got {})",
+        calls.len(),
+    );
+
+    let mut got = calls[0].block_ids.clone();
+    got.sort();
+    let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS..].to_vec();
+    want.sort();
+    assert_eq!(got, want);
+    assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_inner_used(h: &TestHarness) {
     let _ = h.inner.local_id();

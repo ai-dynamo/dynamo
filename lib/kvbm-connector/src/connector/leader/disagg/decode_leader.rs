@@ -235,6 +235,18 @@ struct CdRequestState {
     /// the request is torn down before USAA arrives, no notification
     /// is emitted (vLLM owns the cancellation path in that case).
     pending_failure: Mutex<Option<String>>,
+
+    /// CAS-guard for `cleanup_failed_request`. Five connector-spawned
+    /// paths can call cleanup for the same request_id concurrently:
+    /// the lifecycle watcher's failure-sink route, commit_usaa1's
+    /// local-kick spawn Err, commit_usaa1's remote-pipeline spawn
+    /// Err, commit_usaa1's session-missing branch spawn, and the
+    /// enqueue spawn's `mark_failed` → failure-sink route. The
+    /// winner of the CAS (false → true) runs the cleanup (gathers
+    /// unfilled_ids, calls `mark_failed_onboarding`, releases state);
+    /// losers early-return so vLLM is not double-notified. Mirrors
+    /// the prefill-side guard on `CdRequest.cleanup_claimed`.
+    cleanup_claimed: std::sync::atomic::AtomicBool,
 }
 
 impl CdRequestState {
@@ -708,6 +720,7 @@ impl DecodeDisaggLeader {
             // doc-comment on `CdRequestState::session`.
             session: Mutex::new(None),
             pending_failure: Mutex::new(None),
+            cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&new_state));
@@ -1033,6 +1046,15 @@ impl DecodeDisaggLeader {
             // Carry over any pre-USAA stash from the gnmt-time state;
             // commit_usaa1 replaces the Arc entry so we must thread it.
             pending_failure: Mutex::new(existing.pending_failure.lock().clone()),
+            // Thread the cleanup_claimed flag through the USAA-1
+            // state rebuild so any cleanup already claimed against
+            // the gnmt-time state keeps its winner — the wrapper
+            // entry being replaced must NOT reopen the CAS window.
+            cleanup_claimed: std::sync::atomic::AtomicBool::new(
+                existing
+                    .cleanup_claimed
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&updated));
@@ -1616,6 +1638,39 @@ impl DecodeDisaggLeader {
 
     async fn cleanup_failed_request(self: &Arc<Self>, request_id: &str, reason: String) {
         tracing::warn!(request_id, reason = %reason, "CD request failed; cleaning up");
+
+        // CAS-guard against parallel cleanup: five connector-spawned
+        // paths can race here for the same request_id — the lifecycle
+        // watcher's failure-sink route, commit_usaa1's local-kick
+        // spawn Err, commit_usaa1's remote-pipeline spawn Err,
+        // commit_usaa1's session-missing branch spawn, and the
+        // enqueue spawn's `mark_failed`. Whichever wins false → true
+        // gathers unfilled_ids and calls `mark_failed_onboarding`;
+        // losers early-return so vLLM is not double-notified for the
+        // same failed G1 window. Mirrors the prefill-side guard on
+        // `CdRequest.cleanup_claimed`.
+        //
+        // If `cd_request_state` is absent (state already evicted by a
+        // prior cleanup's `release_request`), no CAS is needed —
+        // there is nothing to notify or release.
+        if let Some(state) = self.cd_request_state.get(request_id)
+            && state
+                .cleanup_claimed
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            tracing::debug!(
+                request_id,
+                "cleanup_failed_request: cleanup already claimed; no-op"
+            );
+            return;
+        }
+
         let unfilled_ids = self
             .cd_request_state
             .get(request_id)
