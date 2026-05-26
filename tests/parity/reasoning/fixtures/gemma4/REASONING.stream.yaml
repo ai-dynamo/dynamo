@@ -4,10 +4,12 @@
 family: gemma4
 model_label: Gemma 4
 mode: stream
+refs:
+  upstream: &upstream_ref 'inspired by vLLM Gemma4 reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_gemma4_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
 cases:
   REASONING.stream.1.a:
     description: Empty stream chunk
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - ''
     expected:
@@ -19,7 +21,8 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
   REASONING.stream.2.a:
     description: Gemma thought channel across chunks
-    ref: dynamo
+    ref: *upstream_ref
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
     chunks:
     - |
       <|channel>thought
@@ -39,11 +42,13 @@ cases:
           step one
           step two
         normal_text: The answer is 42.
+        reason: Dynamo strips Gemma channel syntax and the thought role label; vLLM leaks the channel prefix in streaming.
       sglang:
         unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
   REASONING.stream.2.b:
     description: Multiple Gemma thought channels across chunks
-    ref: dynamo
+    ref: *upstream_ref
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
     chunks:
     - |-
       <|channel>thought
@@ -59,11 +64,13 @@ cases:
       vllm:
         reasoning_text: first
         normal_text: " middle <|channel>thought\nsecond<channel|> done"
+        reason: Dynamo extracts each complete Gemma thought channel across chunks; vLLM leaves the later complete channel in normal_text.
       sglang:
         unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
   REASONING.stream.3.a:
     description: Start marker split across chunks
-    ref: dynamo
+    ref: *upstream_ref
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
     chunks:
     - <|chan
     - |-
@@ -78,11 +85,13 @@ cases:
         normal_text: |-
           <|channel>thought
           thinking<channel|>answer
+        reason: Dynamo buffers a split Gemma start delimiter and extracts the channel; vLLM leaves the full channel in normal_text.
       sglang:
         unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
   REASONING.stream.3.b:
     description: End marker split across chunks
-    ref: dynamo
+    ref: *upstream_ref
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
     chunks:
     - |-
       <|channel>thought
@@ -97,11 +106,12 @@ cases:
           <|channel>thought
           thinking<channel|>answer
         normal_text: ''
+        reason: Dynamo buffers a split Gemma end delimiter and resumes normal_text after it; vLLM keeps the delimiter and answer in reasoning_text.
       sglang:
         unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
   REASONING.stream.3.c:
     description: Partial channel marker prefix later becomes normal text
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain <|chan
     - ce answer
@@ -114,7 +124,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
   REASONING.stream.1.b:
     description: Plain text never enters reasoning mode
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain
     - ' answer'

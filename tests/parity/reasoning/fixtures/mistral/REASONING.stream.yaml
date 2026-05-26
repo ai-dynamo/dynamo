@@ -4,10 +4,12 @@
 family: mistral
 model_label: Mistral / Magistral
 mode: stream
+refs:
+  upstream: &upstream_ref 'inspired by vLLM Mistral reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_mistral_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
 cases:
   REASONING.stream.1.a:
     description: Empty stream chunk
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - ''
     expected:
@@ -19,7 +21,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.stream.2.a:
     description: Mistral THINK block across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - '[THINK]thin'
     - 'king[/THINK]answer'
@@ -34,7 +36,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.stream.2.b:
     description: Multiple Mistral THINK spans across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - '[THINK]first[/THINK]'
     - ' middle '
@@ -50,7 +52,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.stream.3.a:
     description: Start marker split across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - '[TH'
     - 'INK]thinking[/THINK]answer'
@@ -65,7 +67,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.stream.3.b:
     description: End marker split across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - '[THINK]thinking[/TH'
     - 'INK]answer'
@@ -80,7 +82,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.stream.3.c:
     description: Partial start-marker prefix later resolves as force-reasoning text
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain [TH
     - ESIS answer
@@ -96,7 +98,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
   REASONING.stream.1.b:
     description: Plain text stays in force-reasoning mode until an end marker
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain
     - ' answer'

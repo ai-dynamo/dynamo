@@ -4,10 +4,12 @@
 family: minimax_append_think
 model_label: MiniMax append-think
 mode: batch
+refs:
+  upstream: &upstream_ref 'inspired by vLLM MiniMax M2 append-think reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_minimax_m2_append_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
 cases:
   REASONING.batch.1.b:
     description: Plain text receives the synthetic think opener
-    ref: dynamo
+    ref: *upstream_ref
     model_text: plain answer
     expected:
       dynamo: &d_0
@@ -18,7 +20,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.2.a:
     description: MiniMax appends a synthetic think opener and leaves content inline
-    ref: dynamo
+    ref: *upstream_ref
     model_text: reasoning content
     expected:
       dynamo: &d_1
@@ -29,18 +31,28 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.3.a:
     description: Reasoning-shaped text followed by downstream MiniMax tool-call text
-    ref: dynamo
-    model_text: reasoning</think><minimax:tool_call><invoke name="get_weather">
+    ref: *upstream_ref
+    model_text: |-
+      reasoning</think><minimax:tool_call>
+      <invoke name="get_weather">
+      <parameter name="location">NYC</parameter>
+      </invoke>
+      </minimax:tool_call>
     expected:
       dynamo: &d_2
         reasoning_text: ''
-        normal_text: <think>reasoning</think><minimax:tool_call><invoke name="get_weather">
+        normal_text: |-
+          <think>reasoning</think><minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">NYC</parameter>
+          </invoke>
+          </minimax:tool_call>
       vllm: *d_2
       sglang:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.2.c:
     description: Reasoning-shaped text followed by normal answer text
-    ref: dynamo
+    ref: *upstream_ref
     model_text: reasoning</think>answer
     expected:
       dynamo: &d_3
@@ -51,7 +63,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.4:
     description: Dangling end marker is left inline
-    ref: dynamo
+    ref: *upstream_ref
     model_text: normal</think>answer
     expected:
       dynamo: &d_4
@@ -62,7 +74,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.5:
     description: Missing end marker is left inline
-    ref: dynamo
+    ref: *upstream_ref
     model_text: partial reasoning
     expected:
       dynamo: &d_5
@@ -73,7 +85,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.2.e:
     description: Empty input still emits the synthetic think opener
-    ref: dynamo
+    ref: *upstream_ref
     model_text: ''
     expected:
       dynamo: &d_6
@@ -84,7 +96,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.2.f:
     description: Complex content remains inline after the synthetic opener
-    ref: dynamo
+    ref: *upstream_ref
     model_text: |-
       Line 1
       Unicode: café
@@ -101,7 +113,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.1.a:
     description: Empty input variant
-    ref: dynamo
+    ref: *upstream_ref
     model_text: ''
     expected:
       dynamo: &d_8
@@ -112,7 +124,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.6.a:
     description: Multiple think-looking spans remain inline
-    ref: dynamo
+    ref: *upstream_ref
     model_text: first</think> middle <think>second</think> done
     expected:
       dynamo: &d_9
@@ -123,7 +135,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.2.d:
     description: Normal text around think-looking markup remains inline after the synthetic opener
-    ref: dynamo
+    ref: *upstream_ref
     model_text: before <think>thinking</think> after
     expected:
       dynamo: &d_10
@@ -133,13 +145,6 @@ cases:
       sglang:
         unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
   REASONING.batch.3.b:
-    description: Tool-call marker remains inline after the synthetic think opener
-    ref: dynamo
-    model_text: <think>choose tool<tool_call>{}
-    expected:
-      dynamo: &d_11
-        reasoning_text: ''
-        normal_text: <think><think>choose tool<tool_call>{}
-      vllm: *d_11
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+    description: Open reasoning interrupted by downstream tool-call text is not configured for MiniMax append-think
+    ref: *upstream_ref
+    reason: MiniMax append-think emits a synthetic normal-text wrapper instead of running an open reasoning-span boundary; closed-span handoff is covered by REASONING.batch.3.a.

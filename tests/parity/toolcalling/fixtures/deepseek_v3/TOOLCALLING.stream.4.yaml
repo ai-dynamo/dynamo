@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3
+model_label: DeepSeek V3
+mode: stream
+cases:
+  TOOLCALLING.stream.4.a:
+    description: Truncated stream terminates after a complete in-flight tool-call body
+    ref: derived from TOOLCALLING.batch.5.a
+    chunks:
+    - delta_text: |-
+        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+        ```json
+        {"location": "NYC"}
+        ```
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"location": "NYC"}
+          ```
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+  TOOLCALLING.stream.4.b:
+    description: Stream terminates mid-call body before the in-flight argument payload is complete
+    ref: derived from TOOLCALLING.batch.5.c
+    chunks:
+    - delta_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>fun
+    - delta_text: |-
+        ction<｜tool▁sep｜>get_weather
+        ```json
+        {"loc
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id002
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"loc
+      sglang:
+        calls: []
+        normal_text: ''
+      vllm: *id002

@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: phi4
+model_label: Phi-4
+mode: stream
+cases:
+  TOOLCALLING.stream.4.a:
+    description: Truncated stream terminates after a complete in-flight tool-call body
+    ref: derived from TOOLCALLING.batch.5.a
+    chunks:
+    - delta_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls: []
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+      vllm: *id001
+  TOOLCALLING.stream.4.b:
+    description: Stream terminates mid-call body before the in-flight argument payload is complete
+    ref: derived from TOOLCALLING.batch.5.c
+    chunks:
+    - delta_text: 'functools[{"name": "get_we'
+    - delta_text: 'ather", "arguments": {"loc'
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id002
+        calls: []
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+      vllm: *id002
