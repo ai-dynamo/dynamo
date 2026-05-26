@@ -13,8 +13,8 @@ use dynamo_kv_router::{
         MatchDetails, ThreadPoolIndexer, query_lower_tiers,
     },
     protocols::{
-        DpRank, ExternalSequenceBlockHash, LocalBlockHash, OverlapScores, RouterEvent,
-        StorageTier, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        DpRank, ExternalSequenceBlockHash, LocalBlockHash, OverlapScores, RouterEvent, StorageTier,
+        TokensWithHashes, WorkerId, WorkerWithDpRank,
     },
 };
 
@@ -227,9 +227,7 @@ impl Indexer {
         tokens_hashes: &[LocalBlockHash],
     ) -> Vec<ExternalSequenceBlockHash> {
         let lower_tier = match self {
-            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
-                lower_tier
-            }
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => lower_tier,
             Self::Remote(_) | Self::None => return Vec::new(),
         };
         let Some(indexer) = lower_tier.get(StorageTier::HostPinned) else {

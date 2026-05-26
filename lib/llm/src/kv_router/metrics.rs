@@ -669,9 +669,8 @@ impl RouterRequestMetrics {
                 } else {
                     plan.block_size_tokens
                 };
-                self.remote_g2_planned_tokens.inc_by(
-                    u64::from(plan.planned_prefix_blocks) * u64::from(block_size_tokens),
-                );
+                self.remote_g2_planned_tokens
+                    .inc_by(u64::from(plan.planned_prefix_blocks) * u64::from(block_size_tokens));
                 self.remote_g2_rejected_g1_candidates_total
                     .inc_by(u64::from(stats.rejected_g1_candidates));
             }

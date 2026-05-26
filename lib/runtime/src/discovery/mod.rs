@@ -193,6 +193,20 @@ impl EventTransport {
             }
         }
     }
+
+    pub(crate) fn discovery_key(&self) -> String {
+        let bytes = self.address().as_bytes();
+        let mut key = String::with_capacity(bytes.len() * 2);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+
+        for byte in bytes {
+            let byte = *byte;
+            key.push(char::from(HEX[(byte >> 4) as usize]));
+            key.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+
+        key
+    }
 }
 
 /// Query key for prefix-based discovery queries
@@ -509,12 +523,13 @@ impl DiscoveryInstance {
                 component,
                 topic,
                 instance_id,
-                ..
+                transport,
             } => DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
                 namespace: namespace.clone(),
                 component: component.clone(),
                 topic: topic.clone(),
                 instance_id: *instance_id,
+                transport_key: transport.discovery_key(),
             }),
         }
     }
@@ -577,23 +592,24 @@ pub struct EventChannelInstanceId {
     /// Topic name for this channel (e.g., "kv-events", "kv-metrics")
     pub topic: String,
     pub instance_id: u64,
+    pub transport_key: String,
 }
 
 impl EventChannelInstanceId {
-    /// Converts to a path string: `{namespace}/{component}/{topic}/{instance_id:x}`
+    /// Converts to a path string: `{namespace}/{component}/{topic}/{instance_id:x}/{transport_key}`
     pub fn to_path(&self) -> String {
         format!(
-            "{}/{}/{}/{:x}",
-            self.namespace, self.component, self.topic, self.instance_id
+            "{}/{}/{}/{:x}/{}",
+            self.namespace, self.component, self.topic, self.instance_id, self.transport_key
         )
     }
 
-    /// Parses from a path string: `{namespace}/{component}/{topic}/{instance_id:x}`
+    /// Parses from a path string: `{namespace}/{component}/{topic}/{instance_id:x}/{transport_key}`
     pub fn from_path(path: &str) -> Result<Self> {
         let parts: Vec<&str> = path.split('/').collect();
-        if parts.len() != 4 {
+        if parts.len() != 5 {
             anyhow::bail!(
-                "Invalid EventChannelInstanceId path: expected 4 parts, got {}",
+                "Invalid EventChannelInstanceId path: expected 5 parts, got {}",
                 parts.len()
             );
         }
@@ -603,6 +619,7 @@ impl EventChannelInstanceId {
             topic: parts[2].to_string(),
             instance_id: u64::from_str_radix(parts[3], 16)
                 .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
+            transport_key: parts[4].to_string(),
         })
     }
 }

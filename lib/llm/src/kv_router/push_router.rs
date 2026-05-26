@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Result;
 use dynamo_kv_router::{
@@ -23,8 +23,9 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, attach_remote_kv_reuse_decision,
+        KvRouter,
         agent_controller::{AgentController, SessionCloseAction},
+        attach_remote_kv_reuse_decision,
         metrics::RouterRequestMetrics,
         sticky_sessions::{InMemoryAffinityStore, StickySessionRouter},
     },
@@ -366,6 +367,47 @@ impl KvPushRouter {
             .or_else(|| self.chooser.unique_dp_rank_for_worker(pinned_worker_id))
             .map(|dp_rank| WorkerWithDpRank::new(pinned_worker_id, dp_rank));
 
+        if !is_query_only && resolved_pinned_worker.is_none() {
+            let selection = self
+                .chooser
+                .find_best_match_details(
+                    Some(context_id),
+                    routing_token_ids,
+                    block_mm_infos,
+                    request.router_config_override.as_ref(),
+                    true,
+                    lora_name.clone(),
+                    priority_jump,
+                    expected_output_tokens,
+                    None,
+                    Some(HashSet::from([pinned_worker_id])),
+                )
+                .await?;
+            let best_worker = selection.worker;
+            let effective_overlap_blocks = selection.cache_hit.effective_overlap_blocks;
+            let cached_tokens = selection.cache_hit.cached_tokens;
+            let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
+            let remote_kv_reuse = Some(selection.remote_kv_reuse);
+
+            tracing::debug!(
+                request_id = %context_id,
+                worker_id = pinned_worker_id,
+                selected_dp_rank = best_worker.dp_rank,
+                overlap_blocks = overlap_amount,
+                "Routing pinned worker through scheduler-constrained dp-rank selection"
+            );
+
+            return Ok(WorkerSelection {
+                instance_id: best_worker.worker_id,
+                dp_rank: best_worker.dp_rank,
+                overlap_amount,
+                effective_overlap_blocks,
+                cached_tokens,
+                scheduler_tracked: true,
+                remote_kv_reuse,
+            });
+        }
+
         if !is_query_only && let Some(pinned_worker) = resolved_pinned_worker {
             let selection = self
                 .chooser
@@ -487,7 +529,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// 2. **If a phase-specific worker or `backend_instance_id` is set in the request**:
     ///    - Query-only requests return that worker selection without state updates
     ///    - Execution requests route through the scheduler as an exact pin when dp_rank is resolved
-    ///    - If dp_rank cannot be resolved, falls back to direct routing without scheduler bookkeeping
+    ///    - If dp_rank cannot be resolved, constrains scheduler selection to that worker ID
+    ///      so DP-attn can choose a concrete rank and still attach remote reuse plans
     ///
     /// 3. **If neither are set (default behavior)**:
     ///    - Finds the best worker based on KV cache overlap

@@ -7,8 +7,7 @@ use crate::indexer::TieredMatchDetails;
 use crate::protocols::{DpRank, LocalBlockHash, StorageTier, WorkerId, WorkerWithDpRank};
 
 pub const REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY: &str = "remote_kv_reuse_plan";
-pub const REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY: &str =
-    "remote_kv_reuse_no_plan_reason";
+pub const REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY: &str = "remote_kv_reuse_no_plan_reason";
 pub const REMOTE_KV_REUSE_PLAN_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,6 +96,23 @@ pub enum RemoteKvReuseDecision {
     },
 }
 
+fn choose_better_candidate(
+    best: &mut Option<(WorkerWithDpRank, usize, usize)>,
+    worker: WorkerWithDpRank,
+    start: usize,
+    hits: usize,
+) {
+    match best {
+        None => *best = Some((worker, start, hits)),
+        Some((best_worker, _, best_hits))
+            if hits > *best_hits || (hits == *best_hits && worker < *best_worker) =>
+        {
+            *best = Some((worker, start, hits));
+        }
+        Some(_) => {}
+    }
+}
+
 pub fn select_remote_g2_reuse_plan(
     input: RemoteKvReuseSelectionInput<'_>,
 ) -> RemoteKvReuseDecision {
@@ -122,28 +138,55 @@ pub fn select_remote_g2_reuse_plan(
         };
     };
 
+    let request_blocks = input.block_hashes.len();
     let mut saw_remote_candidate = false;
-    let mut best: Option<(WorkerWithDpRank, usize)> = None;
-    for (&worker, &hits) in &host_pinned_matches.hits {
+    let mut best_continuation: Option<(WorkerWithDpRank, usize, usize)> = None;
+    let mut best_root_fallback: Option<(WorkerWithDpRank, usize, usize)> = None;
+    for (&worker, &host_continuation_hits) in &host_pinned_matches.hits {
         if worker == input.target {
             continue;
         }
         saw_remote_candidate = true;
+
+        let device_match = input
+            .tiered_matches
+            .device
+            .overlap_scores
+            .scores
+            .get(&worker)
+            .copied()
+            .unwrap_or(0) as usize;
+
+        // Normal lower-tier semantics report HostPinned hits as a continuation
+        // after the source worker's Device match. With write-through HiCache,
+        // the same blocks are present in both GPU and CPU, so that continuation
+        // can be zero even though a valid CPU-pinned chain exists from root.
+        // Prefer real HostPinned continuations first; only fall back to a root
+        // candidate if no positive HostPinned continuation exists. Otherwise a
+        // zero-hit write-through fallback can beat a smaller but real write-back
+        // HostPinned chain, only to fail the later source-side chain walk.
+        let (start, hits) = if host_continuation_hits > 0 {
+            (device_match.min(request_blocks), host_continuation_hits)
+        } else if device_match > 0 {
+            (0, device_match.min(request_blocks))
+        } else {
+            continue;
+        };
+
+        let hits = hits.min(request_blocks.saturating_sub(start));
         if hits == 0 {
             continue;
         }
-        match best {
-            None => best = Some((worker, hits)),
-            Some((best_worker, best_hits))
-                if hits > best_hits || (hits == best_hits && worker < best_worker) =>
-            {
-                best = Some((worker, hits));
-            }
-            Some(_) => {}
+
+        if host_continuation_hits > 0 {
+            choose_better_candidate(&mut best_continuation, worker, start, hits);
+        } else {
+            choose_better_candidate(&mut best_root_fallback, worker, start, hits);
         }
     }
 
-    let Some((source, hits)) = best else {
+    let best = best_continuation.or(best_root_fallback);
+    let Some((source, start, hits)) = best else {
         return RemoteKvReuseDecision::NoPlan {
             reason: if saw_remote_candidate {
                 RemoteKvReuseNoPlanReason::NoContiguousPrefix
@@ -154,27 +197,10 @@ pub fn select_remote_g2_reuse_plan(
         };
     };
 
-    // The indexer returns `hits` as a chained continuation count: the
-    // HostPinned chain for this source extends from the position where its
-    // Device chain ended, not from position 0. Without offsetting, the plan
-    // would reference request.block_hashes[..hits] (positions 0..hits), but
-    // the actual HostPinned matches on the source cover positions
-    // [device_match, device_match + hits). The wrong hashes would land in
-    // the plan, the source's resolve_for_request would fail to find them,
-    // and the plan would be silently useless.
-    let device_match = input
-        .tiered_matches
-        .device
-        .overlap_scores
-        .scores
-        .get(&source)
-        .copied()
-        .unwrap_or(0) as usize;
-
-    let request_blocks = input.block_hashes.len();
-    let start = device_match.min(request_blocks);
-    let available_after_device = request_blocks.saturating_sub(start);
-    let planned_prefix_blocks = (hits as usize).min(available_after_device) as u32;
+    // Continuation candidates start where the source worker's Device chain ended.
+    // Write-through candidates start at root because their HostPinned copy mirrors
+    // blocks that are also still present in the source worker's Device tier.
+    let planned_prefix_blocks = hits as u32;
     if planned_prefix_blocks == 0 {
         return RemoteKvReuseDecision::NoPlan {
             reason: RemoteKvReuseNoPlanReason::NoContiguousPrefix,

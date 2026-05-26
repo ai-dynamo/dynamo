@@ -43,7 +43,10 @@ impl DynamicSubscriber {
     pub async fn start_zmq(self: Arc<Self>) -> Result<WireStream> {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<Bytes>();
 
-        // Track active endpoint connections with instance ID to endpoint mapping
+        // Track active endpoint connections. A single runtime instance can
+        // publish the same topic through multiple ZMQ endpoints, for example
+        // one KV-event stream per attention-DP rank. Key by both instance and
+        // endpoint so those streams are all consumed.
         let active_endpoints: Arc<RwLock<HashMap<String, (String, CancellationToken)>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
@@ -93,10 +96,11 @@ impl DynamicSubscriber {
 
                         // Extract ZMQ endpoint from the instance
                         if let Some(endpoint) = Self::extract_zmq_endpoint(&instance) {
+                            let endpoint_key = Self::endpoint_key(&instance_id, &endpoint);
                             let mut endpoints_guard = endpoints.write().await;
 
-                            // Skip if instance already tracked
-                            if endpoints_guard.contains_key(&instance_id) {
+                            // Skip if this exact instance/endpoint stream is already tracked.
+                            if endpoints_guard.contains_key(&endpoint_key) {
                                 tracing::debug!(endpoint = %endpoint, instance_id = %instance_id, "Already connected to ZMQ publisher");
                                 continue;
                             }
@@ -106,7 +110,7 @@ impl DynamicSubscriber {
                             // Create cancellation token for this endpoint's stream
                             let endpoint_cancel = CancellationToken::new();
                             endpoints_guard.insert(
-                                instance_id.clone(),
+                                endpoint_key.clone(),
                                 (endpoint.clone(), endpoint_cancel.clone()),
                             );
                             drop(endpoints_guard);
@@ -116,7 +120,7 @@ impl DynamicSubscriber {
                             let zmq_topic_clone = zmq_topic.clone();
                             let endpoint_clone = endpoint.clone();
                             let endpoints_clone = Arc::clone(&endpoints);
-                            let instance_id_clone = instance_id.clone();
+                            let endpoint_key_clone = endpoint_key.clone();
 
                             tokio::spawn(async move {
                                 if let Err(e) = Self::consume_endpoint_stream(
@@ -134,7 +138,7 @@ impl DynamicSubscriber {
                                     );
                                 }
                                 // Clean up on stream termination
-                                endpoints_clone.write().await.remove(&instance_id_clone);
+                                endpoints_clone.write().await.remove(&endpoint_key_clone);
                             });
                         } else {
                             tracing::warn!(
@@ -150,12 +154,35 @@ impl DynamicSubscriber {
                             "ZMQ publisher removed from discovery, cancelling endpoint stream"
                         );
 
-                        // Cancel the endpoint's stream via its CancellationToken
-                        if let Some((_endpoint, cancel)) = endpoints.write().await.remove(&id_str) {
-                            cancel.cancel();
-                            tracing::info!(instance_id = %id_str, "Cancelled endpoint stream");
-                        } else {
+                        // Cancel every endpoint stream for this runtime instance.
+                        let removed = {
+                            let mut endpoints_guard = endpoints.write().await;
+                            let keys = endpoints_guard
+                                .keys()
+                                .filter(|key| Self::key_belongs_to_instance(key, &id_str))
+                                .cloned()
+                                .collect::<Vec<_>>();
+
+                            let mut removed = Vec::with_capacity(keys.len());
+                            for key in keys {
+                                if let Some((endpoint, cancel)) = endpoints_guard.remove(&key) {
+                                    removed.push((endpoint, cancel));
+                                }
+                            }
+                            removed
+                        };
+
+                        if removed.is_empty() {
                             tracing::warn!(instance_id = %id_str, "No active endpoint found for removed stream instance");
+                        } else {
+                            for (endpoint, cancel) in removed {
+                                cancel.cancel();
+                                tracing::info!(
+                                    endpoint = %endpoint,
+                                    instance_id = %id_str,
+                                    "Cancelled endpoint stream"
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -194,6 +221,16 @@ impl DynamicSubscriber {
             return Some(endpoint.clone());
         }
         None
+    }
+
+    fn endpoint_key(instance_id: &str, endpoint: &str) -> String {
+        format!("{instance_id}|{endpoint}")
+    }
+
+    fn key_belongs_to_instance(endpoint_key: &str, instance_id: &str) -> bool {
+        endpoint_key
+            .strip_prefix(instance_id)
+            .is_some_and(|rest| rest.starts_with('|'))
     }
 
     /// Consume events from a single endpoint and forward to the merged channel.

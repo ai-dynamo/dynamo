@@ -113,6 +113,7 @@ struct CacheHitEstimates {
 
 const REMOTE_KV_REUSE_PLAN_TTL_MS: u64 = 30_000;
 const REMOTE_G2_REUSE_ENABLED_ENV: &str = "DYN_REMOTE_G2_REUSE_ENABLED";
+const REMOTE_G2_TRACE_ENV: &str = "DYN_REMOTE_G2_TRACE";
 
 #[derive(Debug, Clone)]
 pub(crate) struct BestMatchDetails {
@@ -135,6 +136,15 @@ fn remote_g2_reuse_enabled() -> bool {
             !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
         })
         .unwrap_or(true)
+}
+
+fn remote_g2_trace_enabled() -> bool {
+    env::var(REMOTE_G2_TRACE_ENV)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn attach_remote_kv_reuse_decision(
@@ -698,6 +708,39 @@ where
             }
         }
         let total_elapsed = start.elapsed();
+
+        if remote_g2_trace_enabled() {
+            let device_hits: Vec<_> = tiered_matches
+                .device
+                .overlap_scores
+                .scores
+                .iter()
+                .map(|(worker, hits)| (worker.worker_id, worker.dp_rank, *hits))
+                .collect();
+            let host_pinned_hits: Vec<_> = tiered_matches
+                .lower_tier
+                .get(&dynamo_kv_router::protocols::StorageTier::HostPinned)
+                .map(|matches| {
+                    matches
+                        .hits
+                        .iter()
+                        .map(|(worker, hits)| (worker.worker_id, worker.dp_rank, *hits))
+                        .collect()
+                })
+                .unwrap_or_else(Vec::new);
+            tracing::warn!(
+                request_id = context_id.unwrap_or_default(),
+                target_worker_id = response.best_worker.worker_id,
+                target_dp_rank = response.best_worker.dp_rank,
+                request_blocks = block_hashes.len(),
+                effective_overlap_blocks = response.effective_overlap_blocks,
+                cached_tokens = response.cached_tokens,
+                ?device_hits,
+                ?host_pinned_hits,
+                decision = ?remote_kv_reuse,
+                "REMOTE_G2_TRACE planner decision"
+            );
+        }
 
         if let Some(m) = metrics::RoutingOverheadMetrics::get() {
             m.observe(

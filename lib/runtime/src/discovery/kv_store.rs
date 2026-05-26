@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId,
+    DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, EventTransport,
     ModelCardInstanceId,
 };
 use crate::storage::kv;
@@ -50,8 +50,16 @@ impl KVStoreDiscovery {
         component: &str,
         topic: &str,
         instance_id: u64,
+        transport: &EventTransport,
     ) -> String {
-        format!("{}/{}/{}/{:x}", namespace, component, topic, instance_id)
+        format!(
+            "{}/{}/{}/{:x}/{}",
+            namespace,
+            component,
+            topic,
+            instance_id,
+            transport.discovery_key()
+        )
     }
 
     /// Extract prefix for querying based on discovery query
@@ -223,11 +231,11 @@ impl Discovery for KVStoreDiscovery {
                 component,
                 topic,
                 instance_id,
-                ..
+                transport,
             } => {
-                let key = Self::event_channel_key(namespace, component, topic, *instance_id);
-                // TODO: bis - remove this info log
-                tracing::info!(
+                let key =
+                    Self::event_channel_key(namespace, component, topic, *instance_id, transport);
+                tracing::debug!(
                     "KVStoreDiscovery::register: EventChannel bucket={}, key={}",
                     EVENT_CHANNELS_BUCKET,
                     key
@@ -341,9 +349,10 @@ impl Discovery for KVStoreDiscovery {
                 component,
                 topic,
                 instance_id,
-                ..
+                transport,
             } => {
-                let key = Self::event_channel_key(namespace, component, topic, *instance_id);
+                let key =
+                    Self::event_channel_key(namespace, component, topic, *instance_id, transport);
                 tracing::debug!(
                     "KVStoreDiscovery::unregister: Unregistering event channel instance_id={}, namespace={}, component={}, topic={}, key={}",
                     instance_id,
@@ -489,15 +498,15 @@ impl Discovery for KVStoreDiscovery {
                         // - Endpoints: "namespace/component/endpoint/{instance_id:x}"
                         // - Models: "namespace/component/endpoint/{instance_id:x}"
                         // - LoRA models: "namespace/component/endpoint/{instance_id:x}/{lora_slug}"
-                        // - EventChannels: "namespace/component/{instance_id:x}"
+                        // - EventChannels: "namespace/component/topic/{instance_id:x}/{transport_key}"
                         //
                         // Use strip_bucket_prefix for consistency with matches_prefix().
                         let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
                         let key_parts: Vec<&str> = relative_key.split('/').collect();
 
-                        // EventChannels need 4 parts (namespace/component/topic/instance_id)
+                        // EventChannels need 5 parts (namespace/component/topic/instance_id/transport_key)
                         // Endpoints/Models need at least 4 parts
-                        let min_parts = 4;
+                        let min_parts = if bucket_name == EVENT_CHANNELS_BUCKET { 5 } else { 4 };
                         if key_parts.len() < min_parts {
                             tracing::warn!(
                                 key = %key_str,
@@ -513,11 +522,12 @@ impl Discovery for KVStoreDiscovery {
                         let namespace = key_parts[0].to_string();
                         let component = key_parts[1].to_string();
 
-                        // Handle EventChannel (4 parts: namespace/component/topic/instance_id) vs Endpoints/Models
+                        // Handle EventChannel (5 parts: namespace/component/topic/instance_id/transport_key) vs Endpoints/Models
                         let id = if bucket_name == EVENT_CHANNELS_BUCKET {
-                            // EventChannel keys: namespace/component/topic/{instance_id:x}
+                            // EventChannel keys: namespace/component/topic/{instance_id:x}/{transport_key}
                             let topic = key_parts[2].to_string();
                             let instance_id_hex = key_parts[3];
+                            let transport_key = key_parts[4].to_string();
                             match u64::from_str_radix(instance_id_hex, 16) {
                                 Ok(instance_id) => {
                                     DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
@@ -525,6 +535,7 @@ impl Discovery for KVStoreDiscovery {
                                         component,
                                         topic,
                                         instance_id,
+                                        transport_key,
                                     })
                                 }
                                 Err(e) => {

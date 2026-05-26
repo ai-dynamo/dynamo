@@ -267,10 +267,7 @@ impl PreprocessedRequest {
         let plan_value = serde_json::to_value(plan)?;
         let mut map = extra_args_object(self.extra_args.take());
         map.remove(REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY);
-        map.insert(
-            REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY.to_string(),
-            plan_value,
-        );
+        map.insert(REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY.to_string(), plan_value);
         self.extra_args = Some(serde_json::Value::Object(map));
         Ok(())
     }
@@ -398,9 +395,7 @@ mod tests {
     fn extra_args_no_plan_reason_is_structured_only() {
         let mut request = test_request();
         request
-            .attach_remote_kv_reuse_no_plan_reason(
-                RemoteKvReuseNoPlanReason::NoRemoteG2Candidate,
-            )
+            .attach_remote_kv_reuse_no_plan_reason(RemoteKvReuseNoPlanReason::NoRemoteG2Candidate)
             .unwrap();
 
         let extra_args = request.extra_args.unwrap();
