@@ -26,6 +26,7 @@ from dynamo.runtime import DistributedRuntime
 
 from .args import Config
 from .cache_info import configure_kv_event_block_size
+from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
@@ -404,7 +405,12 @@ class WorkerFactory:
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
-        factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
         factory.init_publish()
 
         # Currently routing to worker is still controlled by the worker

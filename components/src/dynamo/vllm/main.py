@@ -46,6 +46,7 @@ from dynamo.vllm.worker_factory import WorkerFactory
 from . import envs
 from .args import Config, _uses_dynamo_connector, parse_args
 from .cache_info import get_configured_kv_event_block_size
+from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
@@ -628,6 +629,8 @@ async def register_vllm_model(
     )
     runtime_values = get_engine_cache_info(engine_client)
     num_gpu_blocks = runtime_values["num_gpu_blocks"]
+    # Get data_parallel_size from vllm_config (defaults to 1)
+    dp_range = get_dp_range_for_worker(vllm_config)
     if num_gpu_blocks is None:
         # TODO(upstream-vllm): remove this workaround once vLLM propagates
         # num_gpu_blocks from Ray DP workers back to the main-process vllm_config.
@@ -640,7 +643,7 @@ async def register_vllm_model(
             "Setting total_kv_blocks=0 for model registration."
         )
         num_gpu_blocks = 0
-    runtime_config.total_kv_blocks = num_gpu_blocks
+    runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
@@ -664,8 +667,6 @@ async def register_vllm_model(
     if stream_interval is not None:
         runtime_config.set_engine_specific("stream_interval", str(stream_interval))
 
-    # Get data_parallel_size from vllm_config (defaults to 1)
-    dp_range = get_dp_range_for_worker(vllm_config)
     runtime_config.data_parallel_start_rank = dp_range[0]
     runtime_config.data_parallel_size = dp_range[1]
 

@@ -193,6 +193,40 @@ Cell values show how each engine's recorded `expected.<impl>` block relates to D
 - `n/a` — **not applicable**: engine marked `unavailable` (no parser registered for that family), OR the sub-case shape doesn't apply to this grammar (e.g. attribute-encoded DSML families have no `4.b` because there's no embedded JSON to malform).
 - `—` — **missing fixture coverage**: no fixture entry exists for that family/case yet. If the case is intentionally not applicable, add an explicit table-only n/a stub with `description:` and `reason:` so the table can explain it.
 
+### Dashboard triage indicators
+
+Do not use `reason:` just to explain that outputs differ. A peer
+`reason:` means the divergence is intentionally classified and is not
+currently a Dynamo fix target. If the audit suggests the peer is more
+correct, or Dynamo is trimming, dropping, misrouting, or leaking text,
+remove the peer `reason:` so the dashboard renders a red `V?` / `S?`.
+That is the visible "fix Dynamo or decide the contract" queue.
+
+What to look for:
+
+- Red `V?` / `S?` — start here. A captured peer differs and the
+  divergence is not classified. If vLLM/SGLang appears more correct,
+  keep it red until Dynamo is fixed or the contract is explicitly
+  decided.
+- `↯` — Dynamo leaked parser-owned syntax into the wrong user-visible
+  field. For tool calling, this means tool call markup leaked into
+  `normal_text`; for reasoning, this means reasoning markup or final
+  answer text landed in the wrong split field.
+- `V` / `S` — documented divergence. Re-audit these when an upstream
+  version changes or when the reason says the peer preserves text that
+  Dynamo loses. If the peer now looks like the better target, delete
+  `reason:` and let the cell become red.
+- `n/a` — the case or peer does not apply. Do not use `n/a` for
+  behavior that is merely unknown.
+- `—` — missing fixture coverage. Add a real fixture, or add an
+  explicit `n/a` stub with a reason.
+
+For reasoning parity, the default contract is a lossless split:
+remove the reasoning delimiters, but preserve the text on each side of
+the delimiter or tool-boundary unless the fixture explicitly documents
+normalization. Tool call text in `normal_text` is not a reasoning leak;
+it is the downstream handoff to the tool calling parser.
+
 19 parsers total — split into the **Top-N models** we prioritize and
 **Others** wired into the harness for completeness. Both sections sorted
 alphabetically within themselves.
