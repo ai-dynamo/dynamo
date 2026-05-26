@@ -2239,6 +2239,16 @@ impl DecodeDisaggLeader {
         else {
             return;
         };
+        // Capture the coordinator-side Arc BEFORE the
+        // `mark_onboarding_complete` await below so the
+        // bottom-of-method `coordinator.release` is identity-
+        // checked. Under `kv_load_failure_policy=recompute` the
+        // await can park unbounded while a recompute reschedule
+        // installs a new lifecycle for the same rid — by-name
+        // release would wipe the new lifecycle. See
+        // `lib/kvbm-connector/CONTRACT.md` §"Cross-lifecycle
+        // stale-release race".
+        let captured_coord = self.coordinator.state_for_decode(request_id);
 
         let local_done = state.local_onboard_complete.load(Ordering::Acquire);
         let remote_done = state.remote_pipeline_complete.load(Ordering::Acquire);
@@ -2290,11 +2300,16 @@ impl DecodeDisaggLeader {
         // — that runs via the `CdRequestStatePayload`'s `Drop` when
         // `process_finished_onboarding` takes the slot's
         // `OnboardingState` on `finished_recving`. Both
-        // `release_request` and `coordinator.release` are idempotent
-        // (DashMap `remove` returns `None` if absent), so the
-        // duplicate Drop is a no-op.
-        self.release_request(request_id);
-        self.coordinator.release(request_id);
+        // `release_request_if_matches` and
+        // `coordinator.release_if_matches` are no-ops if the
+        // captured Arc no longer matches the DashMap entry (the
+        // recompute cross-lifecycle case), and they're also no-ops
+        // if the entry is already absent — so duplicate Drop is
+        // safe.
+        self.release_request_if_matches(request_id, &state);
+        if let Some(coord) = captured_coord.as_ref() {
+            self.coordinator.release_if_matches(request_id, coord);
+        }
     }
 
     async fn cleanup_failed_request(self: &Arc<Self>, request_id: &str, reason: String) {
