@@ -43,13 +43,12 @@ func TestBuildExclusions(t *testing.T) {
 		{
 			name: "glob patterns starting with * are untouched",
 			settings: types.OverlaySettings{
-				Exclusions: []string{"*/.cache/huggingface", "*/.cache/vllm/torch_compile_cache", "*.pyc", "*/__pycache__"},
+				Exclusions: []string{"*/.cache/huggingface", "*.pyc", "*/__pycache__"},
 			},
 			want: map[string]bool{
-				"*/.cache/huggingface":              true,
-				"*/.cache/vllm/torch_compile_cache": true,
-				"*.pyc":                             true,
-				"*/__pycache__":                     true,
+				"*/.cache/huggingface": true,
+				"*.pyc":                true,
+				"*/__pycache__":        true,
 			},
 		},
 		{
