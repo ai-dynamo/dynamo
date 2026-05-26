@@ -105,7 +105,8 @@ impl ReasoningParser for BasicReasoningParser {
 
     fn detect_and_parse_reasoning(&mut self, text: &str, _token_ids: &[u32]) -> ParserResult {
         let has_think_tag = text.contains(&self.think_start_token);
-        // Dangling end marker without an opener: treat the prefix as reasoning.
+        // REASONING.batch.4: dangling end marker without an opener. Treat the
+        // prefix as reasoning.
         // Models in this family normally emit `<think>...</think>final_answer`;
         // when the opener is absent but a `</think>` is present, the natural
         // reading is that the opener was implicit (chat template or tokenizer
