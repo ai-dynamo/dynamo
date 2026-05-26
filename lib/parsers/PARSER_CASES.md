@@ -311,6 +311,9 @@ splits along four type-handling axes:
   empty nested objects, and duplicate-key / last-key-wins policy when
   a grammar can represent it. Chunk-boundary versions of these shapes
   belong under `PARSER.stream.3`, not here.
+- **`PARSER.batch.7.f`** Numeric precision edges. Integer-like number
+  literals above `f64`'s exact integer range must preserve the original
+  value rather than round through float parsing.
 
 ## `PARSER.batch.8` — Normal text interleaved with tool calls
 

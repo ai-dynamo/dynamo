@@ -23,13 +23,13 @@ the table referenced in `tests/parity/README.md`.
 
 Cell markers (per peer, vllm + sglang):
   =     peer block is `*d_<case>` anchor ref to dynamo (matches)
-  V/S   peer is a concrete inline block AND has `reason:` (intentional —
-        rendered same color as =, since the divergence is accounted for)
+  V/S   peer is a concrete inline block AND has `reason:` (intentional)
   V?/S? peer is a concrete inline block AND has no `reason:` yet
         (research-needed; we observed it but haven't classified it)
   V!/S! peer has `error: <substring>` (expected to crash)
   VS, V?S, VS!, etc. — combinations
-  n/a   peer marked `unavailable`, or family/case doesn't apply
+  D     Dynamo-only fixture; both peer blocks are `unavailable`
+  n/a   family/case doesn't apply
   —     no fixture entry exists for this family/case yet
 
 Footnote markers `†` (no vLLM peer) and `§` (no SGLang peer) are auto-derived
@@ -50,6 +50,7 @@ Run:
 
 PARITY.{md,html} are for local viewing only; don't check them in.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -64,6 +65,14 @@ from pathlib import Path
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
+from tests.parity.common import TOP_N_TOOL_CALLING_FAMILIES as TOP_N_FAMILIES
+from tests.parity.common import (
+    build_parity_tooltip_html,
+    linkify_text_html,
+    parity_cell_class,
+)
+from tests.parity.markup import colorize_markup, colorize_stream_deltas
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = REPO_ROOT / "tests/parity/parser/fixtures"
@@ -285,30 +294,10 @@ def _build_family_to_rust_ref() -> dict[str, tuple[str, int]]:
     return out
 
 
-# Curated featured-model order. The only hand-maintained list left in the
-# script: it picks WHICH families lead the table and IN WHAT ORDER. The
-# human-readable label for each (e.g. "DeepSeek V4") is sourced from the
-# fixture YAML's `model_label:` field, so the label travels with the
-# family definition, not with this script.
-#
-# Source of truth: the tracked Top-N model mapping used by the parity
-# planning notes. When that list changes, this list and the corresponding
-# `model_label:` fields under `fixtures/<family>/PARSER.batch.yaml` must
-# be updated together.
-# Alphabetical-by-family-id within the list (matches the table row order).
-TOP_N_FAMILIES = [
-    "deepseek_v4",
-    "gemma4",
-    "glm47",
-    "harmony",
-    "kimi_k2",
-    "minimax_m2",
-    "qwen3_coder",
-]
-
 BATCH_SUB_CASE_GROUPS = [
+    ("Single-call", ("1.a", "1.b", "1.c", "1.d")),
     ("Core", ("1", "3", "9", "9.a", "9.b")),
-    ("Multi-call", ("2.a", "2.b", "2.c", "2.d", "10")),
+    ("Multi-call", ("2.a", "2.b", "2.c", "2.d", "2.e", "10")),
     (
         "Malformed / recovery",
         ("4.a", "4.b", "4.c", "4.d", "4.e", "5.a", "5.b", "5.c", "5.d", "5.e"),
@@ -324,6 +313,7 @@ BATCH_SUB_CASE_GROUPS = [
             "7.c",
             "7.d",
             "7.e",
+            "7.f",
         ),
     ),
     ("Text interleaving", ("8.a", "8.b", "8.c", "8.d")),
@@ -338,6 +328,7 @@ SPLIT_PARENT_SUBCASES = {
     # Once a taxonomy bucket has leaf cases, the matrix should render only the
     # leaves. Existing parent fixtures still carry useful expectations/reasons
     # for parser families that have not been rewritten to leaf IDs yet.
+    "1": ("1.a",),
     "9": ("9.a",),
     "30": ("30.a", "30.b", "30.c"),
     "31": ("31.a", "31.b"),
@@ -594,6 +585,22 @@ def peer_status(case: dict, dyn: dict, impl: str) -> tuple[str, bool]:
     return ("na", False)
 
 
+_TOOL_CALL_MARKUP_RE = re.compile(
+    r"</?tool_call|</?tool_calls|<\|tool_call|<\|tool_calls|"
+    r"</?TOOLCALL|TOOL_CALLS|<｜(?:DSML｜)?(?:tool|tool▁call|tool▁calls)|"
+    r"<｜DSML｜|</?minimax:tool_call|</?invoke|</?arg_key|</?arg_value"
+)
+
+
+def _dynamo_tool_call_leak(dyn: dict) -> str | None:
+    normal_text = dyn.get("normal_text")
+    if not dyn.get("reason") or not isinstance(normal_text, str):
+        return None
+    if not _TOOL_CALL_MARKUP_RE.search(normal_text):
+        return None
+    return str(dyn["reason"])
+
+
 def cell_for(case: dict | None) -> str:
     if case is None:
         return "—"
@@ -617,7 +624,9 @@ def cell_for(case: dict | None) -> str:
     # leaking tool call markup only when Dynamo also leaves residual
     # `normal_text`. Dynamo can have non-leak reasons for dropped malformed
     # markup, so don't mark those as `↯`.
-    if isinstance(dyn, dict) and dyn.get("reason") and bool(dyn.get("normal_text")):
+    if isinstance(dyn, dict) and _dynamo_tool_call_leak(dyn):
+        if v_kind == "unavail" and s_kind == "unavail":
+            return "↯D"
         if parts:
             return "↯" + "".join(parts)
         return "↯"
@@ -625,7 +634,7 @@ def cell_for(case: dict | None) -> str:
     if parts:
         return "".join(parts)
     if v_kind == "unavail" and s_kind == "unavail":
-        return "n/a"
+        return "D"
     return "="
 
 
@@ -636,15 +645,17 @@ def render_row(
     sub_cases: list[str],
     no_vllm: set[str],
     no_sglang: set[str],
+    inheritance: dict[str, dict],
 ) -> str:
     cells = [cell_for(cases.get((family, sub))) for sub in sub_cases]
-    suff = family_suffix(family, no_vllm, no_sglang)
-    return f"| {model} | {family}{suff} | " + " | ".join(cells) + " |"
+    parser_label = _parser_label_markdown(family, no_vllm, no_sglang, inheritance)
+    return f"| {model} | {parser_label} | " + " | ".join(cells) + " |"
 
 
 _LEGEND_MD = (
     "**Legend:** "
-    "`=` full parity (Dynamo, vLLM, and SGLang produce the same results) · "
+    "`=` all captured peers match Dynamo · "
+    "`D` Dynamo-only fixture (both peers unavailable) · "
     "`V`/`S` divergence (V = vLLM, S = SGLang; intentional, has `reason:`) · "
     "`?` research-needed suffix (e.g. V?, S? — diverges with no `reason:` yet) · "
     "`↯` Dynamo leaks tool call markup into `normal_text` "
@@ -652,8 +663,8 @@ _LEGEND_MD = (
     "`!` expected-error suffix (e.g. V!, S! — engine crashes by design) · "
     "`n/a` not applicable · "
     "`—` missing fixture coverage · "
-    "`†` (parser column) = no vLLM peer parser for this family · "
-    "`§` (parser column) = no SGLang peer parser for this family."
+    "`†` (tool calling parser column) = no vLLM peer parser for this family · "
+    "`§` (tool calling parser column) = no SGLang peer parser for this family."
 )
 
 
@@ -665,44 +676,26 @@ def render_markdown(
     top_n: list[tuple[str, str]],
     others: list[tuple[str, str]],
 ) -> str:
-    header = "| model | parser | " + " | ".join(sub_cases) + " |"
+    inheritance = _build_family_inheritance(_build_family_to_rust_ref())
+    header = "| model | Tool calling parser | " + " | ".join(sub_cases) + " |"
     sep = "|---|---|" + ":-:|" * len(sub_cases)
     lines = [header, sep]
     lines.append("| **Top-N models** |   |" + "   |" * len(sub_cases))
     for model, fam in top_n:
-        lines.append(render_row(model, fam, cases, sub_cases, no_vllm, no_sglang))
+        lines.append(
+            render_row(model, fam, cases, sub_cases, no_vllm, no_sglang, inheritance)
+        )
     lines.append("| **Others** |   |" + "   |" * len(sub_cases))
     for model, fam in others:
-        lines.append(render_row(model, fam, cases, sub_cases, no_vllm, no_sglang))
+        lines.append(
+            render_row(model, fam, cases, sub_cases, no_vllm, no_sglang, inheritance)
+        )
     lines.append("")
     lines.append(_LEGEND_MD)
     return "\n".join(lines)
 
 
 _IMPL_DISPLAY = {"dynamo": "Dynamo", "vllm": "vLLM", "sglang": "SGLang"}
-_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
-_TRAILING_URL_PUNCTUATION = ".,;:)"
-
-
-def _linkify_text_html(text: str) -> str:
-    """Escape plain text and turn embedded URLs into anchors."""
-    parts: list[str] = []
-    last = 0
-    for match in _URL_RE.finditer(text):
-        raw_url = match.group(0)
-        url = raw_url.rstrip(_TRAILING_URL_PUNCTUATION)
-        if not url:
-            continue
-        parts.append(html_lib.escape(text[last : match.start()]))
-        href = html_lib.escape(url, quote=True)
-        parts.append(
-            f'<a href="{href}" target="_blank" rel="noopener noreferrer">'
-            f"{html_lib.escape(url)}</a>"
-        )
-        parts.append(html_lib.escape(raw_url[len(url) :]))
-        last = match.end()
-    parts.append(html_lib.escape(text[last:]))
-    return "".join(parts)
 
 
 def _format_output_block_html(block, family: str | None = None) -> str:
@@ -725,258 +718,42 @@ def _format_output_block_html(block, family: str | None = None) -> str:
         calls_line = html_lib.escape(f"calls=[{rendered}]")
     else:
         calls_line = "calls=[]"
-    nt_line = f"normal_text='{_colorize_markup(nt, family)}'"
+    nt_line = f"normal_text='{colorize_markup(nt, family)}'"
     return f"{nt_line}\n{calls_line}"
-
-
-# Matches both `<...>` and the Mistral-style `[NAME]`/`[/NAME]` form.
-# Brackets only match ALL-CAPS-underscore names so JSON arrays
-# (e.g. `[{...}]`, `[1, 2]`) don't get false-matched as tags.
-_TAG_RE = re.compile(r"<[^<>]+>|\[/?[A-Z][A-Z0-9_]*\]")
-
-# Two coloring schemes share one cycling palette:
-#   * Paired open/close: every matched pair gets a *fresh* palette index, so
-#     two `<tool_call>...</tool_call>` instances in the same input render as
-#     two different colors.
-#   * Singletons (e.g. harmony's `<|channel|>` section markers): stable
-#     by-role color so all `<|channel|>` tokens share one class everywhere.
-_PAIRED_PALETTE_SIZE = 8
-_color_seq = 0
-_singleton_classes: dict[str, str] = {}
-
-
-def _next_color_class() -> str:
-    global _color_seq
-    cls = f"tt-c{_color_seq % _PAIRED_PALETTE_SIZE}"
-    _color_seq += 1
-    return cls
-
-
-def _singleton_class_for(name: str) -> str:
-    cls = _singleton_classes.get(name)
-    if cls is None:
-        cls = _next_color_class()
-        _singleton_classes[name] = cls
-    return cls
-
-
-_PIPES = ("|", "｜")  # ASCII and FULLWIDTH VERTICAL LINE (U+FF5C)
-_BEGIN_SUFFIXES = (
-    "_begin",
-    "▁begin",
-)  # ASCII underscore and LOWER ONE EIGHTH BLOCK (U+2581)
-_END_SUFFIXES = ("_end", "▁end")
-
-# Harmony (gpt-oss) tokens are linear state-machine delimiters. Turn-boundary
-# tokens form pseudo-pairs: `<|start|>` opens a turn; `<|end|>`, `<|return|>`,
-# or `<|call|>` closes it. Each closer flavor gets its own paired color so a
-# tool-call turn (start→call) is visually distinct from a normal turn (start→end)
-# or a final turn (start→return). Section markers stay as same-colored singletons.
-_HARMONY_TURN_OPEN = "start"
-_HARMONY_TURN_CLOSE = frozenset({"end", "return", "call"})
-_HARMONY_SECTION_MARKERS = frozenset({"channel", "constrain", "message"})
-_HARMONY_TOKEN_RE = re.compile(r"<\|([A-Za-z_]+)\|>")
-_HARMONY_SEGMENT_CLASS = {
-    "start": "tt-h-start",
-    "channel": "tt-h-channel",
-    "constrain": "tt-h-constrain",
-    "message": "tt-h-message",
-    "end": "tt-h-stop",
-    "return": "tt-h-stop",
-    "call": "tt-h-call",
-}
-
-
-def _colorize_harmony(text: str) -> str:
-    """Color Harmony's linear token segments as `<|token|>related-text`.
-
-    Harmony is not paired XML. Tokens such as `<|channel|>` and `<|message|>`
-    introduce the header/content span that follows, so each special token is
-    grouped with text up to the next Harmony token.
-    """
-    pieces: list[str] = []
-    last = 0
-    for m in _HARMONY_TOKEN_RE.finditer(text):
-        if m.start() > last:
-            pieces.append(html_lib.escape(text[last : m.start()]))
-        token_name = m.group(1)
-        if token_name in _HARMONY_TURN_CLOSE:
-            end = m.end()
-        else:
-            next_m = _HARMONY_TOKEN_RE.search(text, m.end())
-            end = next_m.start() if next_m else len(text)
-        cls = _HARMONY_SEGMENT_CLASS.get(token_name, "tt-h-other")
-        token = html_lib.escape(m.group(0))
-        related = html_lib.escape(text[m.end() : end])
-        pieces.append(
-            f'<span class="tt-h {cls}"><span class="tt-h-token">{token}</span>{related}</span>'
-        )
-        last = end
-    if last < len(text):
-        pieces.append(html_lib.escape(text[last:]))
-    return "".join(pieces)
-
-
-def _colorize_markup(text: str, family: str | None = None) -> str:
-    if family == "harmony" and _HARMONY_TOKEN_RE.search(text):
-        return _colorize_harmony(text)
-    return _colorize_xml(text)
-
-
-def _strip_suffix(s: str, suffixes: tuple[str, ...]) -> str | None:
-    for suf in suffixes:
-        if s.endswith(suf) and len(s) > len(suf):
-            return s[: -len(suf)]
-    return None
-
-
-def _tag_kind_and_name(inner: str) -> tuple[str | None, str, str | None]:
-    """Classify `<...>` tag inner text into an open/close/singleton kind.
-
-    Returns (kind, pair_id, color_override):
-      * kind: 'open' | 'close' | 'singleton' | None
-      * pair_id: name used to match open against close on the stack
-      * color_override: when set, the paired span uses this name for the
-        color class instead of pair_id (lets `<|start|>...<|call|>` color
-        differently from `<|start|>...<|end|>` despite sharing pair_id).
-    """
-
-    def _name_of(s: str) -> str:
-        # Split on whitespace, slash, `>`, OR `=` so that
-        # `<function=book_flight>` pairs with `</function>` and
-        # `<parameter=destination>` pairs with `</parameter>`.
-        if not s:
-            return ""
-        return re.split(r"[\s/>=]", s, 1)[0].rstrip("|")
-
-    if inner.startswith("/"):
-        return ("close", _name_of(inner[1:]), None)
-    starts_pipe = inner[:1] in _PIPES
-    ends_pipe = inner[-1:] in _PIPES
-    if starts_pipe and ends_pipe and len(inner) >= 2:
-        middle = inner[1:-1]
-        stripped = _strip_suffix(middle, _BEGIN_SUFFIXES)
-        if stripped is not None:
-            return ("open", stripped, None)
-        stripped = _strip_suffix(middle, _END_SUFFIXES)
-        if stripped is not None:
-            return ("close", stripped, None)
-        if middle == _HARMONY_TURN_OPEN:
-            return ("open", "__harmony_turn", None)
-        if middle in _HARMONY_TURN_CLOSE:
-            # Color the pair by which closer flavor was used.
-            return ("close", "__harmony_turn", f"__harmony_pair_{middle}")
-        if middle in _HARMONY_SECTION_MARKERS:
-            return ("singleton", "__harmony_section", None)
-        return (None, "", None)
-    if starts_pipe and inner[:1] == "|":
-        return ("open", _name_of(inner[1:]), None)
-    if ends_pipe and inner[-1:] == "|":
-        return ("close", _name_of(inner[:-1]), None)
-    return ("open", _name_of(inner), None)
-
-
-def _colorize_xml(text: str) -> str:
-    """HTML-escape `text` and wrap each `<...>` token in a span.
-    Paired open/close (stack match by tag name) → class 'tt-paired'.
-    Unmatched close, or open that never closes → class 'tt-orphan'.
-
-    Pairs standard XML (`<X>...</X>`) AND alt pipe-marker conventions:
-      `<|X>...<X|>`          (boundary ASCII pipes)
-      `<|X_begin|>...<|X_end|>`  (both-side pipes with _begin/_end suffix)
-    Lenient pop-through: a close looks down the stack for the nearest
-    name-match; anything un-closed above it is marked orphan. Lets
-    no-close singletons (e.g. `<|tool_call_argument_begin|>`) localize
-    their orphan-ness without poisoning the surrounding pairs.
-    """
-    pieces: list[str] = []
-    stack: list[tuple[str, int]] = []
-    last = 0
-    for m in _TAG_RE.finditer(text):
-        if m.start() > last:
-            pieces.append(html_lib.escape(text[last : m.start()]))
-        tok = m.group(0)
-        kind, pair_id, color_override = _tag_kind_and_name(tok[1:-1])
-        esc = html_lib.escape(tok)
-        if kind is None:
-            pieces.append(f'<span class="tt-orphan">{esc}</span>')
-        elif kind == "singleton":
-            cls = _singleton_class_for(pair_id)
-            pieces.append(f'<span class="{cls}">{esc}</span>')
-        elif kind == "close":
-            match_at = -1
-            for i in range(len(stack) - 1, -1, -1):
-                if stack[i][0] == pair_id:
-                    match_at = i
-                    break
-            if match_at >= 0:
-                for _, unmatched_idx in stack[match_at + 1 :]:
-                    pieces[
-                        unmatched_idx
-                    ] = f'<span class="tt-orphan">{pieces[unmatched_idx]}</span>'
-                open_idx = stack[match_at][1]
-                # Per-instance color: every matched pair gets a fresh palette
-                # index, so two `<tool_call>...</tool_call>` (or two
-                # `<|start|>...<|call|>`) blocks in the same input render as
-                # different colors. (color_override unused on the paired
-                # path — kept on the singleton-flavor branch only.)
-                _ = color_override
-                cls = _next_color_class()
-                pieces[open_idx] = f'<span class="{cls}">{pieces[open_idx]}</span>'
-                pieces.append(f'<span class="{cls}">{esc}</span>')
-                del stack[match_at:]
-            else:
-                pieces.append(f'<span class="tt-orphan">{esc}</span>')
-        else:
-            pieces.append(esc)
-            stack.append((pair_id, len(pieces) - 1))
-        last = m.end()
-    for _, idx in stack:
-        pieces[idx] = f'<span class="tt-orphan">{pieces[idx]}</span>'
-    if last < len(text):
-        pieces.append(html_lib.escape(text[last:]))
-    return "".join(pieces)
 
 
 def _build_tooltip_html(case: dict, dyn) -> str:
     """Rich HTML hover tooltip: head, input (colorized), per-engine output,
     divergence reasons. Returns the full `<div class="ttip">...</div>`."""
     case_id = case.get("__case_id", "")
+    family = case.get("__family")
     desc = case.get("description") or ""
-    head = f"{case_id} — {desc}" if (case_id and desc) else (case_id or desc)
+    if case_id and family:
+        head = f"{case_id} — {family}"
+    else:
+        head = case_id or str(family or "")
 
-    parts: list[str] = ['<div class="ttip">']
-    if head:
-        parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
-
-    ref = case.get("ref")
-    if isinstance(ref, str) and ref:
-        parts.append('<div class="ttip-section">Ref:</div>')
-        parts.append(f'<pre class="ttip-pre">{_linkify_text_html(ref)}</pre>')
-
+    input_label = None
+    input_html = None
     model_text = case.get("model_text")
     if isinstance(model_text, str) and model_text:
-        family = case.get("__family")
-        parts.append('<div class="ttip-section">Input:</div>')
-        parts.append(
-            f"<pre class=\"ttip-pre\">input_text='{_colorize_markup(model_text, family)}'</pre>"
-        )
+        input_label = "Input"
+        input_html = f"input_text='{colorize_markup(model_text, family)}'"
     chunks = case.get("chunks")
     if isinstance(chunks, list) and chunks:
-        parts.append('<div class="ttip-section">Input chunks:</div>')
         chunk_lines = []
+        chunk_html = colorize_stream_deltas(chunks, family)
         for i, chunk in enumerate(chunks):
             if not isinstance(chunk, dict):
                 continue
-            delta = chunk.get("delta_text") or ""
             suffix = ""
             if chunk.get("finish_reason"):
                 suffix = " finish_reason=" + html_lib.escape(
                     str(chunk["finish_reason"])
                 )
-            chunk_lines.append(f"{i}: delta_text='{_colorize_xml(delta)}'{suffix}")
-        chunk_text = "\n".join(chunk_lines)
-        parts.append(f'<pre class="ttip-pre">{chunk_text}</pre>')
+            chunk_lines.append(f"{i}: delta_text='{chunk_html[i]}'{suffix}")
+        input_label = "Input chunks"
+        input_html = "\n".join(chunk_lines)
 
     expected = case.get("expected") or {}
 
@@ -987,7 +764,7 @@ def _build_tooltip_html(case: dict, dyn) -> str:
         }
 
     n_dyn = _norm(dyn) if isinstance(dyn, dict) else None
-    all_parity = isinstance(dyn, dict) and all(
+    all_engines_parity = isinstance(dyn, dict) and all(
         isinstance(expected.get(i), dict)
         and not expected[i].get("unavailable")
         and "error" not in expected[i]
@@ -995,35 +772,32 @@ def _build_tooltip_html(case: dict, dyn) -> str:
         for i in ("dynamo", "vllm", "sglang")
     )
 
-    if all_parity:
-        parts.append('<div class="ttip-section">All engines parity:</div>')
-        parts.append(
-            f'<pre class="ttip-pre">{_format_output_block_html(dyn, case.get("__family"))}</pre>'
+    output_sections: list[tuple[str, str]] = []
+    if all_engines_parity:
+        output_sections.append(
+            ("All engines parity", _format_output_block_html(dyn, family))
         )
     else:
         for impl in ("dynamo", "vllm", "sglang"):
             block = expected.get(impl)
-            parts.append(f'<div class="ttip-section">{_IMPL_DISPLAY[impl]}:</div>')
-            parts.append(
-                f'<pre class="ttip-pre">{_format_output_block_html(block, case.get("__family"))}</pre>'
+            output_sections.append(
+                (_IMPL_DISPLAY[impl], _format_output_block_html(block, family))
             )
 
     reasons = _tooltip_for(case, dyn) if isinstance(dyn, dict) else ""
-    if reasons:
-        parts.append('<div class="ttip-section">Divergence reason:</div>')
-        parts.append(f'<pre class="ttip-pre">{_linkify_text_html(reasons)}</pre>')
 
-    dyn_leak = (
-        dyn.get("reason")
-        if isinstance(dyn, dict) and bool(dyn.get("normal_text"))
-        else None
+    dyn_leak = _dynamo_tool_call_leak(dyn) if isinstance(dyn, dict) else None
+    return build_parity_tooltip_html(
+        head=head,
+        description=desc,
+        input_label=input_label,
+        input_html=input_html,
+        output_sections=output_sections,
+        divergent_reasons=reasons or None,
+        leak_label="↯ Dynamo tool call leaks",
+        leak_text=str(dyn_leak) if dyn_leak else None,
+        refs=[("Ref", case.get("ref")), ("Spec ref", case.get("spec_ref"))],
     )
-    if dyn_leak:
-        parts.append('<div class="ttip-section">↯ Dynamo tool call leaks:</div>')
-        parts.append(f'<pre class="ttip-pre">{_linkify_text_html(str(dyn_leak))}</pre>')
-
-    parts.append("</div>")
-    return "".join(parts)
 
 
 def _tooltip_for(case: dict, dyn: dict) -> str:
@@ -1064,24 +838,6 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
     return "\n".join(parts)
 
 
-def _cell_class(text: str) -> str:
-    if text == "—":
-        return "missing"
-    if text == "n/a":
-        return "na"
-    if "!" in text:
-        return "err"
-    if "↯" in text:
-        return "leak"
-    if "?" in text:
-        return "research"
-    if text == "=":
-        return "ok"
-    # V / S / VS with a documented `reason:` — accepted divergence, but
-    # NOT parity, so don't color it green.
-    return "documented"
-
-
 def _build_na_tooltip_html(case: dict) -> str:
     """Tooltip for an n/a stub case (only `reason:` in YAML, no `expected:`
     block). Renders case id + description + the reason. Used when the cell
@@ -1090,13 +846,11 @@ def _build_na_tooltip_html(case: dict) -> str:
     desc = case.get("description") or ""
     head = f"{case_id} — {desc}" if (case_id and desc) else (case_id or desc)
     reason = case.get("reason") or "n/a (no reason given)"
-    parts = ['<div class="ttip">']
-    if head:
-        parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
-    parts.append('<div class="ttip-section">Why n/a:</div>')
-    parts.append(f'<pre class="ttip-pre">{_linkify_text_html(str(reason))}</pre>')
-    parts.append("</div>")
-    return "".join(parts)
+    return build_parity_tooltip_html(
+        head=head,
+        extra_sections=[("Why n/a", linkify_text_html(str(reason)))],
+        refs=[("Ref", case.get("ref")), ("Spec ref", case.get("spec_ref"))],
+    )
 
 
 def _build_missing_tooltip_html(mode: str, family: str, sub: str) -> str:
@@ -1107,24 +861,24 @@ def _build_missing_tooltip_html(mode: str, family: str, sub: str) -> str:
     fixture author recorded why the case does not apply.
     """
     case_id = f"PARSER.{mode}.{sub}"
-    parts = ['<div class="ttip">']
-    parts.append(
-        f'<div class="ttip-head">{html_lib.escape(case_id)} — '
-        f"{html_lib.escape(family)}</div>"
+    return build_parity_tooltip_html(
+        head=f"{case_id} — {family}",
+        extra_sections=[
+            (
+                "Missing fixture",
+                html_lib.escape(
+                    "No fixture entry exists for this family/case. If the case "
+                    "is intentionally not applicable, add an explicit n/a stub "
+                    "with description: and reason: so the table can explain it."
+                ),
+            )
+        ],
     )
-    parts.append('<div class="ttip-section">Missing fixture:</div>')
-    parts.append(
-        '<pre class="ttip-pre">No fixture entry exists for this family/case. '
-        "If the case is intentionally not applicable, add an explicit n/a "
-        "stub with description: and reason: so the table can explain it.</pre>"
-    )
-    parts.append("</div>")
-    return "".join(parts)
 
 
 def render_cell_html(case: dict | None, mode: str, family: str, sub: str) -> str:
     text = cell_for(case)
-    cls = _cell_class(text)
+    cls = parity_cell_class(text)
     band_cls = _subcase_band_class(mode, sub)
     col_group = html_lib.escape(_subcase_group_key(mode, sub))
     td_open = f'<td class="cell {cls} {band_cls}" data-col-hide-group="{col_group}">'
@@ -1159,12 +913,13 @@ def _parser_inheritance_tooltip_html(
     no_vllm: set[str] | None = None,
     no_sglang: set[str] | None = None,
 ) -> str:
-    """Rich `.ttip` tooltip rendering the parser inheritance as an ASCII
-    tree localized to the target family: variant header, siblings sharing
-    the same backend, the target marked with `← THIS`, aliases nested under
-    the target, and a warning when filed under `xml/` but bypassing the
-    shared XML base. `ctor_ref` is unused here (was for older field-based
-    layout) — kept for API stability with `_parser_cell_html`."""
+    """Rich `.ttip` tooltip for the tool calling parser column.
+
+    Keep this field-list shape aligned with the reasoning parser column tooltip
+    so both tables explain "effective parser/backend -> row family" the same
+    way. `ctor_ref` is unused here (was for older field-based layout) — kept
+    for API stability with `_parser_cell_html`.
+    """
     del ctor_ref
 
     variant = info["variant"] or "?"
@@ -1173,93 +928,61 @@ def _parser_inheritance_tooltip_html(
     factory = info["factory"]
     alias_of = info.get("alias_of")  # set when this family is an alias-only entry
 
-    # Header: ParserConfig::<Variant>[::<Sub>] → <backend file>  [(factory: <name>)]
     head_parts = [f"ParserConfig::{variant}"]
     if sub_variant:
         head_parts[-1] = f"ParserConfig::{variant}::{sub_variant}"
     bf_href = html_lib.escape(f"../../../lib/parsers/src/tool_calling/{backend_file}")
     bf_link = f'<a href="{bf_href}">{html_lib.escape(backend_file)}</a>'
-    header_html = f"{html_lib.escape(head_parts[0])} → {bf_link}"
+
+    anchor = alias_of or family
+    shared_family = sorted([anchor] + info["shared_with"])
+    effective_backend = _shared_backend_short(info) or family
+
+    implementation = f"{html_lib.escape(head_parts[0])} -> {bf_link}"
     if factory:
         factory_name = factory.split("(", 1)[0]
-        header_html += html_lib.escape(f"  (factory: {factory_name})")
+        implementation += html_lib.escape(f" (factory: {factory_name})")
 
-    # Body: anchor + siblings, alphabetical, target marked with ← THIS.
-    # Anchor is the family whose entry "owns" this backend. If `family` is
-    # an alias-only entry, the anchor is its target and the marker drops
-    # to the alias's leaf row under that target.
-    anchor = alias_of or family
-    siblings = info["shared_with"]
-    fam_list = sorted([anchor] + siblings)
-    body_lines: list[str] = []
-    for i, fam in enumerate(fam_list):
-        is_last_fam = i == len(fam_list) - 1
-        branch = "└── " if is_last_fam else "├── "
-        # block="..." suffix only renders for the anchor row, since we only
-        # have factory args for the current entry (not for siblings).
-        suffix = ""
-        if fam == anchor and info["factory"]:
-            fm = re.search(r'\("([^"]+)"\)', info["factory"])
-            if fm:
-                suffix = f'  block="{fm.group(1)}"'
-        # ← THIS goes on the target family's line only when the table cell
-        # IS the target (not an alias).
-        marker_html = (
-            "  <strong>← THIS</strong>" if (fam == family and not alias_of) else ""
+    tooltip_lines = [
+        "Tool calling parser family from fixture YAML.",
+        f"Tool calling parser row: {html_lib.escape(family)}",
+        f"Effective parser/backend: {html_lib.escape(effective_backend)}",
+        f"Dynamo implementation: {implementation}",
+    ]
+    if info["shared_with"]:
+        tooltip_lines.append(
+            "Shared implementation family: " + html_lib.escape(", ".join(shared_family))
         )
-        body_lines.append(
-            f"{branch}{html_lib.escape(fam)}{html_lib.escape(suffix)}{marker_html}"
+    if alias_of:
+        tooltip_lines.append(f"Alias of: {html_lib.escape(alias_of)}")
+    if info["aliases"]:
+        tooltip_lines.append(
+            "Registered aliases: " + html_lib.escape(", ".join(info["aliases"]))
         )
 
-        # Aliases nested under the anchor. If we're rendering the alias's
-        # own tooltip, the alias's row carries the ← THIS marker.
-        if fam == anchor and info["aliases"]:
-            cont = "    " if is_last_fam else "│   "
-            for j, alias in enumerate(info["aliases"]):
-                alast = j == len(info["aliases"]) - 1
-                ab = "└── " if alast else "├── "
-                a_marker = (
-                    "  <strong>← THIS</strong>"
-                    if (alias_of and alias == family)
-                    else ""
-                )
-                body_lines.append(
-                    f"{cont}{ab}{html_lib.escape(alias)}  (alias){a_marker}"
-                )
-
-    # Peer-availability footnote (†/§) — embedded here so symbols don't need
-    # their own native tooltip. Anchored on the table-cell family, so an
-    # alias inherits its target's peer markers (they share the same fixture
-    # YAMLs and the same `expected.<impl>.unavailable` flags).
     peer_notes: list[str] = []
     if no_vllm and family in no_vllm:
-        peer_notes.append(
-            '<span class="parser-suffix">†</span> no vLLM peer parser for this family'
-        )
+        peer_notes.append("no vLLM peer parser")
     if no_sglang and family in no_sglang:
-        peer_notes.append(
-            '<span class="parser-suffix">§</span> no SGLang peer parser for this family'
-        )
-    peer_html = ("\n\n" + "\n".join(peer_notes)) if peer_notes else ""
+        peer_notes.append("no SGLang peer parser")
+    if peer_notes:
+        tooltip_lines.append("Peer availability: " + ", ".join(peer_notes))
 
-    # Misleading-location warning appended as a separate paragraph below the tree.
-    warn_html = ""
     if info["filed_under_xml_misleading"]:
-        warn_html = (
-            "\n\n⚠ Filed under xml/ but does NOT use the shared xml::parser.\n"
-            f"   Has its own ParserConfig::{html_lib.escape(variant)} variant."
+        tooltip_lines.append(
+            "Note: filed under xml/ but does not use the shared xml::parser; "
+            f"it has its own ParserConfig::{html_lib.escape(variant)} variant."
         )
+    tooltip_lines.extend(_tool_parser_tree_lines(family, info, effective_backend))
 
-    tree_html = header_html + "\n" + "\n".join(body_lines) + peer_html + warn_html
-
-    if alias_of:
-        head_text = f"{family} — alias of {alias_of}; inherits {info['base_label']}"
+    if effective_backend == family:
+        head_text = f"`{family}`"
     else:
-        head_text = f"{family} — inherits {info['base_label']}"
+        head_text = f"`{effective_backend}` (row: `{family}`)"
     return (
         '<div class="ttip">'
         f'<div class="ttip-head">{html_lib.escape(head_text)}</div>'
-        f'<pre class="ttip-pre">{tree_html}</pre>'
+        f'<pre class="ttip-pre">{"".join(line + chr(10) for line in tooltip_lines).rstrip()}</pre>'
         "</div>"
     )
 
@@ -1271,6 +994,64 @@ _SHARED_BACKEND_SHORT = {
 }
 
 
+def _tool_parser_tree_lines(
+    family: str,
+    info: dict,
+    effective_backend: str,
+) -> list[str]:
+    alias_of = info.get("alias_of")
+    anchor = alias_of or family
+    aliases = info["aliases"]
+    if not info["shared_with"] and not aliases and effective_backend == family:
+        return []
+
+    fam_list = sorted([anchor] + info["shared_with"])
+    lines = ["", "Shared implementation tree:"]
+    root_label = html_lib.escape(effective_backend)
+    if effective_backend == family:
+        root_label = f"<strong>{root_label}</strong>"
+    lines.append(f"{root_label} (effective parser/backend)")
+
+    for i, fam in enumerate(fam_list):
+        is_last_fam = i == len(fam_list) - 1
+        branch = "└── " if is_last_fam else "├── "
+        fam_label = html_lib.escape(fam)
+        if fam == family and not alias_of:
+            fam_label = f"<strong>{fam_label}</strong>"
+        lines.append(f"{branch}{fam_label}")
+
+        if fam == anchor and aliases:
+            cont = "    " if is_last_fam else "│   "
+            for j, alias in enumerate(aliases):
+                alast = j == len(aliases) - 1
+                ab = "└── " if alast else "├── "
+                alias_label = html_lib.escape(alias)
+                if alias_of and alias == family:
+                    alias_label = f"<strong>{alias_label}</strong>"
+                lines.append(f"{cont}{ab}{alias_label} (alias)")
+
+    return lines
+
+
+def _shared_backend_short(info: dict | None) -> str | None:
+    if info and info["shared_with"]:
+        return _SHARED_BACKEND_SHORT.get(info["key"])
+    return None
+
+
+def _parser_label_markdown(
+    family: str,
+    no_vllm: set[str],
+    no_sglang: set[str],
+    inheritance: dict[str, dict],
+) -> str:
+    suff = family_suffix(family, no_vllm, no_sglang)
+    short = _shared_backend_short(inheritance.get(family))
+    if short:
+        return f"{short} -> {family}{suff}"
+    return f"{family}{suff}"
+
+
 def _parser_cell_html(
     family: str,
     refs: dict[str, tuple[str, int]],
@@ -1279,9 +1060,9 @@ def _parser_cell_html(
     inheritance: dict[str, dict],
 ) -> str:
     suff = family_suffix(family, no_vllm, no_sglang)
-    label = html_lib.escape(family)
+    row_label = html_lib.escape(family)
     if suff:
-        label += f'<span class="parser-suffix">{html_lib.escape(suff)}</span>'
+        row_label += f'<span class="parser-suffix">{html_lib.escape(suff)}</span>'
     ref = refs.get(family)
     info = inheritance.get(family)
     ttip = (
@@ -1290,14 +1071,16 @@ def _parser_cell_html(
         else ""
     )
 
-    # Shared-base suffix: only show when 2+ families share this backend, so
-    # the column calls out the consolidation rows without adding noise to
-    # standalone parsers (pythonic, gemma4, glm47, kimi_k2, harmony, ...).
-    base_suffix = ""
-    if info and info["shared_with"]:
-        short = _SHARED_BACKEND_SHORT.get(info["key"])
-        if short:
-            base_suffix = f'<span class="parser-base">→ {html_lib.escape(short)}</span>'
+    # Shared-backend rows should read as implementation -> fixture family,
+    # e.g. `xml -> minimax_m2` and `xml -> qwen3_coder`. Standalone parsers
+    # keep the public family name as the primary label.
+    short = _shared_backend_short(info)
+    if short:
+        label = html_lib.escape(short)
+        base_suffix = f'<span class="parser-base">→ {row_label}</span>'
+    else:
+        label = row_label
+        base_suffix = ""
 
     # Family-name link points to the **actual parser code** (backend_file from
     # the inheritance map), not to the config-ctor location in config.rs. The
@@ -1461,7 +1244,9 @@ def _subcase_group_headers_html(mode: str, sub_cases: list[str]) -> str:
     """Build semantic group headers spanning the displayed sub-case columns."""
     spans: list[str] = [
         _column_control_header_html("model", "Model", default_visible=False),
-        _column_control_header_html("parser", "Parser", default_visible=True),
+        _column_control_header_html(
+            "parser", "Tool calling parser", default_visible=True
+        ),
     ]
     for run in _subcase_runs(mode, sub_cases):
         label = _subcase_group_label(mode, run[0])
@@ -1525,6 +1310,7 @@ def _compute_stats(
         "slots": len(families) * len(sub_cases),
         "real": 0,
         "parity": 0,
+        "dynamo_only": 0,
         "documented": 0,
         "research": 0,
         "errors": 0,
@@ -1544,6 +1330,8 @@ def _compute_stats(
             s["real"] += 1
             if text == "=":
                 s["parity"] += 1
+            elif text == "D":
+                s["dynamo_only"] += 1
             elif "!" in text:
                 s["errors"] += 1
             elif "↯" in text:
@@ -1683,9 +1471,9 @@ def render_html(modes: list[str], family_filter: str | None = None) -> str:
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
     title = (
-        f"Dynamo {family_filter} Tool Call Parser - Parity Table"
+        f"Dynamo {family_filter} Tool Calling Parser - Parity Table"
         if family_filter
-        else "Dynamo Tool Call Parser - Parity Table"
+        else "Dynamo Tool Calling Parser - Parity Table"
     )
     command = "python3 tests/parity/generate_parity_table.py parser --html"
     output = "tests/parity/parser/PARITY.html"

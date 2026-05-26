@@ -21,11 +21,12 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
 from .cache_info import configure_kv_event_block_size
+from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
@@ -284,6 +285,11 @@ class WorkerFactory:
                     config,
                     engine_client,
                     vllm_config,
+                    # Embedding workers have no prefill/decode split — they
+                    # always serve a single pooling pass, so they advertise
+                    # as Aggregated with no peer dependencies.
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
                 ),
             )
         except Exception as e:
@@ -399,7 +405,12 @@ class WorkerFactory:
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
-        factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
         factory.init_publish()
 
         # Currently routing to worker is still controlled by the worker
@@ -494,6 +505,16 @@ class WorkerFactory:
                 bench_cfg, vllm_config
             )
 
+        # What the worker is advertising itself as, and what other worker it needs to serve traffic.
+        if config.disaggregation_mode == DisaggregationMode.DECODE:
+            worker_type = WorkerType.Decode
+            needs_set: list[WorkerType] = [WorkerType.Prefill]
+        else:
+            # AGGREGATED
+            worker_type = WorkerType.Aggregated
+            needs_set = []
+        needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
         await self.register_vllm_model(
             model_input,
             model_type,
@@ -501,6 +522,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=worker_type,
+            needs=needs,
         )
 
         health_check_payload = VllmHealthCheckPayload(
@@ -706,6 +729,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=WorkerType.Prefill,
+            needs=[[WorkerType.Decode]],
         )
 
         health_check_payload = VllmPrefillHealthCheckPayload(

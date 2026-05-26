@@ -13,7 +13,7 @@ use crate::{
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
-        AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
+        AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
     },
     protocols::{EndpointId, maybe_error::MaybeError},
@@ -1002,6 +1002,53 @@ where
     }
 }
 
+/// Bidirectional `AsyncEngine` impl for streaming-input workloads (e.g. the
+/// OpenAI Realtime API). Selects a sticky instance on the first inbound frame
+/// and binds the whole input stream to that worker. Required so engines of
+/// shape `BidirectionalStreamingEngine<T, U>` can be stored as a `PushRouter`
+/// in `WorkerSet`.
+///
+/// Remote per-frame dispatch over `AddressedPushRouter` / `PushWorkHandler`
+/// is not yet implemented; this impl currently bails after selecting the
+/// worker. KV and Direct modes inherit the same `bail!` invariants as the
+/// unary impl.
+#[async_trait]
+impl<T, U> AsyncEngine<ManyIn<T>, ManyOut<U>, Error> for PushRouter<T, U>
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    async fn generate(&self, mut input: ManyIn<T>) -> Result<ManyOut<U>, Error> {
+        match self.router_mode {
+            RouterMode::KV => {
+                anyhow::bail!("KV routing should not call generate on PushRouter");
+            }
+            RouterMode::Direct => {
+                anyhow::bail!(
+                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                );
+            }
+            _ => {}
+        }
+
+        // Wait for the first frame so the sticky-instance pick reflects the
+        // session's actual start, not router construction time.
+        if input.next().await.is_none() {
+            anyhow::bail!("bidirectional input stream closed before first frame");
+        }
+        let instance_id = self
+            .select_next_worker()
+            .ok_or_else(|| anyhow::anyhow!("no instances available for bidirectional routing"))?;
+
+        // Per-frame remote dispatch over AddressedPushRouter / PushWorkHandler
+        // is tracked in #9361. Until that lands, callers must register engines
+        // in-process via ModelManager rather than rely on discovered workers.
+        anyhow::bail!(
+            "bidirectional remote dispatch is not yet implemented (selected instance {instance_id})"
+        )
+    }
+}
+
 struct OccupancyTrackedStream<U: Data> {
     inner: ManyOut<U>,
     state: Arc<RoutingOccupancyState>,
@@ -1199,6 +1246,95 @@ mod tests {
         assert_eq!(state.load(selected), 1);
         drop(permit);
         assert_eq!(state.load(selected), 0);
+    }
+
+    #[tokio::test]
+    async fn bidirectional_generate_bails_with_no_instances() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_bidi_no_instances".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        let input: ManyIn<u64> =
+            ResponseStream::new(Box::pin(tokio_stream::iter(vec![1u64, 2u64])), ctx);
+        let result = router.generate(input).await;
+        assert!(
+            result.is_err(),
+            "bidirectional generate must bail when no instances are registered"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn bidirectional_generate_bails_for_kv_router_mode() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_bidi_kv_mode".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::KV)
+            .await
+            .unwrap();
+
+        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        let input: ManyIn<u64> = ResponseStream::new(Box::pin(tokio_stream::iter(vec![1u64])), ctx);
+        let result = router.generate(input).await;
+        assert!(
+            result.is_err(),
+            "bidirectional generate must bail for RouterMode::KV"
+        );
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("KV") || err_msg.contains("kv"),
+            "error should mention KV: got {err_msg}"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn bidirectional_generate_bails_for_direct_router_mode() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_bidi_direct_mode".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::Direct)
+            .await
+            .unwrap();
+
+        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        let input: ManyIn<u64> = ResponseStream::new(Box::pin(tokio_stream::iter(vec![1u64])), ctx);
+        let result = router.generate(input).await;
+        assert!(
+            result.is_err(),
+            "bidirectional generate must bail for RouterMode::Direct"
+        );
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Direct") || err_msg.contains("direct"),
+            "error should mention Direct: got {err_msg}"
+        );
+
+        rt.shutdown();
     }
 
     #[tokio::test]

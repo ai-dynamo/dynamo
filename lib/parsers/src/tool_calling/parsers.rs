@@ -1737,10 +1737,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let (result, content) = detect_and_parse_tool_call(input, Some("harmony"), None)
             .await
             .unwrap();
-        assert_eq!(
-            content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from html.parser import HTMLParser
@@ -48,7 +49,7 @@ def test_generate_parser_parity_table_html() -> None:
 
     assert "<html" in html.lower()
     assert "<table" in html.lower()
-    assert "Dynamo Tool Call Parser - Parity Table" in html
+    assert "Dynamo Tool Calling Parser - Parity Table" in html
     assert "generate_parity_table.py parser --html" in html
     assert "PARSER.batch.*" in html
     assert "PARSER.stream.*" in html
@@ -72,12 +73,48 @@ def test_generate_parser_parity_table_batch_mode_excludes_stream_links() -> None
     assert all("PARSER.stream." not in href for href in fixture_links)
 
 
+@pytest.mark.timeout(60)
+def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> None:
+    html = _render_html_for("reasoning")
+
+    assert "Dynamo Reasoning - Parity Table" in html
+    assert re.search(
+        r'<td class="cell na[^"]*"[^>]*><a href="fixtures/qwen3/REASONING\.batch\.yaml">n/a</a>'
+        r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.3\.b — qwen3',
+        html,
+    )
+    assert re.search(
+        r'<td class="cell leak[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">↯D</a>'
+        r'<div class="ttip"><div class="ttip-head">REASONING\.stream\.3\.b — gpt_oss',
+        html,
+    )
+    assert re.search(
+        r'<td class="cell research[^"]*"[^>]*><a href="fixtures/kimi_k25/REASONING\.batch\.yaml">V\?</a>'
+        r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.3\.b — kimi_k25',
+        html,
+    )
+    assert re.search(
+        r'<td class="cell research[^"]*"[^>]*><a href="fixtures/granite/REASONING\.batch\.yaml">V\?</a>'
+        r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.2\.a — granite',
+        html,
+    )
+    assert re.search(
+        r'<td class="cell ok[^"]*"[^>]*><a href="fixtures/minimax_append_think/REASONING\.batch\.yaml">=</a>'
+        r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.3\.a — minimax_append_think',
+        html,
+    )
+
+
 def _render_html(*extra_args: str) -> str:
+    return _render_html_for("parser", *extra_args)
+
+
+def _render_html_for(table: str, *extra_args: str) -> str:
     result = subprocess.run(
         [
             sys.executable,
             str(GENERATOR.relative_to(REPO_ROOT)),
-            "parser",
+            table,
             "--html",
             *extra_args,
         ],

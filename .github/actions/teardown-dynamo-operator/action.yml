@@ -4,7 +4,8 @@ description: 'Delete a vCluster and its host namespace'
 inputs:
   kubeconfig_base64:
     description: 'Base64-encoded kubeconfig for host cluster access'
-    required: true
+    required: false
+    default: ''
   vcluster_name:
     description: 'Name of the vCluster to delete'
     required: true
@@ -15,6 +16,7 @@ runs:
   using: "composite"
   steps:
     - name: Setup host kubeconfig
+      if: inputs.kubeconfig_base64 != ''
       shell: bash
       run: |
         echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig

@@ -220,9 +220,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     backend::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
-    let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
-    prometheus_metrics::add_to_module(&prometheus_metrics)?;
-    m.add_submodule(&prometheus_metrics)?;
 
     Ok(())
 }
@@ -377,6 +374,10 @@ fn register_model<'p>(
         .clone()
         .or(model_name)
         .or_else(|| Some(source_path.clone()));
+
+    if let Some(cfg) = &runtime_config {
+        cfg.validate_config()?;
+    }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // For TensorBased, Images, and Videos models, skip HuggingFace downloads and register directly
@@ -603,6 +604,10 @@ impl ModelType {
     #[classattr]
     const Videos: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Videos,
+    };
+    #[classattr]
+    const Realtime: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Realtime,
     };
 
     fn supports_chat(&self) -> bool {

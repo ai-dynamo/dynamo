@@ -110,11 +110,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         libfontconfig-dev && \
     # Use system python explicitly: some runtime bases put a framework venv first on PATH.
-    PIP_BREAK_SYSTEM_PACKAGES="" && \
-    if /usr/bin/python3 -m pip install --help | grep -q -- "--break-system-packages"; then \
-        PIP_BREAK_SYSTEM_PACKAGES="--break-system-packages"; \
-    fi && \
-    /usr/bin/python3 -m pip install ${PIP_BREAK_SYSTEM_PACKAGES} --no-cache-dir yq && \
+    # PIP_BREAK_SYSTEM_PACKAGES env var works across pip versions: pip >=23 honours
+    # it; older pip silently ignores it but predates the PEP 668 EXTERNALLY-MANAGED
+    # marker (Ubuntu <23.04), so no override is needed there in the first place.
+    # pip >=26 made the --break-system-packages flag require a boolean argument,
+    # so the env-var form is the only portable spelling.
+    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
@@ -192,24 +193,53 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
         fi; \
     fi
 
-# Copy UCX and NIXL libraries for dev stage compilation.
-# The upstream SGLang runtime image doesn't include NIXL, but cargo build needs to link against
-# -lnixl, -lnixl_build, and -lnixl_common. Runtime stage doesn't need this since it uses pre-built
-# wheels, but dev stage needs it for maturin develop and cargo build from source.
+# Copy NIXL SDK material for dev stage compilation.
+# cargo build needs NIXL headers plus linkable -lnixl, -lnixl_build, and -lnixl_common.
 # - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
-# - vllm/trtllm/none: NIXL/UCX are already present in runtime (no-op).
+# - vLLM CUDA: Reuse upstream vLLM's Python-wheel NIXL libs and copy only headers beside them.
+# - trtllm/none: NIXL/UCX are already present in runtime (no-op).
 ARG TARGETARCH
+{% if framework == "vllm" and device == "cuda" %}
+ARG CUDA_MAJOR
+{% endif %}
 RUN --mount=from=wheel_builder,target=/wheel_builder \
+    set -eux; \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
-        if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
-            mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
-            cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
-            cp -r /wheel_builder/usr/local/ucx /usr/local/; \
-            cp -r /wheel_builder/usr/local/libfabric /usr/local/; \
-            cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
-            cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
-            echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
+        test -d /wheel_builder/usr/local/ucx; \
+        test -d /wheel_builder/opt/nvidia/nvda_nixl; \
+        mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
+        cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
+        cp -r /wheel_builder/usr/local/ucx /usr/local/; \
+        cp -r /wheel_builder/usr/local/libfabric /usr/local/; \
+        cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
+        cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
+        echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
+{% if framework == "vllm" and device == "cuda" %}
+    elif [ "${FRAMEWORK}" = "vllm" ]; then \
+        wheel_lib_dir="/usr/local/lib/python${PYTHON_VERSION}/dist-packages/.nixl_cu${CUDA_MAJOR}.mesonpy.libs"; \
+        if [ ! -d "${wheel_lib_dir}" ]; then \
+            echo "ERROR: expected upstream vLLM NIXL wheel libs at ${wheel_lib_dir}; update vLLM NIXL dev-image path handling." >&2; \
+            exit 1; \
         fi; \
+        for lib in libnixl.so libnixl_build.so libnixl_common.so libserdes.so libstream.so; do \
+            if [ ! -f "${wheel_lib_dir}/${lib}" ]; then \
+                echo "ERROR: missing ${wheel_lib_dir}/${lib}; upstream vLLM NIXL wheel layout changed." >&2; \
+                exit 1; \
+            fi; \
+        done; \
+        if [ ! -d "${wheel_lib_dir}/plugins" ]; then \
+            echo "ERROR: missing ${wheel_lib_dir}/plugins; upstream vLLM NIXL wheel layout changed." >&2; \
+            exit 1; \
+        fi; \
+        test -d /wheel_builder/opt/nvidia/nvda_nixl/include; \
+        if [ ! -f "${wheel_lib_dir}/include/nixl.h" ]; then \
+            rm -rf "${wheel_lib_dir}/include"; \
+            cp -r /wheel_builder/opt/nvidia/nvda_nixl/include "${wheel_lib_dir}/include"; \
+        fi; \
+        test -f "${wheel_lib_dir}/include/nixl.h"; \
+        mkdir -p /opt/dynamo; \
+        ln -sfn "${wheel_lib_dir}" /opt/dynamo/nixl; \
+{% endif %}
     fi
 
 {% if device == "xpu" %}
@@ -221,15 +251,17 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
-{% elif framework == "vllm" %}
-# Reuse the stable symlink created by the upstream vLLM runtime stage so dev
-# builds do not hardcode a CUDA-specific `.nixl_cu*` directory.
+{% elif framework == "trtllm" or (framework == "vllm" and device == "cuda") %}
+# trtllm and vLLM CUDA dev images inherit upstream containers that ship NIXL
+# inside Python wheels. These env vars provide a stable prefix for source builds.
+# For vLLM CUDA, /opt/dynamo/nixl is a symlink to the wheel's
+# .nixl_cu${CUDA_MAJOR}.mesonpy.libs directory, with headers added by the dev stage.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
 {% else %}
 # NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
-# For trtllm/none: this resets the same values already set in runtime.
+# For dynamo: this resets the same values already set in runtime.
 # For sglang: this sets them after copying NIXL from wheel_builder above.
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
@@ -333,8 +365,8 @@ RUN mkdir -p /opt/dynamo/venv && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]
-{% elif framework == "vllm" %}
-# vLLM inherits upstream's system Python solve; keep dev installs in our venv.
+{% elif framework == "vllm" or framework == "trtllm" %}
+# vllm/trtllm inherit upstream's system Python solve; keep dev installs in our venv.
 
 {% if device == "cuda" %}
 # CUDA: Runtime uses system Python, so --system-site-packages correctly inherits packages.
