@@ -1894,14 +1894,13 @@ svg.card-icon{
 
 .dynamo-technique-guide {
     margin: 24px 0 26px;
-    padding: 16px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 8px;
-    background: var(--pst-color-surface);
+    padding: 0;
+    border: 0;
+    background: transparent;
 }
 
 .dark .dynamo-technique-guide {
-    background: var(--nv-dark-grey-2);
+    background: transparent;
 }
 
 .dynamo-technique-guide-header {
@@ -2188,15 +2187,6 @@ svg.card-icon{
     color: var(--pst-color-text-base);
     font-size: 15px;
     line-height: 1.2;
-    overflow-wrap: break-word;
-}
-
-.dynamo-benchmark-model small {
-    display: block;
-    margin-top: 3px;
-    color: var(--pst-color-text-muted);
-    font-size: 12px;
-    line-height: 1.25;
     overflow-wrap: break-word;
 }
 
