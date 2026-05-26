@@ -14,6 +14,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
     SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY,
@@ -313,6 +314,12 @@ class GMSStorageClient:
             manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
             sources = build_file_transfer_sources(input_dir, manifest.allocations)
             session = backend.start_restore(sources)
+            # The transfer backend may create CUDA contexts from worker threads
+            # while staging POSIX/NIXL resources in the background.  Keep a
+            # current context in the main restore thread too, because the GMS
+            # memory manager's publish path synchronizes/unmaps from this
+            # thread.
+            cuda_utils.cuda_runtime_set_device(self.device)
             with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
                 mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
                 if clear_existing:
