@@ -462,7 +462,7 @@ fn payload_prefill_worker_info(
             let dp_rank = worker_id_json
                 .get("prefill_dp_rank")
                 .and_then(|v| v.as_u64())
-                .map(|r| r as u32);
+                .and_then(|r| u32::try_from(r).ok());
             Some((worker_id, dp_rank))
         })
 }
@@ -539,6 +539,21 @@ mod tests {
         assert_eq!(
             prefill_worker_info(None, &disaggregated_params, None),
             Some((20, Some(3)))
+        );
+    }
+
+    #[test]
+    fn prefill_worker_info_ignores_out_of_range_payload_dp_rank() {
+        let disaggregated_params = json!({
+            "worker_id": {
+                "prefill_worker_id": 20,
+                "prefill_dp_rank": u64::from(u32::MAX) + 1
+            }
+        });
+
+        assert_eq!(
+            prefill_worker_info(None, &disaggregated_params, None),
+            Some((20, None))
         );
     }
 
