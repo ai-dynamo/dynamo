@@ -1673,6 +1673,118 @@ async fn cd_decode_plans_g3_to_g2_promotion_when_g3_holds_prefix() -> Result<()>
     Ok(())
 }
 
+/// Stage 2d: end-to-end G3→G2 prefix promotion at decode USAA.
+/// Analog of `cd_decode_promotes_g1_prefix_to_g2_at_usaa` for
+/// the G3-source path. Pre-loads G3 (so 2c plans G3), drives
+/// USAA, asserts `promote_g3_to_g2` fires with the prefix
+/// hashes (no vLLM block_ids needed), and that the promotion
+/// task drives `session.make_available` + `finish_availability`
+/// once the future resolves.
+///
+/// Discriminating quality: pre-Stage-2d code had the match guard
+/// in `commit_usaa1`'s promotion-spawn block that bailed on
+/// `SourceTier::G3` (added in Stage 2a). On pre-2d code, USAA
+/// would return `Err("G3 promotion dispatch not yet wired …")`
+/// and the `update_state_after_alloc` call would error out
+/// before reaching the spawn. Post-2d, the match dispatches to
+/// `promote_g3_to_g2` and the test reaches the assertions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_promotes_g3_prefix_to_g2_at_usaa() -> Result<()> {
+    let h = build_harness();
+    h.inner.install_g3_prefix("req-1", prefix_hashes(&h));
+    h.wrapper.create_slot(make_request())?;
+
+    // GNMT — plans the G3 promotion (Stage 2c).
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(count, Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE));
+    assert!(async_flag);
+    assert_eq!(
+        h.wrapper.pending_promotion_tier_for_test("req-1"),
+        Some("G3"),
+    );
+
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    // USAA — must NOT bail on the G3 dispatch (post-2d). Pre-2d
+    // would Err here with the "G3 promotion dispatch not yet
+    // wired" message from the match guard in commit_usaa1.
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Pin: the G3 path dispatched; the G1 path did not.
+    h.inner.wait_g3_promotion_count(1).await;
+    assert_eq!(
+        h.inner.g3_promotion_count(),
+        1,
+        "Stage 2d must dispatch through promote_g3_to_g2 for G3 plans",
+    );
+    assert_eq!(
+        h.inner.promotion_count(),
+        0,
+        "G1 promotion must NOT fire when G3 plan won at GNMT",
+    );
+    let dispatched_hashes = h
+        .inner
+        .snapshot_g3_promotion(0)
+        .expect("g3 promotion #0 recorded");
+    assert_eq!(
+        dispatched_hashes,
+        prefix_hashes(&h),
+        "promote_g3_to_g2 must be called with the GNMT-time prefix hashes",
+    );
+
+    // `finish_availability` is still deferred — the promotion
+    // future hasn't resolved.
+    assert!(
+        !session.finish_availability_called(),
+        "USAA must NOT call finish_availability before promotion lands",
+    );
+
+    // Resolve the G3 promotion with genuine G2 ImmutableBlocks.
+    let slot = h.inner.slot("req-1").expect("slot installed");
+    let prefix_token_blocks: Vec<_> = slot.token_blocks[..COMPUTED_BLOCKS].to_vec();
+    let mutables = h
+        .inner
+        .g2_manager()
+        .allocate_blocks(COMPUTED_BLOCKS)
+        .expect("allocate prefix G2");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(prefix_token_blocks.iter())
+        .map(|(m, tb)| m.complete(tb).expect("complete prefix G2"))
+        .collect();
+    let promoted_g2 = h.inner.g2_manager().register_blocks(completes);
+    assert_eq!(promoted_g2.len(), COMPUTED_BLOCKS);
+    h.inner.resolve_g3_promotion(0, Ok(promoted_g2));
+
+    // Post-resolution: the task drives make_available + finish_availability.
+    wait_until(|| session.finish_availability_called()).await;
+    let make_avail = session.make_available_calls();
+    assert_eq!(
+        make_avail.len(),
+        2,
+        "expected GNMT-time local_match + USAA-G3-promotion make_available; got: {:?}",
+        make_avail,
+    );
+    assert_eq!(
+        make_avail[0],
+        local_match_hashes(&h),
+        "first make_available is local match at GNMT",
+    );
+    assert_eq!(
+        make_avail[1],
+        prefix_hashes(&h),
+        "second make_available is the G3-promoted prefix",
+    );
+
+    Ok(())
+}
+
 /// Stage 2c: when neither G2 nor G3 holds the prefix, the
 /// wrapper must fall back to the existing Stage 1 G1 promotion
 /// path. This is the existing happy-path behavior; the test

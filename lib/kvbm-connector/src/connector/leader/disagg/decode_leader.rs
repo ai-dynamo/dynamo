@@ -1666,20 +1666,6 @@ impl DecodeDisaggLeader {
         // completes, the resulting G2 blocks remain registered in
         // the cache and benefit future requests.
         if let Some(plan) = updated.pending_promotion.clone() {
-            // Stage 2 dispatch lands in 2d. Until then, the only
-            // tier that can flow through `commit_gnmt_remote`'s
-            // empty-prefix arm is `G1`; any other variant is a
-            // programmer error (a producer was added that this
-            // arm doesn't yet know how to dispatch).
-            match plan.source_tier {
-                SourceTier::G1 => {}
-                SourceTier::G3 => {
-                    anyhow::bail!(
-                        "commit_usaa1: G3 promotion dispatch not yet wired \
-                         (Stage 2d); rid={request_id}"
-                    );
-                }
-            }
             // Lookup the coordinator-side state FIRST so we can
             // skip the spawn entirely when cleanup has already
             // evicted state — a non-gated promotion task would
@@ -1737,27 +1723,50 @@ impl DecodeDisaggLeader {
             let request_id_owned = request_id.to_string();
             let prefix_block_count = plan.prefix_block_count;
             let prefix_hashes = plan.prefix_hashes.clone();
-            // Pair vLLM's G1 block_ids for the prefix slice with
-            // the canonical hashes captured at GNMT. The hash
-            // carried by each `ExternalBlock<G1>` is what the
-            // offload pipeline registers the resulting G2 block
-            // with — the same hash `promote_g1_to_g2`'s future
-            // uses to re-query the G2 manager after transfer.
-            debug_assert_eq!(prefix_g1_block_ids.len(), prefix_block_count);
-            let source_blocks: Vec<kvbm_engine::offload::ExternalBlock<crate::G1>> =
-                prefix_g1_block_ids
-                    .iter()
-                    .copied()
-                    .zip(prefix_hashes.iter().copied())
-                    .map(|(bid, h)| kvbm_engine::offload::ExternalBlock::<crate::G1>::new(bid, h))
-                    .collect();
-            crate::audit!(
-                "prefix_g1_to_g2_promotion_enqueued",
-                role = "decode",
-                request_id,
-                prefix_block_count
-            );
-            let promotion_fut = inner.promote_g1_to_g2(source_blocks);
+            // Tier-dispatched promotion future construction. Both
+            // arms build the same `BoxFuture<Result<Vec<ImmutableBlock<G2>>>>`
+            // shape; the task body below is identical and operates
+            // on the resulting G2 blocks regardless of source tier.
+            //
+            // - G1: pair vLLM's prefix block_ids with the GNMT-time
+            //   prefix hashes into `ExternalBlock<G1>` entries. The
+            //   offload pipeline registers each resulting G2 block
+            //   with the carried sequence_hash.
+            // - G3: pass the prefix hashes directly. The shim
+            //   re-matches G3 internally and stages via
+            //   `kvbm_engine::leader::stage_g3_to_g2`; no vLLM
+            //   block_ids are needed (the source blocks live in
+            //   the connector's own G3 manager).
+            let (tier_label, promotion_fut) = match plan.source_tier {
+                SourceTier::G1 => {
+                    debug_assert_eq!(prefix_g1_block_ids.len(), prefix_block_count);
+                    let source_blocks: Vec<kvbm_engine::offload::ExternalBlock<crate::G1>> =
+                        prefix_g1_block_ids
+                            .iter()
+                            .copied()
+                            .zip(prefix_hashes.iter().copied())
+                            .map(|(bid, h)| {
+                                kvbm_engine::offload::ExternalBlock::<crate::G1>::new(bid, h)
+                            })
+                            .collect();
+                    crate::audit!(
+                        "prefix_g1_to_g2_promotion_enqueued",
+                        role = "decode",
+                        request_id,
+                        prefix_block_count
+                    );
+                    ("g1->g2", inner.promote_g1_to_g2(source_blocks))
+                }
+                SourceTier::G3 => {
+                    crate::audit!(
+                        "prefix_g3_to_g2_promotion_enqueued",
+                        role = "decode",
+                        request_id,
+                        prefix_block_count
+                    );
+                    ("g3->g2", inner.promote_g3_to_g2(prefix_hashes.clone()))
+                }
+            };
             // Task returns `bool` consumed by `coordinator.release`'s
             // deferred-finalize path:
             //
@@ -1821,13 +1830,14 @@ impl DecodeDisaggLeader {
                             "prefix_g2_promotion_failed",
                             role = "decode",
                             request_id = %request_id_owned,
+                            source_tier = tier_label,
                             error = %err
                         );
                         // session.close implies finish_commits +
                         // finish_availability with `closed_reason`
                         // set, so the prefill peer observes a
                         // terminal lifecycle event and bails.
-                        session.close(Some(format!("g1->g2 promotion: {err}")));
+                        session.close(Some(format!("{tier_label} promotion: {err}")));
                         false
                     }
                 }
