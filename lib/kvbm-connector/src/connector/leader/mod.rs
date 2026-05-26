@@ -839,6 +839,24 @@ impl ConnectorLeader {
 
         let mut slot = shared_slot.lock();
 
+        // Bounded escape for a hung async find session. Without this a stuck
+        // PreparingToOnboard slot would survive arbitrarily many GNMT calls
+        // and only get cleaned up when the request was explicitly finished.
+        if slot.force_error_if_preparing_timed_out(slot::PREPARING_TO_ONBOARD_DEFAULT_TIMEOUT) {
+            crate::audit!(
+                "preparing_to_onboard_timeout",
+                request_id,
+                num_computed_tokens,
+                timeout_secs = slot::PREPARING_TO_ONBOARD_DEFAULT_TIMEOUT.as_secs(),
+            );
+            // Drain the find sessions held in the now-Error state and fall
+            // back to local prefill. `recover_from_match_error` takes the
+            // Error state, releases per-shard sessions on the InstanceLeader,
+            // and returns the slot to Inactive.
+            self.recover_from_match_error(&mut slot);
+            return Ok((None, false));
+        }
+
         if slot.match_requires_reset() {
             // Check for inflight offloads - potential race with block freeing
             // vLLM preemption frees G1 blocks immediately, but we may still have

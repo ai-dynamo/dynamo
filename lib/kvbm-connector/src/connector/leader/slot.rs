@@ -73,6 +73,15 @@ impl OnboardingShard {
     }
 }
 
+/// Default upper bound on time a slot may stay in `PreparingToOnboard`
+/// before the watchdog escalates it to `Error(Onboarding)`. Chosen to
+/// match the session-side [`disagg::lifecycle::LIFECYCLE_WATCHDOG`]
+/// (also 60 s) so a hung find-session and a hung peer surface within
+/// the same scheduler-observable horizon. The constant is `pub` so
+/// call sites and tests share the same default.
+pub const PREPARING_TO_ONBOARD_DEFAULT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
 /// Data associated with onboarding operations (both PreparingToOnboard and Onboarding states).
 ///
 /// RAII cleanup hook for resources kicked off during a CD-remote
@@ -122,6 +131,14 @@ pub struct OnboardingState {
     /// when this `OnboardingState` is taken/dropped — that's the
     /// canonical CD cleanup point.
     pub cd_payload: Option<Box<dyn CdOnboardingPayload>>,
+
+    /// Monotonic timestamp captured when this state was first installed
+    /// (entering `PreparingToOnboard`). Used by the configurable
+    /// `force_error_if_preparing_timed_out` watchdog to escape a stuck
+    /// async find session. The field is read only while the txn state
+    /// is `PreparingToOnboard`; once promoted to `Onboarding`, the
+    /// onboarding pipeline has its own progress signals.
+    pub prepared_at: std::time::Instant,
 }
 
 impl OnboardingState {
@@ -136,6 +153,7 @@ impl OnboardingState {
             total_tokens_at_start,
             shards: vec![initial_shard],
             cd_payload: None,
+            prepared_at: std::time::Instant::now(),
         };
         state.debug_assert_contiguous();
         state
@@ -154,6 +172,7 @@ impl OnboardingState {
             total_tokens_at_start: 0,
             shards: Vec::new(),
             cd_payload: Some(cd_payload),
+            prepared_at: std::time::Instant::now(),
         }
     }
 
@@ -713,6 +732,26 @@ impl SlotStateMachine {
                 self.txn_state = TransactionState::Error(data);
             }
         }
+    }
+
+    /// Force the slot into `Error` if it has been stuck in
+    /// `PreparingToOnboard` for at least `timeout`. Returns `true` if the
+    /// transition fired. Idempotent: subsequent calls return `false`.
+    ///
+    /// A hung async find session (unreachable hub, lost peer, etc.) would
+    /// otherwise leave the slot in `PreparingToOnboard` indefinitely;
+    /// callers (GNMT entry, periodic sweep, etc.) invoke this with a
+    /// configured timeout to bound that window.
+    fn force_error_if_preparing_timed_out(&mut self, timeout: std::time::Duration) -> bool {
+        let timed_out = matches!(
+            &self.txn_state,
+            TransactionState::PreparingToOnboard(state)
+                if state.prepared_at.elapsed() >= timeout
+        );
+        if timed_out {
+            self.txn_to_error();
+        }
+        timed_out
     }
 
     /// Take the error state data, transitioning to Inactive.
@@ -1284,6 +1323,34 @@ impl RequestSlot {
     /// Returns the `OffloadingState` containing the session ID.
     pub fn txn_take_offloading(&mut self) -> Result<OffloadingState, StateTransitionError> {
         self.state.txn_take_offloading()
+    }
+
+    /// Force the slot into `Error` if it has been stuck in
+    /// `PreparingToOnboard` for at least `timeout`. Returns `true` if the
+    /// transition fired. No-op otherwise (including when the slot is in
+    /// `Onboarding`, `Offloading`, or already `Error`).
+    ///
+    /// Used by call sites (GNMT entry, request_finished, periodic sweep)
+    /// to bound the window in which a hung async find session can keep
+    /// the slot stuck. The data preserved in `Error(Onboarding(state))`
+    /// carries the find sessions so the existing cleanup paths
+    /// (`txn_take_error` → drain find sessions → `release_all`) can
+    /// release server-side state.
+    pub fn force_error_if_preparing_timed_out(&mut self, timeout: std::time::Duration) -> bool {
+        self.state.force_error_if_preparing_timed_out(timeout)
+    }
+
+    /// Test-only: backdate the slot's `prepared_at` timestamp so timeout
+    /// tests are deterministic without sleeps. Returns `true` if the slot
+    /// is in `PreparingToOnboard` and the backdate was applied.
+    #[cfg(test)]
+    pub fn backdate_prepared_at_for_test(&mut self, offset: std::time::Duration) -> bool {
+        if let TransactionState::PreparingToOnboard(state) = &mut self.state.txn_state {
+            state.prepared_at = std::time::Instant::now() - offset;
+            true
+        } else {
+            false
+        }
     }
 
     /// Transition to error state, preserving current state data for recovery.
@@ -3873,6 +3940,85 @@ mod tests {
                 (start_post, end_post),
             );
             assert_eq!(end_pre - start_pre, 5);
+        }
+    }
+
+    /// `force_error_if_preparing_timed_out` watchdog: bounds the window a
+    /// hung async find session can keep the slot stuck in
+    /// `PreparingToOnboard`. Backdates `prepared_at` directly (the field
+    /// is `pub` on `OnboardingState`) so tests are deterministic — no
+    /// sleeps, no flakes.
+    #[cfg(test)]
+    mod preparing_to_onboard_timeout_tests {
+        use super::*;
+        use kvbm_engine::leader::{MatchBreakdown, ReadyResult};
+        use std::time::Duration;
+
+        const TEST_BLOCK_SIZE: usize = 4;
+
+        fn slot_with_pending_find() -> RequestSlot {
+            let tokens: Vec<u32> = (0..16).collect();
+            let request = Request::new("test-req", tokens, None, None, None);
+            let mut slot = RequestSlot::new(request, TEST_BLOCK_SIZE).expect("RequestSlot::new");
+
+            // Construct a Ready find-session shard. The find session itself
+            // is irrelevant to the timeout check — what matters is the
+            // PreparingToOnboard state with a known `prepared_at`.
+            let ready = ReadyResult::new(vec![], MatchBreakdown::default());
+            slot.txn_prepare_to_onboard(0, 16, 0, 1, FindMatchesResult::Ready(ready))
+                .expect("txn_prepare_to_onboard");
+            slot
+        }
+
+        /// Reproducer: today's behavior — once in `PreparingToOnboard`, the
+        /// slot stays there. With the new watchdog, the slot transitions
+        /// to `Error(Onboarding)` once `prepared_at + timeout < now`.
+        #[test]
+        fn transitions_to_error_when_elapsed() {
+            let mut slot = slot_with_pending_find();
+            assert!(matches!(
+                slot.txn_state(),
+                TransactionState::PreparingToOnboard(_)
+            ));
+
+            // Backdate prepared_at by 10s so a 5s timeout is comfortably exceeded.
+            assert!(slot.backdate_prepared_at_for_test(Duration::from_secs(10)));
+
+            assert!(slot.force_error_if_preparing_timed_out(Duration::from_secs(5)));
+            assert!(matches!(slot.txn_state(), TransactionState::Error(_)));
+        }
+
+        /// No-op when the elapsed window hasn't reached the timeout.
+        #[test]
+        fn no_op_when_not_elapsed() {
+            let mut slot = slot_with_pending_find();
+            assert!(!slot.force_error_if_preparing_timed_out(Duration::from_secs(60)));
+            assert!(matches!(
+                slot.txn_state(),
+                TransactionState::PreparingToOnboard(_)
+            ));
+        }
+
+        /// No-op when the slot is not in PreparingToOnboard (e.g. Inactive).
+        #[test]
+        fn no_op_when_not_preparing() {
+            let tokens: Vec<u32> = (0..16).collect();
+            let request = Request::new("test-req", tokens, None, None, None);
+            let mut slot = RequestSlot::new(request, TEST_BLOCK_SIZE).expect("RequestSlot::new");
+            assert!(matches!(slot.txn_state(), TransactionState::Inactive));
+            assert!(!slot.force_error_if_preparing_timed_out(Duration::ZERO));
+            assert!(matches!(slot.txn_state(), TransactionState::Inactive));
+        }
+
+        /// Idempotent: a second call after the first transition is a no-op
+        /// (the slot is no longer in PreparingToOnboard).
+        #[test]
+        fn idempotent_after_transition() {
+            let mut slot = slot_with_pending_find();
+            assert!(slot.backdate_prepared_at_for_test(Duration::from_secs(10)));
+            assert!(slot.force_error_if_preparing_timed_out(Duration::from_secs(5)));
+            assert!(!slot.force_error_if_preparing_timed_out(Duration::from_secs(5)));
+            assert!(matches!(slot.txn_state(), TransactionState::Error(_)));
         }
     }
 }
