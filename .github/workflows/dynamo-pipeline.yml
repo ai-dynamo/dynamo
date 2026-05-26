@@ -114,6 +114,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          # `cargo test` reads LFS-managed fixtures under lib/llm/tests/data/media via
+          # include_bytes!; without lfs:true the checkout has 132-byte pointer files and
+          # the image-decoder tests panic with "image format could not be determined".
+          lfs: true
       - name: Select cargo target dir (prefer NVMe scratch)
         shell: bash
         run: |
