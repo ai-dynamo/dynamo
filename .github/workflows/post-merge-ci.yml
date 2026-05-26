@@ -210,6 +210,8 @@ jobs:
 
   sglang-efa-build:
     name: sglang-runtime-efa
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_sglang == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -321,7 +323,7 @@ jobs:
     with:
       test_suite_name: vllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -343,7 +345,7 @@ jobs:
     with:
       test_suite_name: vllm
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -359,7 +361,7 @@ jobs:
     with:
       test_suite_name: vllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
       platform: '["amd64", "arm64"]'
@@ -375,7 +377,7 @@ jobs:
     with:
       test_suite_name: sglang
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -383,6 +385,11 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
       gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
       gpu_test_timeout_minutes: 120
+      # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
+      # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
+      # while yielding one auto slot today. Larger runners will get more slots from the same markers.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -392,7 +399,7 @@ jobs:
     with:
       test_suite_name: sglang
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -408,7 +415,7 @@ jobs:
     with:
       test_suite_name: trtllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -416,6 +423,11 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
       gpu_test_timeout_minutes: 120
+      # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
+      # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
+      # while yielding one auto slot today. Larger runners will get more slots from the same markers.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -425,7 +437,7 @@ jobs:
     with:
       test_suite_name: trtllm
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -441,7 +453,7 @@ jobs:
     with:
       test_suite_name: trtllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]'
@@ -457,10 +469,10 @@ jobs:
     with:
       test_suite_name: planner
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
+      amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_parallel_mode: none
@@ -539,25 +551,17 @@ jobs:
 
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build, vllm-test]
-    if: |
-      always() &&
-      needs.vllm-build.result == 'success' &&
-      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
+    needs: [vllm-build]
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       copy_timeout_minutes: 20
     secrets: inherit
 
   vllm-dev-copy-to-acr:
     name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-dev-build]
-    if: |
-      always() &&
-      needs.vllm-dev-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-dev-build.outputs.target_tag_plain }}
@@ -568,16 +572,11 @@ jobs:
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build, sglang-test]
-    if: |
-      always() &&
-      needs.sglang-build.result == 'success' &&
-      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
+    needs: [sglang-build]
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       copy_timeout_minutes: 20
     secrets: inherit
 
@@ -597,16 +596,11 @@ jobs:
 
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build, trtllm-test]
-    if: |
-      always() &&
-      needs.trtllm-build.result == 'success' &&
-      (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
+    needs: [trtllm-build]
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 20
     secrets: inherit
 
@@ -626,11 +620,7 @@ jobs:
 
   frontend-copy-to-acr:
     name: frontend # This name overlaps with other frontend jobs to group them in the UI
-    needs: [frontend-build, frontend-compliance]
-    if: |
-      always() &&
-      needs.frontend-build.result == 'success' &&
-      (needs.frontend-compliance.result == 'success' || needs.frontend-compliance.result == 'skipped')
+    needs: [frontend-build]
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
@@ -646,7 +636,7 @@ jobs:
 
   deploy-operator:
     needs: [operator]
-    runs-on: prod-default-small-v2
+    runs-on: prod-deploy-tester-v1
     outputs:
       namespace: ${{ steps.setup.outputs.namespace }}
       vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
@@ -657,7 +647,6 @@ jobs:
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
       with:
-        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
         operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
         hf_token: ${{ secrets.HF_TOKEN }}
@@ -670,7 +659,7 @@ jobs:
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
-      image_suffix: vllm-runtime-cuda12
+      image_suffix: vllm-runtime-cuda13
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -682,7 +671,7 @@ jobs:
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
-      image_suffix: sglang-runtime-cuda12
+      image_suffix: sglang-runtime-cuda13
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -703,14 +692,13 @@ jobs:
   deploy-cleanup:
     if: always()
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
-    runs-on: prod-default-small-v2
+    runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     - name: Teardown vCluster
       if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
       uses: ./.github/actions/teardown-dynamo-operator
       with:
-        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
         vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
@@ -719,7 +707,7 @@ jobs:
   # ============================================================================
   deploy-test-gaie:
     name: GAIE Deploy Test
-    runs-on: prod-default-small-v2
+    runs-on: prod-deploy-tester-v1
     needs: [deploy-operator, frontend-copy-to-acr, vllm-copy-to-acr]
     timeout-minutes: 30
     permissions:
@@ -731,14 +719,12 @@ jobs:
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
         with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: ./.github/actions/setup-dynamo-operator
         with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -750,7 +736,6 @@ jobs:
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
         with:
-          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
       - name: Install GAIE prerequisites (Gateway API, kgateway, Inference Extension CRDs)
@@ -776,7 +761,7 @@ jobs:
           extra_pytest_args: >-
             -m framework_with_gaie
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
-            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda13
 
   deploy-status-check:
     runs-on: ubuntu-latest

@@ -21,14 +21,17 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
+from .cache_info import configure_kv_event_block_size
+from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
+    EmbeddingWorkerHandler,
     PrefillWorkerHandler,
     get_dp_range_for_worker,
 )
@@ -135,6 +138,16 @@ class WorkerFactory:
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
 
+        # Embedding worker is selected first because it crosses worker shapes
+        # (pooling AsyncLLM, ModelType.Embedding) rather than being a variant
+        # of decode. Aggregated-only — exclusivity with disagg modes is
+        # enforced earlier in DynamoVllmConfig._validate_embedding_worker_exclusivity.
+        if config.embedding_worker:
+            await self._create_embedding_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
+            return
+
         # NOTE: --benchmark-mode is only supported for prefill/decode workers.
         # The encode worker path does not wire benchmark waiting or
         # the get_perf_metrics endpoint.
@@ -188,6 +201,99 @@ class WorkerFactory:
             )
         except Exception as e:
             logger.error(f"Failed to serve encode worker endpoint: {e}")
+            raise
+        finally:
+            handler.cleanup()
+
+    async def _create_embedding_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+    ) -> None:
+        """Initialize an aggregated text-embedding worker.
+
+        Pooling models have no KV cache, no decode phase, and no streamed
+        output, so several pieces of the decode-worker setup are intentionally
+        skipped here:
+
+        - KV-events publisher: no KV cache → nothing to publish.
+        - Forward-pass-metrics relay: relays decode-phase ZMQ metrics; no
+          decode here.
+        - StatLoggerFactory wiring: built around per-batch sampling/decoding
+          stats which the pooling engine does not emit.
+        - InstrumentedScheduler: hard-codes ``pooling_params=None`` (see
+          components/src/dynamo/vllm/instrumented_scheduler.py), which would
+          silently disable the pooling pass. ``setup_vllm_engine`` only
+          installs it when ``--benchmark-mode`` is set, which is rejected
+          for embedding workers via config validation.
+
+          We are deliberately not extending ``--benchmark-mode`` with an
+          ``embed`` choice. That flag exists primarily to expose a worker's
+          capability curve (RPS / p99 vs. concurrency, throughput knee) at
+          startup for capacity planning, engine-arg tuning, and as input to
+          the Dynamo planner's auto-scaling decisions. Decode workloads
+          benefit because they have many interacting knobs (max-num-seqs,
+          chunked prefill, prefill/decode mix). Embedding workloads are
+          essentially ``(batch_size × ISL → latency)`` -- a clean two-axis
+          function -- so the value of in-process self-profiling is much
+          lower than external HTTP load testing, which is what every other
+          embedding-serving stack uses anyway. The single remaining wedge
+          is planner integration: if/when the Dynamo planner needs
+          in-process embedding capability curves to auto-scale embedding
+          fleets, add ``--benchmark-mode embed`` at that point together
+          with the planner's embedding-capability model.
+
+        The engine itself is the standard ``AsyncLLM`` constructed by
+        ``setup_vllm_engine``; pooling vs. generation is selected by the
+        user's ``--runner pooling`` argument flowing through ``engine_args``.
+        """
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        factory = StatLoggerFactory(endpoint=generate_endpoint)
+        (
+            engine_client,
+            vllm_config,
+            _default_sampling_params,
+            _prometheus_temp_dir,
+            _component_gauges,
+        ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+
+        handler = EmbeddingWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            shutdown_event=shutdown_event,
+        )
+
+        logger.info("Starting to serve the embedding worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Embedding,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    # Embedding workers have no prefill/decode split — they
+                    # always serve a single pooling pass, so they advertise
+                    # as Aggregated with no peer dependencies.
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to serve embedding worker endpoint: {e}")
             raise
         finally:
             handler.cleanup()
@@ -296,9 +402,15 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
-        factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
         factory.init_publish()
 
         # Currently routing to worker is still controlled by the worker
@@ -393,6 +505,16 @@ class WorkerFactory:
                 bench_cfg, vllm_config
             )
 
+        # What the worker is advertising itself as, and what other worker it needs to serve traffic.
+        if config.disaggregation_mode == DisaggregationMode.DECODE:
+            worker_type = WorkerType.Decode
+            needs_set: list[WorkerType] = [WorkerType.Prefill]
+        else:
+            # AGGREGATED
+            worker_type = WorkerType.Aggregated
+            needs_set = []
+        needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
         await self.register_vllm_model(
             model_input,
             model_type,
@@ -400,6 +522,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=worker_type,
+            needs=needs,
         )
 
         health_check_payload = VllmHealthCheckPayload(
@@ -513,6 +637,7 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
+        await configure_kv_event_block_size(engine_client, vllm_config)
 
         encode_worker_client = await self._maybe_get_encode_worker_client(
             runtime, config
@@ -604,6 +729,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=WorkerType.Prefill,
+            needs=[[WorkerType.Decode]],
         )
 
         health_check_payload = VllmPrefillHealthCheckPayload(

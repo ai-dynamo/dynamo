@@ -131,7 +131,7 @@ spec:
                         WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
                         This image is used for both temporary DGDs created during online profiling and the final DGD.
                         If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
                       type: string
                   type: object
                 enableGpuDiscovery:
@@ -206,7 +206,7 @@ spec:
                       description: |-
                         ProfilerImage specifies the container image to use for profiling jobs.
                         This image contains the profiler code and dependencies needed for SLA-based profiling.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
                       type: string
                     resources:
                       description: |-
@@ -585,6 +585,7 @@ spec:
                             - h100_pcie
                             - a100_sxm
                             - a100_pcie
+                            - a30
                             - l40s
                             - l40
                             - l4
@@ -601,6 +602,7 @@ spec:
                             - h100_pcie
                             - a100_sxm
                             - a100_pcie
+                            - a30
                             - l40s
                             - l40
                             - l4
@@ -682,8 +684,9 @@ spec:
                   type: object
                 image:
                   description: |-
-                    Image is the container image reference for the profiling job (frontend image).
-                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0".
+                    Image is the container image reference for the profiling job (planner image).
+                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1".
+                    For Dynamo < 1.1.0, use dynamo-frontend.
                   type: string
                 model:
                   description: |-
@@ -1094,8 +1097,24 @@ spec:
                               description: |-
                                 Standard object's metadata.
                                 More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+                              properties:
+                                annotations:
+                                  additionalProperties:
+                                    type: string
+                                  type: object
+                                finalizers:
+                                  items:
+                                    type: string
+                                  type: array
+                                labels:
+                                  additionalProperties:
+                                    type: string
+                                  type: object
+                                name:
+                                  type: string
+                                namespace:
+                                  type: string
                               type: object
-                              x-kubernetes-preserve-unknown-fields: true
                             spec:
                               description: |-
                                 Specification of the desired behavior of the pod.
@@ -7767,6 +7786,23 @@ spec:
                                                   May contain labels and annotations that will be copied into the PVC
                                                   when creating it. No other fields are allowed and will be rejected during
                                                   validation.
+                                                properties:
+                                                  annotations:
+                                                    additionalProperties:
+                                                      type: string
+                                                    type: object
+                                                  finalizers:
+                                                    items:
+                                                      type: string
+                                                    type: array
+                                                  labels:
+                                                    additionalProperties:
+                                                      type: string
+                                                    type: object
+                                                  name:
+                                                    type: string
+                                                  namespace:
+                                                    type: string
                                                 type: object
                                               spec:
                                                 description: |-

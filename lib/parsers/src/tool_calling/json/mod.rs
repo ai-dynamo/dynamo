@@ -153,6 +153,7 @@ mod tests {
     // Recovery for missing outer </TOOLCALL> (max_tokens / EOS truncation):
     // when the inner JSON array is well-formed, treat EOF as the end token
     // and extract the call rather than silently dropping it.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/nemotron_deci/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.5 — nemotron_deci
     fn test_parse_nemotron_deci_no_outer_close_recovers() {
         let config = JsonParserConfig {
@@ -177,6 +178,7 @@ mod tests {
     // but no parser-level test pinned it. This test makes the contract
     // visible at the per-parser surface so a JSON-family refactor can't
     // silently break parallel-call extraction without a per-parser failure.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a in tests/parity/parser/fixtures/nemotron_deci/PARSER.batch.2.yaml.
     #[test] // PARSER.batch.2 — nemotron_deci
     fn test_parse_nemotron_deci_multiple_calls() {
         let config = JsonParserConfig {
@@ -198,6 +200,7 @@ mod tests {
     // `"city":"NYC` with no closing quote, brace, or array bracket). The
     // base parser balances unclosed strings/braces and retries the parse,
     // surfacing the call rather than silently dropping it.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b in tests/parity/parser/fixtures/nemotron_deci/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4 — nemotron_deci
     fn test_parse_nemotron_deci_truncated_json_recovers() {
         let config = JsonParserConfig {
@@ -239,6 +242,7 @@ mod tests {
 
     /// PARSER.batch.6 — empty args. A no-arg call (`{}`) must still be returned
     /// with the function name intact.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/nemotron_deci/PARSER.batch.6.yaml.
     #[test] // PARSER.batch.6 — nemotron_deci
     fn test_parse_nemotron_deci_empty_args() {
         let config = nemotron_deci_config();

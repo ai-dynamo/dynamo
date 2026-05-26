@@ -3,6 +3,7 @@
 # Filters that trigger CI jobs:
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
+#   snapshot -> snapshot-agent build and test
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
@@ -39,6 +40,7 @@ examples:
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
+  - 'dev/observability/**'
   - 'deploy/observability/**'
   - 'deploy/pre-deployment/**'
 
@@ -49,6 +51,7 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
@@ -64,6 +67,10 @@ ignore:
   - 'container/templates/aws.Dockerfile'
   - 'container/templates/local_dev.Dockerfile'
   - 'container/templates/dev.Dockerfile'
+  # Removed by trtllm upstream-base migration; claim here so changed-files
+  # validation passes on the deletion diff without triggering trtllm CI.
+  - 'container/build_trtllm_wheel.sh'
+  - 'container/deps/trtllm/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -92,6 +99,9 @@ core:
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
+  # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
+  # TokenSpeed Docker images and backend-specific build/test jobs.
+  - 'components/src/dynamo/tokenspeed/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
@@ -108,9 +118,16 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  # Operator imports the local snapshot module.
+  - 'deploy/snapshot/**'
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
+
+snapshot:
+  - *ci
+  - 'deploy/snapshot/**'
+  - 'deploy/snapshot/.*'
 
 deploy:
   - *ci
@@ -118,6 +135,7 @@ deploy:
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
+  - 'tests/utils/managed_deployment.py'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -145,11 +163,20 @@ sglang:
   - '!**/*.rst'
 
 trtllm:
-  - 'container/deps/trtllm/**'
+  - 'container/deps/requirements.trtllm.txt'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
-  - 'container/build_trtllm_wheel.sh'
   - 'container/templates/trtllm_*'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+# sample -> sample-unified-test (framework-agnostic CPU-only backend
+# reference implementation). Piggybacks on the vllm image, so a sample-only
+# change triggers vllm-build + sample-unified-test. The common/backend ABC
+# already triggers `core`; this filter is for the launch scripts and tests
+# that are specific to the sample backend.
+sample:
+  - 'examples/backends/sample/**'
   - '!**/*.md'
   - '!**/*.rst'
 

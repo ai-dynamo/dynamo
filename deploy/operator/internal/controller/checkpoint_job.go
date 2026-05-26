@@ -14,6 +14,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -52,9 +53,10 @@ func buildCheckpointWorkerDefaultEnv(
 	return defaultContainer.Env
 }
 
+//nolint:gocyclo
 func buildCheckpointJob(
 	ctx context.Context,
-	reader ctrlclient.Reader,
+	kubeClient ctrlclient.Client,
 	config *configv1alpha1.OperatorConfiguration,
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
 	jobName string,
@@ -75,11 +77,11 @@ func buildCheckpointJob(
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
 	}
-	// Checkpoint Jobs always capture exactly the main container. Other
-	// containers in the pod template (e.g. GMS saver sidecars the operator
-	// adds below) are preserved but not checkpointed. The annotation is
-	// the contract the snapshot-agent reads.
-	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{consts.MainContainerName})
+	targetContainerName := ckpt.Spec.Job.TargetContainerName
+	if targetContainerName == "" {
+		targetContainerName = consts.MainContainerName
+	}
+	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{targetContainerName})
 	if podTemplate.Spec.ServiceAccountName == "" {
 		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(ckpt.Name)
 	}
@@ -89,38 +91,95 @@ func buildCheckpointJob(
 	if len(podTemplate.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
-	mainContainer, err := checkpoint.RequireMainContainer(&podTemplate.Spec)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
+	var targetContainer *corev1.Container
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == targetContainerName {
+			targetContainer = &podTemplate.Spec.Containers[i]
+			break
+		}
 	}
-	mainContainer.Env = dynamo.MergeEnvs(
+	if targetContainer == nil {
+		return nil, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", targetContainerName)
+	}
+	targetContainer.Env = dynamo.MergeEnvs(
 		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
-		mainContainer.Env,
+		targetContainer.Env,
 	)
-	dynamo.AddStandardEnvVars(mainContainer, config)
+	dynamo.AddStandardEnvVars(targetContainer, config)
 
-	checkpoint.EnsurePodInfoMount(mainContainer)
-	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
+	checkpoint.EnsurePodInfoMount(targetContainer)
+	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, targetContainer, dynamo.ToBetaSharedMemorySize(ckpt.Spec.Job.SharedMemory))
 	// NewCheckpointJob handles control volume + readiness probe from the
 	// snapshot contract.
 
+	if err := checkpoint.EnsureStoragePVC(ctx, kubeClient, ckpt.Namespace, config.Checkpoint.Storage); err != nil {
+		return nil, err
+	}
+	if storage, ok, err := checkpoint.StorageFromConfig(config.Checkpoint.Storage); err != nil {
+		return nil, err
+	} else if ok {
+		snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
+		snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
+		if podTemplate.Annotations == nil {
+			podTemplate.Annotations = map[string]string{}
+		}
+		snapshotprotocol.ApplyCheckpointStorageMetadata(podTemplate.Annotations, storage)
+	}
+
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
-		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
-		if err := dra.ApplyClaim(&podTemplate.Spec, claimTemplateName); err != nil {
-			return nil, fmt.Errorf("failed to apply DRA claim for GMS checkpoint: %w", err)
-		}
-		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
-			ctx,
-			reader,
-			ckpt.Namespace,
-			hash,
-			ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
-		)
-		if err != nil {
-			return nil, err
-		}
-		if err := checkpoint.EnsureGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage); err != nil {
-			return nil, err
+		switch ckpt.Spec.GPUMemoryService.Mode {
+		case "", nvidiacomv1alpha1.GMSModeIntraPod:
+			claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
+			foundToleration := false
+			for i := range podTemplate.Spec.Tolerations {
+				toleration := podTemplate.Spec.Tolerations[i]
+				if toleration.Key == consts.KubeResourceGPUNvidia && toleration.Effect == corev1.TaintEffectNoSchedule {
+					foundToleration = true
+					break
+				}
+			}
+			if !foundToleration {
+				podTemplate.Spec.Tolerations = append(podTemplate.Spec.Tolerations, corev1.Toleration{
+					Key:      consts.KubeResourceGPUNvidia,
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoSchedule,
+				})
+			}
+
+			podClaim := corev1.PodResourceClaim{
+				Name:                      dra.ClaimName,
+				ResourceClaimTemplateName: &claimTemplateName,
+			}
+			foundPodClaim := false
+			for i := range podTemplate.Spec.ResourceClaims {
+				if podTemplate.Spec.ResourceClaims[i].Name == dra.ClaimName {
+					podTemplate.Spec.ResourceClaims[i] = podClaim
+					foundPodClaim = true
+					break
+				}
+			}
+			if !foundPodClaim {
+				podTemplate.Spec.ResourceClaims = append(podTemplate.Spec.ResourceClaims, podClaim)
+			}
+
+			gms.EnsureServerSidecar(&podTemplate.Spec, targetContainer)
+			for _, name := range ckpt.Spec.GPUMemoryService.ExtraClientContainers {
+				var container *corev1.Container
+				for i := range podTemplate.Spec.Containers {
+					if podTemplate.Spec.Containers[i].Name == name {
+						container = &podTemplate.Spec.Containers[i]
+						break
+					}
+				}
+				if container == nil {
+					continue
+				}
+				gms.EnsureClient(&podTemplate.Spec, container)
+			}
+		case nvidiacomv1alpha1.GMSModeInterPod:
+			return nil, fmt.Errorf("gpuMemoryService checkpoint jobs for mode %q are not implemented", ckpt.Spec.GPUMemoryService.Mode)
+		default:
+			return nil, fmt.Errorf("gpuMemoryService checkpoint job has unsupported mode %q", ckpt.Spec.GPUMemoryService.Mode)
 		}
 	}
 

@@ -11,6 +11,8 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+#[cfg(feature = "lightseek-mm")]
+pub mod lightseek_mm;
 pub mod media;
 pub mod prompt;
 pub mod speculative_prefill;
@@ -19,8 +21,9 @@ use anyhow::Context;
 use anyhow::{Result, bail};
 
 use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionToolChoiceOption, EncodingFormat,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
@@ -37,6 +40,8 @@ use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
+#[cfg(feature = "lightseek-mm")]
+use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
@@ -145,6 +150,70 @@ struct ReasoningState {
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
 }
 
+/// Per-image routing payload accumulated by `gather_multi_modal_data` and
+/// consumed by `gather_mm_exact_routing_info`.
+#[derive(Debug, Clone, Copy)]
+pub struct MmImageEntry {
+    pub mm_hash: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Derive the model's local directory from the MDC. The directory is the
+/// parent of `config.json` (which lives in `mdc.model_info` as `HfConfigJson`)
+/// and contains the other artifacts MM-aware routing reads at startup
+/// (`tokenizer.json`, `processor_config.json`, `preprocessor_config.json`).
+/// Returns `None` for cards built from non-disk sources.
+#[cfg(feature = "lightseek-mm")]
+fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
+    let ModelInfoType::HfConfigJson(cf) = mdc.model_info.as_ref()?;
+    cf.path()?.parent().map(std::path::PathBuf::from)
+}
+
+/// Find the first occurrence of `needle` in `haystack`. Linear scan; the
+/// needles here are tokenized chat-template placeholders (≤ 10 tokens for
+/// Phi-3-style `<|image_N|>`), so the naive O(n·m) cost is fine.
+#[cfg(feature = "lightseek-mm")]
+fn find_subseq<T: PartialEq>(haystack: &[T], needle: &[T]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Shared SSRF-aware `MediaFetcher` + `reqwest::Client` for the dim-fetch
+/// path used by MM-aware routing. Inherits the same policy contract as the
+/// frontend-decode path (`MediaLoader`): blocklist DNS resolver, redirect
+/// revalidation, hostname/IP blocklist, `DYN_MM_ALLOW_INTERNAL` opt-in.
+///
+/// **Lifecycle:** `LazyLock` so the closure runs on first access. For MM-
+/// routable preprocessors, `OpenAIPreprocessor::new_with_parts` calls
+/// `LazyLock::force(...)` at startup — that surfaces TLS-root / reqwest-
+/// init / env-misconfig failures at deployment time, not on the first MM
+/// request 20 minutes in. Text-only deployments skip the force, leaving
+/// the LazyLock dormant.
+#[cfg(feature = "lightseek-mm")]
+static DIM_FETCH_MEDIA_FETCHER: std::sync::LazyLock<crate::preprocessor::media::MediaFetcher> =
+    std::sync::LazyLock::new(crate::preprocessor::media::MediaFetcher::from_env);
+
+#[cfg(feature = "lightseek-mm")]
+static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(|| {
+        DIM_FETCH_MEDIA_FETCHER
+            .build_http_client()
+            .expect("dim-fetch http client construction failed")
+    });
+
+pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
+    "dynamo.llm.preserve_omitted_max_tokens";
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PreprocessRequestOptions {
+    preserve_omitted_max_tokens: bool,
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -159,9 +228,114 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
+    /// Per-image token-count engine. `None` when the feature is disabled, the
+    /// model isn't covered by the registry, or `preprocessor_config.json` is
+    /// unreadable.
+    #[cfg(feature = "lightseek-mm")]
+    image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
+    /// Image-placeholder token id resolved from the model's HF JSON configs.
+    /// `None` disables MM-aware routing for this model and the router falls
+    /// back to text-prefix routing.
+    #[cfg(feature = "lightseek-mm")]
+    image_token_id: Option<crate::protocols::TokenIdType>,
+    /// Per-family flatten-time image placeholder template (e.g.
+    /// `"<|image_{n}|>"` for Phi-3, `"<image>"` for LLaVA-1.5). Threaded
+    /// through from the formatter so the routing path can reverse the
+    /// BPE-encoded numbered form (Phi-3) back into single placeholder
+    /// tokens when the chat template uses numbered markers.
+    #[cfg(feature = "lightseek-mm")]
+    image_placeholder_template: Option<&'static str>,
 }
 
 impl OpenAIPreprocessor {
+    fn omitted_max_tokens_default(
+        prompt_len: usize,
+        context_length: u32,
+        options: PreprocessRequestOptions,
+    ) -> Option<u32> {
+        if context_length == 0 || options.preserve_omitted_max_tokens {
+            return None;
+        }
+        Some(context_length.saturating_sub(prompt_len as u32))
+    }
+
+    fn nvext_passthrough_args<R: NvExtProvider>(
+        request: &R,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let mut nvext_passthrough = serde_json::Map::new();
+
+        if let Some(nvext) = request.nvext() {
+            if let Some(ref fields) = nvext.extra_fields {
+                nvext_passthrough.insert("extra_fields".to_string(), serde_json::json!(fields));
+            }
+            if let Some(ref salt) = nvext.cache_salt {
+                nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
+            }
+            if nvext.token_data.is_some() {
+                nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
+            }
+        }
+
+        if !nvext_passthrough.contains_key("cache_salt")
+            && let Some(salt) = request
+                .unsupported_fields()
+                .and_then(|fields| fields.get("cache_salt"))
+                .and_then(|value| value.as_str())
+        {
+            nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
+        }
+
+        if nvext_passthrough.is_empty() {
+            None
+        } else {
+            Some(nvext_passthrough)
+        }
+    }
+
+    fn sampling_passthrough_args<R: NvExtProvider>(
+        request: &R,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let mut sampling_passthrough = serde_json::Map::new();
+
+        if let Some(fields) = request.unsupported_fields() {
+            for key in ["detokenize", "allowed_token_ids", "bad_words_token_ids"] {
+                if let Some(value) = fields.get(key) {
+                    sampling_passthrough.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+
+        if sampling_passthrough.is_empty() {
+            None
+        } else {
+            Some(sampling_passthrough)
+        }
+    }
+
+    fn backend_extra_args<R: NvExtProvider>(request: &R) -> Option<serde_json::Value> {
+        let mut extra_args = serde_json::Map::new();
+
+        if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
+            extra_args.insert(
+                "nvext".to_string(),
+                serde_json::Value::Object(nvext_passthrough),
+            );
+        }
+
+        if let Some(sampling_passthrough) = Self::sampling_passthrough_args(request) {
+            extra_args.insert(
+                "sampling_options".to_string(),
+                serde_json::Value::Object(sampling_passthrough),
+            );
+        }
+
+        if extra_args.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(extra_args))
+        }
+    }
+
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
@@ -194,12 +368,104 @@ impl OpenAIPreprocessor {
         let runtime_config = mdc.runtime_config.clone();
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
+        // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
+        // model_type comes from config.json (e.g. "qwen3_vl") and lets the
+        // lightseek registry resolve fine-tunes loaded from custom-named
+        // directories where the family substring isn't in the path.
+        #[cfg(feature = "lightseek-mm")]
+        let image_token_inputs: Option<(String, String, std::path::PathBuf)> = mdc_model_dir(&mdc)
+            .map(|p| (mdc.source_path().to_string(), model_info.model_type(), p));
+
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
         };
 
         let context_length = mdc.context_length;
+
+        #[cfg(feature = "lightseek-mm")]
+        let (image_token_counter, image_token_id) = match image_token_inputs {
+            Some((model_id, model_type, model_dir)) => {
+                // Try counter init and image-token resolution independently.
+                // Each carries its own reason for failure; the summary log
+                // below names whichever pieces are missing so operators can
+                // tell at a glance whether the model needs a lightseek
+                // upstream PR (registry miss) or a non-standard placeholder
+                // location (resolver miss).
+                let (counter, counter_err): (
+                    Option<lightseek_mm::LightseekMmCounter>,
+                    Option<String>,
+                ) = match lightseek_mm::LightseekMmCounter::try_new(
+                    &model_id,
+                    Some(&model_type),
+                    &model_dir,
+                ) {
+                    Ok(c) => (Some(c), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
+                let img_tok = lightseek_mm::resolve_image_token_id(&model_id, &model_dir);
+
+                match (counter.is_some(), img_tok.is_some()) {
+                    (true, true) => tracing::info!(
+                        target: "mm_routing",
+                        model = %model_id,
+                        model_dir = %model_dir.display(),
+                        "MM-aware KV routing enabled (lightseek)"
+                    ),
+                    (counter_ok, img_ok) => {
+                        let mut reasons: Vec<String> = Vec::new();
+                        if !counter_ok {
+                            reasons.push(format!(
+                                "model not supported by the lightseek registry ({})",
+                                counter_err.as_deref().unwrap_or("unknown error")
+                            ));
+                        }
+                        if !img_ok {
+                            reasons.push(
+                                "image-placeholder token unresolvable from \
+                                 config.json / processor_config.json / \
+                                 tokenizer_config.json / vocab probe"
+                                    .to_string(),
+                            );
+                        }
+                        tracing::warn!(
+                            target: "mm_routing",
+                            model = %model_id,
+                            reasons = %reasons.join("; "),
+                            "{} is not supported for MM-aware KV routing ({}). \
+                             Falling back to KV routing without MM awareness — \
+                             text-prefix overlap still works but the router \
+                             cannot distinguish requests by image content.",
+                            model_id,
+                            reasons.join("; ")
+                        );
+                    }
+                }
+                (counter, img_tok)
+            }
+            None => {
+                tracing::debug!(
+                    target: "mm_routing",
+                    "model directory not derivable from MDC; MM-aware routing disabled"
+                );
+                (None, None)
+            }
+        };
+
+        #[cfg(feature = "lightseek-mm")]
+        let image_placeholder_template = formatter.image_placeholder_template();
+
+        // Force the dim-fetch HTTP client to build at startup for any
+        // MM-routable preprocessor, so TLS / env-var / reqwest-init
+        // failures fail the deployment instead of crashing the first
+        // MM request 20 minutes in. Text-only preprocessors skip the
+        // force (both lightseek hooks resolved to `None`) — no point
+        // building a client they'll never use.
+        #[cfg(feature = "lightseek-mm")]
+        if image_token_counter.is_some() || image_token_id.is_some() {
+            std::sync::LazyLock::force(&DIM_FETCH_MEDIA_FETCHER);
+            std::sync::LazyLock::force(&DIM_FETCH_HTTP_CLIENT);
+        }
 
         Ok(Arc::new(Self {
             formatter,
@@ -212,8 +478,15 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             media_loader,
             context_length,
+            #[cfg(feature = "lightseek-mm")]
+            image_token_counter,
+            #[cfg(feature = "lightseek-mm")]
+            image_token_id,
+            #[cfg(feature = "lightseek-mm")]
+            image_placeholder_template,
         }))
     }
+
     /// Encode a string to it's tokens
     pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
         self.tokenizer.encode(s)
@@ -239,6 +512,23 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        self.preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
+            .await
+    }
+
+    async fn preprocess_request_with_options<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        tracker: Option<&RequestTracker>,
+        options: PreprocessRequestOptions,
+    ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
@@ -260,22 +550,56 @@ impl OpenAIPreprocessor {
             .is_some_and(|p| p.trim_end().ends_with("<think>"));
 
         let tokenize_start = Instant::now();
-        let annotations = {
+        let (token_ids, annotations) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
-            self.gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
+            self.gather_tokens(request, formatted_prompt.clone(), tracker)
                 .with_context(|| "Failed to gather tokens")?
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
-        self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
+        let _mm_image_entries = self
+            .gather_multi_modal_data(request, &mut builder, formatted_prompt)
             .await
             .with_context(|| "Failed to gather multimodal data")?;
+
+        // Build the MM-aware view (expanded routing_token_ids + per-block
+        // mm_hashes) for the KV router. No-op when no images are present or
+        // the model has no resolved image-placeholder.
+        #[cfg(feature = "lightseek-mm")]
+        self.gather_mm_exact_routing_info(&mut builder, &_mm_image_entries, &token_ids)
+            .with_context(|| "Failed to build MM routing info")?;
+
+        // Install tokens on the builder. Done after MM routing built its
+        // view so the routing-side borrow stays cheap and builder ownership
+        // moves once.
+        builder.token_ids(token_ids);
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_PREPROCESS])
             .observe(preprocess_start.elapsed().as_secs_f64());
 
-        Ok((builder.build()?, annotations, prompt_injected_reasoning))
+        if let Some(nvext) = request.nvext()
+            && let Some(router_params) = &nvext.router
+        {
+            builder.router(Some(router_params.clone()));
+        }
+
+        let mut preprocessed = builder.build()?;
+
+        // If omitted, allow generation up to the remaining context length. Responses requests
+        // preserve omission so backend adapters can compute the dynamic cap from their
+        // effective prompt length/tokenization.
+        if preprocessed.stop_conditions.max_tokens.is_none()
+            && let Some(max_tokens) = Self::omitted_max_tokens_default(
+                preprocessed.token_ids.len(),
+                self.context_length,
+                options,
+            )
+        {
+            preprocessed.stop_conditions.max_tokens = Some(max_tokens);
+        }
+
+        Ok((preprocessed, annotations, prompt_injected_reasoning))
     }
 
     pub fn builder<
@@ -355,6 +679,7 @@ impl OpenAIPreprocessor {
                 lora_name,
                 allowed_worker_ids: None,
                 session_control: nvext.session_control.clone(),
+                routing_constraints: nvext.routing_constraints.clone(),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
@@ -364,6 +689,10 @@ impl OpenAIPreprocessor {
                 lora_name,
                 ..Default::default()
             }));
+        }
+
+        if let Some(extra_args) = Self::backend_extra_args(request) {
+            builder.extra_args(Some(extra_args));
         }
 
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
@@ -433,18 +762,42 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest + NvExtProvider>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<Vec<MmImageEntry>> {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
+        // Per-image (mm_hash, width, height) for the lightseek MM-routing path.
+        // Accumulated in message order so we don't walk messages twice.
+        // Cleared and returned to the caller; empty for non-image / text-only requests.
+        #[cfg(feature = "lightseek-mm")]
+        let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
+        // Total `image_url` content parts in the request. Bumped at every
+        // image part regardless of which fetch path handles it. Used at
+        // `mm_hashes` forwarding time: if `mm_image_entries.len()` is
+        // smaller, we omit `mm_hashes` for the whole request rather than
+        // ship a partial / misaligned UUID list to vLLM.
+        //
+        // The mismatch is only reachable on the URL-passthrough path
+        // (no media_loader): each `fetch_image_dims_uncached` failure logs
+        // a warn and skips its `mm_image_entries.push`, but doesn't abort
+        // the request. The decoded path (`has_media_loader`) propagates
+        // any dim-fetch failure via `?`, so the request errors out before
+        // mm_hashes forwarding is even considered.
+        #[cfg(feature = "lightseek-mm")]
+        let mut total_image_count: usize = 0;
+        // For the URL-passthrough case (media_loader is None) we collect image
+        // URLs here and resolve dims via header-only HTTP after the loop so we
+        // can issue all fetches in parallel.
+        #[cfg(feature = "lightseek-mm")]
+        let mut url_passthrough_images: Vec<(u64, String)> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let has_media_loader = self.media_loader.is_some();
 
@@ -464,6 +817,10 @@ impl OpenAIPreprocessor {
                         ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
                         _ => continue,
                     };
+                    #[cfg(feature = "lightseek-mm")]
+                    if type_str == "image_url" {
+                        total_image_count += 1;
+                    }
                     fetch_tasks.push((type_str.to_string(), content_part));
                 } else {
                     let (type_str, url) = match content_part {
@@ -478,6 +835,12 @@ impl OpenAIPreprocessor {
                         }
                         _ => continue,
                     };
+                    #[cfg(feature = "lightseek-mm")]
+                    if type_str == "image_url" {
+                        total_image_count += 1;
+                        let mm_hash = Self::hash_image_url(url.as_str());
+                        url_passthrough_images.push((mm_hash, url.to_string()));
+                    }
                     media_map
                         .entry(type_str.to_string())
                         .or_default()
@@ -495,13 +858,121 @@ impl OpenAIPreprocessor {
             }))
             .await;
 
-            for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
+            for ((type_str, _content_part), result) in
+                fetch_tasks.into_iter().zip(results.into_iter())
+            {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
                 let rdma_descriptor = result?;
+
+                // Decoded RDMA descriptor carries shape `[H, W, C]`.
+                // Image-only; lightseek doesn't cover audio/video.
+                #[cfg(feature = "lightseek-mm")]
+                if type_str == "image_url" {
+                    let shape = &rdma_descriptor.tensor_info.shape;
+                    if shape.len() >= 2 {
+                        let h = shape[0] as u32;
+                        let w = shape[1] as u32;
+                        let url_str = match _content_part {
+                            ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
+                                p.image_url.url.as_str()
+                            }
+                            _ => unreachable!(
+                                "rdma image_url descriptor only originates from ImageUrl content parts"
+                            ),
+                        };
+                        // Frontend-decode path: hash the decoded RGB bytes so
+                        // the same image reached via different (signed) URLs
+                        // collides on the same `mm_hash` and routes to the
+                        // worker that already has those KV blocks. Fall back
+                        // to URL hashing only if the descriptor lost local
+                        // storage (e.g. reconstructed from the wire), which
+                        // shouldn't happen on the frontend.
+                        let (mm_hash, hash_source) = match rdma_descriptor.content_hash() {
+                            Some(h) => (h, "decoded_bytes"),
+                            None => (Self::hash_image_url(url_str), "url_fallback"),
+                        };
+                        if let Some(counter) = self.image_token_counter.as_ref() {
+                            let n = counter.count_tokens(w, h);
+                            tracing::debug!(
+                                target: "mm_routing",
+                                model = counter.model_id(),
+                                width = w,
+                                height = h,
+                                tokens = n,
+                                mm_hash = mm_hash,
+                                source = hash_source,
+                                "lightseek image-token count"
+                            );
+                        }
+                        mm_image_entries.push(MmImageEntry {
+                            mm_hash,
+                            width: w,
+                            height: h,
+                        });
+                    }
+                }
+
                 media_map
                     .entry(type_str)
                     .or_default()
                     .push(MultimodalData::Decoded(rdma_descriptor));
+            }
+        }
+
+        // URL-passthrough path (media_loader is None): fetch image headers in
+        // parallel to get (W, H) per image without downloading the full bytes.
+        // This is what enables MM-aware routing for vLLM-backed VLMs that
+        // register `media_decoder: null` and let the worker do its own decode.
+        #[cfg(feature = "lightseek-mm")]
+        if !url_passthrough_images.is_empty() {
+            let dim_results = futures::future::join_all(
+                url_passthrough_images
+                    .iter()
+                    .map(|(mm_hash, url)| Self::fetch_image_dims(*mm_hash, url.as_str())),
+            )
+            .await;
+            for ((mm_hash, url), dim_res) in url_passthrough_images.into_iter().zip(dim_results) {
+                match dim_res {
+                    Ok((w, h)) => {
+                        if let Some(counter) = self.image_token_counter.as_ref() {
+                            let n = counter.count_tokens(w, h);
+                            tracing::debug!(
+                                target: "mm_routing",
+                                model = counter.model_id(),
+                                width = w,
+                                height = h,
+                                tokens = n,
+                                mm_hash = mm_hash,
+                                source = "url_passthrough_header_fetch",
+                                "lightseek image-token count"
+                            );
+                        }
+                        mm_image_entries.push(MmImageEntry {
+                            mm_hash,
+                            width: w,
+                            height: h,
+                        });
+                    }
+                    Err(e) => {
+                        // Redact `data:` URIs to just the media-type prefix —
+                        // the comma-separated payload is the entire (base64)
+                        // image body and ships in logs would be log bloat /
+                        // potential PII spillage if logs are aggregated.
+                        let url_for_log = if url.starts_with("data:") {
+                            url.split_once(',')
+                                .map(|(p, _)| format!("{p},<redacted>"))
+                                .unwrap_or_else(|| "data:<redacted>".to_string())
+                        } else {
+                            url.to_string()
+                        };
+                        tracing::warn!(
+                            target: "mm_routing",
+                            url = %url_for_log,
+                            error = %e,
+                            "lightseek: failed to fetch image dims; MM routing entry skipped"
+                        );
+                    }
+                }
             }
         }
 
@@ -526,12 +997,435 @@ impl OpenAIPreprocessor {
             if let Some(ref prompt) = formatted_prompt {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
             }
+
+            if let Some(serde_json::Value::Object(backend_extra_args)) =
+                Self::backend_extra_args(request)
+            {
+                let extra_args_obj = extra_args
+                    .as_object_mut()
+                    .expect("multimodal extra_args must be an object");
+                extra_args_obj.extend(backend_extra_args);
+            }
+
+            // Forward routing-side mm_hashes as `multi_modal_uuids` so vLLM
+            // publishes KV events with the same key the router computes.
+            // The kv-router parses events via parse_mm_hash_from_extra_key
+            // (kv-router/src/zmq_wire/extra_keys.rs), which requires exactly
+            // 64 hex chars and reads u64 from the first 16. We pad u64 ->
+            // 16 hex chars + 48 zeros so the byte representation matches
+            // end-to-end without forcing frontend image decoding.
+            //
+            // Skip forwarding entirely if any image failed dim resolution —
+            // a shorter `mm_hashes` list would misalign with the image
+            // positions vLLM derives from `multi_modal_data`, and the
+            // backend would inject the wrong UUIDs onto the wrong images.
+            #[cfg(feature = "lightseek-mm")]
+            if !mm_image_entries.is_empty() && mm_image_entries.len() == total_image_count {
+                // 48 trailing zeros — paired with the {:016x} prefix this gives
+                // the 64-char hex string the kv-router's parse_mm_hash_from_extra_key
+                // expects (reads u64 from the first 16 chars).
+                const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
+                let hexes: Vec<serde_json::Value> = mm_image_entries
+                    .iter()
+                    .map(|e| serde_json::Value::String(format!("{:016x}{}", e.mm_hash, HEX_PAD)))
+                    .collect();
+                extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
+            } else if !mm_image_entries.is_empty() {
+                tracing::warn!(
+                    target: "mm_routing",
+                    resolved = mm_image_entries.len(),
+                    expected = total_image_count,
+                    "lightseek: not all images resolved an MM-routing entry; skipping mm_hashes forwarding"
+                );
+            }
+
             builder.extra_args(Some(extra_args));
         }
 
+        #[cfg(feature = "lightseek-mm")]
+        return Ok(mm_image_entries);
+        #[cfg(not(feature = "lightseek-mm"))]
+        Ok(Vec::new())
+    }
+
+    /// Build `MmRoutingInfo` for exact MM-aware KV routing.
+    ///
+    /// Computes per-image token counts via lightseek, expands the placeholder
+    /// tokens, builds per-block `BlockMmObjectInfo`, and writes the result to
+    /// `builder.mm_routing_info`. The worker-bound `token_ids` are left
+    /// unchanged — only the routing-side view is expanded.
+    ///
+    /// `token_ids` is the tokenized formatted prompt (one entry per
+    /// placeholder per image, before expansion); the caller threads it in
+    /// from `gather_tokens` to avoid a second tokenizer pass.
+    ///
+    /// Returns `Ok(())` with no work performed when:
+    /// - no images in the request,
+    /// - `image_token_id` was not resolved at startup,
+    /// - `image_token_counter` is unavailable,
+    /// - `kv_cache_block_size` is 0 (worker didn't advertise one), or
+    /// - the count of placeholder tokens in `token_ids` doesn't match
+    ///   `mm_image_entries.len()` (mismatched expansion would misalign
+    ///   offsets; falling back to text-prefix routing is safer than
+    ///   producing incorrect block hashes).
+    #[cfg(feature = "lightseek-mm")]
+    pub fn gather_mm_exact_routing_info(
+        &self,
+        builder: &mut PreprocessedRequestBuilder,
+        mm_image_entries: &[MmImageEntry],
+        token_ids: &[crate::protocols::TokenIdType],
+    ) -> Result<()> {
+        use crate::protocols::common::preprocessor::MmRoutingInfo;
+        use dynamo_kv_router::protocols::{RequestExtraInfo, RequestMmObjectInfo};
+
+        if mm_image_entries.is_empty() {
+            return Ok(());
+        }
+        let Some(image_token_id) = self.image_token_id else {
+            tracing::debug!(
+                target: "mm_routing",
+                "image_token_id unresolved; skipping MM routing info"
+            );
+            return Ok(());
+        };
+        let Some(counter) = self.image_token_counter.as_ref() else {
+            tracing::debug!(
+                target: "mm_routing",
+                "image_token_counter unavailable; skipping MM routing info"
+            );
+            return Ok(());
+        };
+        let block_size = self.kv_cache_block_size;
+        if block_size == 0 {
+            tracing::debug!(
+                target: "mm_routing",
+                "kv_cache_block_size is 0; skipping MM routing info"
+            );
+            return Ok(());
+        }
+
+        // Sanity: number of placeholder tokens in the tokenized prompt must
+        // match the number of images in the request. If they disagree, the
+        // expansion would misplace ranges; better to skip MM routing entirely
+        // and fall back to text-prefix routing for this request.
+        //
+        // Families like Phi-3-vision use numbered placeholder text
+        // (`<|image_1|>`) that BPE-decomposes into multiple sub-tokens —
+        // `image_token_id` (the single `<|image|>` special token) never
+        // appears post-tokenization. For those we run a substring-match
+        // pass first that rewrites each numbered placeholder's BPE
+        // sub-sequence back to a single `image_token_id`, then proceed
+        // with the standard expansion below.
+        let placeholder_count = token_ids.iter().filter(|&&t| t == image_token_id).count();
+        let normalized_token_ids: std::borrow::Cow<'_, [crate::protocols::TokenIdType]> =
+            if placeholder_count == mm_image_entries.len() {
+                std::borrow::Cow::Borrowed(token_ids)
+            } else if let Some(tpl) = self.image_placeholder_template
+                && tpl.contains("{n}")
+            {
+                match self.normalize_numbered_placeholders(
+                    token_ids,
+                    image_token_id,
+                    tpl,
+                    mm_image_entries.len(),
+                ) {
+                    Some(v) => std::borrow::Cow::Owned(v),
+                    None => {
+                        tracing::warn!(
+                            target: "mm_routing",
+                            placeholder_count,
+                            image_count = mm_image_entries.len(),
+                            image_token_id = image_token_id,
+                            placeholder_template = tpl,
+                            "numbered placeholder BPE rewrite failed; \
+                             skipping MM routing info (text-prefix routing only)"
+                        );
+                        return Ok(());
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    target: "mm_routing",
+                    placeholder_count,
+                    image_count = mm_image_entries.len(),
+                    image_token_id = image_token_id,
+                    "placeholder token count in tokenized prompt does not match image count; \
+                     skipping MM routing info (text-prefix routing only)"
+                );
+                return Ok(());
+            };
+
+        // Compute per-image N via lightseek + run the expansion.
+        let n_tokens: Vec<usize> = mm_image_entries
+            .iter()
+            .map(|e| counter.count_tokens(e.width, e.height))
+            .collect();
+        let n_total: usize = n_tokens.iter().sum();
+
+        let mut expanded: Vec<crate::protocols::TokenIdType> =
+            Vec::with_capacity(normalized_token_ids.len() + n_total);
+        let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
+        let mut i = 0usize;
+        for &t in normalized_token_ids.iter() {
+            if t == image_token_id && i < mm_image_entries.len() {
+                let start = expanded.len();
+                expanded.extend(std::iter::repeat_n(image_token_id, n_tokens[i]));
+                img_ranges.push((start, start + n_tokens[i]));
+                i += 1;
+            } else {
+                expanded.push(t);
+            }
+        }
+
+        // Pad to a whole multiple of kv_cache_block_size. The router's
+        // compute_block_hash_for_seq only hashes whole blocks, so the partial
+        // tail block doesn't influence routing either way; aligning the length
+        // keeps our routing_token_ids and `block_mm_infos` agreeing on count.
+        // `div_ceil` guarantees `total_tokens >= expanded.len()`, so resize
+        // only ever grows.
+        let total_tokens = expanded.len().div_ceil(block_size) * block_size;
+        if expanded.len() < total_tokens {
+            expanded.resize(total_tokens, 0);
+        }
+
+        // Build request-level MM info, then derive per-block info.
+        let mm_objects: Vec<RequestMmObjectInfo> = mm_image_entries
+            .iter()
+            .zip(img_ranges.iter())
+            .map(|(entry, &(s, e))| RequestMmObjectInfo {
+                mm_hash: entry.mm_hash,
+                offsets: vec![(s, e)],
+            })
+            .collect();
+        let block_mm_infos =
+            RequestExtraInfo { mm_objects }.to_block_level(block_size, total_tokens);
+
+        tracing::debug!(
+            target: "mm_routing",
+            n_images = mm_image_entries.len(),
+            block_size,
+            total_tokens,
+            n_blocks = block_mm_infos.len(),
+            "lightseek MmRoutingInfo built (exact)"
+        );
+
+        builder.mm_routing_info(Some(MmRoutingInfo {
+            routing_token_ids: expanded,
+            block_mm_infos,
+        }));
         Ok(())
     }
 
+    /// Rewrites BPE-decomposed numbered image placeholders back into single
+    /// `image_token_id` tokens so the standard expansion can proceed.
+    ///
+    /// Used for Phi-3-vision-style templates whose flatten-time placeholder
+    /// is `<|image_{n}|>` (not a tokenizer special token, BPE-encodes into
+    /// ~7 sub-tokens) while the model's actual image token is `<|image|>`
+    /// (single special token = `image_token_id`). The backend's HF
+    /// processor recognises `<|image_{n}|>` in the prompt and replaces
+    /// each with N copies of `image_token_id` post-tokenization — we
+    /// replicate the routing-side equivalent here.
+    ///
+    /// For each image index `i` in `1..=expected_count`, encodes the
+    /// substituted placeholder string and scans `token_ids` for the
+    /// resulting BPE sub-sequence. Each match collapses to a single
+    /// `image_token_id` in the returned vector, preserving every
+    /// surrounding token. Returns `None` if any expected placeholder is
+    /// missing or if scans go out of order — the caller falls back to
+    /// text-prefix routing in that case.
+    #[cfg(feature = "lightseek-mm")]
+    fn normalize_numbered_placeholders(
+        &self,
+        token_ids: &[crate::protocols::TokenIdType],
+        image_token_id: crate::protocols::TokenIdType,
+        placeholder_tpl: &str,
+        expected_count: usize,
+    ) -> Option<Vec<crate::protocols::TokenIdType>> {
+        let mut out: Vec<crate::protocols::TokenIdType> = Vec::with_capacity(token_ids.len());
+        let mut cursor = 0usize;
+        for idx in 1..=expected_count {
+            let placeholder_text = placeholder_tpl.replace("{n}", &idx.to_string());
+            let encoding = self.tokenizer.encode(&placeholder_text).ok()?;
+            let sub_ids = encoding.token_ids();
+            if sub_ids.is_empty() {
+                return None;
+            }
+            let pos = find_subseq(&token_ids[cursor..], sub_ids)? + cursor;
+            out.extend_from_slice(&token_ids[cursor..pos]);
+            out.push(image_token_id);
+            cursor = pos + sub_ids.len();
+        }
+        out.extend_from_slice(&token_ids[cursor..]);
+        Some(out)
+    }
+
+    /// xxh3-64 of the raw URL bytes. Used as the routing `mm_hash` in the
+    /// URL-passthrough path: two requests with byte-identical URLs route to
+    /// the same worker, anything else routes independently.
+    ///
+    /// We deliberately do NOT strip cache-buster / signed-URL query
+    /// parameters — a query string like `?v=2` could mean either "new
+    /// cache-busted fetch of the same image" or "version 2 of a different
+    /// image", and the URL alone doesn't tell us which. Keeping the hash
+    /// URL-identical avoids the heuristic and the false-positive collisions
+    /// that come with it. Workloads with rotating signed URLs (S3, GCS,
+    /// Azure SAS) should use `--frontend-decoding`: that path hashes the
+    /// decoded RGB bytes instead, so cross-URL cache reuse is restored
+    /// without depending on URL conventions.
+    #[cfg(feature = "lightseek-mm")]
+    fn hash_image_url(url: &str) -> u64 {
+        xxhash_rust::xxh3::xxh3_64(url.as_bytes())
+    }
+
+    /// Header-only image dim fetch. For HTTP/HTTPS we issue a Range request
+    /// for the first 64 KB (covers PNG/WebP in <1 KB and JPEG SOF in worst
+    /// case). For data: URIs we decode the base64 payload locally and parse
+    /// the header. Caller treats Err as "MM routing entry unavailable for
+    /// this image" — request still proceeds with text-prefix routing.
+    ///
+    /// Results are cached by `mm_hash` so repeated requests for the same image
+    /// (typical of multi-turn / session workloads) hit the cache and skip the
+    /// HTTP fetch entirely. Without this cache, sticky-routing workloads pay
+    /// 4–5× HTTP Range fetches per request just to compute routing tokens.
+    #[cfg(feature = "lightseek-mm")]
+    async fn fetch_image_dims(mm_hash: u64, url: &str) -> Result<(u32, u32)> {
+        use moka::future::Cache;
+        use std::sync::LazyLock;
+
+        // Bounded sharded LRU (moka uses TinyLFU internally — sharded write
+        // locks, lock-free reads). Replaces an earlier hand-rolled DashMap +
+        // tokio::sync::Notify singleflight; moka's `try_get_with` provides
+        // both singleflight and bounded LRU eviction in one primitive.
+        //
+        //   max_capacity:  100k entries (~5 MB at ~50 B/entry incl. moka
+        //                  bookkeeping). Caps memory under unbounded URL
+        //                  pools (signed-URL refresh, image proxies).
+        //   time_to_live:  24h. Bounds staleness if a URL is re-uploaded
+        //                  with new content. Independent of capacity-based
+        //                  eviction, which kicks in earlier under load.
+        static DIM_CACHE: LazyLock<Cache<u64, (u32, u32)>> = LazyLock::new(|| {
+            Cache::builder()
+                .max_capacity(100_000)
+                .time_to_live(Duration::from_secs(24 * 60 * 60))
+                .build()
+        });
+
+        // Hot path: avoid allocating an owned URL on cache hit. moka's
+        // `get` is async because it may do a small amount of bookkeeping
+        // for the LRU/TinyLFU policy.
+        if let Some(dims) = DIM_CACHE.get(&mm_hash).await {
+            return Ok(dims);
+        }
+
+        // Cold path: take an owned String so the init future can be
+        // 'static (moka may move waiters across executor threads). Because
+        // try_get_with does built-in singleflight, concurrent callers for
+        // the same `mm_hash` collapse into a single fetch.
+        let url_owned = url.to_string();
+        DIM_CACHE
+            .try_get_with(mm_hash, async move {
+                Self::fetch_image_dims_uncached(&url_owned)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("fetch_image_dims failed: {}", e))
+    }
+
+    #[cfg(feature = "lightseek-mm")]
+    async fn fetch_image_dims_uncached(url: &str) -> Result<(u32, u32)> {
+        use image::ImageReader;
+        use std::io::Cursor;
+
+        // Most JPEG SOF markers and PNG/WebP headers fit in the first 4 KB.
+        // Start small and only escalate to 64 KB if the parser fails on the
+        // truncated header.
+        const SMALL_RANGE: usize = 4 * 1024 - 1;
+        const LARGE_RANGE: usize = 64 * 1024 - 1;
+        // Per-Range tighter bound than MediaFetcher's 30 s default — dim
+        // fetch is best-effort; on a slow remote we'd rather skip MM
+        // routing for this image than starve the request.
+        const DIM_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+        if let Some(rest) = url.strip_prefix("data:") {
+            let comma = rest
+                .find(',')
+                .ok_or_else(|| anyhow::anyhow!("malformed data URI: no comma"))?;
+            let prefix = &rest[..comma];
+            let payload = &rest[comma + 1..];
+            let bytes: Vec<u8> = if prefix.contains(";base64") {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD
+                    .decode(payload)
+                    .map_err(|e| anyhow::anyhow!("data URI base64 decode: {}", e))?
+            } else {
+                payload.as_bytes().to_vec()
+            };
+            let (w, h) = ImageReader::new(Cursor::new(&bytes))
+                .with_guessed_format()?
+                .into_dimensions()?;
+            return Ok((w, h));
+        }
+
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            anyhow::bail!("unsupported url scheme for dim fetch: {}", url);
+        }
+
+        // `DIM_FETCH_MEDIA_FETCHER` and `DIM_FETCH_HTTP_CLIENT` are
+        // module-scope `LazyLock`s forced at startup in `new_with_parts`
+        // for MM-routable preprocessors — see their definitions for the
+        // lifecycle and policy contract.
+
+        // Pre-flight SSRF check on the original URL. Redirect targets are
+        // revalidated by the Client's redirect policy, and DNS-resolved
+        // IPs are filtered by the resolver — so a URL that passes here
+        // can't escape the contract on the wire either.
+        let parsed = url::Url::parse(url)?;
+        DIM_FETCH_MEDIA_FETCHER
+            .check_if_url_allowed_with_dns(&parsed)
+            .await?;
+
+        let mut range_end = SMALL_RANGE;
+        loop {
+            let resp = DIM_FETCH_HTTP_CLIENT
+                .get(url)
+                .header("Range", format!("bytes=0-{}", range_end))
+                .timeout(DIM_FETCH_TIMEOUT)
+                .send()
+                .await?;
+            let status = resp.status();
+            // Require 206 Partial Content — if the origin ignored the
+            // Range header and answered 200 OK, `.bytes()` would buffer
+            // the full image into memory. Bail in that case rather than
+            // download an unbounded payload just to peek at dimensions.
+            // The caller treats Err as "MM routing entry unavailable for
+            // this image", which falls back to text-prefix routing.
+            if status != reqwest::StatusCode::PARTIAL_CONTENT {
+                anyhow::bail!(
+                    "image dim fetch expected 206 Partial Content, got HTTP {}",
+                    status
+                );
+            }
+            let bytes = resp.bytes().await?;
+            match ImageReader::new(Cursor::new(&bytes))
+                .with_guessed_format()
+                .and_then(|r| r.into_dimensions().map_err(std::io::Error::other))
+            {
+                Ok((w, h)) => return Ok((w, h)),
+                Err(_) if range_end < LARGE_RANGE => {
+                    range_end = LARGE_RANGE;
+                    continue;
+                }
+                Err(e) => anyhow::bail!("image header parse failed after 64KB: {}", e),
+            }
+        }
+    }
+
+    /// Tokenize the request and return the token ids alongside any annotations
+    /// the caller asked for. The caller owns the result and is responsible for
+    /// installing it on the builder via `builder.token_ids(...)` once any
+    /// downstream consumers (e.g. MM-routing) have borrowed it.
     pub fn gather_tokens<
         R: OAIChatLikeRequest
             + AnnotationsProvider
@@ -542,12 +1436,12 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-        builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
         tracker: Option<&RequestTracker>,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
         let mut token_count: Option<usize> = None;
+        let mut tokens_out: Vec<crate::protocols::TokenIdType> = Vec::new();
         // match request type before any conversion/processing
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
@@ -555,12 +1449,12 @@ impl OpenAIPreprocessor {
                     match token_input {
                         TokenInput::Single(tokens) => {
                             token_count = Some(tokens.len());
-                            builder.token_ids(tokens);
+                            tokens_out = tokens;
                         }
                         TokenInput::Batch(token_batches) => {
                             if token_batches.len() == 1 {
                                 token_count = Some(token_batches[0].len());
-                                builder.token_ids(token_batches[0].clone());
+                                tokens_out = token_batches[0].clone();
                             } else {
                                 bail!(
                                     "Batch token input not supported for more than one token in requests (got {})",
@@ -630,14 +1524,14 @@ impl OpenAIPreprocessor {
                             }
 
                             token_count = Some(tokens_vec.len());
-                            builder.token_ids(tokens_vec);
+                            tokens_out = tokens_vec;
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
                                 let encoding = self.encode_with_timing(&texts[0], tracker)?;
                                 let tokens = encoding.token_ids().to_vec();
                                 token_count = Some(tokens.len());
-                                builder.token_ids(tokens);
+                                tokens_out = tokens;
                             } else {
                                 bail!(
                                     "Batch text input not supported for more than one text in requests (got {})",
@@ -655,7 +1549,7 @@ impl OpenAIPreprocessor {
             Self::validate_token_count(count, self.context_length)?;
         }
 
-        Ok(annotations)
+        Ok((tokens_out, annotations))
     }
 
     /// Validate that the prompt token count does not consume the model's entire context length.
@@ -793,27 +1687,35 @@ impl OpenAIPreprocessor {
                 Some("kimi_k25")
             );
 
-        // tool_choice=required/named forces the backend into guided decoding,
-        // which constrains output to a bare JSON shape with no reasoning
-        // wrapper. Running the reasoning parser on that output is both
-        // pointless (nothing to extract) and actively harmful for parsers
-        // that inject a `<think>` prefix unconditionally (e.g. MiniMax
-        // append-think), because the prefix would contaminate the
-        // tool-call JSON fed into the jail.
-        let tool_choice_forces_guided_json = matches!(
-            request.inner.tool_choice,
-            Some(ChatCompletionToolChoiceOption::Required)
-                | Some(ChatCompletionToolChoiceOption::Named(_))
+        // Under guided-decoding (tool_choice=required/named), only force-
+        // reasoning parsers must skip — they treat the bare JSON output as
+        // reasoning_content and starve the jail. Non-force-reasoning parsers
+        // (qwen3, deepseek_v4, glm45, etc.) are safe to run: vLLM's
+        // reasoner-gate allows free generation during `<think>...</think>`
+        // before clamping to the guided grammar, so the model emits
+        // `<reasoning></think><JSON>` and the parser strips the prefix so the
+        // jail sees pure JSON.
+        let skip_reasoning_for_guided_json =
+            matches!(
+                request.inner.tool_choice,
+                Some(ChatCompletionToolChoiceOption::Required)
+                    | Some(ChatCompletionToolChoiceOption::Named(_))
+            ) && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
+
+        let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
+            self.runtime_config.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
         );
 
         // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
-            && !Self::is_reasoning_disabled_by_request(
-                self.runtime_config.reasoning_parser.as_deref(),
-                request.chat_template_args.as_ref(),
-            )
+            && !reasoning_disabled_by_request
             && !suppress_reasoning_after_tool
-            && !tool_choice_forces_guided_json;
+            && !skip_reasoning_for_guided_json;
+        let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
+            && Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref())
+            && !suppress_reasoning_after_tool
+            && !skip_reasoning_for_guided_json;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
@@ -827,6 +1729,10 @@ impl OpenAIPreprocessor {
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
+            ))
+        } else if should_strip_disabled_reasoning_start {
+            Box::pin(Self::strip_leading_reasoning_start_from_stream(
+                stream, "<think>",
             ))
         } else {
             Box::pin(stream)
@@ -1280,22 +2186,57 @@ impl OpenAIPreprocessor {
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
     ) -> bool {
-        // gpt-oss / harmony parsers consume `<|channel|>analysis<|message|>...<|end|>`
-        // markers; without them the parser silently produces empty
-        // reasoning_content. Same shape as gemma4's `<|think|>` markers.
+        // Parsers in this allow-list match against special tokens that the
+        // tokenizer would otherwise strip when `skip_special_tokens=true`
+        // (the OpenAI-API default). Without the tokens preserved through
+        // decode the parsers silently produce empty reasoning_content /
+        // tool_calls.
+        //
+        // - gemma4: `<|think|>` prompt trigger plus parser-visible
+        //   `<|channel>` / `<channel|>` reasoning markers and tool-call markers.
+        // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
+        // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
+        // - kimi_k25: `</think>` (special token id 163607).
         matches!(
             tool_call_parser,
-            Some("gemma4") | Some("gemma-4") | Some("harmony")
+            Some("gemma4") | Some("gemma-4") | Some("harmony") | Some("kimi_k2")
         ) || matches!(
             reasoning_parser,
-            Some("gemma4") | Some("gemma-4") | Some("gpt_oss")
+            Some("gemma4") | Some("gemma-4") | Some("gpt_oss") | Some("kimi_k25")
+        )
+    }
+
+    fn is_nemotron_force_reasoning(reasoning_parser: Option<&str>) -> bool {
+        matches!(
+            reasoning_parser,
+            Some("nemotron_nano" | "nemotron3" | "nemotron_v3")
+        )
+    }
+
+    /// Parsers that begin streaming in reasoning mode (force_reasoning=true).
+    /// These swallow any leading text without an open `<think>` tag as
+    /// reasoning_content, so they cannot run on guided-decoding output where
+    /// the model emits bare JSON from token 0.
+    fn is_force_reasoning_parser(reasoning_parser: Option<&str>) -> bool {
+        matches!(
+            reasoning_parser,
+            Some(
+                "deepseek_r1"
+                    | "step3"
+                    | "kimi_k25"
+                    | "mistral"
+                    | "minimax_append_think"
+                    | "nemotron_nano"
+                    | "nemotron3"
+                    | "nemotron_v3"
+            )
         )
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
-    /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
-    ///   or "force_nonempty_content": true.
+    /// For Nemotron force-reasoning aliases: disabled when chat_template_args
+    ///   contains "enable_thinking": false or "force_nonempty_content": true.
     /// For deepseek_r1 / deepseek_v4: disabled when chat_template_args contains
     ///   "thinking": false or "thinking_mode": "chat" — matches the V4 formatter's
     ///   `resolve_thinking_mode` convention, so the parser and the prompt stay in sync.
@@ -1317,7 +2258,7 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            Some("nemotron_nano") | Some("nemotron3") => {
+            parser if Self::is_nemotron_force_reasoning(parser) => {
                 if let Some(args) = chat_template_args {
                     if let Some(enable_thinking) = args.get("enable_thinking")
                         && enable_thinking == &serde_json::Value::Bool(false)
@@ -1427,6 +2368,149 @@ impl OpenAIPreprocessor {
         })
         .fuse()
     }
+
+    // Motivation: when Nemotron reasoning is disabled by request flags, the
+    // backend may still emit a leading <think>. Buffer the initial stream
+    // bytes so split chunks like "<thi" + "nk>answer" are stripped cleanly.
+    fn strip_leading_reasoning_start_from_stream<S>(
+        stream: S,
+        think_start_token: &'static str,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        struct StripReasoningStartState {
+            stream:
+                Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+            think_start_token: &'static str,
+            choices: HashMap<u32, StripChoiceState>,
+            last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
+            eof_flushed: bool,
+        }
+
+        #[derive(Default)]
+        struct StripChoiceState {
+            buffer: String,
+            decided: bool,
+        }
+
+        fn take_undecided_buffer(choice_state: &mut StripChoiceState) -> Option<String> {
+            if choice_state.decided || choice_state.buffer.is_empty() {
+                return None;
+            }
+
+            choice_state.decided = true;
+            Some(std::mem::take(&mut choice_state.buffer))
+        }
+
+        fn drain_undecided_buffers(
+            choices: &mut HashMap<u32, StripChoiceState>,
+        ) -> HashMap<u32, String> {
+            choices
+                .iter_mut()
+                .filter_map(|(index, choice_state)| {
+                    take_undecided_buffer(choice_state).map(|buffer| (*index, buffer))
+                })
+                .collect()
+        }
+
+        let state = StripReasoningStartState {
+            stream: Box::pin(stream),
+            think_start_token,
+            choices: HashMap::new(),
+            last_response: None,
+            eof_flushed: false,
+        };
+
+        stream::unfold(state, |mut state| async move {
+            if let Some(mut response) = state.stream.next().await {
+                let Some(mut data) = response.data.take() else {
+                    return Some((response, state));
+                };
+
+                for choice in data.inner.choices.iter_mut() {
+                    let choice_state = state.choices.entry(choice.index).or_default();
+                    let text = match choice.delta.content.take() {
+                        Some(ChatCompletionMessageContent::Text(text)) => text,
+                        other => {
+                            if let Some(buffer) = take_undecided_buffer(choice_state) {
+                                choice.delta.content =
+                                    Some(ChatCompletionMessageContent::Text(buffer));
+                            } else {
+                                choice.delta.content = other;
+                            }
+                            continue;
+                        }
+                    };
+
+                    let output = if choice_state.decided {
+                        text
+                    } else {
+                        choice_state.buffer.push_str(&text);
+                        if state.think_start_token.starts_with(&choice_state.buffer)
+                            && choice_state.buffer.len() < state.think_start_token.len()
+                        {
+                            choice.delta.content = None;
+                            continue;
+                        }
+
+                        choice_state.decided = true;
+                        if choice_state.buffer.starts_with(state.think_start_token) {
+                            choice_state.buffer[state.think_start_token.len()..].to_string()
+                        } else {
+                            choice_state.buffer.clone()
+                        }
+                    };
+
+                    choice_state.buffer.clear();
+                    choice.delta.content = if output.is_empty() {
+                        None
+                    } else {
+                        Some(ChatCompletionMessageContent::Text(output))
+                    };
+                }
+
+                response.data = Some(data);
+                state.last_response = Some(response.clone());
+
+                Some((response, state))
+            } else if state.eof_flushed {
+                None
+            } else {
+                state.eof_flushed = true;
+                let mut flushed = drain_undecided_buffers(&mut state.choices);
+                if flushed.is_empty() {
+                    None
+                } else {
+                    let mut response = state.last_response.clone()?;
+                    let data = response.data.as_mut()?;
+                    data.inner.usage = None;
+                    data.inner.choices.retain_mut(|choice| {
+                        if let Some(buffer) = flushed.remove(&choice.index) {
+                            choice.delta.role = None;
+                            choice.delta.content = Some(ChatCompletionMessageContent::Text(buffer));
+                            choice.delta.tool_calls = None;
+                            choice.delta.function_call = None;
+                            choice.delta.refusal = None;
+                            choice.delta.reasoning_content = None;
+                            choice.finish_reason = None;
+                            choice.logprobs = None;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+
+                    if data.inner.choices.is_empty() {
+                        None
+                    } else {
+                        Some((response, state))
+                    }
+                }
+            }
+        })
+        .fuse()
+    }
 }
 
 // for pals, we do not want to add the generation prompt to the formatted prompt
@@ -1474,40 +2558,25 @@ impl
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
-        let tracker = response_generator.tracker();
+        let tracker = Some(response_generator.tracker());
+        let preprocess_options = PreprocessRequestOptions {
+            preserve_omitted_max_tokens: context
+                .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
+                .ok()
+                .is_some_and(|flag| *flag),
+        };
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning) = self
-            .preprocess_request(&request, tracker.as_deref())
+            .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
-        let trace_state = if crate::agents::trace::is_enabled() {
-            common_request.agent_context.clone().map(|agent_context| {
-                let request_model = common_request.model.clone();
-                let request_tracker = tracker.clone();
-                let replay_metrics = crate::agents::trace::request_replay_metrics(
-                    &common_request.token_ids,
-                    self.kv_cache_block_size,
-                );
-                let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
-                    .and_then(|context| context.x_request_id)
-                    .or_else(|| {
-                        context
-                            .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
-                            .ok()
-                            .map(|value| value.as_ref().clone())
-                    });
-                (
-                    agent_context,
-                    request_model,
-                    request_tracker,
-                    x_request_id,
-                    replay_metrics,
-                )
-            })
-        } else {
-            None
-        };
+        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+            &common_request,
+            &tracker,
+            &context,
+            self.kv_cache_block_size,
+        );
         let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
@@ -1580,36 +2649,11 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = if let Some((
-            agent_context,
-            request_model,
-            request_tracker,
-            x_request_id,
-            replay_metrics,
-        )) = trace_state
-        {
-            let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(final_stream);
-            tokio::spawn(async move {
-                done_fut.await;
-                if request_tracker.is_none() {
-                    tracing::warn!(
-                        request_id,
-                        "agent_context present but request tracker is missing; emitting partial trace"
-                    );
-                }
-                let mut metrics = crate::agents::trace::request_metrics(
-                    request_id,
-                    x_request_id,
-                    request_model,
-                    request_tracker.as_deref(),
-                );
-                metrics.replay = replay_metrics;
-                crate::agents::trace::emit_request_end(agent_context, metrics);
-            });
-            stream
-        } else {
-            final_stream
-        };
+        let final_stream = crate::agents::trace::wrap_agent_trace_request_end_stream(
+            final_stream,
+            trace_state,
+            request_id,
+        );
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);
@@ -1639,6 +2683,7 @@ impl
 
         // unpack the request
         let (mut request, context) = request.into_parts();
+        let request_id = context.id().to_string();
 
         // Preserve original streaming flag
         let original_stream_flag = request.inner.stream.unwrap_or(false);
@@ -1651,9 +2696,9 @@ impl
         request.inner.stream = Some(true);
 
         // create a response generator
-        let response_generator = request.response_generator(context.id().to_string());
+        let response_generator = request.response_generator(request_id.clone());
         let mut response_generator = Box::new(response_generator);
-        let tracker = response_generator.tracker();
+        let tracker = Some(response_generator.tracker());
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
 
@@ -1665,15 +2710,29 @@ impl
             // No token annotations
             HashMap::new()
         } else {
-            // Normal path: tokenize the prompt
-            self.gather_tokens(&request, &mut builder, None, tracker.as_deref())?
+            // Normal path: tokenize the prompt; embeddings don't need MM routing,
+            // so install tokens on the builder right away.
+            let (token_ids, ann) = self.gather_tokens(&request, None, tracker.as_deref())?;
+            builder.token_ids(token_ids);
+            ann
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
-        self.gather_multi_modal_data(&request, &mut builder, None)
+        // Returned MM entries are unused on the embeddings path; routing info is
+        // not built here.
+        let _ = self
+            .gather_multi_modal_data(&request, &mut builder, None)
             .await?;
 
         let mut common_request = builder.build()?;
+
+        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+            &common_request,
+            &tracker,
+            &context,
+            self.kv_cache_block_size,
+        );
+        let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -1708,7 +2767,13 @@ impl
             response_stream,
             response_generator,
             context.clone(),
-            false,
+            trace_tokens_enabled,
+        );
+
+        let stream = crate::agents::trace::wrap_agent_trace_request_end_stream(
+            Box::pin(stream),
+            trace_state,
+            request_id,
         );
 
         // prepend the annotations to the response stream
@@ -1889,8 +2954,24 @@ mod tests {
             (
                 Some("kimi_k2"),
                 Some("kimi_k25"),
-                false,
-                "kimi_k2 paired → not required",
+                true,
+                "kimi_k2 + kimi_k25 paired → required \
+                 (tool-call markers `<|tool_calls_section_*|>` and reasoning \
+                  marker `</think>` are special tokens that get stripped under \
+                  the default skip_special_tokens=true)",
+            ),
+            (
+                None,
+                Some("kimi_k25"),
+                true,
+                "kimi_k25 reasoning only → required (`</think>` is special token id 163607)",
+            ),
+            (
+                Some("kimi_k2"),
+                None,
+                true,
+                "kimi_k2 tool-call only → required \
+                 (`<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>` are special)",
             ),
             (None, None, false, "no parsers → not required"),
         ];
@@ -1901,6 +2982,69 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+    }
+
+    #[test]
+    fn test_backend_extra_args_preserves_nvext_and_sampling_extensions() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "detokenize": false,
+            "allowed_token_ids": [10, 11],
+            "bad_words_token_ids": [[12, 13]],
+            "nvext": {
+                "cache_salt": "step_7",
+                "extra_fields": ["completion_token_ids"]
+            }
+        }))
+        .unwrap();
+
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request).unwrap();
+
+        assert_eq!(extra_args["nvext"]["cache_salt"], "step_7");
+        assert_eq!(
+            extra_args["nvext"]["extra_fields"],
+            serde_json::json!(["completion_token_ids"])
+        );
+        assert_eq!(extra_args["sampling_options"]["detokenize"], false);
+        assert_eq!(
+            extra_args["sampling_options"]["allowed_token_ids"],
+            serde_json::json!([10, 11])
+        );
+        assert_eq!(
+            extra_args["sampling_options"]["bad_words_token_ids"],
+            serde_json::json!([[12, 13]])
+        );
+    }
+
+    #[test]
+    fn test_internal_preserve_omitted_max_tokens_option() {
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                100,
+                PreprocessRequestOptions::default()
+            ),
+            Some(90)
+        );
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                100,
+                PreprocessRequestOptions {
+                    preserve_omitted_max_tokens: true,
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                0,
+                PreprocessRequestOptions::default()
+            ),
+            None
+        );
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
@@ -1926,6 +3070,14 @@ mod tests {
             m.insert(
                 "enable_thinking".to_string(),
                 serde_json::Value::Bool(false),
+            );
+            m
+        };
+        let force_nonempty_content_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "force_nonempty_content".to_string(),
+                serde_json::Value::Bool(true),
             );
             m
         };
@@ -2047,6 +3199,24 @@ mod tests {
                 false,
                 "nemotron_nano + empty args → enabled",
             ),
+            (
+                Some("nemotron3"),
+                Some(&force_nonempty_content_true),
+                true,
+                "nemotron3 + force_nonempty_content=true → disabled",
+            ),
+            (
+                Some("nemotron_v3"),
+                Some(&enable_thinking_false),
+                true,
+                "nemotron_v3 + enable_thinking=false → disabled",
+            ),
+            (
+                Some("nemotron_v3"),
+                Some(&force_nonempty_content_true),
+                true,
+                "nemotron_v3 + force_nonempty_content=true → disabled",
+            ),
             // deepseek_v4 — same convention as deepseek_r1; verify all three aliases
             // (deepseek_v4 / deepseek-v4 / deepseekv4) plus both signal keys.
             (
@@ -2136,5 +3306,86 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+    }
+
+    /// Different query strings must produce different hashes. `?v=1` and
+    /// `?v=2` may look like cache-busters, but they could equally be a
+    /// content selector ("version 2 of the image"). The URL alone doesn't
+    /// tell us which, so we keep the hash URL-identical and let the URL be
+    /// the identity. For signed-URL workloads where rotation actually
+    /// hides a stable object, `--frontend-decoding` hashes the decoded
+    /// bytes instead.
+    #[cfg(feature = "lightseek-mm")]
+    #[test]
+    fn hash_image_url_distinguishes_query_strings() {
+        let base = "https://cdn.example.com/img.jpg";
+        let v1 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=1"));
+        let v2 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=2"));
+        let no_q = OpenAIPreprocessor::hash_image_url(base);
+        assert_ne!(v1, v2, "different query values must hash differently");
+        assert_ne!(v1, no_q, "presence of a query string must change the hash");
+    }
+
+    /// Rotating S3 / GCS / Azure SAS signatures change the URL and
+    /// therefore the hash. This is a known limitation of URL-passthrough
+    /// routing for signed-URL workloads — `--frontend-decoding` is the
+    /// recommended mode there because it hashes the decoded image bytes
+    /// regardless of how the URL was signed.
+    #[cfg(feature = "lightseek-mm")]
+    #[test]
+    fn hash_image_url_distinguishes_rotating_signatures() {
+        let base = "https://bucket.s3.amazonaws.com/img.jpg";
+        let a = OpenAIPreprocessor::hash_image_url(&format!(
+            "{base}?X-Amz-Signature=AAA&X-Amz-Date=20260101T000000Z&X-Amz-Expires=600"
+        ));
+        let b = OpenAIPreprocessor::hash_image_url(&format!(
+            "{base}?X-Amz-Signature=BBB&X-Amz-Date=20260101T010000Z&X-Amz-Expires=900"
+        ));
+        assert_ne!(
+            a, b,
+            "rotating presign params produce a different URL and must hash differently"
+        );
+    }
+
+    /// Identical URLs must hash to the same value (the basic identity
+    /// guarantee that makes URL-passthrough routing useful at all).
+    #[cfg(feature = "lightseek-mm")]
+    #[test]
+    fn hash_image_url_is_deterministic_for_identical_urls() {
+        let url = "https://cdn.example.com/img.jpg?width=256";
+        assert_eq!(
+            OpenAIPreprocessor::hash_image_url(url),
+            OpenAIPreprocessor::hash_image_url(url),
+        );
+    }
+
+    /// data: URIs hash the entire URI string. Same payload → same hash;
+    /// different payload → different hash.
+    #[cfg(feature = "lightseek-mm")]
+    #[test]
+    fn hash_image_url_data_uri_content_addressed() {
+        let same = "data:image/png;base64,AAAA";
+        let other = "data:image/png;base64,BBBB";
+        assert_eq!(
+            OpenAIPreprocessor::hash_image_url(same),
+            OpenAIPreprocessor::hash_image_url(same)
+        );
+        assert_ne!(
+            OpenAIPreprocessor::hash_image_url(same),
+            OpenAIPreprocessor::hash_image_url(other),
+            "different data URI payloads must hash differently"
+        );
+    }
+
+    /// Non-HTTP / non-data schemes (s3://, gs://, file://) hash as-is.
+    #[cfg(feature = "lightseek-mm")]
+    #[test]
+    fn hash_image_url_other_schemes_passthrough() {
+        let s3a = OpenAIPreprocessor::hash_image_url("s3://bucket/key?v=1");
+        let s3b = OpenAIPreprocessor::hash_image_url("s3://bucket/key?v=2");
+        assert_ne!(
+            s3a, s3b,
+            "s3:// query params identify objects and must not collide"
+        );
     }
 }

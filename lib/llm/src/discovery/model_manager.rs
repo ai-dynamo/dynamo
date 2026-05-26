@@ -25,6 +25,7 @@ use crate::{
     local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
     types::{
+        RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
         openai::{
             audios::OpenAIAudiosStreamingEngine,
@@ -36,12 +37,25 @@ use crate::{
     },
 };
 
-/// State for prefill router activation rendezvous
+/// State for prefill router activation rendezvous.
+///
+/// Once a prefill endpoint has been observed for a (model, namespace) pair,
+/// `PrefillReady` is left in the activator map indefinitely (until prefill
+/// workers all disappear). This survives `register_prefill_router` consuming
+/// the entry — that consumer hands out a fresh `oneshot::Receiver` synthesized
+/// from the cached endpoint, then re-inserts `PrefillReady` so future decode
+/// WorkerSet rebuilds (e.g., decode pod restarts) can find it and activate
+/// immediately without waiting for prefill workers to re-register.
 enum PrefillActivationState {
     /// Decode model registered, waiting for prefill endpoint
     DecodeWaiting(oneshot::Sender<Endpoint>),
-    /// Prefill endpoint arrived, waiting for decode model to register
-    PrefillReady(oneshot::Receiver<Endpoint>),
+    /// Prefill endpoint observed and cached for this (model, namespace).
+    /// Anyone calling `register_prefill_router` synthesizes a fresh
+    /// `oneshot::Receiver` from this and re-inserts the cached endpoint.
+    ///
+    /// Boxed to keep the enum variant sizes balanced (`Endpoint` is much
+    /// larger than `oneshot::Sender`). Satisfies `clippy::large_enum_variant`.
+    PrefillReady(Box<Endpoint>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +69,13 @@ pub enum ModelManagerError {
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
 }
+
+/// Sentinel label value used in frontend Prometheus metrics for requests
+/// that target an unregistered model. Bounds label cardinality so arbitrary
+/// client-supplied model strings cannot create unbounded Prometheus series.
+/// The `_model` suffix makes accidental collision with a real model name
+/// implausible while keeping the value readable in Grafana dropdowns.
+pub const UNKNOWN_METRIC_MODEL: &str = "unknown_model";
 
 /// Central manager for model engines, routing, and configuration.
 ///
@@ -173,6 +194,29 @@ impl ModelManager {
         self.has_decode_model(model) || self.has_prefill_model(model)
     }
 
+    /// Check if any engine (chat, completions, embeddings, images, etc.) is
+    /// registered under this exact model name. Case-sensitive. Distinct from
+    /// [`has_model_any`](Self::has_model_any), which checks specifically for a
+    /// decode or prefill engine.
+    pub fn has_registered_model(&self, model: &str) -> bool {
+        self.models.contains_key(model)
+    }
+
+    /// Resolve the model name to use in frontend Prometheus metrics.
+    ///
+    /// Returns the user-supplied name if a model is registered under it
+    /// (preserving original casing), otherwise returns the bounded sentinel
+    /// [`UNKNOWN_METRIC_MODEL`]. Callers should use this resolved name
+    /// for every metric child created before engine lookup so unknown-model
+    /// requests do not pollute Prometheus label cardinality.
+    pub fn metric_model_for<'a>(&self, model: &'a str) -> &'a str {
+        if self.has_registered_model(model) {
+            model
+        } else {
+            UNKNOWN_METRIC_MODEL
+        }
+    }
+
     pub fn model_display_names(&self) -> HashSet<String> {
         self.models
             .iter()
@@ -233,6 +277,14 @@ impl ModelManager {
         self.models
             .iter()
             .filter(|entry| entry.value().has_videos_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    pub fn list_realtime_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_realtime_engine())
             .map(|entry| entry.key().clone())
             .collect()
     }
@@ -313,6 +365,16 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_audios_engine()
+    }
+
+    pub fn get_realtime_engine(
+        &self,
+        model: &str,
+    ) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_realtime_engine()
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -502,6 +564,27 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_realtime_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: RealtimeBidirectionalEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_realtime_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_realtime_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.realtime_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
     pub fn add_prefill_model(
         &self,
         model: &str,
@@ -569,6 +652,13 @@ impl ModelManager {
 
     pub fn remove_videos_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_videos_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_realtime_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_realtime_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
@@ -669,32 +759,44 @@ impl ModelManager {
         namespace: &str,
     ) -> Option<oneshot::Receiver<Endpoint>> {
         let key = Self::model_namespace_key(model_name, namespace);
-        match self.prefill_router_activators.remove(&key) {
-            Some((_, PrefillActivationState::PrefillReady(rx))) => {
-                // Prefill endpoint already arrived - rx will immediately resolve
-                tracing::debug!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Prefill endpoint already available for namespace, returning receiver"
-                );
-                Some(rx)
-            }
-            Some((key, PrefillActivationState::DecodeWaiting(tx))) => {
-                // Decode already registered - this shouldn't happen, restore state and return None
-                tracing::error!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Decode WorkerSet already registered for this prefill router"
-                );
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
-                None
-            }
-            None => {
-                // New registration: create tx/rx pair, store sender and return receiver
+        // Use the entry API so the activator state mutation is atomic per-key:
+        // a concurrent `remove_prefill_activator` (called by the watcher on
+        // prefill-component teardown) can't slip into the gap between a
+        // `remove`-then-`insert` pair and miss the cleanup, leaving a stale
+        // PrefillReady cached for a prefill that's already gone.
+        match self.prefill_router_activators.entry(key) {
+            Entry::Occupied(o) => match o.get() {
+                PrefillActivationState::PrefillReady(endpoint) => {
+                    // Read the cached endpoint without removing the entry — its
+                    // shard lock is held for the duration of the OccupiedEntry,
+                    // so any concurrent prefill teardown serializes after us
+                    // and observes the entry it needs to clear.
+                    let endpoint_clone = (**endpoint).clone();
+                    let (tx, rx) = oneshot::channel();
+                    let _ = tx.send(endpoint_clone);
+                    tracing::debug!(
+                        model_name = %model_name,
+                        namespace = %namespace,
+                        "Prefill endpoint cached; returning fresh receiver"
+                    );
+                    Some(rx)
+                }
+                PrefillActivationState::DecodeWaiting(_) => {
+                    // Decode already registered — entry stays in place so the
+                    // existing live waiter isn't disturbed. Return None to
+                    // signal the caller that this shouldn't have happened.
+                    tracing::error!(
+                        model_name = %model_name,
+                        namespace = %namespace,
+                        "Decode WorkerSet already registered for this prefill router"
+                    );
+                    None
+                }
+            },
+            Entry::Vacant(v) => {
+                // New registration: create tx/rx pair, store sender, return receiver.
                 let (tx, rx) = oneshot::channel();
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
+                v.insert(PrefillActivationState::DecodeWaiting(tx));
                 tracing::debug!(
                     model_name = %model_name,
                     namespace = %namespace,
@@ -714,78 +816,102 @@ impl ModelManager {
         endpoint: Endpoint,
     ) -> anyhow::Result<()> {
         let key = Self::model_namespace_key(model_name, namespace);
-        match self.prefill_router_activators.remove(&key) {
-            Some((_, PrefillActivationState::DecodeWaiting(sender))) => {
-                sender.send(endpoint).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Failed to send endpoint to prefill router activator for {}:{}",
-                        model_name,
-                        namespace
-                    )
-                })?;
-                tracing::info!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Activated prefill router for decode WorkerSet"
-                );
+
+        // Reactivate any existing deactivated decode-side `PrefillRouter`. Used
+        // by the PrefillReady-refresh and Vacant arms — the rebuilding case
+        // for prefill workers that previously died and now rejoin.
+        let reactivate_if_needed = || {
+            if let Some(model) = self.get_model(model_name)
+                && let Some(ws) = model.get_worker_set(namespace)
+                && let Some(ref pr) = ws.prefill_router
+                && pr.is_deactivated()
+            {
+                pr.reactivate();
+                true
+            } else {
+                false
+            }
+        };
+
+        // Atomic per-key state transition via the entry API. Replaces the
+        // previous `remove → process → insert` pattern, which left a window in
+        // which a concurrent `remove_prefill_activator` (prefill teardown via
+        // the watcher) could slip in, observe an empty map, and skip the
+        // cleanup — letting a stale `PrefillReady` get resurrected here.
+        match self.prefill_router_activators.entry(key) {
+            Entry::Occupied(mut o) => {
+                // Atomically swap the value to a fresh PrefillReady. The old
+                // value tells us which transition we just performed.
+                let new_value = PrefillActivationState::PrefillReady(Box::new(endpoint.clone()));
+                let old = o.insert(new_value);
+                // Drop the OccupiedEntry to release the shard lock before any
+                // potentially-non-trivial work (e.g. nested DashMap accesses
+                // via reactivate_if_needed). The state transition above is
+                // already committed.
+                drop(o);
+
+                match old {
+                    PrefillActivationState::DecodeWaiting(sender) => {
+                        // Cold-start (or post-rebuild) handshake: decode
+                        // registered first. Wake the waiting receiver.
+                        sender.send(endpoint).map_err(|_| {
+                            anyhow::anyhow!(
+                                "Failed to send endpoint to prefill router activator for {}:{}",
+                                model_name,
+                                namespace
+                            )
+                        })?;
+                        tracing::info!(
+                            model_name = %model_name,
+                            namespace = %namespace,
+                            "Activated prefill router for decode WorkerSet"
+                        );
+                    }
+                    PrefillActivationState::PrefillReady(_) => {
+                        // Stale PrefillReady from a prior handshake. Two cases:
+                        //   (a) Duplicate activate_prefill_router call (e.g.,
+                        //       the same prefill instance re-publishes its
+                        //       endpoint) — just refresh, no router action.
+                        //   (b) Prefill rejoin after a transient absence —
+                        //       reactivate any deactivated decode-side router.
+                        if reactivate_if_needed() {
+                            tracing::info!(
+                                model_name = %model_name,
+                                namespace = %namespace,
+                                "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
+                            );
+                        } else {
+                            tracing::debug!(
+                                model_name = %model_name,
+                                namespace = %namespace,
+                                "Refreshed cached prefill endpoint for future decode WorkerSet rebuild"
+                            );
+                        }
+                    }
+                }
                 Ok(())
             }
-            Some((_, PrefillActivationState::PrefillReady(_))) => {
-                anyhow::bail!(
-                    "Prefill router for {}:{} already activated",
-                    model_name,
-                    namespace
-                );
-            }
-            None => {
-                // Try to reactivate an existing deactivated router first.
-                // This handles prefill rejoin after a transient failure: the decode
-                // WorkerSet's PrefillRouter already exists but is deactivated.
-                if let Some(model) = self.get_model(model_name)
-                    && let Some(ws) = model.get_worker_set(namespace)
-                    && let Some(ref pr) = ws.prefill_router
-                    && pr.is_deactivated()
-                {
-                    pr.reactivate();
-                    // Store the endpoint so that if the decode WorkerSet is rebuilt
-                    // (removed and re-added), a subsequent register_prefill_router call
-                    // finds PrefillReady instead of falling back to DecodeWaiting and
-                    // stalling.
-                    let (tx, rx) = oneshot::channel();
-                    tx.send(endpoint).map_err(|_| {
-                        anyhow::anyhow!(
-                            "Failed to send endpoint for prefill model {}:{}",
-                            model_name,
-                            namespace
-                        )
-                    })?;
-                    self.prefill_router_activators
-                        .insert(key, PrefillActivationState::PrefillReady(rx));
+            Entry::Vacant(v) => {
+                // No prior handshake state. Insert a fresh PrefillReady so a
+                // future decode rebuild's register_prefill_router finds the
+                // cache and activates immediately.
+                v.insert(PrefillActivationState::PrefillReady(Box::new(endpoint)));
+
+                // Then handle the prefill-rejoin case: an existing decode-side
+                // PrefillRouter that was deactivated when prefill went away.
+                if reactivate_if_needed() {
                     tracing::info!(
                         model_name = %model_name,
                         namespace = %namespace,
                         "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
                     );
-                    return Ok(());
+                } else {
+                    tracing::info!(
+                        model_name = %model_name,
+                        namespace = %namespace,
+                        "Stored prefill endpoint for future decode WorkerSet registration"
+                    );
                 }
-
-                // No existing deactivated router -- store endpoint for a future decode
-                // registration.
-                let (tx, rx) = oneshot::channel();
-                tx.send(endpoint).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Failed to send endpoint for prefill model {}:{}",
-                        model_name,
-                        namespace
-                    )
-                })?;
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(rx));
-                tracing::info!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Stored prefill endpoint for future decode WorkerSet registration"
-                );
                 Ok(())
             }
         }
@@ -804,7 +930,9 @@ impl ModelManager {
     }
 
     /// Remove the prefill router activator for a (model, namespace) pair.
-    /// Called when a WorkerSet is removed to prevent stale activators.
+    /// Called when the prefill WorkerSet is removed: at that point both the
+    /// cached prefill endpoint (`PrefillReady`) and any pending handshake
+    /// (`DecodeWaiting`) are stale, so we drop everything for the key.
     pub fn remove_prefill_activator(&self, model_name: &str, namespace: &str) {
         let key = Self::model_namespace_key(model_name, namespace);
         if self.prefill_router_activators.remove(&key).is_some() {
@@ -812,6 +940,38 @@ impl ModelManager {
                 model_name = %model_name,
                 namespace = %namespace,
                 "Cleaned up prefill router activator for removed WorkerSet"
+            );
+        }
+    }
+
+    /// Remove a stale `DecodeWaiting(sender)` entry on decode WorkerSet teardown,
+    /// while preserving any `PrefillReady(endpoint)` cache.
+    ///
+    /// When a decode WorkerSet is torn down, the `DecodeWaiting` entry's sender
+    /// targets a `oneshot::Receiver` held by the now-dropped `PrefillRouter`. If
+    /// we leave it in the map:
+    ///   - the next decode rebuild's `register_prefill_router` finds the stale
+    ///     `DecodeWaiting`, hits the `Some(DecodeWaiting)` arm, and returns
+    ///     `None` — so the rebuilt WorkerSet has no `PrefillRouter` at all;
+    ///   - when prefill finally registers, `activate_prefill_router` wakes the
+    ///     orphaned receiver and activates a router that's about to be dropped,
+    ///     producing log lines that look like success while the rebuilt
+    ///     WorkerSet still has nothing.
+    ///
+    /// `PrefillReady` must be left intact — it's a cache of the prefill endpoint
+    /// that survives decode rebuilds (PR 8965's primary contribution).
+    pub fn remove_decode_prefill_waiter(&self, model_name: &str, namespace: &str) {
+        let key = Self::model_namespace_key(model_name, namespace);
+        // Atomic remove-if-stale: only drop the entry if it's `DecodeWaiting`,
+        // leaving `PrefillReady` cache entries untouched.
+        let removed = self.prefill_router_activators.remove_if(&key, |_, v| {
+            matches!(v, PrefillActivationState::DecodeWaiting(_))
+        });
+        if removed.is_some() {
+            tracing::debug!(
+                model_name = %model_name,
+                namespace = %namespace,
+                "Removed stale DecodeWaiting activator on decode WorkerSet teardown"
             );
         }
     }
@@ -889,6 +1049,20 @@ impl ModelManager {
         let rx = self.runtime_configs.get(endpoint_id)?;
         let configs = rx.borrow();
         configs.get(&worker_id)?.disaggregated_endpoint.clone()
+    }
+
+    /// Get the registered `data_parallel_size` for a specific worker.
+    /// Used by PD prefill routing so the chosen prefill DP rank can be
+    /// encoded into `bootstrap_room` (`bootstrap_room % dp_size == dp_rank`)
+    /// and recovered modulo-style on the decode side.
+    pub fn get_data_parallel_size(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+    ) -> Option<u32> {
+        let rx = self.runtime_configs.get(endpoint_id)?;
+        let configs = rx.borrow();
+        Some(configs.get(&worker_id)?.data_parallel_size)
     }
 }
 
@@ -1042,6 +1216,35 @@ mod tests {
     }
 
     #[test]
+    fn test_metric_model_for_resolves_to_sentinel_for_unknown() {
+        let mm = ModelManager::new();
+        mm.add_worker_set(
+            "Llama-3.1-8B-Instruct",
+            "ns1",
+            make_worker_set("ns1", "abc"),
+        );
+
+        // Registered models preserve their original casing.
+        assert_eq!(
+            mm.metric_model_for("Llama-3.1-8B-Instruct"),
+            "Llama-3.1-8B-Instruct"
+        );
+
+        // Case mismatches and unregistered strings collapse to the sentinel so
+        // arbitrary client-supplied values cannot create unbounded Prometheus
+        // series.
+        assert_eq!(
+            mm.metric_model_for("llama-3.1-8b-instruct"),
+            UNKNOWN_METRIC_MODEL
+        );
+        assert_eq!(
+            mm.metric_model_for("nonexistent-model-1"),
+            UNKNOWN_METRIC_MODEL
+        );
+        assert_eq!(mm.metric_model_for(""), UNKNOWN_METRIC_MODEL);
+    }
+
+    #[test]
     fn test_model_display_names_includes_prefill() {
         let mm = ModelManager::new();
         mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
@@ -1054,6 +1257,45 @@ mod tests {
     fn test_model_display_names_empty() {
         let mm = ModelManager::new();
         assert!(mm.model_display_names().is_empty());
+    }
+
+    #[test]
+    fn test_add_get_remove_realtime_model_round_trip() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+
+        mm.add_realtime_model("rt-echo", "0", engine.clone())
+            .unwrap();
+        assert!(mm.list_realtime_models().contains(&"rt-echo".to_string()));
+        assert!(mm.get_realtime_engine("rt-echo").is_ok());
+
+        mm.remove_realtime_model("rt-echo").unwrap();
+        assert!(!mm.list_realtime_models().contains(&"rt-echo".to_string()));
+        assert!(matches!(
+            mm.get_realtime_engine("rt-echo"),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_add_realtime_model_duplicate() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+        mm.add_realtime_model("rt-echo", "0", engine.clone())
+            .unwrap();
+        assert!(matches!(
+            mm.add_realtime_model("rt-echo", "0", engine),
+            Err(ModelManagerError::ModelAlreadyExists(_))
+        ));
+    }
+
+    #[test]
+    fn test_get_realtime_engine_missing() {
+        let mm = ModelManager::new();
+        assert!(matches!(
+            mm.get_realtime_engine("does-not-exist"),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
     }
 
     #[test]
@@ -1157,6 +1399,44 @@ mod tests {
         let mm = ModelManager::new();
         // Should not panic
         mm.remove_prefill_activator("llama", "ns1");
+    }
+
+    // -- remove_decode_prefill_waiter tests (stale-DecodeWaiting cleanup) --
+
+    /// Decode WorkerSet teardown while still in DecodeWaiting must drop the
+    /// stale waiter so a subsequent decode rebuild can register fresh.
+    #[test]
+    fn test_remove_decode_prefill_waiter_clears_decodewaiting() {
+        let mm = ModelManager::new();
+
+        // Decode registers first → DecodeWaiting in map.
+        let rx1 = mm.register_prefill_router("llama", "ns1");
+        assert!(rx1.is_some());
+
+        // Decode WorkerSet is removed before prefill registers. Drop the
+        // receiver to mirror PrefillRouter being dropped along with the
+        // WorkerSet.
+        drop(rx1);
+
+        // Watcher's decode-teardown path calls this:
+        mm.remove_decode_prefill_waiter("llama", "ns1");
+
+        // Rebuild path: a new register_prefill_router must succeed.
+        let rx2 = mm.register_prefill_router("llama", "ns1");
+        assert!(
+            rx2.is_some(),
+            "after stale-DecodeWaiting cleanup, decode rebuild must get a fresh rx"
+        );
+    }
+
+    /// Removing the waiter when the activator is already empty must not panic.
+    #[test]
+    fn test_remove_decode_prefill_waiter_empty_noop() {
+        let mm = ModelManager::new();
+        mm.remove_decode_prefill_waiter("llama", "ns1");
+        // And the next register must still work.
+        let rx = mm.register_prefill_router("llama", "ns1");
+        assert!(rx.is_some());
     }
 
     #[test]

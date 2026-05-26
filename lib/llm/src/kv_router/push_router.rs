@@ -4,9 +4,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::{
+    indexer::RoutingDecisionHashes,
+    protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
+};
 use dynamo_runtime::{
     dynamo_nvtx_range,
+    error::{DynamoError, ErrorType as DynamoErrorType},
     metrics::frontend_perf::{STAGE_DISPATCH, STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
@@ -49,6 +53,7 @@ struct WorkerSelection {
     overlap_amount: u32,
     effective_overlap_blocks: f64,
     cached_tokens: usize,
+    routing_hashes: Option<RoutingDecisionHashes>,
     /// Whether the scheduler is tracking this request (add_request or
     /// find_best_match_details with update_states=true was called).
     scheduler_tracked: bool,
@@ -295,6 +300,7 @@ impl KvPushRouter {
         request: &PreprocessedRequest,
         phase: RequestPhase,
         is_query_only: bool,
+        return_routing_hashes: bool,
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
@@ -302,10 +308,13 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
+        let routing_constraints = routing
+            .and_then(|r| r.routing_constraints.clone())
+            .unwrap_or_default();
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
-            let selection = self
+            let outcome = self
                 .chooser
                 .find_best_match_details(
                     Some(context_id),
@@ -313,25 +322,59 @@ impl KvPushRouter {
                     block_mm_infos,
                     request.router_config_override.as_ref(),
                     !is_query_only,
+                    return_routing_hashes,
                     lora_name,
                     priority_jump,
                     expected_output_tokens,
                     None,
                     allowed_worker_ids,
+                    routing_constraints.clone(),
                 )
                 .await?;
-            let best_worker = selection.worker;
-            let effective_overlap_blocks = selection.cache_hit.effective_overlap_blocks;
-            let cached_tokens = selection.cache_hit.cached_tokens;
-            let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
+            let (
+                best_worker,
+                effective_overlap_blocks,
+                cached_tokens,
+                overlap_amount,
+                routing_hashes,
+            ) = match outcome {
+                crate::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    routing_hashes,
+                } => (
+                    worker,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    overlap_blocks,
+                    routing_hashes,
+                ),
+                crate::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                } => {
+                    // TODO(#8189): classify queue-depth
+                    // saturation distinctly from generic resource exhaustion
+                    // (operator-facing 429 vs 503) once the shared rejection
+                    // layer lands.
+                    return Err(DynamoError::builder()
+                        .error_type(DynamoErrorType::ResourceExhausted)
+                        .message(format!(
+                            "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+                        ))
+                        .build()
+                        .into());
+                }
+            };
 
             if !is_query_only {
                 let total_blocks = routing_token_ids
                     .len()
                     .div_ceil(self.chooser.block_size() as usize);
-                // NOTE: tests/mm_router/test_vllm_mm_router_e2e.py parses this log line.
-                // Keep the "[ROUTING] ... with X/Y blocks overlap" shape stable unless
-                // router tests are updated together.
+                // tests/utils/router_logs.py parses the structured fields on this event.
                 tracing::debug!(
                     request_id = %context_id,
                     worker_id = best_worker.worker_id,
@@ -352,6 +395,7 @@ impl KvPushRouter {
                 overlap_amount,
                 effective_overlap_blocks,
                 cached_tokens,
+                routing_hashes,
                 scheduler_tracked: !is_query_only,
             });
         };
@@ -361,7 +405,7 @@ impl KvPushRouter {
             .map(|dp_rank| WorkerWithDpRank::new(pinned_worker_id, dp_rank));
 
         if !is_query_only && let Some(pinned_worker) = resolved_pinned_worker {
-            let selection = self
+            let outcome = self
                 .chooser
                 .find_best_match_details(
                     Some(context_id),
@@ -369,17 +413,51 @@ impl KvPushRouter {
                     block_mm_infos,
                     request.router_config_override.as_ref(),
                     true,
+                    return_routing_hashes,
                     lora_name.clone(),
                     priority_jump,
                     expected_output_tokens,
                     Some(pinned_worker),
                     allowed_worker_ids,
+                    routing_constraints.clone(),
                 )
                 .await?;
-            let best_worker = selection.worker;
-            let effective_overlap_blocks = selection.cache_hit.effective_overlap_blocks;
-            let cached_tokens = selection.cache_hit.cached_tokens;
-            let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
+            let (
+                best_worker,
+                effective_overlap_blocks,
+                cached_tokens,
+                overlap_amount,
+                routing_hashes,
+            ) = match outcome {
+                crate::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    routing_hashes,
+                } => (
+                    worker,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    overlap_blocks,
+                    routing_hashes,
+                ),
+                crate::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                } => {
+                    // TODO(#8189): same classification
+                    // refinement applies on the pinned-worker path.
+                    return Err(DynamoError::builder()
+                        .error_type(DynamoErrorType::ResourceExhausted)
+                        .message(format!(
+                            "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+                        ))
+                        .build()
+                        .into());
+                }
+            };
 
             return Ok(WorkerSelection {
                 instance_id: best_worker.worker_id,
@@ -387,6 +465,7 @@ impl KvPushRouter {
                 overlap_amount,
                 effective_overlap_blocks,
                 cached_tokens,
+                routing_hashes,
                 scheduler_tracked: true,
             });
         }
@@ -404,18 +483,43 @@ impl KvPushRouter {
             "Routing to specified worker"
         );
 
+        if routing_constraints.has_hard_constraints() {
+            let configs = self.chooser.workers_with_configs.borrow();
+            match configs.get(&pinned_worker_id) {
+                Some(config)
+                    if !routing_constraints.is_compatible_with_worker_taints(config.taints()) =>
+                {
+                    return Err(anyhow::anyhow!(
+                        "Pinned worker {} does not satisfy required taints {:?}; worker taints: {:?}",
+                        pinned_worker_id,
+                        routing_constraints.required_taints,
+                        config.taints()
+                    ));
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "Pinned worker {} could not be validated against required taints {:?} because worker config was unavailable",
+                        pinned_worker_id,
+                        routing_constraints.required_taints
+                    ));
+                }
+                _ => {}
+            }
+        }
+
         // Build a WorkerWithDpRank; use 0 as a fallback dp_rank when it
         // couldn't be resolved -- this is only used for the cache-hit
         // estimate query and won't affect scheduler state.
         let effective_dp_rank = resolved_dp_rank.unwrap_or(0);
         let worker = WorkerWithDpRank::new(pinned_worker_id, effective_dp_rank);
-        let cache_hit = self
+        let (cache_hit, routing_hashes) = self
             .chooser
-            .get_cache_hit_estimate(
+            .get_cache_hit_estimate_with_hashes(
                 routing_token_ids,
                 block_mm_infos,
                 worker,
                 lora_name.as_deref(),
+                return_routing_hashes,
             )
             .await?;
         let effective_overlap_blocks = cache_hit.effective_overlap_blocks;
@@ -459,6 +563,7 @@ impl KvPushRouter {
             overlap_amount: overlap_blocks,
             effective_overlap_blocks,
             cached_tokens,
+            routing_hashes,
             scheduler_tracked: !is_query_only && resolved_dp_rank.is_some(),
         })
     }
@@ -524,9 +629,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
 
+        let should_record = !is_query_only && self.chooser.indexer().records_routing_decisions();
         let block_size = self.chooser.block_size() as usize;
         let selection = self
-            .select_worker(&context_id, &request, phase, is_query_only)
+            .select_worker(&context_id, &request, phase, is_query_only, should_record)
             .instrument(tracing::info_span!("kv_router.select_worker"))
             .await?;
         let WorkerSelection {
@@ -535,36 +641,39 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             overlap_amount,
             effective_overlap_blocks,
             cached_tokens,
+            routing_hashes,
             scheduler_tracked,
         } = selection;
 
-        // In approximate mode (use_kv_events=false), record the routing decision
-        // so the indexer can track cache state based on routing decisions.
-        // This covers both pre-selected workers and find_best_match selections.
-        if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
-            let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
-            let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
+        if should_record {
             let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-            let mut tokens_with_hashes =
-                TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
-                    .with_is_eagle(self.chooser.is_eagle());
-            if let Some(infos) = block_mm_infos {
-                tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
-            }
-            if let Some(lora_name) = lora_name {
-                tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
-            }
-            if let Err(e) = self
-                .chooser
-                .record_routing_decision(tokens_with_hashes, worker)
-                .await
-            {
+            let record_result = if let Some(hashes) = routing_hashes {
+                self.chooser
+                    .record_routing_decision_hashes(hashes, worker)
+                    .await
+            } else {
+                let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+                let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
+                let mut tokens_with_hashes =
+                    TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
+                        .with_is_eagle(self.chooser.is_eagle());
+                if let Some(infos) = block_mm_infos {
+                    tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
+                }
+                if let Some(lora_name) = lora_name {
+                    tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+                }
+                self.chooser
+                    .record_routing_decision(tokens_with_hashes, worker)
+                    .await
+            };
+            if let Err(e) = record_result {
                 tracing::warn!(
                     request_id = %context_id,
                     worker_id = instance_id,
                     dp_rank = dp_rank,
                     error = %e,
-                    "Failed to record routing decision in approximate mode"
+                    "Failed to record routing decision"
                 );
             }
         }

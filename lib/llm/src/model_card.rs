@@ -32,6 +32,23 @@ use crate::protocols::TokenIdType;
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
+/// Extract the set of atomic special-token strings from a HuggingFace tokenizer.
+///
+/// "Special" here means `AddedToken { special: true, .. }` — these are the only tokens
+/// guaranteed atomic in BPE (won't be merged with surrounding bytes), so they are the
+/// only safe boundary points for the L1 prefix cache.
+fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
+    let added = hf.get_added_tokens_decoder();
+    let mut out: Vec<String> = added
+        .values()
+        .filter(|t| t.special)
+        .map(|t| t.content.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
@@ -194,6 +211,423 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
+/// MDC cache: `blobs/<blake3>` + `by-slug/<slug>/<mdcsum>/<filename>`.
+/// The `<mdcsum>` segment mirrors HF Hub's `snapshots/<rev>/` and
+/// isolates worker sets that share a model name but publish different
+/// file content.
+fn mdc_cache_root() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".cache/dynamo/mdc")
+}
+
+fn mdc_blobs_dir() -> anyhow::Result<PathBuf> {
+    let dir = mdc_cache_root().join("blobs");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating MDC blobs dir {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn mdc_slug_dir(slug: &Slug, mdcsum: &str) -> anyhow::Result<PathBuf> {
+    let dir = mdc_cache_root()
+        .join("by-slug")
+        .join(slug.to_string())
+        .join(mdcsum);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating MDC slug dir {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Per-call tmp path next to `dest`. pid + uuid suffix keeps tmps
+/// disjoint across concurrent callers so `rename(2)` is the only
+/// synchronization point — never `create(tmp)`.
+fn unique_tmp_path(dest: &Path) -> PathBuf {
+    let suffix = format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let name = dest
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut p = dest.to_path_buf();
+    p.set_file_name(format!("{name}.{suffix}"));
+    p
+}
+
+/// RAII guard that unlinks a tmp path on drop. `dismiss()` cancels the
+/// cleanup once the tmp has been consumed by a successful rename. Drop
+/// ignores ENOENT — safe under double-cleanup races.
+struct TmpGuard {
+    path: Option<PathBuf>,
+}
+
+impl TmpGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+    fn dismiss(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TmpGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// Atomic publish: stage via `f(&tmp)`, then `rename(tmp -> dest)`.
+/// Concurrent-safe because tmps are per-call (see [`unique_tmp_path`])
+/// and `rename(2)` is atomic + overwrites. Tmp is unlinked on any
+/// failure path including async cancellation — see [`TmpGuard`].
+async fn stage_and_rename<F, Fut>(dest: &Path, f: F) -> anyhow::Result<()>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let tmp = unique_tmp_path(dest);
+    let mut guard = TmpGuard::new(tmp.clone());
+    f(tmp.clone()).await?;
+    tokio::fs::rename(&tmp, dest)
+        .await
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), dest.display()))?;
+    guard.dismiss();
+    Ok(())
+}
+
+/// Sync sibling of [`stage_and_rename`] for cheap operations
+/// (e.g., creating a symlink).
+fn stage_and_rename_sync<F>(dest: &Path, f: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&Path) -> anyhow::Result<()>,
+{
+    let tmp = unique_tmp_path(dest);
+    let mut guard = TmpGuard::new(tmp.clone());
+    f(&tmp)?;
+    std::fs::rename(&tmp, dest)
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), dest.display()))?;
+    guard.dismiss();
+    Ok(())
+}
+
+/// Concurrent-safe via [`stage_and_rename_sync`].
+fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
+    stage_and_rename_sync(link, |tmp| {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, tmp)
+            .with_context(|| format!("symlinking {} -> {}", tmp.display(), target.display()))?;
+        #[cfg(not(unix))]
+        std::fs::copy(target, tmp)
+            .map(|_| ())
+            .with_context(|| format!("copying {} -> {}", target.display(), tmp.display()))?;
+        Ok(())
+    })
+}
+
+/// 1 GiB cap on metadata fetch — realistic files are <20 MiB. Bounds
+/// disk usage if a worker advertises a bogus `CheckedFile.size`, and is
+/// the fallback when `size` is absent on a `CheckedFile`.
+const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// File extensions that identify model weights. Used by the hf:// sibling
+/// harvest to skip weight blobs (which `hub::from_hf(_, ignore_weights=true)`
+/// also already filters at download, but the snapshot dir may contain
+/// pre-existing weights from a prior unrestricted pull).
+///
+/// `.safetensors.index.json` is correctly kept: extension is `.json`.
+fn is_weight_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("safetensors" | "bin" | "gguf" | "onnx" | "tflite" | "h5" | "pt" | "pth" | "msgpack")
+    )
+}
+
+/// Parent directory of a `file://` URI when it resolves to a real local
+/// directory. Returns `None` for any other scheme or unreachable path.
+fn file_uri_parent(uri: &str) -> Option<PathBuf> {
+    let url = url::Url::parse(uri).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    let path = url.to_file_path().ok()?;
+    let parent = path.parent()?;
+    parent.is_dir().then(|| parent.to_path_buf())
+}
+
+/// Symlink non-weight files from `snapshot_dir` into `slug_dir`. Picks up
+/// `preprocessor_config.json` and other sibling files that
+/// `from_pretrained(slug_dir)` consumers need.
+///
+/// Names in `typed_filenames` are owned by the resolve loop's typed-slot
+/// pass — never overwritten. Every other harvested sibling is re-linked
+/// unconditionally so a re-registration with the same `mdcsum` but a
+/// different upstream snapshot picks up fresh contents (mdcsum doesn't
+/// cover harvested files).
+fn harvest_siblings(
+    snapshot_dir: &Path,
+    slug_dir: &Path,
+    typed_filenames: &std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
+    let entries = match std::fs::read_dir(snapshot_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!(
+                snapshot = %snapshot_dir.display(),
+                error = %e,
+                "sibling harvest: snapshot dir unreadable, skipping",
+            );
+            return Ok(());
+        }
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() || is_weight_file(&path) {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if !n.is_empty() => n.to_owned(),
+            _ => continue,
+        };
+        if typed_filenames.contains(&name) {
+            continue;
+        }
+        let dst = slug_dir.join(&name);
+        // Resolve through the canonical target so a downstream
+        // `canonicalize` lands on a stable blob path rather than
+        // chasing snapshot-dir symlinks. `symlink_force` is idempotent
+        // and atomic via `stage_and_rename_sync`.
+        let target = std::fs::canonicalize(&path).unwrap_or(path);
+        symlink_force(&target, &dst)
+            .with_context(|| format!("harvesting {} -> {}", target.display(), dst.display()))?;
+        tracing::debug!(
+            file = %name,
+            target = %target.display(),
+            "harvested sibling into slug_dir",
+        );
+    }
+    Ok(())
+}
+
+/// Stage `uri` into `dest`, verifying staged bytes against `expected`
+/// before publishing. Schemes: `http(s)`, `file`, `hf`. For `hf://`,
+/// `hf_snapshots` must already contain the resolved repo path —
+/// caller is expected to pre-resolve once per repo.
+async fn resolve_uri(
+    client: &reqwest::Client,
+    uri: &str,
+    expected: &CheckedFile,
+    dest: &Path,
+    hf_snapshots: &std::collections::HashMap<String, PathBuf>,
+) -> anyhow::Result<()> {
+    let cap = expected
+        .size()
+        .unwrap_or(ABSOLUTE_MAX_METADATA_BYTES)
+        .min(ABSOLUTE_MAX_METADATA_BYTES);
+
+    let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
+
+    if dest.exists() {
+        if CheckedFile::from_disk(dest).is_ok_and(|cf| cf.checksum() == expected.checksum()) {
+            return Ok(());
+        }
+        tracing::warn!(dest = %dest.display(), "MDC cache blob failed re-verification; refetching");
+        let _ = std::fs::remove_file(dest);
+    }
+
+    stage_and_rename(dest, |tmp| async move {
+        match parsed.scheme() {
+            "http" | "https" => stream_to_tmp(client, uri, &tmp, cap).await?,
+            "file" => {
+                let path = parsed
+                    .to_file_path()
+                    .map_err(|()| anyhow::anyhow!("invalid file:// uri: {uri}"))?;
+                copy_to_tmp(&path, &tmp, cap).await?;
+            }
+            "hf" => {
+                let (repo, filename) = parse_hf_uri(uri)?;
+                let snapshot = hf_snapshots
+                    .get(&repo)
+                    .with_context(|| format!("hf snapshot not pre-resolved for {repo}"))?;
+                copy_to_tmp(&snapshot.join(&filename), &tmp, cap).await?;
+            }
+            scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
+        }
+
+        // Re-blake3 the staged bytes via the same `from_disk` path the
+        // worker used at registration so the comparison is bit-identical.
+        let actual = CheckedFile::from_disk(&tmp)?;
+        if actual.checksum() != expected.checksum() {
+            anyhow::bail!(
+                "checksum mismatch for {uri}: expected {}, got {}",
+                expected.checksum(),
+                actual.checksum()
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Stream HTTP body to `tmp`, capped at `cap` bytes. Pre-checks
+/// `Content-Length` if present; otherwise the post-write check
+/// catches overage.
+async fn stream_to_tmp(
+    client: &reqwest::Client,
+    uri: &str,
+    tmp: &Path,
+    cap: u64,
+) -> anyhow::Result<()> {
+    use futures::TryStreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::io::StreamReader;
+
+    let response = client
+        .get(uri)
+        .send()
+        .await
+        .with_context(|| format!("fetching {uri}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!("fetching {uri} returned status {}", response.status());
+    }
+    if let Some(content_length) = response.content_length()
+        && content_length > cap
+    {
+        anyhow::bail!("{uri} reports {content_length} bytes, exceeds cap {cap}");
+    }
+
+    let stream = response.bytes_stream().map_err(std::io::Error::other);
+    // `cap + 1` so a body of exactly `cap` passes but anything larger
+    // trips the `written > cap` check below.
+    let mut reader = StreamReader::new(stream).take(cap + 1);
+    let mut file = tokio::fs::File::create(tmp)
+        .await
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    let written = tokio::io::copy(&mut reader, &mut file)
+        .await
+        .with_context(|| format!("streaming body from {uri} to {}", tmp.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("flushing {}", tmp.display()))?;
+    if written > cap {
+        anyhow::bail!("{uri} body exceeds cap {cap}");
+    }
+    Ok(())
+}
+
+async fn copy_to_tmp(src: &Path, tmp: &Path, cap: u64) -> anyhow::Result<()> {
+    let metadata = tokio::fs::metadata(src)
+        .await
+        .with_context(|| format!("reading metadata for {}", src.display()))?;
+    if metadata.len() > cap {
+        anyhow::bail!(
+            "{} is {} bytes, exceeds cap {}",
+            src.display(),
+            metadata.len(),
+            cap
+        );
+    }
+    tokio::fs::copy(src, tmp)
+        .await
+        .with_context(|| format!("copying {} -> {}", src.display(), tmp.display()))?;
+    Ok(())
+}
+
+/// Parse `hf://repo[@rev]/filename` into `(repo[@rev], filename)`.
+fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
+    let body = uri
+        .strip_prefix("hf://")
+        .with_context(|| format!("expected hf:// scheme, got: {uri}"))?;
+    let (repo, filename) = body
+        .rsplit_once('/')
+        .with_context(|| format!("hf:// uri must end in /filename, got: {uri}"))?;
+    if repo.is_empty() || filename.is_empty() {
+        anyhow::bail!("malformed hf:// uri: {uri}");
+    }
+    Ok((repo.to_string(), filename.to_string()))
+}
+
+fn checked_file_uri(
+    cf: &CheckedFile,
+    source: &str,
+    local_model_path: Option<&Path>,
+    is_custom: bool,
+) -> anyhow::Result<String> {
+    use std::borrow::Cow;
+
+    // Coerce path-only into a synthetic file:// URL up front so the
+    // scheme dispatch below covers both shapes uniformly. `absolute`
+    // (not `canonicalize`) — worker paths often don't exist here.
+    let url: Cow<url::Url> = if let Some(u) = cf.url() {
+        Cow::Borrowed(u)
+    } else {
+        let Some(p) = cf.path() else {
+            anyhow::bail!("CheckedFile has neither path nor url");
+        };
+        let abs = std::path::absolute(p)?;
+        Cow::Owned(
+            url::Url::from_file_path(&abs)
+                .map_err(|()| anyhow::anyhow!("invalid file path: {}", abs.display()))?,
+        )
+    };
+
+    match url.scheme() {
+        "http" | "https" | "hf" => Ok(url.to_string()),
+        "file" => {
+            // worker location → --model-path → hf://. Basename + checksum preserved.
+            // is_custom slots aren't published on HF, so rung 4 errors instead.
+            let path = url
+                .to_file_path()
+                .map_err(|()| anyhow::anyhow!("invalid file uri: {url}"))?;
+            let filename = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .with_context(|| format!("no filename in file uri: {url}"))?;
+            if path.exists() {
+                return Ok(url.to_string());
+            }
+            if let Some(prefix) = local_model_path {
+                let local = prefix.join(filename);
+                if local.exists() {
+                    return file_uri_for(&local);
+                }
+            }
+            if is_custom {
+                anyhow::bail!(
+                    "custom file {filename} not reachable on this host \
+                     (worker path {} missing, no --model-path overlay); \
+                     custom files aren't published on HF, so ensure the \
+                     file exists at the same path on every host (shared \
+                     mount) or pass --model-path with the same basename",
+                    path.display()
+                );
+            }
+            Ok(format!("hf://{source}/{filename}"))
+        }
+        _ => Ok(url.to_string()),
+    }
+}
+
+fn file_uri_for(p: &Path) -> anyhow::Result<String> {
+    Ok(url::Url::from_file_path(std::path::absolute(p)?)
+        .map_err(|()| anyhow::anyhow!("invalid file path: {}", p.display()))?
+        .to_string())
+}
+
+fn uri_basename(uri: &str) -> anyhow::Result<String> {
+    url::Url::parse(uri)
+        .with_context(|| format!("parsing uri: {uri}"))?
+        .path_segments()
+        .and_then(|mut s| s.rfind(|s| !s.is_empty()))
+        .map(String::from)
+        .with_context(|| format!("no basename in uri: {uri}"))
+}
+
 fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
     match p {
         PromptFormatterArtifact::HfTokenizerConfigJson(cf)
@@ -265,6 +699,29 @@ pub struct ModelDeploymentCard {
     /// `Tokens` for engines that expect pre-processed input.
     /// `Text` for engines that take care of pre-processing themselves.
     pub model_input: ModelInput,
+
+    /// Processing stage this worker handles (Prefill, Decode, Encode, Aggregated).
+    /// Orthogonal to `model_type` (which describes endpoints exposed).
+    ///
+    /// Every worker is expected to set this explicitly; `None` means the
+    /// worker has not declared a role and is treated as misconfiguration
+    /// (workers not ready). A temporary shim in `Model::ws_role_and_needs`
+    /// softens this while backends are being migrated — see
+    /// `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]` is
+    /// kept so pre-field cards still deserialize.
+    #[serde(default)]
+    pub worker_type: Option<crate::worker_type::WorkerType>,
+
+    /// Peer worker types this worker requires to serve traffic, in DNF form.
+    /// The outer `Vec` is OR; each inner `Vec` is an AND-set of required
+    /// worker types. Empty outer `Vec` means "no peers required."
+    ///
+    /// Examples:
+    /// - Prefill worker: `[[Decode]]` — needs a Decode peer.
+    /// - Encode worker: `[[Prefill, Decode], [Aggregated]]` — needs either a
+    ///   P+D pair or a single Aggregated peer.
+    #[serde(default)]
+    pub needs: Vec<Vec<crate::worker_type::WorkerType>>,
 
     /// LoRA metadata for routing
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,6 +857,35 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
+                // Topology fields participate in the checksum so that a rolling
+                // update that changes only worker_type/needs is correctly
+                // rejected as incompatible with the existing WorkerSet (forcing
+                // drain-and-redeploy) instead of silently joining and serving
+                // stale readiness data.
+                //
+                // worker_type discriminator: 0 = None, then the variant ordinal.
+                match self.worker_type {
+                    None => bytes_to_hash.push(0),
+                    Some(crate::worker_type::WorkerType::Prefill) => bytes_to_hash.push(1),
+                    Some(crate::worker_type::WorkerType::Decode) => bytes_to_hash.push(2),
+                    Some(crate::worker_type::WorkerType::Encode) => bytes_to_hash.push(3),
+                    Some(crate::worker_type::WorkerType::Aggregated) => bytes_to_hash.push(4),
+                }
+                // needs is DNF: hash length(outer) || for each alt { length(inner) || each variant }
+                bytes_to_hash.extend((self.needs.len() as u32).to_be_bytes());
+                for alt in &self.needs {
+                    bytes_to_hash.extend((alt.len() as u32).to_be_bytes());
+                    for w in alt {
+                        let v: u8 = match w {
+                            crate::worker_type::WorkerType::Prefill => 1,
+                            crate::worker_type::WorkerType::Decode => 2,
+                            crate::worker_type::WorkerType::Encode => 3,
+                            crate::worker_type::WorkerType::Aggregated => 4,
+                        };
+                        bytes_to_hash.push(v);
+                    }
+                }
+
                 if let Some(router_config) = self.router_config.as_ref()
                     && let Ok(bytes) = serde_json::to_vec(router_config)
                 {
@@ -410,6 +896,8 @@ impl ModelDeploymentCard {
                     // should be defined.
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
+
+                // TODO: Do we want any of user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -425,7 +913,12 @@ impl ModelDeploymentCard {
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
-    /// When the `DYN_TOKENIZER=fastokens` env var is set, uses `fastokens` for encoding
+    /// Env-var controls:
+    /// - `DYN_TOKENIZER=fastokens` — use `fastokens` as the encoding backend
+    /// - `DYN_TOKENIZER_CACHE=1` — wrap the tokenizer in an L1 prefix cache that records
+    ///   tokenizations at special-token boundaries (massive speed-up for shared chat
+    ///   prefixes; default off, zero cost when unset)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 50 MB)
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = match std::env::var("DYN_TOKENIZER") {
             Ok(v) if v == "fastokens" => true,
@@ -440,35 +933,25 @@ impl ModelDeploymentCard {
             Err(_) => false,
         };
 
-        match &self.tokenizer {
+        let cache_enabled = matches!(
+            std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref(),
+            Some("1")
+        );
+        let cache_bytes = std::env::var("DYN_TOKENIZER_CACHE_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(50 * 1024 * 1024);
+
+        let inner: Arc<dyn crate::tokenizers::traits::Tokenizer> = match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
                 })?;
 
-                // Try fastokens backend if requested
-                if use_fast {
-                    if let Some(path_str) = p.to_str() {
-                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
-                            Ok(fast) => {
-                                tracing::info!("Using fastokens tokenizer backend");
-                                return Ok(crate::tokenizers::Tokenizer::from(Arc::new(fast)));
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    %e,
-                                    "Failed to load fastokens, falling back to HuggingFace"
-                                );
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            path = %p.display(),
-                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
-                        );
-                    }
-                }
-
+                // Load HF first — needed both for fallback and (if cache is on) for
+                // extracting special-token strings. `FastTokenizer` does not re-expose
+                // `get_added_tokens_decoder`, so we must capture specials from the raw
+                // HF tokenizer before any swap.
                 let hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
@@ -479,9 +962,65 @@ impl ModelDeploymentCard {
                     })
                     .map_err(anyhow::Error::msg)
                     .with_context(|| p.display().to_string())?;
-                Ok(crate::tokenizers::Tokenizer::from(Arc::new(
-                    crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf),
-                )))
+
+                // Hold onto specials before any move of `hf`.
+                let specials: Vec<String> = if cache_enabled {
+                    extract_hf_special_tokens(&hf)
+                } else {
+                    Vec::new()
+                };
+
+                // Pick the inner backend.
+                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
+                    if let Some(path_str) = p.to_str() {
+                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                            Ok(fast) => {
+                                tracing::info!("Using fastokens tokenizer backend");
+                                Arc::new(fast)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    %e,
+                                    "Failed to load fastokens, falling back to HuggingFace"
+                                );
+                                Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(
+                                    hf,
+                                ))
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            path = %p.display(),
+                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
+                        );
+                        Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                    }
+                } else {
+                    Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                };
+
+                if cache_enabled {
+                    tracing::info!(
+                        cache_bytes,
+                        specials = specials.len(),
+                        "wrapping tokenizer in L1 prefix cache",
+                    );
+                    Arc::new(
+                        crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
+                            .with_observer(
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
+                                        .inc();
+                                }),
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
+                                        .inc();
+                                }),
+                            ),
+                    )
+                } else {
+                    raw
+                }
             }
             Some(TokenizerKind::TikTokenModel(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
@@ -494,7 +1033,31 @@ impl ModelDeploymentCard {
                     .with_context(|| {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
-                Ok(crate::tokenizers::Tokenizer::from(Arc::new(tokenizer)))
+
+                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
+                if cache_enabled {
+                    // Empty specials -> L1 always misses; wrapper is a thin passthrough.
+                    // Special-token extraction for tiktoken is out of scope for v1.
+                    tracing::info!(
+                        cache_bytes,
+                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 will not hit until tiktoken special-token extraction is added)",
+                    );
+                    Arc::new(
+                        crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
+                            .with_observer(
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
+                                        .inc();
+                                }),
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
+                                        .inc();
+                                }),
+                            ),
+                    )
+                } else {
+                    raw
+                }
             }
             None => {
                 anyhow::bail!(
@@ -506,7 +1069,9 @@ impl ModelDeploymentCard {
                     self.display_name
                 );
             }
-        }
+        };
+
+        Ok(crate::tokenizers::Tokenizer::from(inner))
     }
 
     pub(crate) fn set_source_path(&mut self, source_path: PathBuf) {
@@ -538,74 +1103,156 @@ impl ModelDeploymentCard {
         matches!(self.model_input, ModelInput::Tokens)
     }
 
-    /// Walk populated metadata `CheckedFile` slots in deterministic
-    /// order: model_info, tokenizer, prompt_formatter,
-    /// chat_template_file, gen_config.
-    pub fn iter_metadata_files(&self) -> Vec<&CheckedFile> {
-        let mut out: Vec<&CheckedFile> = Vec::with_capacity(5);
-        if let Some(m) = self.model_info.as_ref() {
-            match m {
-                ModelInfoType::HfConfigJson(cf) => out.push(cf),
-            }
+    /// Iterate populated metadata slots in deterministic order:
+    /// model_info, tokenizer, prompt_formatter, chat_template_file,
+    /// gen_config. Each entry is `(file, is_custom)` — `is_custom` is
+    /// only ever true for operator-supplied chat templates, which
+    /// can't fall back to HF.
+    ///
+    /// TODO(gh-8749): external preprocessors (vllm/sglang) read
+    /// `from_pretrained(slug_dir)` and may expect siblings outside the
+    /// typed slots — `preprocessor_config.json`, `special_tokens_map.json`,
+    /// `added_tokens.json`, etc. Add an `extra_files: Vec<CheckedFile>`
+    /// MDC field so the worker can advertise everything in its model dir
+    /// minus weights. Frontend pipeline is already generic over slot count.
+    pub fn iter_metadata_files(&self) -> Vec<(&CheckedFile, bool)> {
+        let mut out: Vec<(&CheckedFile, bool)> = Vec::with_capacity(5);
+        if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_ref() {
+            out.push((cf, false));
         }
-        if let Some(t) = self.tokenizer.as_ref() {
-            match t {
-                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
-                    out.push(cf)
-                }
-            }
+        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
+            self.tokenizer.as_ref()
+        {
+            out.push((cf, false));
         }
         if let Some(p) = self.prompt_formatter.as_ref() {
-            out.push(pf_checked_file(p));
+            out.push((pf_checked_file(p), p.is_custom()));
         }
         if let Some(c) = self.chat_template_file.as_ref() {
-            out.push(pf_checked_file(c));
+            out.push((pf_checked_file(c), c.is_custom()));
         }
-        if let Some(g) = self.gen_config.as_ref() {
-            match g {
-                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
-            }
+        if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = self.gen_config.as_ref() {
+            out.push((cf, false));
         }
         out
     }
 
-    /// Mutable variant of [`Self::iter_metadata_files`].
-    pub fn iter_metadata_files_mut(&mut self) -> Vec<&mut CheckedFile> {
-        let mut out: Vec<&mut CheckedFile> = Vec::with_capacity(5);
-        if let Some(m) = self.model_info.as_mut() {
-            match m {
-                ModelInfoType::HfConfigJson(cf) => out.push(cf),
-            }
+    /// Mutable mirror of [`Self::iter_metadata_files`].
+    pub fn iter_metadata_files_mut(&mut self) -> Vec<(&mut CheckedFile, bool)> {
+        let mut out: Vec<(&mut CheckedFile, bool)> = Vec::with_capacity(5);
+        if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_mut() {
+            out.push((cf, false));
         }
-        if let Some(t) = self.tokenizer.as_mut() {
-            match t {
-                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
-                    out.push(cf)
+        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
+            self.tokenizer.as_mut()
+        {
+            out.push((cf, false));
+        }
+        if let Some(p) = self.prompt_formatter.as_mut() {
+            let is_custom = p.is_custom();
+            out.push((pf_checked_file_mut(p), is_custom));
+        }
+        if let Some(c) = self.chat_template_file.as_mut() {
+            let is_custom = c.is_custom();
+            out.push((pf_checked_file_mut(c), is_custom));
+        }
+        if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = self.gen_config.as_mut() {
+            out.push((cf, false));
+        }
+        out
+    }
+
+    async fn resolve_metadata_files(
+        &mut self,
+        local_model_path: Option<&Path>,
+    ) -> anyhow::Result<()> {
+        let source = self.source_path().to_string();
+        let mdcsum = self.mdcsum().to_string();
+        let blobs = mdc_blobs_dir()?;
+        let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
+
+        let entries: Vec<(String, CheckedFile)> = self
+            .iter_metadata_files()
+            .into_iter()
+            .map(|(cf, is_custom)| {
+                Ok((
+                    checked_file_uri(cf, &source, local_model_path, is_custom)?,
+                    cf.clone(),
+                ))
+            })
+            .collect::<anyhow::Result<_>>()?;
+
+        // Pre-resolve hf:// repos once per unique repo; otherwise the
+        // resolve loop would call hub::from_hf N times for one model.
+        let mut hf_snapshots: std::collections::HashMap<String, PathBuf> =
+            std::collections::HashMap::new();
+        for (uri, _) in &entries {
+            if uri.starts_with("hf://") {
+                let (repo, _) = parse_hf_uri(uri)?;
+                if let std::collections::hash_map::Entry::Vacant(e) = hf_snapshots.entry(repo) {
+                    let repo_name = e.key().clone();
+                    let snap = crate::hub::from_hf(&repo_name, /* ignore_weights = */ true)
+                        .await
+                        .with_context(|| format!("hub::from_hf({repo_name})"))?;
+                    e.insert(snap);
                 }
             }
         }
-        if let Some(p) = self.prompt_formatter.as_mut() {
-            out.push(pf_checked_file_mut(p));
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .context("building http client for metadata fetch")?;
+        for (uri, expected) in &entries {
+            let filename = uri_basename(uri)?;
+            // Hash is validated at MDC deserialize; safe as a path component.
+            let blake3_hex = expected.checksum().hash();
+            let blob = blobs.join(blake3_hex);
+            tracing::debug!(filename = %filename, uri = %uri, blake3 = %blake3_hex, "resolving");
+            resolve_uri(&client, uri, expected, &blob, &hf_snapshots).await?;
+            symlink_force(&blob, &slug_dir.join(&filename))?;
         }
-        if let Some(c) = self.chat_template_file.as_mut() {
-            out.push(pf_checked_file_mut(c));
-        }
-        if let Some(g) = self.gen_config.as_mut() {
-            match g {
-                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
+        tracing::debug!(
+            display_name = %self.display_name,
+            artifact_count = entries.len(),
+            cache_root = %mdc_cache_root().display(),
+            "resolved model metadata files",
+        );
+
+        // Harvest non-weight siblings (preprocessor_config.json, …) from
+        // every snapshot dir we touched. Typed-slot basenames are passed
+        // through so the harvest never overwrites them. No-op for `http://`.
+        let typed_filenames: std::collections::HashSet<String> = entries
+            .iter()
+            .filter_map(|(uri, _)| uri_basename(uri).ok())
+            .collect();
+        let mut snapshot_dirs: std::collections::HashSet<PathBuf> =
+            hf_snapshots.values().cloned().collect();
+        for (uri, _) in &entries {
+            if let Some(parent) = file_uri_parent(uri) {
+                snapshot_dirs.insert(parent);
             }
         }
-        out
-    }
-
-    /// Download the files this card needs to work: config.json, tokenizer.json, etc.
-    pub async fn download_config(&mut self) -> anyhow::Result<()> {
-        if self.has_local_files() {
-            tracing::trace!("All model config is local, not downloading");
-            return Ok(());
+        for snap in &snapshot_dirs {
+            harvest_siblings(snap, &slug_dir, &typed_filenames)?;
         }
 
-        // For TensorBased models, config files are not used - they handle everything in the backend
+        // Pass 3: rewrite cf.path to the cache symlink so downstream
+        // tokenizer/config loaders read from a verified location.
+        for (cf, _) in self.iter_metadata_files_mut() {
+            cf.update_dir(&slug_dir);
+        }
+        Ok(())
+    }
+
+    /// Resolve every metadata `CheckedFile` through the cache: fetch,
+    /// blake3-verify, content-address. `local_model_path` (frontend's
+    /// `--model-path`) supplies a fallback directory for `file://`
+    /// slots whose worker-published location is unreachable.
+    pub async fn download_config(&mut self, local_model_path: Option<&Path>) -> anyhow::Result<()> {
+        // TensorBased models don't use metadata files — backend handles
+        // everything.
         if self.model_type.supports_tensor() {
             tracing::debug!(
                 display_name = %self.display_name,
@@ -613,12 +1260,10 @@ impl ModelDeploymentCard {
             );
             return Ok(());
         }
-
-        let ignore_weights = true;
-        let local_path = crate::hub::from_hf(self.source_path(), ignore_weights).await?;
-
-        self.update_dir(&local_path);
-        Ok(())
+        // Single resolve pipeline: every CheckedFile (URL or local
+        // path, existing or missing) flows through resolve_uri,
+        // blake3-verifies, lands in the MDC cache. No new/legacy split.
+        self.resolve_metadata_files(local_model_path).await
     }
 
     /// Re-write all the local disk paths as a URL. Do this before publishing the MDC.
@@ -687,63 +1332,6 @@ impl ModelDeploymentCard {
             }
         }
         Ok(())
-    }
-
-    /// Are all the files we need (tokenizer.json, etc) available locally?
-    fn has_local_files(&self) -> bool {
-        let has_model_info = self
-            .model_info
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-        let has_tokenizer = self
-            .tokenizer
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-        let has_prompt_formatter = self
-            .prompt_formatter
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-        let has_chat_template_file = self
-            .chat_template_file
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-        let has_gen_config = self
-            .gen_config
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-
-        has_model_info
-            && has_tokenizer
-            && has_prompt_formatter
-            && has_chat_template_file
-            && has_gen_config
-    }
-
-    /// Update the directory for files like tokenizer.json be in here.
-    fn update_dir(&mut self, dir: &Path) {
-        if let Some(model_info) = self.model_info.as_mut() {
-            model_info.update_dir(dir);
-        }
-        if let Some(tk) = self.tokenizer.as_mut() {
-            tk.update_dir(dir);
-        }
-        if let Some(pf) = self.prompt_formatter.as_mut() {
-            pf.update_dir(dir);
-        }
-        if let Some(gc) = self.gen_config.as_mut() {
-            gc.update_dir(dir);
-        }
-        // If it's a custom chat template we didn't download it, so leave the path untouched
-        if let Some(ct) = self.chat_template_file.as_mut()
-            && !ct.is_custom()
-        {
-            ct.update_dir(dir);
-        }
     }
 
     /// Creates a ModelDeploymentCard from a local directory path.
@@ -846,6 +1434,8 @@ impl ModelDeploymentCard {
             migration_limit: 0,
             model_type: Default::default(),  // set later
             model_input: Default::default(), // set later
+            worker_type: Default::default(), // set later
+            needs: Default::default(),       // set later
             lora: None,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
@@ -1299,7 +1889,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 mod tests {
     use super::HFConfig;
     use std::collections::HashSet;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     pub fn test_config_json_llama3() -> anyhow::Result<()> {
@@ -1352,5 +1942,490 @@ mod tests {
             "Should contain tokenizer eos_token (248046 <|im_end|>)"
         );
         Ok(())
+    }
+
+    fn test_cf(uri: &str, size: u64) -> super::CheckedFile {
+        serde_json::from_value(serde_json::json!({
+            "path": uri,
+            "checksum": format!("blake3:{}", "0".repeat(64)),
+            "size": size,
+        }))
+        .unwrap()
+    }
+
+    async fn assert_resolve_uri_rejects(body: &[u8], declared_size: u64, expected_err: &str) {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/f")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("f");
+        let url = format!("{}/f", server.url());
+        let result = super::resolve_uri(
+            &reqwest::Client::new(),
+            &url,
+            &test_cf(&url, declared_size),
+            &dest,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        let msg = result.expect_err("expected error").to_string();
+        assert!(
+            msg.contains(expected_err),
+            "want `{expected_err}` in: {msg}"
+        );
+        assert!(!dest.exists(), "no file should be written");
+    }
+
+    #[tokio::test]
+    async fn resolve_uri_http_rejects_checksum_mismatch() {
+        assert_resolve_uri_rejects(b"hello world", 11, "checksum mismatch").await;
+    }
+
+    #[tokio::test]
+    async fn resolve_uri_http_rejects_oversize_body() {
+        assert_resolve_uri_rejects(b"x".repeat(35).as_slice(), 8, "exceeds cap").await;
+    }
+
+    /// Cache hit re-verifies the on-disk blob; mismatch → unlink + refetch.
+    #[tokio::test]
+    async fn resolve_uri_refetches_on_cache_hit_mismatch() {
+        let body: &[u8] = b"valid-bytes-for-blob";
+        let dir = tempfile::tempdir().unwrap();
+        let valid = dir.path().join("valid");
+        std::fs::write(&valid, body).unwrap();
+        let cf = super::CheckedFile::from_disk(&valid).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/f")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let url = format!("{}/f", server.url());
+
+        let dest = dir.path().join("blob");
+        std::fs::write(&dest, b"corrupt-bytes").unwrap();
+
+        super::resolve_uri(
+            &reqwest::Client::new(),
+            &url,
+            &cf,
+            &dest,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("resolve_uri should refetch and succeed");
+
+        let after = std::fs::read(&dest).unwrap();
+        assert_eq!(after, body, "blob should have been replaced");
+    }
+
+    /// `parse_hf_uri` round-trip — `hf://repo/filename` parses into
+    /// `(repo, filename)` and rejects malformed inputs.
+    #[test]
+    fn parse_hf_uri_roundtrip() {
+        let (repo, filename) = super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/tokenizer.json").unwrap();
+        assert_eq!(repo, "Qwen/Qwen3-0.6B");
+        assert_eq!(filename, "tokenizer.json");
+
+        assert!(super::parse_hf_uri("hf://just-a-name").is_err());
+        assert!(super::parse_hf_uri("https://example.com/x").is_err());
+    }
+
+    /// HF-cache-style snapshot of TinyLlama: per-file symlinks into a
+    /// sibling `blobs/<hash>` dir. The symlink layout is what triggers
+    /// the canonicalize trap `resolve_metadata_files` has to handle.
+    fn hf_cache_fixture(workspace: &Path) -> anyhow::Result<PathBuf> {
+        use std::hash::{Hash, Hasher};
+        let snapshot = workspace.join("snapshots/abc");
+        let blobs = workspace.join("blobs");
+        std::fs::create_dir_all(&snapshot)?;
+        std::fs::create_dir_all(&blobs)?;
+        let src =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        for entry in std::fs::read_dir(&src)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            name.to_string_lossy().hash(&mut hasher);
+            let blob = format!("blob-{:x}", hasher.finish());
+            std::fs::copy(entry.path(), blobs.join(&blob))?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(
+                Path::new("../..").join("blobs").join(&blob),
+                snapshot.join(name),
+            )?;
+        }
+        Ok(snapshot)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn download_config_pipelines_local_files_through_cache() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let snapshot = hf_cache_fixture(workspace.path())?;
+        let home = tempfile::tempdir()?;
+        let home_path = home.path().to_path_buf();
+
+        temp_env::async_with_vars([("HOME", Some(home.path()))], async {
+            let mut mdc = super::ModelDeploymentCard::load_from_disk(&snapshot, None)?;
+            let slug = mdc.slug.clone();
+            let mdcsum = mdc.mdcsum().to_string();
+            mdc.download_config(None).await?;
+
+            let blobs = home_path.join(".cache/dynamo/mdc/blobs");
+            let snap = home_path
+                .join(".cache/dynamo/mdc/by-slug")
+                .join(slug.to_string())
+                .join(&mdcsum);
+
+            assert!(snap.join("config.json").exists());
+            assert!(snap.join("tokenizer.json").exists());
+            assert!(snap.join("generation_config.json").exists());
+
+            // Sibling harvest: TinyLlama_v1.1 fixture ships
+            // `special_tokens_map.json` and `tokenizer.model` outside the
+            // typed slots — both must land in slug_dir for
+            // `from_pretrained()` to see a complete model dir.
+            assert!(snap.join("special_tokens_map.json").exists());
+            assert!(snap.join("tokenizer.model").exists());
+
+            for (cf, _) in mdc.iter_metadata_files() {
+                let path = cf.path().expect("post-download local path");
+                assert!(path.starts_with(&snap));
+                assert!(std::fs::canonicalize(path)?.starts_with(&blobs));
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+    }
+
+    /// Build a `CheckedFile` whose wire `path` field is `repr` — parses
+    /// as a URL when `repr` has a scheme, otherwise as a `PathBuf`.
+    fn cf_for(repr: &str) -> super::CheckedFile {
+        serde_json::from_value(serde_json::json!({
+            "path": repr,
+            "checksum": format!("blake3:{}", "0".repeat(64)),
+            "size": 1u64,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn checked_file_uri_passes_through_remote_urls() {
+        let tmp = tempfile::tempdir().unwrap();
+        for url in [
+            "http://worker:8080/v1/metadata/slug/base/config.json",
+            "hf://Qwen/Qwen3-0.6B/config.json",
+        ] {
+            let got =
+                super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
+                    .unwrap();
+            assert_eq!(got, url);
+        }
+    }
+
+    #[test]
+    fn checked_file_uri_uses_local_model_path_when_worker_path_unreachable() {
+        let cf = cf_for("/nonexistent/worker/path/config.json");
+        let local = tempfile::tempdir().unwrap();
+        let local_cfg = local.path().join("config.json");
+        std::fs::write(&local_cfg, b"").unwrap();
+        let got =
+            super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
+        assert_eq!(
+            got,
+            url::Url::from_file_path(&local_cfg).unwrap().to_string()
+        );
+    }
+
+    /// Rung 4: when worker path is missing and `--model-path` doesn't
+    /// supply the basename, synthesize hf://; if `is_custom`, error
+    /// with a clear operator-action message instead (HF doesn't host
+    /// custom slots).
+    #[test]
+    fn checked_file_uri_rung_4_hf_fallback_or_custom_error() {
+        let cf = cf_for("/nonexistent/worker/path/template.jinja");
+
+        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
+        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/template.jinja");
+
+        let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true)
+            .expect_err("custom slot must error instead of falling back to HF");
+        let msg = err.to_string();
+        assert!(msg.contains("template.jinja"), "wrong error: {msg}");
+        assert!(msg.contains("custom"), "wrong error: {msg}");
+        assert!(
+            msg.contains("--model-path") || msg.contains("shared mount"),
+            "wrong error: {msg}"
+        );
+    }
+
+    /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
+    /// must still unlink the tmp file via the [`TmpGuard`] drop path.
+    #[tokio::test]
+    async fn stage_and_rename_unlinks_tmp_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        let leaked_before: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(leaked_before.is_empty(), "tempdir starts empty");
+
+        let fut = super::stage_and_rename(&dest, |tmp| async move {
+            std::fs::write(&tmp, b"partial").unwrap();
+            // Mimic a worker abort mid-fetch: yield, then never resume.
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        // Drop the future before it can complete (cancellation).
+        {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(50), fut).await;
+        }
+
+        // Give Drop a moment to run.
+        tokio::task::yield_now().await;
+
+        let leaked_after: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
+        assert!(
+            leaked_after.is_empty(),
+            "TmpGuard should have unlinked the tmp on cancel; leaked: {leaked_after:?}"
+        );
+        assert!(!dest.exists(), "dest must not exist after cancel");
+    }
+
+    /// Brings in the sibling that `lightseek-mm` needs.
+    #[test]
+    fn harvest_brings_in_non_weight_siblings() -> anyhow::Result<()> {
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+        std::fs::write(snap.path().join("preprocessor_config.json"), b"pre")?;
+        std::fs::write(snap.path().join("tokenizer.model"), b"sp")?;
+        // `.safetensors.index.json` is `.json`, not a weight — must be kept.
+        std::fs::write(snap.path().join("model.safetensors.index.json"), b"idx")?;
+        super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
+        assert!(slug.path().join("preprocessor_config.json").exists());
+        assert!(slug.path().join("tokenizer.model").exists());
+        assert!(slug.path().join("model.safetensors.index.json").exists());
+        Ok(())
+    }
+
+    /// Weight blobs stay out so the metadata cache doesn't bloat.
+    #[test]
+    fn harvest_skips_weight_blobs() -> anyhow::Result<()> {
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
+            std::fs::write(snap.path().join(weight), b"WEIGHTS")?;
+        }
+        super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
+        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
+            assert!(!slug.path().join(weight).exists());
+        }
+        Ok(())
+    }
+
+    /// Missing snapshot dir is best-effort: no error, no work.
+    #[test]
+    fn harvest_tolerates_missing_snapshot() -> anyhow::Result<()> {
+        let slug = tempfile::tempdir()?;
+        super::harvest_siblings(
+            &slug.path().join("does-not-exist"),
+            slug.path(),
+            &Default::default(),
+        )?;
+        Ok(())
+    }
+
+    /// Names in `typed_filenames` survive a harvest pass even when the
+    /// snapshot dir contains a different file at the same basename — the
+    /// resolve loop's typed slots own those.
+    #[test]
+    fn harvest_preserves_typed_filenames() -> anyhow::Result<()> {
+        let blob_dir = tempfile::tempdir()?;
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+
+        // Typed slot: blob in the dynamo cache; slug_dir links to it.
+        let typed_blob = blob_dir.path().join("config-blob");
+        std::fs::write(&typed_blob, b"typed-slot-content")?;
+        super::symlink_force(&typed_blob, &slug.path().join("config.json"))?;
+
+        // Snapshot dir has a different `config.json` — the stale-payload
+        // case the harvest must NOT import over the typed slot.
+        std::fs::write(snap.path().join("config.json"), b"STALE-DO-NOT-IMPORT")?;
+        std::fs::write(snap.path().join("special_tokens_map.json"), b"st")?;
+
+        let typed_filenames: std::collections::HashSet<String> =
+            ["config.json".to_string()].into_iter().collect();
+        super::harvest_siblings(snap.path(), slug.path(), &typed_filenames)?;
+
+        // Content equality is portable: `symlink_force` degrades to a copy
+        // on non-Unix, so we can't depend on `is_symlink()`.
+        assert_eq!(
+            std::fs::read(slug.path().join("config.json"))?,
+            b"typed-slot-content"
+        );
+        assert!(slug.path().join("special_tokens_map.json").exists());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod worker_type_tests {
+    //! Tests for the `worker_type` / `needs` fields on `ModelDeploymentCard`.
+    //! See `docs/proposals/health-disagg-readiness.md`.
+
+    use super::*;
+    use crate::worker_type::WorkerType;
+
+    #[test]
+    fn default_card_has_no_worker_type_and_no_needs() {
+        let card = ModelDeploymentCard::with_name_only("test-model");
+        assert_eq!(card.worker_type, None);
+        assert!(card.needs.is_empty());
+    }
+
+    #[test]
+    fn serde_round_trip_default() {
+        let card = ModelDeploymentCard::with_name_only("test-model");
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, None);
+        assert!(back.needs.is_empty());
+    }
+
+    #[test]
+    fn serde_round_trip_decode_needs_prefill() {
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Decode);
+        card.needs = vec![vec![WorkerType::Prefill]];
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, Some(WorkerType::Decode));
+        assert_eq!(back.needs, vec![vec![WorkerType::Prefill]]);
+    }
+
+    #[test]
+    fn serde_round_trip_aggregated_needs_encode() {
+        // E-PD pattern: an aggregated worker with --route-to-encoder.
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.needs = vec![vec![WorkerType::Encode]];
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, Some(WorkerType::Aggregated));
+        assert_eq!(back.needs, vec![vec![WorkerType::Encode]]);
+    }
+
+    #[test]
+    fn serde_round_trip_encode_needs_dnf() {
+        // Encode worker: needs (Prefill AND Decode) OR Aggregated.
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Encode);
+        card.needs = vec![
+            vec![WorkerType::Prefill, WorkerType::Decode],
+            vec![WorkerType::Aggregated],
+        ];
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, Some(WorkerType::Encode));
+        assert_eq!(back.needs.len(), 2);
+        assert_eq!(back.needs[0], vec![WorkerType::Prefill, WorkerType::Decode]);
+        assert_eq!(back.needs[1], vec![WorkerType::Aggregated]);
+    }
+
+    /// mdcsum must cover `worker_type` and `needs` so that a rolling update
+    /// which changes only topology metadata produces a different checksum,
+    /// triggering the drain-and-redeploy path in `watcher.rs` instead of
+    /// silently joining an existing WorkerSet with a stale card.
+    ///
+    /// Note: `mdcsum()` caches its result on first call via `OnceLock`, so
+    /// each case builds a fresh card rather than mutating one and re-hashing.
+    #[test]
+    fn mdcsum_covers_worker_type_and_needs() {
+        fn hash(worker_type: Option<WorkerType>, needs: Vec<Vec<WorkerType>>) -> String {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.worker_type = worker_type;
+            card.needs = needs;
+            card.mdcsum().to_string()
+        }
+
+        let baseline = hash(None, vec![]);
+        let prefill_only = hash(Some(WorkerType::Prefill), vec![]);
+        let decode_only = hash(Some(WorkerType::Decode), vec![]);
+        assert_ne!(baseline, prefill_only, "worker_type must change mdcsum");
+        assert_ne!(
+            prefill_only, decode_only,
+            "swapping worker_type must change mdcsum"
+        );
+
+        let prefill_with_decode = hash(Some(WorkerType::Prefill), vec![vec![WorkerType::Decode]]);
+        let prefill_with_decode_encode = hash(
+            Some(WorkerType::Prefill),
+            vec![vec![WorkerType::Decode, WorkerType::Encode]],
+        );
+        assert_ne!(
+            prefill_only, prefill_with_decode,
+            "adding needs must change mdcsum"
+        );
+        assert_ne!(
+            prefill_with_decode, prefill_with_decode_encode,
+            "extending an AND-set must change mdcsum"
+        );
+
+        let encode_dnf = hash(
+            Some(WorkerType::Encode),
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        );
+        let encode_single_alt = hash(
+            Some(WorkerType::Encode),
+            vec![vec![WorkerType::Prefill, WorkerType::Decode]],
+        );
+        assert_ne!(
+            encode_dnf, encode_single_alt,
+            "adding an OR alternative must change mdcsum"
+        );
+    }
+
+    /// Serde back-compat: an old-format card (no `worker_type` / `needs`
+    /// keys in the JSON payload) must deserialize with both fields defaulted
+    /// (`None` and empty `Vec`) — this is an attribute of the
+    /// `#[serde(default)]` contract and is independent of how readers
+    /// subsequently interpret the missing values. Construction of the test
+    /// payload strips the new keys from a fresh serialization so the test
+    /// tracks schema drift rather than a hand-rolled JSON literal.
+    #[test]
+    fn backward_compat_missing_fields_default_to_none_and_empty() {
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Prefill);
+        card.needs = vec![vec![WorkerType::Decode]];
+        let mut value: serde_json::Value = serde_json::to_value(&card).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        assert!(
+            obj.remove("worker_type").is_some(),
+            "precondition: serialized card must carry worker_type"
+        );
+        assert!(
+            obj.remove("needs").is_some(),
+            "precondition: serialized card must carry needs"
+        );
+        let stripped = serde_json::to_string(&value).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(back.worker_type, None);
+        assert!(back.needs.is_empty());
     }
 }

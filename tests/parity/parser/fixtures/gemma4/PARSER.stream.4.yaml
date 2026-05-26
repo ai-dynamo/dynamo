@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: gemma4
+model_label: Gemma 4
+mode: stream
+cases:
+  PARSER.stream.4.a:
+    description: Truncated stream terminates after a complete in-flight tool-call body
+    ref: derived from PARSER.batch.5.a
+    chunks:
+    - delta_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+        reason: SGLang recovers a call before the required `<tool_call|>` end marker; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "NYC'
+        normal_text: ''
+        reason: vLLM emits partial arguments before the required `<tool_call|>` end marker; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.
+  PARSER.stream.4.b:
+    description: Stream terminates mid-call body before the in-flight argument payload is complete
+    ref: derived from PARSER.batch.5.c
+    chunks:
+    - delta_text: <|tool_call>call:get_w
+    - delta_text: eather{location:<|"|>N
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: ''
+        reason: SGLang emits the function name from a mid-body truncated call; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "N'
+        normal_text: ''
+        reason: vLLM emits partial arguments from a mid-body truncated call; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.

@@ -38,6 +38,38 @@ fn detect_content_array_usage(env: &Environment) -> bool {
     out_array.contains("template_test") && !out_string.contains("template_test")
 }
 
+/// Picks an image-placeholder template by sniffing the chat template source
+/// for distinctive role/end markers.
+///
+/// Returned string is a format with `{n}` standing in for the 1-based image
+/// index (numbered Phi-3 placeholders) or just a static placeholder (LLaVA).
+/// Returns `None` when we don't know a flatten strategy for this template —
+/// callers leave the mixed-content array untouched in that case.
+///
+/// The detection is intentionally narrow: only families whose chat templates
+/// concatenate `message.content` with strings (and therefore can't render a
+/// content array) need this. Qwen-VL / LLaVA-NeXT iterate `content` natively
+/// and don't reach the flatten path at all.
+fn detect_image_placeholder_template(env: &Environment) -> Option<&'static str> {
+    let src = env
+        .get_template("default")
+        .ok()
+        .map(|t| t.source().to_string())
+        .unwrap_or_default();
+    // Phi-3-vision template constructs `<|user|>` at runtime via
+    // `'<|' + message['role'] + '|>'`, so the literal `<|user|>` never
+    // appears in the source. The literals that ARE in the source are
+    // `<|end|>` (end-of-turn) and `<|assistant|>` (generation prompt).
+    if src.contains("<|end|>") && src.contains("<|assistant|>") {
+        return Some("<|image_{n}|>");
+    }
+    // LLaVA-1.5: USER:/ASSISTANT: convention with `+ message['content']`.
+    if src.contains("USER:") && src.contains("ASSISTANT:") {
+        return Some("<image>");
+    }
+    None
+}
+
 /// Remove known non-standard Jinja2 tags from chat templates
 ///
 /// Some models use custom Jinja2 extensions that minijinja doesn't recognize. These tags
@@ -161,11 +193,40 @@ impl HfTokenizerConfigJsonFormatter {
         // Detect at model load time whether this template requires content arrays
         let requires_content_arrays = detect_content_array_usage(&env);
 
+        // Pick a per-family placeholder for the mixed-content → string flatten
+        // path. `None` is the safe default — the existing behavior in
+        // `may_be_fix_msg_content` leaves mixed arrays untouched.
+        let image_placeholder_template = if requires_content_arrays {
+            None
+        } else {
+            detect_image_placeholder_template(&env)
+        };
+
         // Detect if the template natively handles reasoning_content (e.g. Nemotron, Qwen3).
         // If so, we must NOT inject <think> blocks — the template does it itself.
         let template_handles_reasoning = env
             .templates()
             .any(|(_, tmpl)| tmpl.source().contains("reasoning_content"));
+
+        // Detect if a given template branches on `tool_call.arguments is string` (Qwen3, Hermes).
+        // Such templates render a JSON-string `arguments` field verbatim; if we pre-parse
+        // it into an object, the `tojson` branch fires instead and emits compact JSON,
+        // breaking byte-level append-only across multi-step tool-use turns. The check is
+        // per-template (default vs tool_use) because in HF configs they can differ — and
+        // because `arguments is string` only appears inside tool-call iteration, the flag
+        // is naturally tied to the `tool_use` template in practice. It is also
+        // tool_calls-specific: legacy `function_call.arguments` lives outside this branch
+        // and must still be normalized.
+        let template_handles_args_string = |name: &str| -> bool {
+            env.templates()
+                .find(|(n, _)| *n == name)
+                .map(|(_, tmpl)| tmpl.source().contains("arguments is string"))
+                .unwrap_or(false)
+        };
+        let default_template_handles_tool_calls_arguments_string =
+            template_handles_args_string("default");
+        let tool_use_template_handles_tool_calls_arguments_string =
+            template_handles_args_string("tool_use");
 
         Ok(HfTokenizerConfigJsonFormatter {
             env,
@@ -175,6 +236,9 @@ impl HfTokenizerConfigJsonFormatter {
             requires_content_arrays,
             exclude_tools_when_tool_choice_none,
             template_handles_reasoning,
+            image_placeholder_template,
+            default_template_handles_tool_calls_arguments_string,
+            tool_use_template_handles_tool_calls_arguments_string,
         })
     }
 }
@@ -214,5 +278,33 @@ mod tests {
         let template = "Start {% generation %}Part 1{% endgeneration %} middle {% generation %}Part 2{% endgeneration %}";
         let result = remove_known_non_jinja2_tags(template);
         assert_eq!(result, "Start Part 1 middle Part 2");
+    }
+
+    #[test]
+    fn test_minijinja_parses_midchain_dotted_integer_lookup() {
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": r#"{{ m.content.0.type }} {{ "1.5.10" }}"#,
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        let result = formatter
+            .env
+            .get_template("default")
+            .unwrap()
+            .render(context! {
+                m => json!({
+                    "content": [
+                        {
+                            "type": "tool_reference"
+                        }
+                    ]
+                })
+            })
+            .unwrap();
+
+        assert_eq!(result, "tool_reference 1.5.10");
     }
 }

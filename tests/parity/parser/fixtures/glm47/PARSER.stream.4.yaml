@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: glm47
+model_label: GLM 5.1
+mode: stream
+cases:
+  PARSER.stream.4.a:
+    description: Truncated stream terminates after a complete in-flight tool-call body
+    ref: derived from PARSER.batch.5.a
+    chunks:
+    - delta_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "NYC"'
+        normal_text: ''
+        reason: >-
+          Impl-defined recovery for PARSER.batch.5-class missing end-token
+          (per `tests/parity/README.md` "permanent divergences"). SGLang's
+          XML-to-JSON state machine
+          (`glm47_moe_detector.py:377-407`) closes the incremental JSON
+          string with `"` when `</arg_value>` is matched but emits the
+          closing `}` only from `_finalize_tool_call` on `</tool_call>`
+          (line 729); on EOF neither flush path runs so the streamed
+          args buffer is shipped as `{"location": "NYC"` (open object).
+          Dynamo drops the truncated call instead of emitting a
+          malformed-JSON args payload (`glm47_parser.rs:194-215`,
+          `allow_eof_recovery=false` production default).
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "NYC"'
+        normal_text: ''
+        reason: >-
+          Impl-defined recovery for PARSER.batch.5-class missing end-token
+          (per `tests/parity/README.md` "permanent divergences"). vLLM's
+          `_build_args_json_so_far` (`glm4_moe_tool_parser.py:331-417`)
+          builds the args JSON from completed `<arg_key>/<arg_value>`
+          pairs and only appends the closing `}` when `is_complete=True`,
+          which `_extract_tool_call_regions` (line 293) sets after
+          observing `</tool_call>`. On EOF mid-`<tool_call>`,
+          `is_complete=False`, so the streaming diff ships
+          `{"location": "NYC"` with no closing brace. Dynamo drops the
+          truncated call (`glm47_parser.rs:194-215`,
+          `allow_eof_recovery=false` production default). Matches
+          SGLang.
+  PARSER.stream.4.b:
+    description: Stream terminates mid-call body before the in-flight argument payload is complete
+    ref: derived from PARSER.batch.5.c
+    chunks:
+    - delta_text: <tool_call>get_weather<arg_key
+    - delta_text: '>location</arg_key><arg_value>N'
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "N'
+        normal_text: ''
+        reason: >-
+          Impl-defined recovery for PARSER.batch.5-class missing end-token
+          (per `tests/parity/README.md` "permanent divergences"). The
+          stream ends mid-`<arg_value>` with `N` and never delivers
+          `</arg_value>` or `</tool_call>`; SGLang's state machine
+          (`glm47_moe_detector.py:419-428`) has already opened the JSON
+          string and emitted `N` incrementally, but neither the closing
+          `"` (gated on `</arg_value>`, line 396) nor `}` (gated on
+          `</tool_call>`, line 729) is ever flushed. Dynamo drops the
+          truncated call (`glm47_parser.rs:194-215`,
+          `allow_eof_recovery=false` production default).
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "N'
+        normal_text: ''
+        reason: >-
+          Impl-defined recovery for PARSER.batch.5-class missing end-token
+          (per `tests/parity/README.md` "permanent divergences"). vLLM's
+          `_build_args_json_so_far` (`glm4_moe_tool_parser.py:331-417`)
+          detects a partial `<arg_value>` (`has_partial_value=True`,
+          line 365) and takes the string-type partial branch at line 403
+          (`parts.append(f'{key_json}: "{escaped}')`), opening a JSON
+          quote without closing it; the wrapping `{`/`}` follow the same
+          `is_complete=False` path (the `</tool_call>` end was never
+          observed), so the streamed args end at `{"location": "N` with
+          no closing `"` or `}`. Dynamo drops the truncated call
+          (`glm47_parser.rs:194-215`). Matches SGLang.

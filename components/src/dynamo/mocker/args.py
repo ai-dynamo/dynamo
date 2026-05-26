@@ -18,6 +18,26 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 logger = logging.getLogger(__name__)
 
 
+def non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be non-negative, got {parsed}")
+    return parsed
+
+
+def non_negative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be non-negative, got {parsed}")
+    return parsed
+
+
 class ProfileDataResult:
     """Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion."""
 
@@ -180,8 +200,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--num-gpu-blocks-override",
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
-        default=16384,
-        help="Number of GPU blocks for KV cache (default: 16384)",
+        default=None,
+        help="Explicit number of GPU blocks for KV cache. When unset, AIC-backed "
+        "mocker estimates the value; non-AIC mocker uses 16384.",
     )
     parser.add_argument(
         "--block-size",
@@ -280,6 +301,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Requires aiconfigurator SDK installed.",
     )
     parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="GPU memory fraction for AIC KV capacity estimation with vLLM "
+        "(default: 0.9).",
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help="Static memory fraction for AIC KV capacity estimation with SGLang "
+        "(default: 0.88).",
+    )
+    parser.add_argument(
         "--aic-system",
         type=str,
         default=None,
@@ -299,7 +334,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-backend-version",
         type=str,
         default=None,
-        help="AIC backend engine version (e.g., '0.12.0' for vLLM, '0.5.6.post2' for SGLang). "
+        help="AIC backend engine version (e.g., '0.14.0' for vLLM, '0.5.6.post2' for SGLang). "
         "If not set, uses the default version for the backend.",
     )
     parser.add_argument(
@@ -493,6 +528,50 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="KV cache bytes per token. If not specified, auto-computed from model config "
         "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
     )
+    parser.add_argument(
+        "--num-g2-blocks",
+        type=non_negative_int,
+        default=None,
+        help="Enable KVBM mock offload with this many per-worker G2 host blocks. "
+        "Set to 0 to disable.",
+    )
+    parser.add_argument(
+        "--num-g3-blocks",
+        type=non_negative_int,
+        default=None,
+        help="Enable shared KVBM mock G3 with this many process-local shared blocks. "
+        "Set to 0 to disable.",
+    )
+    parser.add_argument(
+        "--offload-batch-size",
+        type=non_negative_int,
+        default=None,
+        help="Batch size for the mock G1->G2 offload pipeline. Set to 0 to use the default.",
+    )
+    parser.add_argument(
+        "--bandwidth-g1-to-g2-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock G1->G2 offload bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g2-to-g1-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock G2->G1 onboard bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g2-to-g3-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock shared G2->G3 offload bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g3-to-g2-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock shared G3->G2 staging bandwidth in GB/s.",
+    )
 
     parser.add_argument(
         "--stagger-delay",
@@ -515,9 +594,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--request-plane",
         type=str,
-        choices=["nats", "http", "tcp"],
+        choices=["nats", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
-        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp]",
     )
     parser.add_argument(
         "--event-plane",
