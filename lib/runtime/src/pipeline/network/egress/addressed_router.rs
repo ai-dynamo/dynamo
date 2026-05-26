@@ -253,12 +253,30 @@ where
 
         // Phase A: Frontend → Backend (network + queue + ack)
         let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
-        let _response = self
+        let request_plane_response = self
             .req_client
             .send_request(address, buffer, headers)
             .await?;
         drop(_nvtx_send);
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+
+        // DIS-2105: worker-side admission control surfaces its rejection on the
+        // REQUEST-plane ACK (single-shot TcpResponseMessage from
+        // shared_tcp_endpoint.rs), NOT on the response-plane stream. A normal
+        // successful queueing arrives as the empty ACK (TcpResponseMessage::empty());
+        // a worker-side load-shed arrives as a payload prefixed with one of the
+        // known overload markers (see detect_worker_overload_response). Detect
+        // here and short-circuit with ResourceExhausted before we wait for a
+        // response-plane connection that the worker is never going to open.
+        if let Some(err) = detect_worker_overload_response(&request_plane_response) {
+            tracing::warn!(
+                request_id,
+                worker_response = %err.to_string(),
+                "Worker rejected request with overload signal — mapping to ResourceExhausted (HTTP 503)"
+            );
+            inflight_guard.disarm();
+            return Err(err.into());
+        }
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
