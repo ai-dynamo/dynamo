@@ -31,7 +31,6 @@
 <text class="lane-label" x="245" y="272.0" text-anchor="end">GMS Loader</text>
 <rect x="262.7" y="254" width="12.0" height="28" fill="#3a1050"/>
 <rect x="272.1" y="254" width="12.0" height="28" fill="#0a4a80"/>
-<circle cx="260.0" cy="220.0" r="3.5" fill="#8c8c8c"><title>Snapshot Agent setup</title></circle>
 <rect x="265.9" y="206" width="193.5" height="28" fill="#4a7500"/>
 <text class="num" x="362.6" y="224.0" text-anchor="middle">2.5s</text>
 <rect x="459.3" y="206" width="35.6" height="28" fill="#005a40"/>
@@ -45,7 +44,6 @@
 <text class="num" x="288.6" y="442.0" text-anchor="middle">0.7s</text>
 <rect x="316.8" y="424" width="140.4" height="28" fill="#0a4a80"/>
 <text class="num" x="387.0" y="442.0" text-anchor="middle">1.8s</text>
-<circle cx="260.0" cy="390.0" r="3.5" fill="#8c8c8c"><title>Snapshot Agent setup</title></circle>
 <rect x="265.7" y="376" width="238.6" height="28" fill="#4a7500"/>
 <text class="num" x="385.0" y="394.0" text-anchor="middle">3.1s</text>
 <rect x="504.3" y="376" width="38.5" height="28" fill="#005a40"/>
@@ -59,7 +57,6 @@
 <text class="num" x="301.6" y="612.0" text-anchor="middle">1.0s</text>
 <rect x="341.4" y="594" width="710.7" height="28" fill="#0a4a80"/>
 <text class="num" x="696.8" y="612.0" text-anchor="middle">9.2s</text>
-<circle cx="260.0" cy="560.0" r="3.5" fill="#8c8c8c"><title>Snapshot Agent setup</title></circle>
 <rect x="265.7" y="546" width="347.6" height="28" fill="#4a7500"/>
 <text class="num" x="439.5" y="564.0" text-anchor="middle">4.5s</text>
 <rect x="613.3" y="546" width="58.1" height="28" fill="#005a40"/>
