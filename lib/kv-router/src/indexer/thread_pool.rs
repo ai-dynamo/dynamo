@@ -483,6 +483,16 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         self.record_routing_decision_hashes(worker, &local_hashes, &sequence_hashes)
             .await
     }
+
+    pub async fn process_routing_decision_hash_slices(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(), KvRouterError> {
+        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
+            .await
+    }
 }
 
 impl<T: SyncIndexer> Drop for ThreadPoolIndexer<T> {

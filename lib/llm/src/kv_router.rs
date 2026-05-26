@@ -11,7 +11,7 @@ use anyhow::Result;
 use dynamo_kv_router::{
     KvSchedulerError, PrefillLoadEstimator, SharedKvCache,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
-    indexer::KvRouterError,
+    indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint,
@@ -78,12 +78,31 @@ pub enum FindBestMatchOutcome {
         overlap_blocks: u32,
         effective_overlap_blocks: f64,
         cached_tokens: usize,
+        routing_hashes: Option<RoutingDecisionHashes>,
     },
     Backpressure {
         reason: RouterBackpressureReason,
         queued_isl_tokens: usize,
         max_queued_isl_tokens: Option<usize>,
     },
+}
+
+fn split_retained_block_hashes(
+    block_hashes: Vec<LocalBlockHash>,
+    supports_overlap_refresh: bool,
+    return_routing_hashes: bool,
+) -> (Option<Vec<LocalBlockHash>>, Option<Vec<LocalBlockHash>>) {
+    debug_assert!(supports_overlap_refresh || return_routing_hashes);
+
+    if supports_overlap_refresh && return_routing_hashes {
+        return (Some(block_hashes.clone()), Some(block_hashes));
+    }
+    if supports_overlap_refresh {
+        return (Some(block_hashes), None);
+    }
+
+    debug_assert!(return_routing_hashes);
+    (None, Some(block_hashes))
 }
 
 // [gluo TODO] shouldn't need to be public
@@ -335,11 +354,7 @@ impl KvRouterOverlapRefresher {
 #[async_trait]
 impl OverlapScoresRefresh for KvRouterOverlapRefresher {
     async fn refresh(&self, block_hashes: &[LocalBlockHash]) -> Option<RefreshedOverlap> {
-        let tiered = match self
-            .indexer
-            .find_matches_by_tier(block_hashes.to_vec())
-            .await
-        {
+        let tiered = match self.indexer.find_matches_by_tier_ref(block_hashes).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(error = ?e, "overlap refresh: find_matches_by_tier failed");
@@ -614,6 +629,16 @@ where
             .await
     }
 
+    pub(crate) async fn record_routing_decision_hashes(
+        &self,
+        hashes: RoutingDecisionHashes,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        self.indexer
+            .record_routing_decision_hashes(worker, hashes)
+            .await
+    }
+
     /// Give these tokens, find the worker with the best weighted cache hit.
     /// Returns the full match details for the selected worker.
     ///
@@ -629,6 +654,7 @@ where
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
+        return_routing_hashes: bool,
         lora_name: Option<String>,
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
@@ -665,61 +691,117 @@ where
         });
         let seq_hash_elapsed = start.elapsed();
 
-        // Only retain a copy of the block hashes when this scheduler can actually use
-        // them for dequeue-time overlap refresh.
-        // TODO: Optimize this by adding a borrowed indexer lookup path to avoid cloning hashes for immediate admissions.
-        let block_hashes_for_refresh = self
-            .scheduler
-            .supports_overlap_refresh()
-            .then(|| block_hashes.clone());
+        let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
+        let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
 
-        // Query indexer (tiered) and shared cache in parallel when shared cache is configured.
-        // Time each independently so metrics can separate indexer vs shared cache latency.
-        let (tiered_matches, shared_cache_hits, indexer_duration, shared_cache_duration) =
-            if let Some(ref shared_cache) = self.shared_cache {
-                let indexer_fut = self
-                    .indexer
-                    .find_matches_by_tier(block_hashes)
-                    .instrument(tracing::info_span!("kv_router.find_matches"));
-                let shared_fut = shared_cache
-                    .check_blocks(tokens, self.block_size)
-                    .instrument(tracing::info_span!("kv_router.shared_cache_check"));
+        let (
+            tiered_matches,
+            shared_cache_hits,
+            indexer_duration,
+            shared_cache_duration,
+            retained_block_hashes,
+        ) = if retain_block_hashes {
+            // Query indexer (tiered) and shared cache in parallel when shared cache is configured.
+            // Time each independently so metrics can separate indexer vs shared cache latency.
+            let (tiered, shared_hits, idx_dur, sc_dur) =
+                if let Some(ref shared_cache) = self.shared_cache {
+                    let indexer_fut = self
+                        .indexer
+                        .find_matches_by_tier_ref(&block_hashes)
+                        .instrument(tracing::info_span!("kv_router.find_matches"));
+                    let shared_fut = shared_cache
+                        .check_blocks(tokens, self.block_size)
+                        .instrument(tracing::info_span!("kv_router.shared_cache_check"));
 
-                let indexer_timed = async {
-                    let t = Instant::now();
-                    let r = indexer_fut.await;
-                    (r, t.elapsed())
-                };
-                let shared_timed = async {
-                    let t = Instant::now();
-                    let r = shared_fut.await;
-                    (r, t.elapsed())
-                };
+                    let indexer_timed = async {
+                        let t = Instant::now();
+                        let r = indexer_fut.await;
+                        (r, t.elapsed())
+                    };
+                    let shared_timed = async {
+                        let t = Instant::now();
+                        let r = shared_fut.await;
+                        (r, t.elapsed())
+                    };
 
-                let ((indexer_result, idx_dur), (shared_result, sc_dur)) =
-                    tokio::join!(indexer_timed, shared_timed);
-                let tiered = indexer_result?;
-                // Shared cache failure is non-fatal: log warning and fall back to empty hits.
-                let hits = match shared_result {
-                    Ok(hits) => Some(hits),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Shared cache query failed, ignoring");
-                        if let Some(m) = metrics::RoutingOverheadMetrics::get() {
-                            m.inc_shared_cache_errors();
+                    let ((indexer_result, idx_dur), (shared_result, sc_dur)) =
+                        tokio::join!(indexer_timed, shared_timed);
+                    let tiered = indexer_result?;
+                    // Shared cache failure is non-fatal: log warning and fall back to empty hits.
+                    let hits = match shared_result {
+                        Ok(hits) => Some(hits),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Shared cache query failed, ignoring");
+                            if let Some(m) = metrics::RoutingOverheadMetrics::get() {
+                                m.inc_shared_cache_errors();
+                            }
+                            None
                         }
-                        None
-                    }
+                    };
+                    (tiered, hits, idx_dur, Some(sc_dur))
+                } else {
+                    let t = Instant::now();
+                    let tiered = self
+                        .indexer
+                        .find_matches_by_tier_ref(&block_hashes)
+                        .instrument(tracing::info_span!("kv_router.find_matches"))
+                        .await?;
+                    (tiered, None, t.elapsed(), None)
                 };
-                (tiered, hits, idx_dur, Some(sc_dur))
-            } else {
+            (tiered, shared_hits, idx_dur, sc_dur, Some(block_hashes))
+        } else if let Some(ref shared_cache) = self.shared_cache {
+            let indexer_fut = self
+                .indexer
+                .find_matches_by_tier(block_hashes)
+                .instrument(tracing::info_span!("kv_router.find_matches"));
+            let shared_fut = shared_cache
+                .check_blocks(tokens, self.block_size)
+                .instrument(tracing::info_span!("kv_router.shared_cache_check"));
+
+            let indexer_timed = async {
                 let t = Instant::now();
-                let tiered = self
-                    .indexer
-                    .find_matches_by_tier(block_hashes)
-                    .instrument(tracing::info_span!("kv_router.find_matches"))
-                    .await?;
-                (tiered, None, t.elapsed(), None)
+                let r = indexer_fut.await;
+                (r, t.elapsed())
             };
+            let shared_timed = async {
+                let t = Instant::now();
+                let r = shared_fut.await;
+                (r, t.elapsed())
+            };
+
+            let ((indexer_result, idx_dur), (shared_result, sc_dur)) =
+                tokio::join!(indexer_timed, shared_timed);
+            let tiered = indexer_result?;
+            let hits = match shared_result {
+                Ok(hits) => Some(hits),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Shared cache query failed, ignoring");
+                    if let Some(m) = metrics::RoutingOverheadMetrics::get() {
+                        m.inc_shared_cache_errors();
+                    }
+                    None
+                }
+            };
+            (tiered, hits, idx_dur, Some(sc_dur), None)
+        } else {
+            let t = Instant::now();
+            let tiered = self
+                .indexer
+                .find_matches_by_tier(block_hashes)
+                .instrument(tracing::info_span!("kv_router.find_matches"))
+                .await?;
+            (tiered, None, t.elapsed(), None, None)
+        };
+
+        let (block_hashes_for_refresh, routing_block_hashes) = retained_block_hashes
+            .map(|block_hashes| {
+                split_retained_block_hashes(
+                    block_hashes,
+                    supports_overlap_refresh,
+                    return_routing_hashes,
+                )
+            })
+            .unwrap_or((None, None));
 
         let tier_overlap_blocks = tier_overlap_blocks_from_tiered_matches(&tiered_matches);
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
@@ -769,6 +851,7 @@ where
             Err(error) => return Err(map_scheduler_error(error)),
         };
         let total_elapsed = start.elapsed();
+        let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
 
         if let Some(m) = metrics::RoutingOverheadMetrics::get() {
             m.observe(
@@ -809,6 +892,7 @@ where
             overlap_blocks: response.effective_overlap_blocks.round() as u32,
             effective_overlap_blocks: response.effective_overlap_blocks,
             cached_tokens: response.cached_tokens,
+            routing_hashes,
         })
     }
 
@@ -835,6 +919,7 @@ where
                 block_mm_infos,
                 router_config_override,
                 update_states,
+                false,
                 lora_name,
                 priority_jump,
                 expected_output_tokens,
@@ -1010,6 +1095,19 @@ where
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
     ) -> Result<WorkerCacheHitEstimate, KvRouterError> {
+        self.get_cache_hit_estimate_with_hashes(tokens, block_mm_infos, worker, lora_name, false)
+            .await
+            .map(|(estimate, _)| estimate)
+    }
+
+    pub(crate) async fn get_cache_hit_estimate_with_hashes(
+        &self,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        worker: WorkerWithDpRank,
+        lora_name: Option<&str>,
+        return_routing_hashes: bool,
+    ) -> Result<(WorkerCacheHitEstimate, Option<RoutingDecisionHashes>), KvRouterError> {
         let block_hashes = compute_block_hash_for_seq(
             tokens,
             self.block_size,
@@ -1019,9 +1117,20 @@ where
                 is_eagle: Some(self.is_eagle),
             },
         );
-        let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
+        let (tiered_matches, routing_hashes) = if return_routing_hashes {
+            let tiered_matches = self.indexer.find_matches_by_tier_ref(&block_hashes).await?;
+            (
+                tiered_matches,
+                Some(RoutingDecisionHashes::from_local_hashes(block_hashes)),
+            )
+        } else {
+            (self.indexer.find_matches_by_tier(block_hashes).await?, None)
+        };
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
-        Ok(self.cache_hit_for_worker(&cache_hit_estimates, worker))
+        Ok((
+            self.cache_hit_for_worker(&cache_hit_estimates, worker),
+            routing_hashes,
+        ))
     }
 
     /// Get potential prefill and decode loads for all workers
@@ -1226,6 +1335,7 @@ where
                         block_mm_infos.as_deref(),
                         None,
                         true,
+                        false,
                         None,
                         0.0,
                         None,
@@ -1294,7 +1404,7 @@ mod tests {
     use async_trait::async_trait;
     use dynamo_kv_router::{
         indexer::{LowerTierMatchDetails, MatchDetails},
-        protocols::{OverlapScores, StorageTier},
+        protocols::{OverlapScores, StorageTier, compute_seq_hash_for_block},
     };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
@@ -1561,6 +1671,93 @@ mod tests {
             err.to_string()
                 .contains("all eligible workers are overloaded")
         );
+    }
+
+    #[tokio::test]
+    async fn test_find_best_match_details_returns_routing_hashes_when_requested() {
+        let router = make_test_router(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::from_worker_id(0),
+            },
+            None,
+        )
+        .await;
+        let tokens = [11, 12, 21, 22];
+
+        let outcome = router
+            .find_best_match_details(
+                None,
+                &tokens,
+                None,
+                None,
+                false,
+                true,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+
+        let FindBestMatchOutcome::Routed {
+            routing_hashes: Some(hashes),
+            ..
+        } = outcome
+        else {
+            panic!("expected routed outcome with routing hashes");
+        };
+        let expected_local = compute_block_hash_for_seq(
+            &tokens,
+            2,
+            BlockHashOptions {
+                block_mm_infos: None,
+                lora_name: None,
+                is_eagle: Some(false),
+            },
+        );
+        let expected_sequence = compute_seq_hash_for_block(&expected_local);
+
+        assert_eq!(hashes.local_hashes, expected_local);
+        assert_eq!(hashes.sequence_hashes, expected_sequence);
+    }
+
+    #[tokio::test]
+    async fn test_find_best_match_details_omits_routing_hashes_when_not_requested() {
+        let router = make_test_router(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::from_worker_id(0),
+            },
+            None,
+        )
+        .await;
+
+        let outcome = router
+            .find_best_match_details(
+                None,
+                &[11, 12, 21, 22],
+                None,
+                None,
+                false,
+                false,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+
+        let FindBestMatchOutcome::Routed { routing_hashes, .. } = outcome else {
+            panic!("expected routed outcome");
+        };
+        assert!(routing_hashes.is_none());
     }
 
     #[tokio::test]
