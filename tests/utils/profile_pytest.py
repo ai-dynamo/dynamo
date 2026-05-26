@@ -47,7 +47,9 @@ The report is written to stdout after the test finishes.
 The raw CSV samples are saved to ``--csv`` if specified.
 Use ``--no-recommend`` to suppress the marker recommendation section.
 Use ``--json-out PATH`` to emit a structured JSON summary (schema_version=1)
-for automation (see ``_write_json_payload`` for the schema).
+for automation (see ``_write_json_payload`` for the schema). When invoking
+from automation, also pass ``--pytest-nodeid NODEID`` so the JSON's
+``nodeid`` field never depends on heuristic extraction from pytest args.
 """
 
 import argparse
@@ -854,17 +856,33 @@ def _detect_framework(pytest_args: list[str]) -> str | None:
 
 
 def _extract_pytest_nodeid(pytest_args: list[str]) -> str:
-    """Return the first arg that looks like a pytest nodeid.
+    """Best-effort: return the first arg that looks like a pytest nodeid.
 
     A nodeid contains ``::`` (file::test selector) or ends with ``.py``
     (a whole-file selection). This skips option values like ``-k expr``
     where ``expr`` is positional from argparse's perspective but is not a
     test path.
+
+    Only used when ``--pytest-nodeid`` is not set (manual invocations).
+    Automation should set ``--pytest-nodeid`` explicitly; see
+    ``_resolve_nodeid``.
     """
     for a in pytest_args:
         if "::" in a or a.endswith(".py"):
             return a
     return ""
+
+
+def _resolve_nodeid(explicit: str | None, pytest_args: list[str]) -> str:
+    """Canonical nodeid for the JSON output.
+
+    Prefers the explicit ``--pytest-nodeid`` flag (set by automation) so
+    the JSON is authoritative; falls back to heuristic extraction for
+    interactive use.
+    """
+    if explicit:
+        return explicit
+    return _extract_pytest_nodeid(pytest_args)
 
 
 def _write_json_payload(
@@ -917,6 +935,7 @@ def _write_json_payload(
 def _maybe_emit_failed_json(
     json_out: str | None,
     *,
+    nodeid: str,
     pytest_args: list[str],
     model_name: str | None = None,
     gpu_reports: "list[GpuReport] | None" = None,
@@ -924,15 +943,18 @@ def _maybe_emit_failed_json(
 ) -> None:
     """Emit a ``status='failed'`` JSON payload if ``--json-out`` was requested.
 
-    Centralises the ``framework=`` / ``nodeid=`` extraction so every early
-    failure path inside ``_find_min_vram`` produces a payload with the same
-    fields. No-op when ``json_out`` is None.
+    The ``nodeid`` is supplied by the caller (pre-resolved via
+    ``_resolve_nodeid``) so the authoritative ``--pytest-nodeid`` value
+    is honoured everywhere. Framework is still derived from
+    ``pytest_args`` since there's no equivalent override flag.
+
+    No-op when ``json_out`` is None.
     """
     if not json_out:
         return
     _write_json_payload(
         json_out,
-        nodeid=_extract_pytest_nodeid(pytest_args),
+        nodeid=nodeid,
         status="failed",
         framework=_detect_framework(pytest_args),
         model=model_name,
@@ -951,6 +973,7 @@ def _find_min_vram(
     kv_bytes_mode: bool = False,
     gpu_indices: list[int] | None = None,
     json_out: str | None = None,
+    pytest_nodeid: str | None = None,
 ) -> int:
     """Binary search to find the minimum VRAM a test needs.
 
@@ -973,6 +996,9 @@ def _find_min_vram(
     """
     if gpu_indices is None:
         gpu_indices = [0]
+    # Resolve once. Automation passes ``--pytest-nodeid`` so the JSON
+    # output never depends on heuristic extraction from ``pytest_args``.
+    nodeid = _resolve_nodeid(pytest_nodeid, pytest_args)
     is_sglang = _is_sglang_test(pytest_args)
     is_trtllm = _is_trtllm_test(pytest_args)
 
@@ -1124,6 +1150,7 @@ def _find_min_vram(
         print(f"  [FAIL] Cannot determine minimum KV cache: {reason}.")
         _maybe_emit_failed_json(
             json_out,
+            nodeid=nodeid,
             pytest_args=pytest_args,
             model_name=model_name,
             gpu_reports=reports,
@@ -1154,6 +1181,7 @@ def _find_min_vram(
                 )
                 _maybe_emit_failed_json(
                     json_out,
+                    nodeid=nodeid,
                     pytest_args=pytest_args,
                     model_name=model_name,
                     gpu_reports=reports,
@@ -1170,6 +1198,7 @@ def _find_min_vram(
                 )
                 _maybe_emit_failed_json(
                     json_out,
+                    nodeid=nodeid,
                     pytest_args=pytest_args,
                     model_name=model_name,
                     gpu_reports=reports,
@@ -1500,7 +1529,7 @@ def _find_min_vram(
     if json_out:
         _write_json_payload(
             json_out,
-            nodeid=_extract_pytest_nodeid(pytest_args),
+            nodeid=nodeid,
             status="failed" if final_probe_failed else "ok",
             framework=_detect_framework(pytest_args),
             num_runs=len(pass_wall_times),
@@ -1592,6 +1621,15 @@ def _build_argparser() -> argparse.ArgumentParser:
         "result and marker recommendations to PATH. Intended for automation "
         "(e.g. the dynamo-profiler bot).",
     )
+    parser.add_argument(
+        "--pytest-nodeid",
+        metavar="NODEID",
+        default=None,
+        help="Authoritative nodeid recorded in the --json-out payload. "
+        "Set this when invoking from automation so the JSON's `nodeid` "
+        "field never depends on heuristic parsing of pytest args. When "
+        "omitted, falls back to a best-effort scan of pytest_args.",
+    )
     return parser
 
 
@@ -1666,6 +1704,7 @@ def main(argv: list[str] | None = None) -> int:
             kv_bytes_mode=args.kv_bytes,
             gpu_indices=gpu_indices,
             json_out=args.json_out,
+            pytest_nodeid=args.pytest_nodeid,
         )
 
     model_name = _extract_model_from_markers(pytest_args)
@@ -1708,7 +1747,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_out:
         _write_json_payload(
             args.json_out,
-            nodeid=_extract_pytest_nodeid(pytest_args),
+            nodeid=_resolve_nodeid(args.pytest_nodeid, pytest_args),
             status="ok" if rc == 0 else "failed",
             framework=_detect_framework(pytest_args),
             num_runs=1,
@@ -1746,19 +1785,22 @@ def _emit_failure_json_on_crash(argv: list[str], exc: BaseException) -> None:
     if json_out is None:
         return
 
-    # Best-effort: use the real parser to recover pytest_args. If parsing
-    # itself blew up (e.g. unknown option), fall through with an empty list
-    # so we still emit *something*.
+    # Best-effort: use the real parser to recover pytest_args and any
+    # --pytest-nodeid override. If parsing itself blew up (e.g. unknown
+    # option), fall through with an empty list so we still emit
+    # *something*.
     pytest_args: list[str] = []
+    explicit_nodeid: str | None = None
     try:
-        _args, pytest_args = _split_argv(_build_argparser(), argv)
+        parsed, pytest_args = _split_argv(_build_argparser(), argv)
+        explicit_nodeid = getattr(parsed, "pytest_nodeid", None)
     except SystemExit:
         pass
 
     try:
         _write_json_payload(
             json_out,
-            nodeid=_extract_pytest_nodeid(pytest_args),
+            nodeid=_resolve_nodeid(explicit_nodeid, pytest_args),
             status="failed",
             framework=_detect_framework(pytest_args),
             error=f"{type(exc).__name__}: {exc}",
