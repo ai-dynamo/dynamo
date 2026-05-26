@@ -325,12 +325,21 @@ impl Runtime {
 }
 
 pub(crate) fn runtime_graceful_shutdown_timeout() -> Duration {
-    let secs = std::env::var(
-        crate::config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-    )
-    .ok()
-    .and_then(|s| s.parse::<u64>().ok())
-    .unwrap_or(DEFAULT_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
+    let env_name =
+        crate::config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS;
+    let secs = match std::env::var(env_name) {
+        Ok(raw) => raw.parse::<u64>().unwrap_or_else(|err| {
+            tracing::warn!(
+                env_var = env_name,
+                value = %raw,
+                error = %err,
+                default_secs = DEFAULT_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                "Invalid runtime graceful shutdown timeout; using default"
+            );
+            DEFAULT_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS
+        }),
+        Err(_) => DEFAULT_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    };
 
     Duration::from_secs(secs)
 }
