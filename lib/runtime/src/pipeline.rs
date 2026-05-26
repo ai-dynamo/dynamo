@@ -20,8 +20,7 @@ pub mod registry;
 
 pub use crate::engine::{
     self as engine, AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream,
-    Data, DataStream, Engine, EngineStream, EngineUnary, RequestStream, ResponseStream,
-    async_trait,
+    Data, DataStream, Engine, EngineStream, EngineUnary, ResponseStream, async_trait,
 };
 pub use anyhow::Error;
 pub use context::Context;
@@ -31,13 +30,11 @@ pub use error::{PipelineError, PipelineErrorExt, TwoPartCodecError};
 /// about the request. This information propagates through the stages, both local and distributed.
 pub type SingleIn<T> = Context<T>;
 
-/// Pipeline input for streaming-request engines.
-///
-/// Symmetric to [`SingleIn<T>`] (which is `Context<T>`): both inputs carry a
-/// typed payload alongside the full pipeline `Context` sidecar (metadata,
-/// registry, stages, controller). For the streaming side the payload is a
-/// stream of `T` rather than a single value, so this is a two-field struct
-/// rather than a `Context<T>` directly.
+/// Concrete request-side stream wrapper, symmetric to [`ResponseStream<R>`] on
+/// the response side and to [`SingleIn<T>`] (= `Context<T>`) on the unary
+/// request side. Carries a typed payload stream alongside the full pipeline
+/// `Context` sidecar (metadata, registry, stages, controller) so engines can
+/// reach the caller's metadata, not just the dyn-safe cancellation slice.
 ///
 /// Earlier definitions wrapped the stream inside `Context<DataStream<T>>`;
 /// that shape was uninstantiable because `DataStream<T>` is `!Sync` while
@@ -49,12 +46,12 @@ pub type SingleIn<T> = Context<T>;
 /// engines that only need the cancellation slice keep their existing usage
 /// (`input.context()`, `.next().await`) without change. Engines that want
 /// the full typed sidecar reach for [`Self::context_ref`].
-pub struct ManyIn<T: Data> {
+pub struct RequestStream<T: Data> {
     stream: DataStream<T>,
     context: Context<()>,
 }
 
-impl<T: Data> ManyIn<T> {
+impl<T: Data> RequestStream<T> {
     /// Wrap a stream + context into a streaming input. The stream is the
     /// per-frame payload; the context carries lifecycle + metadata + registry.
     pub fn new(stream: DataStream<T>, context: Context<()>) -> Self {
@@ -76,7 +73,7 @@ impl<T: Data> ManyIn<T> {
     }
 }
 
-impl<T: Data> futures::Stream for ManyIn<T> {
+impl<T: Data> futures::Stream for RequestStream<T> {
     type Item = T;
 
     fn poll_next(
@@ -87,21 +84,27 @@ impl<T: Data> futures::Stream for ManyIn<T> {
     }
 }
 
-impl<T: Data> AsyncEngineContextProvider for ManyIn<T> {
+impl<T: Data> AsyncEngineContextProvider for RequestStream<T> {
     fn context(&self) -> std::sync::Arc<dyn AsyncEngineContext> {
         self.context.context()
     }
 }
 
-impl<T: Data> AsyncEngineStream<T> for ManyIn<T> {}
+impl<T: Data> AsyncEngineStream<T> for RequestStream<T> {}
 
-impl<T: Data> std::fmt::Debug for ManyIn<T> {
+impl<T: Data> std::fmt::Debug for RequestStream<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ManyIn")
+        f.debug_struct("RequestStream")
             .field("context", &self.context)
             .finish_non_exhaustive()
     }
 }
+
+/// Documentary alias for [`RequestStream<T>`] used at engine call sites to
+/// match the `SingleIn` / `ManyIn` / `SingleOut` / `ManyOut` family. Prefer
+/// `RequestStream<T>` when naming a concrete type in code; prefer `ManyIn<T>`
+/// when discussing the engine-IO role.
+pub type ManyIn<T> = RequestStream<T>;
 
 /// Type alias for the output of pipeline that returns a single value
 pub type SingleOut<T> = EngineUnary<T>;
@@ -152,7 +155,7 @@ mod sealed {
     impl<T: Data> Connectable for EngineStream<T> {
         type DataType = T;
     }
-    impl<T: Data> Connectable for ManyIn<T> {
+    impl<T: Data> Connectable for RequestStream<T> {
         type DataType = T;
     }
 }
@@ -176,7 +179,7 @@ impl<T: Data> PipelineIO for EngineStream<T> {
         self.context().id().to_string()
     }
 }
-impl<T: Data> PipelineIO for ManyIn<T> {
+impl<T: Data> PipelineIO for RequestStream<T> {
     fn id(&self) -> String {
         self.context.id().to_string()
     }

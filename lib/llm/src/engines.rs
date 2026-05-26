@@ -14,9 +14,6 @@ use dynamo_runtime::pipeline::{Error, ManyIn, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
 
-#[cfg(test)]
-use dynamo_runtime::engine::RequestStream;
-
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
