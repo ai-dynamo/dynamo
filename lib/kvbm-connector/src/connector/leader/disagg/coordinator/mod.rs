@@ -73,6 +73,15 @@ pub struct CdRequest {
     pub session: Mutex<Option<Arc<dyn Session>>>,
     /// Coarse lifecycle status.
     pub status: Mutex<CdRequestStatus>,
+    /// Lifecycle-driven cancel signal. Fires when the session's
+    /// lifecycle watcher observes Detached / Failed from velo (peer
+    /// crash, Frame::Error, heartbeat loss). Cloned into
+    /// `run_setup`'s drain loops so a wedged session bails
+    /// immediately instead of pinning the spawned task forever —
+    /// the commits/availability mpsc streams never return None
+    /// while run_setup still holds an Arc<dyn Session>, so the
+    /// lifecycle stream is the only viable abort signal.
+    pub cancel: tokio_util::sync::CancellationToken,
     /// Per-role state.
     pub role: CdRequestRole,
 }
@@ -217,6 +226,7 @@ impl CdRequest {
             peer_instance_id,
             session: Mutex::new(None),
             status: Mutex::new(CdRequestStatus::Active),
+            cancel: tokio_util::sync::CancellationToken::new(),
             role: CdRequestRole::Decode(bits),
         })
     }
@@ -234,6 +244,7 @@ impl CdRequest {
             peer_instance_id,
             session: Mutex::new(None),
             status: Mutex::new(CdRequestStatus::Active),
+            cancel: tokio_util::sync::CancellationToken::new(),
             role: CdRequestRole::Prefill(bits),
         })
     }

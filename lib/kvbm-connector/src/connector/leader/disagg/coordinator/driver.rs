@@ -254,6 +254,15 @@ impl ConditionalDisaggCoordinator {
         self.states.get(request_id).map(|e| Arc::clone(e.value()))
     }
 
+    /// Test/integration-only public accessor for the per-request state.
+    /// Production code uses [`Self::state_for_decode`] or role-specific
+    /// helpers; tests need direct access (e.g. to fire the cancel
+    /// token, simulate lifecycle-watcher effects).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn state_for_test(&self, request_id: &str) -> Option<Arc<CdRequest>> {
+        self.state_for(request_id)
+    }
+
     fn arc_self(&self) -> Option<Arc<Self>> {
         self.weak_self.upgrade()
     }
@@ -499,6 +508,13 @@ impl ConditionalDisaggCoordinator {
         }
 
         // Spawn lifecycle watcher.
+        //
+        // On any terminal lifecycle outcome (Detached / Failed / watchdog),
+        // cancel the per-request token BEFORE removing the state from
+        // `coord.states`. The cancel unblocks any `run_setup` task still
+        // blocked on commits/availability streams (which never return
+        // None on their own while run_setup holds an Arc<dyn Session>).
+        // The eviction itself is unchanged.
         let watcher_coord = self.weak_self.clone();
         let watcher_request_id = request_id.clone();
         spawn_lifecycle_watcher(
@@ -510,6 +526,9 @@ impl ConditionalDisaggCoordinator {
             self.lifecycle_watchdog,
             move |_outcome| async move {
                 if let Some(coord) = watcher_coord.upgrade() {
+                    if let Some(state) = coord.state_for(&watcher_request_id) {
+                        state.cancel.cancel();
+                    }
                     coord.states.remove(&watcher_request_id);
                 }
             },
@@ -518,10 +537,36 @@ impl ConditionalDisaggCoordinator {
         tracing::info!("prefill run_setup: attached, draining commits");
 
         // 2. Drain commit stream.
+        //
+        // Each `next().await` is raced against the per-request
+        // CancellationToken so a peer detach / failure surfaced on
+        // the session's lifecycle stream (Detached / Failed) aborts
+        // the drain immediately. Without this, `commits.next()`
+        // stays Poll::Pending forever — the mpsc senders only drop
+        // when every `Arc<VeloSessionInner>` does, and run_setup
+        // itself holds one. Velo heartbeat covers Frame::Error,
+        // explicit detach, AND silent-stuck-peer (heartbeat loss),
+        // so this is the complete bail signal — no wall-clock
+        // timeout needed.
+        let cancel = state.cancel.clone();
         let mut commits = session.commits();
         let mut commit_seen = HashSet::new();
         let expected_count = bits.expected_hashes.len();
-        while let Some(d) = commits.next().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    anyhow::bail!(
+                        "prefill run_setup: session cancelled mid-commits-drain \
+                         (seen {}/{}) for {}",
+                        commit_seen.len(),
+                        expected_count,
+                        request_id
+                    );
+                }
+                d = commits.next() => d,
+            };
+            let Some(d) = next else { break };
             match d {
                 CommitDelta::Added(hashes) => {
                     let n = hashes.len();
@@ -550,14 +595,28 @@ impl ConditionalDisaggCoordinator {
         }
         tracing::info!("prefill run_setup: commits drained, draining availability");
 
-        // 3. Drain availability and pull chunks.
+        // 3. Drain availability and pull chunks. Same cancellation
+        // discipline as the commits drain.
         *bits.status.lock() = PrefillStatus::Pulling;
         let mut avail = session.availability();
         let expected_set: HashSet<SequenceHash> = bits.expected_hashes.iter().copied().collect();
         let mut remaining: HashSet<SequenceHash> = expected_set.clone();
         let mut filled_index: usize = 0;
 
-        while let Some(d) = avail.next().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    anyhow::bail!(
+                        "prefill run_setup: session cancelled mid-availability-drain \
+                         ({} hash(es) still unavailable) for {}",
+                        remaining.len(),
+                        request_id
+                    );
+                }
+                d = avail.next() => d,
+            };
+            let Some(d) = next else { break };
             match d {
                 AvailabilityDelta::Available(blocks) => {
                     let chunk: Vec<CommittedBlock> = blocks
@@ -1174,6 +1233,11 @@ impl ConditionalDisaggCoordinator {
         }
 
         // Spawn lifecycle watcher.
+        //
+        // Same cancel-then-evict pattern as the prefill watcher: any
+        // terminal lifecycle outcome cancels the per-request token so
+        // any in-flight decode-side task awaiting on session streams
+        // bails immediately (symmetric with prefill's `run_setup`).
         let watcher_coord = self.weak_self.clone();
         let watcher_request_id = request_id.to_string();
         spawn_lifecycle_watcher(
@@ -1186,6 +1250,9 @@ impl ConditionalDisaggCoordinator {
             move |outcome| async move {
                 let failure_reason = Self::decode_failure_reason(&outcome);
                 if let Some(coord) = watcher_coord.upgrade() {
+                    if let Some(state) = coord.state_for(&watcher_request_id) {
+                        state.cancel.cancel();
+                    }
                     if let Some(reason) = failure_reason {
                         coord
                             .invoke_decode_failure_sink_and_evict(&watcher_request_id, reason)

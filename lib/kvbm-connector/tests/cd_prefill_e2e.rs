@@ -1433,6 +1433,57 @@ async fn cd_prefill_multiple_observer_commits_before_attach_accumulate() -> Resu
     Ok(())
 }
 
+/// Pins the lifecycle-driven bail contract: when the per-request
+/// CancellationToken fires (the lifecycle watcher's response to
+/// session Detached / Failed), `run_setup`'s drain loops abort
+/// immediately instead of hanging on `commits.next()` /
+/// `avail.next()` forever — those mpsc streams never return None
+/// while run_setup still holds an `Arc<dyn Session>`, so the cancel
+/// is the only viable abort signal. `cleanup_failed_request` then
+/// runs, evicting the request from the coordinator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_run_setup_bails_on_cancel() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(count, Some(NUM_EXTERNAL));
+    assert!(async_flag);
+
+    // Wait for run_setup's `factory.attach` to land. Do NOT inject
+    // peer commits — the commits stream stays legitimately pending
+    // (no Closed, no Added), which is the wedged-peer state we want
+    // to cancel out of.
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session attached");
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Attaching)).await;
+    assert_eq!(session.commit_calls().len(), 0);
+
+    // Fire the lifecycle-driven cancel directly. In production this
+    // would come from spawn_lifecycle_watcher's callback after velo
+    // surfaced LifecycleEvent::{Detached,Failed} (peer crash,
+    // Frame::Error, or heartbeat loss — all three converge here).
+    {
+        let state = h
+            .coordinator
+            .state_for_test("req-1")
+            .expect("state should exist after GNMT");
+        state.cancel.cancel();
+    }
+
+    // run_setup's tokio::select! sees the cancel arm fire, bails with
+    // Err, and the spawn-site catches it into cleanup_failed_request
+    // which removes the state. If the cancel arm were missing,
+    // active_count would stay at 1 forever (the original bug).
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_until(|| h.coordinator.active_count() == 0),
+    )
+    .await
+    .expect("cancel must unblock run_setup and drain coordinator state within 5s");
+
+    Ok(())
+}
+
 /// Pins the DNPT-digest verifier contract: when decode ships an
 /// `expected_hash_digest` and prefill's locally-recomputed digest does
 /// NOT match (e.g. salt/LoRA propagation drift, hasher version skew),

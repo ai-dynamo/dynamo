@@ -4655,6 +4655,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tmq",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",
