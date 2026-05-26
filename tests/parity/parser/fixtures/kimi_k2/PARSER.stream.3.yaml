@@ -48,4 +48,5 @@ cases:
       sglang:
         calls: []
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
+        reason: Model splits the opening Kimi section marker across chunks. SGLang leaks the raw tool-call section as normal_text; Dynamo buffers the partial marker and emits the completed call.
       vllm: *id001
