@@ -296,6 +296,28 @@ directly: `enforce_prefill_max_tokens(request)`,
 are free to inline the logic when their generate path is shaped
 differently.
 
+## Metrics
+
+Two surfaces:
+
+1. **`dynamo_component_*` gauges + router-input signal** — engines declare
+   their DP rank shape via `component_metrics_dp_ranks()`. The framework
+   constructs a Rust-owned `SnapshotPublisher` and hands it back through
+   `attach_snapshot_publisher(publisher)`. Engine code calls
+   `publisher.publish(dp_rank, ComponentSnapshot(...))` from its natural
+   push surface (stat-logger / ZMQ recv / poll thread) — event-driven,
+   no framework poll loop, no GIL on the gauge write path.
+2. **Vendor-prefixed metrics** (`vllm:`, `sglang:`, `trtllm_`,
+   `lmcache:`) — engines bridge their own
+   `prometheus_client.CollectorRegistry` into the runtime's combined
+   `/metrics` output via `register_prometheus(metrics)` using
+   `register_global_registry` (or `register_engine_registry` for a
+   private registry).
+
+`ComponentSnapshot.kv_cache_hit_rate` is tri-state: `None` means "no data
+yet" or "no prefix cache" (gauge skipped); `0.0` is a legitimate
+zero-hit measurement.
+
 ## Telemetry
 
 > **Requires `DYN_LOGGING_JSONL=1` + `OTEL_EXPORT_ENABLED=1`** for engine
@@ -378,6 +400,9 @@ common/backend/
     worker.py            # Worker + WorkerConfig (incl. disaggregation_mode)
     disagg.py            # Disagg request helpers (prefill clamp,
                          #   prefill_result extraction)
+    metrics.py           # Prometheus helpers (gather_with_labels,
+                         #   ensure_prometheus_multiproc_dir, registration)
+    publisher.py         # ComponentSnapshot dataclass (push payload)
     run.py               # Common entry point: run(engine_cls)
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
@@ -410,12 +435,16 @@ that the unified path does not yet support.
 - Finish reason normalization handled by Rust layer
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — see
   [Disaggregated Serving](#disaggregated-serving) below
+- **Metrics & Prometheus** — engine-native metrics passthrough
+  (`vllm:`, `sglang:`, `trtllm_`), `dynamo_component_*` gauges
+  (total_blocks, gpu_cache_usage, model_load_time), TRT-LLM
+  `AdditionalMetricsCollector` (abort, KV transfer, request types).
+  See [Metrics](#metrics) below.
 
 ### Common gaps (all engines)
 
 | Feature | Description |
 |---------|-------------|
-| Metrics & Prometheus | Engine-level metrics, KV cache utilization gauges, Prometheus multiprocess registry |
 | KV event publishing | Prefix cache events (BlockStored/Removed) to router via ZMQ or NATS |
 | Health check payloads | Per-engine custom health check payloads (BOS token probe, etc.) |
 | Logprobs | Selected token + top-k log probability extraction and streaming |

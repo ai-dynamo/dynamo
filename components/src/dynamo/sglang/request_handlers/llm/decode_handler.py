@@ -7,7 +7,6 @@ import os
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
 
-import pybase64
 import sglang as sgl
 from PIL.Image import Image as PILImage
 
@@ -643,11 +642,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
-                    # Base64-encode tensor bytes to match sglang's output format.
-                    routed_experts = pybase64.b64encode(
-                        routed_experts.numpy().tobytes()
-                    ).decode("utf-8")
-                    # Internal transport field consumed by frontend nvext mapping.
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream.
                     out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
@@ -741,10 +736,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     response_nvext["stop_reason"] = stop_reason
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
-                    # Base64-encode tensor bytes to match sglang's output format.
-                    routed_experts = pybase64.b64encode(
-                        routed_experts.numpy().tobytes()
-                    ).decode("utf-8")
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream.
                     response_nvext["routed_experts"] = routed_experts
                 if response_nvext:
                     response["nvext"] = response_nvext

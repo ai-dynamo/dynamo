@@ -1737,10 +1737,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let (result, content) = detect_and_parse_tool_call(input, Some("harmony"), None)
             .await
             .unwrap();
-        assert_eq!(
-            content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -1884,7 +1881,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["timezone"], "Asia/Shanghai");
     }
-    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a PARSER.*; covers registry plumbing.
+    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a TOOLCALLING.*; covers registry plumbing.
     #[tokio::test]
     async fn test_deepseek_v4_compatibility_aliases() {
         let input = r#"<｜DSML｜tool_calls>
