@@ -106,7 +106,7 @@ def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> N
 
 
 def _render_html(*extra_args: str) -> str:
-    return _render_html_for("parser", *extra_args)
+    return _render_html_for("toolcalling", *extra_args)
 
 
 def _render_html_for(table: str, *extra_args: str) -> str:
