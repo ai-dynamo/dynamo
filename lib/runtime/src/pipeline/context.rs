@@ -51,20 +51,6 @@ impl<T: Send + Sync + 'static> Context<T> {
         }
     }
 
-    pub fn with_controller_and_metadata(
-        current: T,
-        controller: Controller,
-        metadata: BTreeMap<String, String>,
-    ) -> Self {
-        Context {
-            current,
-            controller: Arc::new(controller),
-            registry: Registry::new(),
-            stages: Vec::new(),
-            metadata,
-        }
-    }
-
     #[deprecated(
         since = "1.1.2",
         note = "Use `Context::with_id_and_metadata` instead; pass `Default::default()` \

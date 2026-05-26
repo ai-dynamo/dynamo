@@ -45,7 +45,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 pub async fn completion_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateCompletionRequest,
-    metadata: MetadataMap,
+    metadata: &MetadataMap,
 ) -> Result<
     (
         impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
@@ -63,7 +63,7 @@ pub async fn completion_response_stream(
         endpoint: "grpc_completions".to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let metadata = extract_metadata_from_grpc(&metadata)
+    let metadata = extract_metadata_from_grpc(metadata)
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
     let request = Context::with_id_and_metadata(request, request_id.clone(), metadata);
     let context = request.context();

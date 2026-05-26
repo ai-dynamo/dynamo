@@ -58,7 +58,7 @@ pub async fn tensor_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateTensorRequest,
     streaming: bool,
-    metadata: MetadataMap,
+    metadata: &MetadataMap,
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
     // create the context for the request
     let request_id = get_or_create_request_id(request.id.as_deref());
@@ -68,7 +68,7 @@ pub async fn tensor_response_stream(
         endpoint: Endpoint::Tensor.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let metadata = extract_metadata_from_grpc(&metadata)
+    let metadata = extract_metadata_from_grpc(metadata)
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
     let request = Context::with_id_and_metadata(request, request_id.clone(), metadata);
     let context = request.context();

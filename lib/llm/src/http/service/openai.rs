@@ -35,7 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
-    metadata::extract_metadata_from_headers,
+    metadata::extract_metadata_from_http,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
         process_response_and_observe_metrics,
@@ -419,7 +419,7 @@ fn context_from_headers<T: Send + Sync + 'static>(
     request_id: String,
     headers: &HeaderMap,
 ) -> Result<Context<T>, ErrorResponse> {
-    let metadata = extract_metadata_from_headers(headers)
+    let metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);

@@ -320,9 +320,8 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let model = request.get_ref().model_name.clone();
-        let request = request.into_inner();
+        let (metadata, _extensions, request) = request.into_parts();
+        let model = request.model_name.clone();
         let request_id = request.id.clone();
 
         // [gluo TODO] refactor to reuse code, inference logic is largely the same
@@ -332,7 +331,8 @@ impl GrpcInferenceService for KserveService {
                 .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
 
             let stream =
-                tensor_response_stream(self.state_clone(), tensor_request, false, metadata).await?;
+                tensor_response_stream(self.state_clone(), tensor_request, false, &metadata)
+                    .await?;
 
             let tensor_response = ExtendedNvCreateTensorResponse {
                 response: NvCreateTensorResponse::from_annotated_stream(stream)
@@ -380,7 +380,7 @@ impl GrpcInferenceService for KserveService {
         }
 
         let (stream, parsing_options) =
-            completion_response_stream(self.state_clone(), completion_request, metadata).await?;
+            completion_response_stream(self.state_clone(), completion_request, &metadata).await?;
 
         let completion_response =
             NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -405,8 +405,8 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<tonic::Streaming<ModelInferRequest>>,
     ) -> Result<Response<Self::ModelStreamInferStream>, Status> {
-        let metadata = request.metadata().clone();
-        let mut request_stream = request.into_inner();
+        let (metadata, _extensions, request_stream) = request.into_parts();
+        let mut request_stream = request_stream;
         let state = self.state_clone();
         let template = self.request_template.clone();
         let output = async_stream::try_stream! {
@@ -444,7 +444,7 @@ impl GrpcInferenceService for KserveService {
                         state.clone(),
                         tensor_request,
                         true,
-                        metadata.clone(),
+                        &metadata,
                     )
                     .await?;
 
@@ -506,7 +506,7 @@ impl GrpcInferenceService for KserveService {
                 let (stream, parsing_options) = completion_response_stream(
                     state.clone(),
                     completion_request,
-                    metadata.clone(),
+                    &metadata,
                 )
                 .await?;
 
