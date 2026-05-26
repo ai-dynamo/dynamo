@@ -553,6 +553,20 @@ impl DecodeDisaggLeader {
         self.release_request_if_matches(request_id, &handle.0)
     }
 
+    /// Test-only: drive [`Self::cleanup_failed_request`] directly.
+    /// Needed by the cross-lifecycle stale-cleanup reproducer
+    /// which spawns the cleanup against a parked
+    /// `mark_failed_onboarding` await, then resolves the await
+    /// after manipulating other lifecycle state.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn cleanup_failed_request_for_test(
+        self: &Arc<Self>,
+        request_id: &str,
+        reason: String,
+    ) {
+        self.cleanup_failed_request(request_id, reason).await;
+    }
+
     /// Test-only: peek at the `pending_promotion.source_tier`
     /// recorded for `request_id` by `commit_gnmt_remote`. Returns
     /// `None` if no promotion is planned; `Some("G1")` or

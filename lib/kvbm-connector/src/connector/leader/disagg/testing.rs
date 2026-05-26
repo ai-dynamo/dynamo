@@ -8,6 +8,7 @@
 //! engine crate at `kvbm_engine::p2p::session::testing`.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Result, anyhow};
 use futures::{FutureExt, future::BoxFuture};
@@ -160,6 +161,20 @@ pub struct FailedCall {
 pub struct MockP2pWorkerHook {
     completed: Mutex<Vec<CompleteCall>>,
     failed: Mutex<Vec<FailedCall>>,
+    /// If non-empty, `mark_failed_onboarding` pushes a oneshot
+    /// receiver here instead of resolving immediately. Tests
+    /// use [`Self::pending_failed_count`] /
+    /// [`Self::resolve_pending_failed`] to release parked awaits
+    /// — needed to reproduce the cross-lifecycle race in
+    /// `cleanup_failed_request` where the await parks while a
+    /// recompute reschedule swaps the DashMap entry.
+    pending_failed_mode: AtomicBool,
+    pending_failed: Mutex<Vec<oneshot::Sender<Result<()>>>>,
+    /// Same shape as `pending_failed` but for
+    /// `mark_onboarding_complete` — needed to reproduce the
+    /// `maybe_complete` cross-lifecycle race.
+    pending_complete_mode: AtomicBool,
+    pending_complete: Mutex<Vec<oneshot::Sender<Result<()>>>>,
 }
 
 impl MockP2pWorkerHook {
@@ -189,11 +204,79 @@ impl MockP2pWorkerHook {
             .find(|call| call.request_id == request_id)
             .cloned()
     }
+
+    /// Switch `mark_failed_onboarding` into pending mode — calls
+    /// record the failure AND park the returned future on a
+    /// oneshot. Tests pull oneshots via
+    /// [`Self::resolve_pending_failed`].
+    pub fn set_pending_failed_mode(&self, enabled: bool) {
+        self.pending_failed_mode
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn pending_failed_count(&self) -> usize {
+        self.pending_failed.lock().len()
+    }
+
+    pub async fn wait_pending_failed_count(&self, n: usize) {
+        wait_until(|| self.pending_failed.lock().len() >= n).await;
+    }
+
+    /// Resolve the pending `mark_failed_onboarding` at `index`
+    /// with `result`. Releases the parked await inside
+    /// `cleanup_failed_request`.
+    pub fn resolve_pending_failed(&self, index: usize, result: Result<()>) {
+        let mut pending = self.pending_failed.lock();
+        let tx = pending
+            .get_mut(index)
+            .expect("pending mark_failed_onboarding not recorded");
+        // Drain by replacing with a dummy sender (oneshot::Sender is move-only).
+        let (dummy_tx, _dummy_rx) = oneshot::channel();
+        let tx = std::mem::replace(tx, dummy_tx);
+        let _ = tx.send(result);
+    }
+
+    /// Switch `mark_onboarding_complete` into pending mode.
+    /// Used by `maybe_complete` cross-lifecycle reproducers.
+    pub fn set_pending_complete_mode(&self, enabled: bool) {
+        self.pending_complete_mode
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn pending_complete_count(&self) -> usize {
+        self.pending_complete.lock().len()
+    }
+
+    pub async fn wait_pending_complete_count(&self, n: usize) {
+        wait_until(|| self.pending_complete.lock().len() >= n).await;
+    }
+
+    pub fn resolve_pending_complete(&self, index: usize, result: Result<()>) {
+        let mut pending = self.pending_complete.lock();
+        let tx = pending
+            .get_mut(index)
+            .expect("pending mark_onboarding_complete not recorded");
+        let (dummy_tx, _dummy_rx) = oneshot::channel();
+        let tx = std::mem::replace(tx, dummy_tx);
+        let _ = tx.send(result);
+    }
 }
 
 impl P2pWorkerHook for MockP2pWorkerHook {
     fn mark_onboarding_complete(&self, request_id: String) -> BoxFuture<'static, Result<()>> {
         self.completed.lock().push(CompleteCall { request_id });
+        if self
+            .pending_complete_mode
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let (tx, rx) = oneshot::channel();
+            self.pending_complete.lock().push(tx);
+            return async move {
+                rx.await
+                    .map_err(|err| anyhow!("mark_onboarding_complete resolver dropped: {err}"))?
+            }
+            .boxed();
+        }
         async { Ok(()) }.boxed()
     }
 
@@ -206,6 +289,18 @@ impl P2pWorkerHook for MockP2pWorkerHook {
             request_id,
             block_ids,
         });
+        if self
+            .pending_failed_mode
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let (tx, rx) = oneshot::channel();
+            self.pending_failed.lock().push(tx);
+            return async move {
+                rx.await
+                    .map_err(|err| anyhow!("mark_failed_onboarding resolver dropped: {err}"))?
+            }
+            .boxed();
+        }
         async { Ok(()) }.boxed()
     }
 }

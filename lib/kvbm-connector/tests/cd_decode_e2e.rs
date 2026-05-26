@@ -1858,6 +1858,163 @@ async fn cd_decode_g3_promotion_failure_closes_session() -> Result<()> {
     Ok(())
 }
 
+/// Refresh "req-1"'s slot in the mock so a second GNMT cycle
+/// can run for the same rid. Mirrors `build_harness`'s req-1
+/// install but with fresh G2 blocks. Used by the cross-lifecycle
+/// cleanup reproducer to model a recompute reschedule.
+fn refresh_req1_slot(h: &TestHarness) {
+    let g2_manager = h.inner.g2_manager().clone();
+    let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
+    let all_hashes = generate_sequence_hashes(&token_sequence);
+    let token_blocks: Vec<_> = token_sequence.blocks().to_vec();
+
+    let mutables = g2_manager
+        .allocate_blocks(LOCAL_BLOCKS)
+        .expect("allocate cycle-2 local match");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(token_blocks[COMPUTED_BLOCKS..COMPUTED_BLOCKS + LOCAL_BLOCKS].iter())
+        .map(|(mutable, tb)| mutable.complete(tb).expect("complete cycle-2 local match"))
+        .collect();
+    let local_match_g2 = g2_manager.register_blocks(completes);
+
+    let slot = MockSlot {
+        block_size: BLOCK_SIZE,
+        total_blocks: TOTAL_BLOCKS,
+        computed_blocks: COMPUTED_BLOCKS,
+        local_match_blocks: LOCAL_BLOCKS,
+        all_hashes,
+        token_blocks,
+        local_match_g2: parking_lot::Mutex::new(Some(local_match_g2)),
+        assigned_block_ids: parking_lot::Mutex::new(None),
+        gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
+        usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
+        transfer_params: parking_lot::Mutex::new(None),
+        ..MockSlot::default()
+    };
+    h.inner.install_slot("req-1", slot);
+}
+
+/// Cross-lifecycle stale-cleanup race for `cleanup_failed_request`.
+///
+/// Reproduces the recompute-policy scenario where the wrapper's
+/// `cleanup_failed_request` parks in `mark_failed_onboarding.await`
+/// for cycle-1 while a recompute reschedule of the same rid
+/// installs a fresh lifecycle's `Arc<CdRequestState>` /
+/// `Arc<CdRequest>`. When the await resolves and the cleanup
+/// proceeds to release, the identity-checked variants
+/// (`release_request_if_matches` /
+/// `coordinator.release_if_matches`) must NOT wipe the new
+/// lifecycle's state.
+///
+/// Sequence:
+///   1. Drive cycle-1 GNMT + USAA at "req-1".
+///   2. Enable pending mode, spawn cleanup_failed_request("req-1").
+///      Task captures cycle-1 Arcs internally, parks on
+///      `mark_failed_onboarding.await`.
+///   3. Manually wipe cycle-1 (via captured-Arc handles) and
+///      refresh the slot.
+///   4. Drive cycle-2 GNMT at "req-1" → fresh Arc at the same key.
+///   5. Resolve the parked await.
+///   6. Assert cycle-2 state survives at "req-1" (post-fix);
+///      pre-fix by-name release would have wiped it.
+///
+/// Discriminating quality verified by probe-revert: temporarily
+/// swapping the cleanup's `_if_matches` calls back to by-name
+/// `release_request` + `coordinator.release` makes step 6's
+/// assertions fail (cycle-2 state is wiped).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cd_decode_cleanup_failed_request_no_ops_against_replaced_lifecycle() -> Result<()> {
+    let h = build_harness();
+
+    // Cycle 1: full GNMT + USAA at "req-1".
+    h.wrapper.create_slot(make_request_for("req-1"))?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+    h.transport.wait_onboard_count(1).await;
+
+    // Capture cycle-1's handles so we can wipe cycle-1 cleanly.
+    let handle_c1_wrapper = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-1")
+        .expect("cycle-1 wrapper state");
+    let coord_c1 = h
+        .coordinator
+        .state_for_test("req-1")
+        .expect("cycle-1 coord state");
+
+    // Park cleanup_failed_request on mark_failed_onboarding.
+    h.workers.set_pending_failed_mode(true);
+    let wrapper_for_cleanup = Arc::clone(&h.wrapper);
+    let cleanup_handle = tokio::spawn(async move {
+        wrapper_for_cleanup
+            .cleanup_failed_request_for_test("req-1", "cycle-1 peer failure".to_string())
+            .await;
+    });
+    h.workers.wait_pending_failed_count(1).await;
+
+    // Recompute reschedule simulation: wipe cycle-1, refresh the
+    // slot, and drive a fresh GNMT for "req-1". Cycle-2's Arcs
+    // now live at the same DashMap key cycle-1 occupied.
+    assert!(
+        h.wrapper
+            .release_request_if_matches_for_test("req-1", &handle_c1_wrapper),
+        "wipe cycle-1 wrapper state",
+    );
+    assert!(
+        h.coordinator.release_if_matches("req-1", &coord_c1),
+        "wipe cycle-1 coord state",
+    );
+    refresh_req1_slot(&h);
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    // Confirm cycle-2 is a fresh Arc at the same key.
+    let handle_c2 = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-1")
+        .expect("cycle-2 wrapper state");
+    assert!(
+        !handle_c1_wrapper.ptr_eq(&handle_c2),
+        "cycle-2 must be a fresh Arc at the same key",
+    );
+
+    // Resolve the parked await. Cleanup_failed_request now
+    // proceeds to its bottom-of-method release with cycle-1's
+    // captured Arcs against cycle-2's DashMap entries.
+    h.workers.resolve_pending_failed(0, Ok(()));
+    cleanup_handle.await?;
+
+    // Cycle-2 MUST survive at "req-1" (the discriminating
+    // assertion). Pre-fix by-name release would have wiped both
+    // wrapper and coord entries here.
+    assert!(
+        h.wrapper.has_active_cd_request("req-1"),
+        "cycle-2 wrapper state must survive stale cleanup release",
+    );
+    assert!(
+        h.coordinator.state_for_test("req-1").is_some(),
+        "cycle-2 coord state must survive stale cleanup release",
+    );
+    let handle_after = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-1")
+        .expect("cycle-2 wrapper still present");
+    assert!(
+        handle_after.ptr_eq(&handle_c2),
+        "post-cleanup wrapper Arc must still be cycle-2 (not removed and re-inserted)",
+    );
+
+    Ok(())
+}
+
 /// Stage 2c: when neither G2 nor G3 holds the prefix, the
 /// wrapper must fall back to the existing Stage 1 G1 promotion
 /// path. This is the existing happy-path behavior; the test
