@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::Parser;
 use kvbm_hub::config::HubConfig;
 use kvbm_hub::{BlockLayoutMode, FeatureKey};
@@ -140,6 +141,19 @@ struct Cli {
     /// base config (below individual `--kvbm` overrides).
     #[arg(long = "kvbm-config", value_name = "JSON")]
     kvbm_config: Option<String>,
+
+    /// Deep-merge a `kv_connector_extra_config` document read from a file into
+    /// the served base config (below `--kvbm-config` and `--kvbm`). The file
+    /// is parsed as TOML when the path ends in `.toml`, otherwise JSON. The
+    /// flat / role-overlay shapes accepted by `KvbmConfig::from_figment_with_json`
+    /// are supported (see lib/kvbm-config). Lets the operator point the hub
+    /// at the same ConfigMap the workers mount: the hub bridges
+    /// `cache.host.cache_size_gb` / `num_blocks` into its own
+    /// `primary.g2_memory_gib` / `primary.g2_blocks` so the `--g2-memory` /
+    /// `--g2-block` validation gate passes without duplicating the value on
+    /// the CLI.
+    #[arg(long = "kvbm-config-file", value_name = "PATH")]
+    kvbm_config_file: Option<PathBuf>,
 }
 
 /// All hub features a client can be granted via `--features` (in dependency
@@ -271,8 +285,64 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
              --block-size ({block_size})"
         );
     }
+    // --kvbm-config-file: load TOML or JSON from disk and stage it as a
+    // pre-merged base layer before --kvbm-config / --kvbm overrides land.
+    // Auto-detected by extension; default to JSON when the suffix is anything
+    // else. Bridge `cache.host.cache_size_gb` / `num_blocks` into primary so
+    // pointing the hub at the worker's ConfigMap satisfies the g2 gate.
+    let kvbm_config_file_blob: Option<String> = match &cli.kvbm_config_file {
+        None => None,
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("reading --kvbm-config-file {}", path.display()))?;
+            let json_value: serde_json::Value = if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+            {
+                let toml_value: toml::Value = toml::from_str(&raw).with_context(|| {
+                    format!("parsing --kvbm-config-file {} as TOML", path.display())
+                })?;
+                serde_json::to_value(toml_value).with_context(|| {
+                    format!(
+                        "converting --kvbm-config-file {} TOML to JSON",
+                        path.display()
+                    )
+                })?
+            } else {
+                serde_json::from_str(&raw).with_context(|| {
+                    format!("parsing --kvbm-config-file {} as JSON", path.display())
+                })?
+            };
+            if !json_value.is_object() {
+                anyhow::bail!("--kvbm-config-file {} must be an object", path.display());
+            }
+            // Bridge flat-shape cache.host sizes into HubConfig.primary so the
+            // gate check below sees what the worker's mount would have given
+            // each worker. CLI flags retain priority — only fill if absent.
+            if config.primary.g2_memory_gib.is_none()
+                && let Some(gib) = json_value
+                    .pointer("/cache/host/cache_size_gb")
+                    .and_then(|v| v.as_f64())
+            {
+                config.primary.g2_memory_gib = Some(gib);
+            }
+            if config.primary.g2_blocks.is_none()
+                && let Some(n) = json_value
+                    .pointer("/cache/host/num_blocks")
+                    .and_then(|v| v.as_u64())
+            {
+                config.primary.g2_blocks = Some(n as usize);
+            }
+            Some(json_value.to_string())
+        }
+    };
+
     if config.primary.g2_memory_gib.is_none() && config.primary.g2_blocks.is_none() {
-        anyhow::bail!("at least one of --g2-memory / --g2-block is required");
+        anyhow::bail!(
+            "at least one of --g2-memory / --g2-block (or `cache.host.cache_size_gb` / \
+             `cache.host.num_blocks` via --kvbm-config-file) is required"
+        );
     }
 
     let enabled = parse_features(cli.features.as_deref())?;
@@ -306,11 +376,18 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
         config.indexer = None;
     }
 
-    // Build the operator's base connector config from `--kvbm-config` +
-    // `--kvbm`, then round-trip-validate it through the same parser the
-    // connector uses (CUDA-free; kvbm-config carries no velo/CUDA). A bad
-    // override aborts startup with the parser's error.
+    // Build the operator's base connector config from `--kvbm-config-file` +
+    // `--kvbm-config` + `--kvbm`, then round-trip-validate through the same
+    // parser the connector uses (CUDA-free; kvbm-config carries no velo/CUDA).
+    // Precedence (lowest → highest): file → inline `--kvbm-config` JSON →
+    // individual `--kvbm` dotted overrides. Each layer is applied via
+    // `apply_overrides` so a single bad value aborts startup with the
+    // parser's error.
     let mut base_config = serde_json::json!({});
+    if let Some(blob) = kvbm_config_file_blob.as_deref() {
+        kvbm_config::overrides::apply_overrides(&mut base_config, Some(blob), &[])
+            .context("applying --kvbm-config-file")?;
+    }
     kvbm_config::overrides::apply_overrides(
         &mut base_config,
         cli.kvbm_config.as_deref(),

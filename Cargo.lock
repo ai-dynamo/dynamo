@@ -4764,6 +4764,7 @@ dependencies = [
  "tmq",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "url",

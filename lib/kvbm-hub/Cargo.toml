@@ -49,6 +49,11 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
 tokio        = { workspace = true }
+# TOML reader for --kvbm-config-file (the hub accepts either JSON or TOML;
+# extension drives the dispatch). figment depends on toml transitively for its
+# Toml provider, but we need direct access to parse a path-only TOML blob into
+# a serde_json::Value before forwarding to kvbm-config's overrides path.
+toml         = { version = "0.8" }
 tokio-util   = { workspace = true }
 tracing      = { workspace = true }
 url          = { workspace = true }
