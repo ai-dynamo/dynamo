@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
+    DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
     SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY,
     SHARDED_SSD_ROOTS_CONFIG_KEY,
 )
@@ -94,7 +95,7 @@ class GMSStorageClient:
         shard_size_bytes: int = 4 * 1024**3,
         transfer_backend: str = _DEFAULT_TRANSFER_BACKEND,
         sharded_ssd_roots: Optional[Sequence[str]] = None,
-        sharded_ssd_queues_per_root: int = 1,
+        sharded_ssd_queues_per_root: int = DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
