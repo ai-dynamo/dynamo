@@ -113,7 +113,7 @@ navigation:
           - page: Llama-3.3-70B Topology
             slug: llama-3-70b-topology
             path: benchmarks/llama-3-70b-topology.mdx
-          - page: KV Router A/B Testing Guide
+          - page: Qwen3-32B KV Router A/B
             slug: kv-router-ab-testing
             path: benchmarks/kv-router-ab-testing.md
       - page: Glossary

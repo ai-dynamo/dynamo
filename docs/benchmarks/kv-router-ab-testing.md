@@ -1,14 +1,14 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: KV Router A/B Testing
+title: Qwen3-32B KV Router A/B Testing
 ---
 
-This guide walks you through setting up and running A/B benchmarks to compare Dynamo's KV Smart Router against standard round-robin routing on a Kubernetes cluster.
+This guide walks through a model-specific A/B benchmark for **Qwen/Qwen3-32B** on an aggregated vLLM Kubernetes deployment. It compares Dynamo's KV Smart Router against standard round-robin routing using the Mooncake FAST'25 toolagent trace.
 
 ## Overview
 
-Dynamo's KV Smart Router intelligently routes requests based on KV cache affinity, improving performance for workloads with shared prompt prefixes. This guide helps you:
+Dynamo's KV Smart Router routes requests based on KV cache affinity, improving performance for workloads with shared prompt prefixes. The commands and expected results here are scoped to Qwen3-32B with eight aggregated vLLM workers. This guide helps you:
 
 1. Deploy two identical Dynamo configurations:
    a. A vllm server for Qwen3-32B with 8 workers (aggregated) **WITHOUT** KV Smart Router enabled

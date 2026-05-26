@@ -59,28 +59,14 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <rect x="29" y="28" width="12" height="12" rx="3" stroke="currentColor" strokeWidth="3" fill="none" />
 <path d="M19 14H29M19 34H29M13 20V28M35 20V28M18 19L30 29M30 19L18 29" stroke="#76B900" strokeWidth="3" strokeLinecap="round" />
 </symbol>
-<symbol id="dynamo-icon-gpu" viewBox="0 0 48 48">
-<path d="M8 39H41" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
-<rect x="10" y="24" width="5" height="15" rx="1" fill="#76B900" />
-<rect x="18" y="17" width="5" height="22" rx="1" stroke="currentColor" strokeWidth="3" fill="none" />
-<rect x="27" y="10" width="5" height="29" rx="1" fill="#76B900" />
-<rect x="36" y="20" width="5" height="19" rx="1" stroke="currentColor" strokeWidth="3" fill="none" />
-<rect x="8" y="7" width="12" height="10" rx="2" stroke="currentColor" strokeWidth="3" fill="none" />
-</symbol>
-<symbol id="dynamo-icon-ab" viewBox="0 0 48 48">
-<circle cx="10" cy="24" r="4" fill="#76B900" />
-<path d="M14 24C20 24 20 14 27 14H39M14 24C20 24 20 34 27 34H39" stroke="currentColor" strokeWidth="3" strokeLinecap="round" fill="none" />
-<path d="M34 10L40 14L34 18M34 30L40 34L34 38" stroke="#76B900" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-</symbol>
 </svg>
 
 <section className="dynamo-technique-guide" aria-labelledby="dynamo-technique-guide-title">
 <div className="dynamo-technique-guide-header">
-<h2 id="dynamo-technique-guide-title">Benchmark Guide</h2>
-<p>Serving features and topologies are the things under test. Metrics and experiment setup explain how to compare results.</p>
+<h2 id="dynamo-technique-guide-title">Features Under Test</h2>
+<p>Serving techniques and topology changes benchmarked across the comparisons below.</p>
 </div>
 <div className="dynamo-technique-grid">
-<div className="dynamo-technique-subhead">Features and topologies</div>
 <div className="dynamo-technique-card">
 <span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
 <div>
@@ -135,21 +121,6 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <div>
 <strong>Multi-node topology</strong>
 <p>Runs serving workers across node boundaries to compare aggregate, single-node P/D, and multi-node P/D shapes.</p>
-</div>
-</div>
-<div className="dynamo-technique-subhead">Benchmark methods and metrics</div>
-<div className="dynamo-technique-card">
-<span className="dynamo-feature-symbol feature-gpu" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-gpu" /></svg></span>
-<div>
-<strong>TPS/GPU</strong>
-<p>Normalizes throughput by GPU count so variants with different capacity can still be compared fairly.</p>
-</div>
-</div>
-<div className="dynamo-technique-card">
-<span className="dynamo-feature-symbol feature-ab" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ab" /></svg></span>
-<div>
-<strong>A/B experiment setup</strong>
-<p>Runs controlled configurations against the same traffic to isolate the effect of a feature, policy, or topology.</p>
 </div>
 </div>
 </div>
@@ -266,7 +237,6 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <div className="dynamo-benchmark-features">
 <span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span><span>Prefill/decode split</span></span>
 <span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-mn" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-mn" /></svg></span><span>Multi-node topology</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-gpu" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-gpu" /></svg></span><span>TPS/GPU</span></span>
 </div>
 <div className="dynamo-benchmark-targets">
 <span><b>Traffic</b><strong>8K ISL / 1K OSL</strong></span>
@@ -276,20 +246,19 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/kv-router-ab-testing">
 <div className="dynamo-benchmark-card-head">
 <div className="dynamo-benchmark-model">
-<img className="dynamo-model-logo" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
-<div><strong>KV Router guide</strong><small>Reusable benchmark procedure</small></div>
+<img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+<div><strong>Qwen3-32B</strong><small>Qwen/Qwen3-32B</small></div>
 </div>
-<span className="dynamo-benchmark-kind">Hands-on guide</span>
+<span className="dynamo-benchmark-kind">Hands-on A/B</span>
 </div>
-<h2>General KV Router A/B setup</h2>
-<p>Legacy step-by-step guide for deploying router-on and router-off configurations.</p>
+<h2>KV Smart Router vs round-robin</h2>
+<p>Step-by-step Kubernetes benchmark for aggregated vLLM Qwen3-32B with eight workers, comparing router-on against router-off.</p>
 <div className="dynamo-benchmark-features">
 <span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span><span>KV routing</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-ab" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ab" /></svg></span><span>A/B experiment setup</span></span>
 </div>
 <div className="dynamo-benchmark-targets">
-<span><b>Traffic</b><strong>Reusable procedure</strong></span>
-<span><b>Hardware</b><strong>Router on/off</strong></span>
+<span><b>Traffic</b><strong>Mooncake toolagent trace</strong></span>
+<span><b>Hardware</b><strong>8x H100/H200 class GPUs</strong></span>
 </div>
 </a>
 </div>

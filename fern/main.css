@@ -1934,16 +1934,6 @@ svg.card-icon{
     gap: 8px;
 }
 
-.dynamo-technique-subhead {
-    grid-column: 1 / -1;
-    margin: 2px 0 0;
-    color: var(--pst-color-text-muted);
-    font-size: 11px;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-}
-
 .dynamo-technique-card {
     display: grid;
     grid-template-columns: 46px minmax(0, 1fr);
@@ -2167,34 +2157,6 @@ svg.card-icon{
     border-radius: 50%;
     background: var(--nv-color-green);
     box-shadow: -13px -10px 0 var(--nv-color-green), 13px -10px 0 var(--nv-color-green), -13px 10px 0 var(--nv-color-green), 13px 10px 0 var(--nv-color-green);
-}
-
-.feature-gpu::before {
-    width: 26px;
-    height: 22px;
-    border: 2px solid var(--nv-color-green);
-    border-radius: 5px;
-}
-
-.feature-gpu::after {
-    width: 17px;
-    height: 13px;
-    border: 1px solid var(--nv-color-green);
-    border-radius: 3px;
-}
-
-.feature-ab::before {
-    width: 30px;
-    height: 24px;
-    border-left: 2px solid var(--nv-color-green);
-    border-right: 2px solid var(--nv-color-green);
-}
-
-.feature-ab::after {
-    width: 30px;
-    height: 2px;
-    background: var(--nv-color-green);
-    transform: rotate(-18deg);
 }
 
 .dynamo-benchmark-model {
