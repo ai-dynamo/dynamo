@@ -14,6 +14,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
+from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -23,6 +24,13 @@ if TYPE_CHECKING:
 MINIMUM_VLLM_VERSION = "0.17.0"
 
 logger = logging.getLogger(__name__)
+
+
+def _current_accelerator_device() -> str:
+    device_type = getattr(current_platform, "device_type", None)
+    if device_type in ("cuda", "xpu"):
+        return device_type
+    return "cuda"
 
 
 @dataclass
@@ -203,7 +211,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 continue
             if mm_hash in self._cpu_store:
                 encoder_cache[mm_hash] = self._cpu_store[mm_hash].to(
-                    "cuda", non_blocking=True
+                    _current_accelerator_device(), non_blocking=True
                 )
             else:
                 logger.warning(
