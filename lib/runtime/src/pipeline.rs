@@ -30,24 +30,10 @@ pub use error::{PipelineError, PipelineErrorExt, TwoPartCodecError};
 /// about the request. This information propagates through the stages, both local and distributed.
 pub type SingleIn<T> = Context<T>;
 
-/// Sync ownership cell for a [`DataStream<T>`].
-///
-/// `DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>` is `Send` but
-/// **not** `Sync`, which prevents it from satisfying the `Data` bound used
-/// throughout the pipeline framework (`Data: Send + Sync + 'static`).
-/// `RequestStream<T>` wraps a `DataStream<T>` behind a `Mutex<Option<…>>` so
-/// the wrapper itself is `Sync` while still letting the eventual consumer
-/// move the stream out for iteration.
-///
-/// **Lifecycle**: construct with a stream, hand the wrapper across threads
-/// freely (`Arc<RequestStream<T>>` is the typical shape), then call
-/// [`Self::take`] on exactly one consumer. The mutex serialises concurrent
-/// `take()` calls; the first observer of `Some(stream)` owns the stream and
-/// may iterate it, all subsequent callers see `None`.
-///
-/// `RequestStream<T>` does not implement [`Stream`] itself. Iteration is the
-/// consumer's responsibility, performed on the [`DataStream<T>`] returned
-/// from [`Self::take`].
+/// `Sync` ownership cell for a non-`Sync` [`DataStream<T>`]. [`Self::take`]
+/// moves the inner stream out; the mutex serialises concurrent attempts so
+/// the first caller observes `Some(stream)` and all later callers see
+/// `None`. Iteration happens on the returned `DataStream<T>`.
 pub struct RequestStream<T: Data> {
     inner: std::sync::Mutex<Option<DataStream<T>>>,
 }
@@ -78,22 +64,9 @@ impl<T: Data> std::fmt::Debug for RequestStream<T> {
     }
 }
 
-/// Pipeline input for streaming-request engines.
-///
-/// Symmetric to [`SingleIn<T>`] (= `Context<T>`): the unary input wraps a
-/// single typed value in a [`Context`], the streaming input wraps a
-/// [`RequestStream<T>`] in a [`Context`]. Both inputs carry the full
-/// pipeline sidecar (controller, metadata, registry, stages) alongside their
-/// payload.
-///
-/// `Context<RequestStream<T>>` is instantiable today because
-/// `RequestStream<T>: Send + Sync + 'static` (the Mutex<Option<…>>
-/// hides the inner stream's `!Sync` nature); earlier attempts at
-/// `Context<DataStream<T>>` were rejected because `DataStream<T>: !Sync`.
-///
-/// Engines pull the data channel out via the standard Context APIs:
-/// `let (req_stream, ctx) = input.into_parts();
-///  let mut stream = req_stream.take().expect("stream not yet taken");`
+/// Pipeline input for streaming-request engines: a [`RequestStream<T>`]
+/// payload wrapped in a [`Context`], symmetric to [`SingleIn<T>`] for unary
+/// inputs.
 pub type ManyIn<T> = Context<RequestStream<T>>;
 
 /// Type alias for the output of pipeline that returns a single value

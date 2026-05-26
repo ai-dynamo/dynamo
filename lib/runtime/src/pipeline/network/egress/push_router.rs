@@ -1055,20 +1055,13 @@ where
 /// worker. KV and Direct modes inherit the same `bail!` invariants as the
 /// unary impl.
 ///
-/// **Reserve-before-observe rationale.** Worker selection happens before
-/// `input.next()` is polled. The router-mode strategies (`RoundRobin`,
-/// `Random`, `PowerOfTwoChoices`, `LeastLoaded`, `DeviceAwareWeighted`)
-/// don't consume the first frame's content, so there's nothing to gain by
-/// waiting for it. Doing the pick up front means:
-///   - `bidirectional_dispatch` and `AddressedPushRouter::generate_bidirectional`
-///     take a unified `ManyIn<T>` instead of a `(first_frame, rest)` pair.
-///   - Connection setup (register both halves, build envelope, wait for
-///     worker dial-in) can run concurrently with the client producing its
-///     first frame.
-/// A client that connects but never sends a frame still releases the slot
-/// via the same response-stream-drop path the unary side uses; the
-/// upstream-side `cancel_both` cleanup in the dispatch path handles the
-/// early-bail case.
+/// **Reserve-before-observe rationale.** The router-mode strategies
+/// (`RoundRobin`, `Random`, `PowerOfTwoChoices`, `LeastLoaded`,
+/// `DeviceAwareWeighted`) don't depend on frame contents, so selection
+/// runs immediately and connection setup proceeds in parallel with the
+/// client producing its first frame. A client that connects but never
+/// sends one still releases the slot via the response-stream-drop path;
+/// the dispatch-side `cancel_both` cleanup covers the early-bail case.
 #[async_trait]
 impl<T, U> AsyncEngine<ManyIn<T>, ManyOut<U>, Error> for PushRouter<T, U>
 where

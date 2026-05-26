@@ -267,13 +267,11 @@ impl AddressedPushRouter {
     }
 
     /// Bidirectional sibling of the `AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>>`
-    /// impl: dispatch a `ManyIn<T>` to a specific `(instance, address)`
-    /// pair, with the first frame packed into the initial request-plane
-    /// envelope and subsequent frames forwarded on the request-stream half
-    /// of the call-home TCP transport. The address / instance pair has
-    /// already been resolved by the caller (typically `PushRouter`'s
-    /// bidirectional impl, which reserves a sticky worker up front before
-    /// observing any inbound frame).
+    /// impl: dispatch a `ManyIn<T>` to a specific `(instance, address)` pair.
+    /// All input frames flow on the request-stream half of the call-home TCP
+    /// transport; the initial envelope is header-only. The caller (typically
+    /// `PushRouter`'s bidirectional impl) has already resolved the
+    /// `(instance, address)` pair.
     pub async fn generate_bidirectional<T, U>(
         &self,
         instance: Instance,
@@ -288,10 +286,6 @@ impl AddressedPushRouter {
         REQUEST_PLANE_INFLIGHT.inc();
         let inflight_guard = InflightGuard::new();
 
-        // Extract the data channel and retain the typed sidecar:
-        //   input: Context<RequestStream<T>>
-        //   ├─ request_stream: RequestStream<T>  (Sync wrapper around DataStream<T>)
-        //   └─ ctx: Context<()>                  (controller + metadata + registry + stages)
         let engine_ctx = input.context();
         let request_id = engine_ctx.id().to_string();
         let engine_ctx_for_forwarder = engine_ctx.clone();
