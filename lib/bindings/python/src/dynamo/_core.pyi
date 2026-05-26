@@ -224,6 +224,34 @@ class Endpoint:
         """
         ...
 
+    async def serve_bidirectional_endpoint(
+        self,
+        handler: Callable[..., AsyncIterator[JsonLike]],
+        graceful_shutdown: bool = True,
+        metrics_labels: Optional[List[Tuple[str, str]]] = None,
+    ) -> None:
+        """
+        Serve a bidirectional (streaming-input, streaming-output) endpoint.
+
+        The handler is an `async def generate(request_stream)` or
+        `async def generate(request_stream, context)` coroutine that returns
+        an async generator of response frames. `request_stream` is a
+        `PyAsyncRequestStream` yielding inbound frames as JSON-like Python
+        objects; the generator yields response frames as JSON-like Python
+        objects.
+
+        Request-stream end (when `__anext__` raises `StopAsyncIteration`)
+        is not a cancellation signal: the caller has merely stopped sending
+        input. The engine must keep yielding response chunks until it
+        chooses to return or observes `context.is_stopped()`.
+
+        Args:
+            handler: The async generator factory described above
+            graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
+            metrics_labels: Optional list of metrics labels to add to the metrics
+        """
+        ...
+
     async def client(self, router_mode: Optional[RouterMode] = None) -> Client:
         """
         Create a `Client` capable of calling served instances of this endpoint.
@@ -267,6 +295,21 @@ class Endpoint:
         and should start receiving requests.
         """
         ...
+
+class PyAsyncRequestStream:
+    """
+    Python-visible inbound iterator handed to bidirectional engine
+    handlers as the first positional argument. Yields request frames as
+    JSON-like Python objects.
+
+    Request-stream end is not a cancellation signal: when this iterator
+    raises `StopAsyncIteration`, the caller has merely stopped sending
+    input. The engine should keep yielding response chunks until it
+    chooses to return or observes `context.is_stopped()`.
+    """
+
+    def __aiter__(self) -> "PyAsyncRequestStream": ...
+    async def __anext__(self) -> JsonLike: ...
 
 class Client:
     """
