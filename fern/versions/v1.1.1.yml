@@ -168,6 +168,16 @@ navigation:
             path: ../pages-v1.1.1/reasoning/dynamo.md
           - page: Reasoning Parsing (Engine Fallback)
             path: ../pages-v1.1.1/reasoning/engine-fallback.md
+      - section: Agents
+        slug: agents
+        path: ../pages-v1.1.1/agents/README.md
+        contents:
+          - page: Agent Tracing
+            path: ../pages-v1.1.1/agents/agent-tracing.md
+          - page: Agent Hints
+            path: ../pages-v1.1.1/agents/agent-hints.md
+          - page: SGLang for Agentic Workloads
+            path: ../pages-v1.1.1/backends/sglang/agents.md
       - section: Multimodal
         path: ../pages-v1.1.1/features/multimodal/README.md
         contents:
@@ -192,16 +202,6 @@ navigation:
             path: ../pages-v1.1.1/backends/trtllm/trtllm-diffusion.md
       - page: LoRA Adapters
         path: ../pages-v1.1.1/features/lora/README.md
-      - section: Agents
-        slug: agents
-        path: ../pages-v1.1.1/agents/README.md
-        contents:
-          - page: Agent Tracing
-            path: ../pages-v1.1.1/agents/agent-tracing.md
-          - page: Agent Hints
-            path: ../pages-v1.1.1/agents/agent-hints.md
-          - page: SGLang for Agentic Workloads
-            path: ../pages-v1.1.1/backends/sglang/agents.md
       - section: Observability (Local)
         path: ../pages-v1.1.1/observability/README.md
         contents:
