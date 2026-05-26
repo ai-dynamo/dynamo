@@ -295,24 +295,34 @@ impl AddressedPushRouter {
             .take()
             .expect("RequestStream::take called twice on bidirectional dispatch input");
 
+        // Different from response (always streaming), the request stream is optional.
+        let enable_request_stream = true;
+
         // Register both halves on the response transport: a `send_stream`
         // (upstream → worker, carrying subsequent request frames) and a
         // `recv_stream` (worker → upstream, carrying response chunks).
-        let (pending_send_stream, pending_recv_stream) =
-            self.register_streams(engine_ctx.clone(), true, true).await;
-        let (req_stream_conn_info, request_stream_provider) =
-            pending_send_stream.unwrap().into_parts();
+        let (pending_send_stream, pending_recv_stream) = self
+            .register_streams(engine_ctx.clone(), enable_request_stream, true)
+            .await;
         let (resp_stream_conn_info, response_stream_provider) =
             pending_recv_stream.unwrap().into_parts();
+        let (req_stream_conn_info, request_stream_provider) = if enable_request_stream {
+            let (connection_info, request_stream_provider) =
+                pending_send_stream.unwrap().into_parts();
+            (Some(connection_info), Some(request_stream_provider))
+        } else {
+            (None, None)
+        };
 
         let recv_subject: Option<String> =
             serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&resp_stream_conn_info.info)
                 .ok()
                 .map(|ci| ci.subject);
-        let send_subject: Option<String> =
-            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&req_stream_conn_info.info)
+        let send_subject: Option<String> = req_stream_conn_info.as_ref().and_then(|ci| {
+            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&ci.info)
                 .ok()
-                .map(|ci| ci.subject);
+                .map(|ci| ci.subject)
+        });
 
         // Tombstone check (same semantics as the unary path) before any
         // request-plane write.
@@ -334,12 +344,16 @@ impl AddressedPushRouter {
 
         let control_message = RequestControlMessage {
             id: engine_ctx.id().to_string(),
-            request_type: RequestType::ManyIn,
+            request_type: if enable_request_stream {
+                RequestType::ManyIn
+            } else {
+                RequestType::SingleIn
+            },
             response_type: ResponseType::ManyOut,
             connection_info: resp_stream_conn_info,
             metadata,
             frontend_send_ts_ns: None,
-            request_stream_connection_info: Some(req_stream_conn_info),
+            request_stream_connection_info: req_stream_conn_info,
         };
 
         // Bidirectional envelope is header-only: every request frame
@@ -421,69 +435,69 @@ impl AddressedPushRouter {
             }
         };
 
-        let request_sender = match request_stream_provider.await {
-            Ok(Ok(sender)) => sender,
-            Ok(Err(e)) => {
-                if let Some(subject) = &send_subject {
-                    self.resp_transport.cancel_send_stream(subject).await;
+        if let Some(request_stream_provider) = request_stream_provider {
+            let request_sender = match request_stream_provider.await {
+                Ok(Ok(sender)) => sender,
+                Ok(Err(e)) => {
+                    self.cancel_both(&recv_subject, &send_subject).await;
+                    return Err(anyhow::anyhow!(
+                        DynamoError::builder()
+                            .error_type(ErrorType::CannotConnect)
+                            .message(format!("Worker dial-in failed for request stream: {e}"))
+                            .build()
+                    ));
                 }
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::CannotConnect)
-                        .message(format!("Worker dial-in failed for request stream: {e}"))
-                        .build()
-                ));
-            }
-            Err(_) => {
-                if let Some(subject) = &send_subject {
-                    self.resp_transport.cancel_send_stream(subject).await;
+                Err(_) => {
+                    self.cancel_both(&recv_subject, &send_subject).await;
+                    return Err(anyhow::anyhow!(
+                        DynamoError::builder()
+                            .error_type(ErrorType::Disconnected)
+                            .message("Worker disconnected before request stream was established")
+                            .build()
+                    ));
                 }
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::Disconnected)
-                        .message("Worker disconnected before request stream was established")
-                        .build()
-                ));
-            }
-        };
+            };
 
-        // Forwarder: pump every frame in `input` to the worker via the
-        // request-stream send half. Exit on stream end, context kill/stop,
-        // send error (worker dropped its receiver), or local serialize
-        // failure. Dropping `request_sender` on exit closes the upstream
-        // mpsc → server-side handler sends Sentinel → wire closes cleanly.
-        tokio::spawn(async move {
-            loop {
-                let item = tokio::select! {
-                    biased;
-                    _ = engine_ctx_for_forwarder.killed() => break,
-                    _ = engine_ctx_for_forwarder.stopped() => break,
-                    item = input_stream.next() => match item {
-                        Some(item) => item,
-                        None => break,
-                    },
-                };
-                let bytes = match serde_json::to_vec(&item) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        // Stream-side framing failure: the engine sees a
-                        // partial input, so kill the context to abort both
-                        // directions consistently rather than silently
-                        // dropping frames.
-                        tracing::error!(
-                            error = %e,
-                            "failed to serialize bidirectional request frame; killing context"
+            // Forwarder: pump every frame in `input` to the worker via the
+            // request-stream send half. Exit on stream end, context kill/stop,
+            // send error (worker dropped its receiver), or local serialize
+            // failure. Dropping `request_sender` on exit closes the upstream
+            // mpsc → server-side handler sends Sentinel → wire closes cleanly.
+            tokio::spawn(async move {
+                loop {
+                    let item = tokio::select! {
+                        biased;
+                        _ = engine_ctx_for_forwarder.killed() => break,
+                        _ = engine_ctx_for_forwarder.stopped() => break,
+                        item = input_stream.next() => match item {
+                            Some(item) => item,
+                            None => break,
+                        },
+                    };
+                    let bytes = match serde_json::to_vec(&item) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            // Stream-side framing failure: the engine sees a
+                            // partial input, so kill the context to abort both
+                            // directions consistently rather than silently
+                            // dropping frames.
+                            tracing::error!(
+                                error = %e,
+                                "failed to serialize bidirectional request frame; killing context"
+                            );
+                            engine_ctx_for_forwarder.kill();
+                            break;
+                        }
+                    };
+                    if request_sender.send(bytes.into()).await.is_err() {
+                        tracing::debug!(
+                            "worker request-stream receiver dropped; forwarder exiting"
                         );
-                        engine_ctx_for_forwarder.kill();
                         break;
                     }
-                };
-                if request_sender.send(bytes.into()).await.is_err() {
-                    tracing::debug!("worker request-stream receiver dropped; forwarder exiting");
-                    break;
                 }
-            }
-        });
+            });
+        }
 
         Ok(finalize_response_stream(
             response_stream.rx,
@@ -562,10 +576,18 @@ where
         let (request, address, instance_info) = addressed_request.into_parts();
         let engine_ctx = context.context();
 
+        let request_type = RequestType::SingleIn;
+        let response_type = ResponseType::ManyOut;
+
         // Register only the recv half on the data plane for a single-in / many-out.
         // Request will be passed as part of the control message to the worker.
-        let (_, pending_response_stream) =
-            self.register_streams(engine_ctx.clone(), false, true).await;
+        let (_, pending_response_stream) = self
+            .register_streams(
+                engine_ctx.clone(),
+                request_type == RequestType::ManyIn,
+                response_type == ResponseType::ManyOut,
+            )
+            .await;
 
         // separate out the connection info and the stream provider from the registered stream
         let (connection_info, response_stream_provider) =
@@ -603,8 +625,8 @@ where
         // calls. all the information here is provided by the [`StreamOptions`] object and/or the dataplane object
         let control_message = RequestControlMessage {
             id: engine_ctx.id().to_string(),
-            request_type: RequestType::SingleIn,
-            response_type: ResponseType::ManyOut,
+            request_type,
+            response_type,
             connection_info,
             metadata: context.metadata().clone(),
             frontend_send_ts_ns: None,

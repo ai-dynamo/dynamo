@@ -69,14 +69,14 @@ pub enum StreamType {
     Response,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RequestType {
     SingleIn,
     ManyIn,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ResponseType {
     SingleOut,
