@@ -33,6 +33,9 @@ pub trait AffinityStore: Send + Sync {
     /// or expired. Implementations should refresh the TTL on hit.
     fn get(&self, session_id: &str) -> Option<WorkerWithDpRank>;
 
+    /// Look up the `(worker, dp_rank)` for a session without refreshing TTL.
+    fn peek(&self, session_id: &str) -> Option<WorkerWithDpRank>;
+
     /// Bind a session to a `(worker, dp_rank)` with the given TTL.
     fn put(&self, session_id: &str, worker: WorkerWithDpRank, ttl: Duration);
 
@@ -97,26 +100,61 @@ impl InMemoryAffinityStore {
             alive
         });
     }
+
+    fn lookup(&self, session_id: &str, refresh: bool) -> Option<WorkerWithDpRank> {
+        let now = Instant::now();
+        let mut entry = self.map.get_mut(session_id)?;
+        if entry.expires_at <= now {
+            let worker = entry.worker;
+            let expires_at = entry.expires_at;
+            drop(entry);
+            self.remove_expired_if_current(session_id, worker, expires_at);
+            return None;
+        }
+
+        let worker = entry.worker;
+        if refresh {
+            entry.expires_at = now + entry.ttl;
+        }
+        tracing::info!(
+            %session_id,
+            worker_id = worker.worker_id,
+            dp_rank = worker.dp_rank,
+            refreshed = refresh,
+            "Sticky session hit"
+        );
+        Some(worker)
+    }
+
+    fn remove_expired_if_current(
+        &self,
+        session_id: &str,
+        worker: WorkerWithDpRank,
+        expires_at: Instant,
+    ) {
+        let removed = self.map.remove_if(session_id, |_, entry| {
+            entry.worker == worker
+                && entry.expires_at == expires_at
+                && entry.expires_at <= Instant::now()
+        });
+        if removed.is_none() {
+            return;
+        }
+
+        tracing::debug!(%session_id, "Session affinity expired during resolve");
+        if let Some(handler) = &self.on_expire {
+            handler(session_id.to_owned(), worker.worker_id);
+        }
+    }
 }
 
 impl AffinityStore for InMemoryAffinityStore {
     fn get(&self, session_id: &str) -> Option<WorkerWithDpRank> {
-        let mut entry = self.map.get_mut(session_id)?;
-        if entry.expires_at <= Instant::now() {
-            let worker = entry.worker;
-            drop(entry);
-            self.map.remove(session_id);
-            tracing::debug!(%session_id, "Session affinity expired during resolve");
-            if let Some(handler) = &self.on_expire {
-                handler(session_id.to_owned(), worker.worker_id);
-            }
-            return None;
-        }
-        // Refresh TTL on access (sliding window)
-        entry.expires_at = Instant::now() + entry.ttl;
-        let worker = entry.worker;
-        tracing::info!(%session_id, worker_id = worker.worker_id, dp_rank = worker.dp_rank, "Sticky session hit");
-        Some(worker)
+        self.lookup(session_id, true)
+    }
+
+    fn peek(&self, session_id: &str) -> Option<WorkerWithDpRank> {
+        self.lookup(session_id, false)
     }
 
     fn put(&self, session_id: &str, worker: WorkerWithDpRank, ttl: Duration) {
@@ -162,6 +200,26 @@ impl StickySessionRouter {
             .as_ref()
             .map(|sc| sc.session_id.as_str())?;
         self.store.get(session_id)
+    }
+
+    /// Resolve a request's session without refreshing the sticky TTL.
+    pub fn peek(&self, request: &PreprocessedRequest) -> Option<WorkerWithDpRank> {
+        let routing = request.routing.as_ref()?;
+        let session_id = routing
+            .session_control
+            .as_ref()
+            .map(|sc| sc.session_id.as_str())?;
+        self.store.peek(session_id)
+    }
+
+    /// Resolve a session id directly and refresh its sticky TTL.
+    pub fn resolve_session(&self, session_id: &str) -> Option<WorkerWithDpRank> {
+        self.store.get(session_id)
+    }
+
+    /// Resolve a session id directly without refreshing its sticky TTL.
+    pub fn peek_session(&self, session_id: &str) -> Option<WorkerWithDpRank> {
+        self.store.peek(session_id)
     }
 
     /// Bind a session to a `(worker, dp_rank)` with the given TTL.
@@ -245,6 +303,52 @@ mod tests {
     }
 
     #[test]
+    fn peek_returns_worker_without_refreshing_ttl() {
+        let map = Arc::new(DashMap::new());
+        let ttl = Duration::from_secs(60);
+        let expires_at = Instant::now() + Duration::from_secs(5);
+        map.insert(
+            "sess-peek".to_owned(),
+            AffinityEntry {
+                worker: worker(7, 2),
+                ttl,
+                expires_at,
+            },
+        );
+        let store = InMemoryAffinityStore {
+            map: map.clone(),
+            on_expire: None,
+        };
+        let router = StickySessionRouter::new(store);
+
+        let req = make_request(Some("sess-peek"));
+        assert_eq!(router.peek(&req), Some(worker(7, 2)));
+
+        let entry = map.get("sess-peek").unwrap();
+        assert_eq!(entry.expires_at, expires_at);
+    }
+
+    #[test]
+    fn bind_overwrites_worker_rank_and_ttl() {
+        let map = Arc::new(DashMap::new());
+        let store = InMemoryAffinityStore {
+            map: map.clone(),
+            on_expire: None,
+        };
+        let router = StickySessionRouter::new(store);
+        router.bind("sess-1", worker(1, 0), Duration::from_secs(10));
+        router.bind("sess-1", worker(2, 3), Duration::from_secs(90));
+
+        let req = make_request(Some("sess-1"));
+        assert_eq!(router.peek(&req), Some(worker(2, 3)));
+
+        let entry = map.get("sess-1").unwrap();
+        assert_eq!(entry.worker, worker(2, 3));
+        assert_eq!(entry.ttl, Duration::from_secs(90));
+        assert!(entry.expires_at > Instant::now() + Duration::from_secs(80));
+    }
+
+    #[test]
     fn unbind_removes_affinity() {
         let store = InMemoryAffinityStore {
             map: Arc::new(DashMap::new()),
@@ -278,7 +382,7 @@ mod tests {
         let req = make_request(Some("sess-expired"));
         assert!(router.resolve(&req).is_none());
         // Entry should be cleaned up
-        assert!(router.store.get("sess-expired").is_none());
+        assert!(router.store.peek("sess-expired").is_none());
     }
 
     #[test]
@@ -345,6 +449,43 @@ mod tests {
             expired_sessions.lock().unwrap().as_slice(),
             &[("sess-expired".to_string(), 99)]
         );
+    }
+
+    #[test]
+    fn expired_lookup_does_not_remove_newer_binding() {
+        let expired_sessions = Arc::new(Mutex::new(Vec::new()));
+        let on_expire = {
+            let expired_sessions = expired_sessions.clone();
+            Arc::new(move |session_id: String, worker_id: u64| {
+                expired_sessions
+                    .lock()
+                    .unwrap()
+                    .push((session_id, worker_id));
+            })
+        };
+        let store = InMemoryAffinityStore {
+            map: Arc::new(DashMap::new()),
+            on_expire: Some(on_expire),
+        };
+        store.map.insert(
+            "sess-race".to_owned(),
+            AffinityEntry {
+                worker: worker(1, 0),
+                ttl: Duration::from_secs(1),
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+
+        let stale = store.map.get("sess-race").unwrap();
+        let stale_worker = stale.worker;
+        let stale_expires_at = stale.expires_at;
+        drop(stale);
+
+        store.put("sess-race", worker(2, 1), Duration::from_secs(300));
+        store.remove_expired_if_current("sess-race", stale_worker, stale_expires_at);
+
+        assert_eq!(store.peek("sess-race"), Some(worker(2, 1)));
+        assert!(expired_sessions.lock().unwrap().is_empty());
     }
 
     #[test]

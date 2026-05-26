@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 use dynamo_runtime::{
     pipeline::{AsyncEngine, ManyOut, PushRouter, SingleIn},
@@ -12,7 +13,10 @@ use dynamo_runtime::{
 
 use crate::{
     kv_router::KvPushRouter,
-    protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
+    protocols::common::{
+        llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        timing::RequestPhase,
+    },
 };
 
 /// The inner router used by PrefillRouter
@@ -50,6 +54,37 @@ impl InnerPrefillRouter {
         match self {
             InnerPrefillRouter::SimpleRouter(router) => router.select_next_worker(),
             InnerPrefillRouter::KvRouter(_) => None,
+        }
+    }
+
+    pub(super) fn sticky_worker_for_prefill(
+        &self,
+        request: &PreprocessedRequest,
+    ) -> Option<WorkerWithDpRank> {
+        match self {
+            InnerPrefillRouter::KvRouter(router) => {
+                router.sticky_worker_for_phase(request, RequestPhase::Prefill)
+            }
+            InnerPrefillRouter::SimpleRouter(_) => None,
+        }
+    }
+
+    pub(super) async fn validate_sticky_prefill_worker(
+        &self,
+        context_id: &str,
+        request: &PreprocessedRequest,
+        worker: WorkerWithDpRank,
+    ) -> Result<WorkerWithDpRank> {
+        match self {
+            InnerPrefillRouter::KvRouter(router) => Ok(router
+                .validate_sticky_worker_for_phase(
+                    context_id,
+                    request,
+                    RequestPhase::Prefill,
+                    worker,
+                )
+                .await?),
+            InnerPrefillRouter::SimpleRouter(_) => Ok(worker),
         }
     }
 }

@@ -69,6 +69,20 @@ impl SessionCloseAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLifecycleOutcome {
+    NoSessionControl,
+    NoAction,
+    OpenSucceeded,
+    NoSessionControlEndpoint,
+    CloseRequested,
+}
+
+pub struct AgentRouteOutcome {
+    pub lifecycle: SessionLifecycleOutcome,
+    pub deferred_close: Option<SessionCloseAction>,
+}
+
 /// Session lifecycle controller.
 ///
 /// Owns a lazy event plane client for the `session_control` endpoint
@@ -114,33 +128,33 @@ impl AgentController {
         });
     }
 
-    /// Called after worker selection. Fires open_session if needed,
-    /// returns a deferred close action for RequestGuard::finish().
-    ///
-    /// Also manages sticky session bindings: Open inserts affinity,
-    /// Close removes it.
-    ///
-    /// Returns `Ok(None)` if session control is unavailable or no action
-    /// is needed. The request proceeds normally without session isolation.
+    /// Called after worker selection. Fires open_session if needed and returns
+    /// a deferred close action for RequestGuard::finish().
     pub async fn on_routed(
         &self,
         request: &crate::preprocessor::PreprocessedRequest,
         instance_id: u64,
         context_id: &str,
         sticky: Option<&StickySessionRouter>,
-    ) -> Result<Option<SessionCloseAction>> {
+    ) -> Result<AgentRouteOutcome> {
         let sc = request
             .routing
             .as_ref()
             .and_then(|r| r.session_control.as_ref());
 
         let Some(sc) = sc else {
-            return Ok(None);
+            return Ok(AgentRouteOutcome {
+                lifecycle: SessionLifecycleOutcome::NoSessionControl,
+                deferred_close: None,
+            });
         };
 
         let Some(action) = sc.action.as_ref() else {
             // No action -- just session_id for sticky routing (handled by StickySessionRouter)
-            return Ok(None);
+            return Ok(AgentRouteOutcome {
+                lifecycle: SessionLifecycleOutcome::NoAction,
+                deferred_close: None,
+            });
         };
 
         match action {
@@ -148,7 +162,10 @@ impl AgentController {
                 let Some(client) = self.get_session_control_client().await else {
                     // No session_control endpoint available -- skip session
                     // lifecycle and let the request proceed without isolation.
-                    return Ok(None);
+                    return Ok(AgentRouteOutcome {
+                        lifecycle: SessionLifecycleOutcome::NoSessionControlEndpoint,
+                        deferred_close: None,
+                    });
                 };
                 let worker_timeout_secs = sc
                     .timeout
@@ -181,7 +198,10 @@ impl AgentController {
                 // Affinity is bound at the routing layer after worker selection;
                 // this controller only owns the open/close RPC lifecycle.
 
-                Ok(None)
+                Ok(AgentRouteOutcome {
+                    lifecycle: SessionLifecycleOutcome::OpenSucceeded,
+                    deferred_close: None,
+                })
             }
             SessionAction::Close => {
                 // Remove affinity immediately
@@ -190,14 +210,18 @@ impl AgentController {
                 }
 
                 // Defer close to after generation completes
-                match self.get_session_control_client().await {
-                    Some(client) => Ok(Some(SessionCloseAction {
-                        session_id: sc.session_id.clone(),
-                        client,
-                        instance_id,
-                    })),
-                    None => Ok(None),
-                }
+                let deferred_close =
+                    self.get_session_control_client()
+                        .await
+                        .map(|client| SessionCloseAction {
+                            session_id: sc.session_id.clone(),
+                            client,
+                            instance_id,
+                        });
+                Ok(AgentRouteOutcome {
+                    lifecycle: SessionLifecycleOutcome::CloseRequested,
+                    deferred_close,
+                })
             }
         }
     }
