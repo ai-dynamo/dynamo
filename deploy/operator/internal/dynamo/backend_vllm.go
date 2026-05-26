@@ -21,6 +21,7 @@ const (
 	pipelineParallelSizeFlag  = "--pipeline-parallel-size"
 	dataParallelSizeFlag      = "--data-parallel-size"
 	dataParallelSizeLocalFlag = "--data-parallel-size-local"
+	distributedExecutorFlag   = "--distributed-executor-backend"
 	enableElasticEPFlag       = "--enable-elastic-ep"
 )
 
@@ -67,7 +68,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			})
 		}
 
-		// Remove probes for multinode worker and leader
+		// Remove probes for multinode workers.
 		if role == RoleWorker {
 			container.LivenessProbe = nil
 			container.ReadinessProbe = nil
@@ -213,33 +214,14 @@ func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 	}
 }
 
-func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	if numberOfNodes <= 1 || role != RoleWorker || !shouldUseMpBackend(GetPodTemplateAnnotations(component)) {
+func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, _ *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	if !b.shouldInjectVLLMMpWaitLeaderInit(podSpec, numberOfNodes, role) {
 		return
 	}
 
-	// Elastic EP workers use a Ray cluster, not the MP coordinator. The worker
-	// command (injected by injectElasticEPRayLaunchFlags) already contains an
-	// inline health gate that polls DynamoSystemPort (9090) before joining Ray.
-	// The MP init container waits on VLLMMpMasterPort (29500), which never opens
-	// in the elastic EP path — injecting it would cause the worker to hang forever.
-	if len(podSpec.Containers) > 0 {
-		if hasFlag(getExpandedCommandAndArgs(&podSpec.Containers[0]), enableElasticEPFlag) {
-			return
-		}
-	}
-	if main := GetMainContainer(component); main != nil {
-		if hasFlag(getExpandedCommandAndArgs(main), enableElasticEPFlag) {
-			return
-		}
-	}
-
-	if len(podSpec.Containers) == 0 || b.ParentGraphDeploymentName == "" {
-		return
-	}
-
+	mainContainer := &podSpec.Containers[0]
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	mainImage := podSpec.Containers[0].Image
+	mainImage := mainContainer.Image
 	cmName := GetWaitLeaderConfigMapName(b.ParentGraphDeploymentName)
 
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
@@ -275,6 +257,14 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	}
 
 	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
+}
+
+func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, numberOfNodes int32, role Role) bool {
+	if b.ParentGraphDeploymentName == "" || numberOfNodes <= 1 || role != RoleWorker || len(podSpec.Containers) == 0 {
+		return false
+	}
+
+	return containerHasArg(&podSpec.Containers[0], distributedExecutorFlag, "mp")
 }
 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
@@ -317,14 +307,6 @@ func getExpandedArgs(container *corev1.Container) []string {
 	return expandedArgs
 }
 
-func getExpandedCommandAndArgs(container *corev1.Container) []string {
-	expandedArgs := make([]string, 0, len(container.Command)+len(container.Args))
-	for _, arg := range container.Command {
-		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
-	}
-	return append(expandedArgs, getExpandedArgs(container)...)
-}
-
 // shouldUseMpBackend determines whether to use multiprocessing (mp) or Ray for vLLM
 // multi-node distributed launches.
 //
@@ -363,7 +345,8 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 // the leader's master port before the worker's main container starts.
 func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, numberOfNodes int32) {
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	mpFlags := fmt.Sprintf("--distributed-executor-backend mp --nnodes %d --master-addr %s --master-port %s",
+	mpFlags := fmt.Sprintf("%s mp --nnodes %d --master-addr %s --master-port %s",
+		distributedExecutorFlag,
 		numberOfNodes, leaderHostname, commonconsts.VLLMMpMasterPort)
 
 	needsShell := false
@@ -393,7 +376,7 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 			quotedArgs[i] = shellQuoteForBashC(arg)
 		}
 		originalArgs := strings.Join(quotedArgs, " ")
-		vllmMultinodeFlags := "--distributed-executor-backend ray"
+		vllmMultinodeFlags := fmt.Sprintf("%s ray", distributedExecutorFlag)
 		container.Args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s %s", VLLMPort, fullCommand, originalArgs, vllmMultinodeFlags)}
 	case RoleWorker:
 		// Worker nodes only run Ray agent - vLLM on leader will spawn Ray actors on workers
@@ -468,7 +451,7 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		// Bounded at 720 × 15s = 3 hours to cover large models with slow disk I/O.
 		// Without a bound, a permanently broken leader leaves the worker looping
 		// forever with no Kubernetes liveness probe to detect it (probes are removed
-		// at the UpdatePodSpec level for elastic EP workers).
+		// from vLLM multinode containers in UpdateContainer).
 		healthGate := fmt.Sprintf(
 			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
 				`2>/dev/null; do `+
