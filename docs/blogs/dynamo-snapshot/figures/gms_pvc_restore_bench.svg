@@ -29,8 +29,9 @@
 <text class="model" x="40" y="182">Qwen3-0.6B</text>
 <text class="lane-label" x="245" y="224.0" text-anchor="end">Snapshot Agent</text>
 <text class="lane-label" x="245" y="272.0" text-anchor="end">GMS Loader</text>
-<rect x="262.7" y="254" width="12.0" height="28" fill="#3a1050"/>
-<rect x="272.1" y="254" width="12.0" height="28" fill="#0a4a80"/>
+<rect x="262.7" y="254" width="86.5" height="28" fill="#3a1050"/>
+<text class="num" x="306.0" y="272.0" text-anchor="middle">1.1s</text>
+<rect x="349.2" y="254" width="12.0" height="28" fill="#0a4a80"/>
 <rect x="265.9" y="206" width="193.5" height="28" fill="#4a7500"/>
 <text class="num" x="362.6" y="224.0" text-anchor="middle">2.5s</text>
 <rect x="459.3" y="206" width="35.6" height="28" fill="#005a40"/>
@@ -40,10 +41,10 @@
 <text class="model" x="40" y="352">Qwen3-8B</text>
 <text class="lane-label" x="245" y="394.0" text-anchor="end">Snapshot Agent</text>
 <text class="lane-label" x="245" y="442.0" text-anchor="end">GMS Loader</text>
-<rect x="260.5" y="424" width="56.3" height="28" fill="#3a1050"/>
-<text class="num" x="288.6" y="442.0" text-anchor="middle">0.7s</text>
-<rect x="316.8" y="424" width="140.4" height="28" fill="#0a4a80"/>
-<text class="num" x="387.0" y="442.0" text-anchor="middle">1.8s</text>
+<rect x="260.5" y="424" width="133.4" height="28" fill="#3a1050"/>
+<text class="num" x="327.2" y="442.0" text-anchor="middle">1.7s</text>
+<rect x="393.9" y="424" width="140.4" height="28" fill="#0a4a80"/>
+<text class="num" x="464.1" y="442.0" text-anchor="middle">1.8s</text>
 <rect x="265.7" y="376" width="238.6" height="28" fill="#4a7500"/>
 <text class="num" x="385.0" y="394.0" text-anchor="middle">3.1s</text>
 <rect x="504.3" y="376" width="38.5" height="28" fill="#005a40"/>
@@ -53,18 +54,18 @@
 <text class="model" x="40" y="522">gpt-oss-120b</text>
 <text class="lane-label" x="245" y="564.0" text-anchor="end">Snapshot Agent</text>
 <text class="lane-label" x="245" y="612.0" text-anchor="end">GMS Loader</text>
-<rect x="261.8" y="594" width="79.7" height="28" fill="#3a1050"/>
-<text class="num" x="301.6" y="612.0" text-anchor="middle">1.0s</text>
-<rect x="341.4" y="594" width="710.7" height="28" fill="#0a4a80"/>
-<text class="num" x="696.8" y="612.0" text-anchor="middle">9.2s</text>
+<rect x="261.8" y="594" width="156.8" height="28" fill="#3a1050"/>
+<text class="num" x="340.2" y="612.0" text-anchor="middle">2.0s</text>
+<rect x="418.5" y="594" width="710.7" height="28" fill="#0a4a80"/>
+<text class="num" x="773.9" y="612.0" text-anchor="middle">9.2s</text>
 <rect x="265.7" y="546" width="347.6" height="28" fill="#4a7500"/>
 <text class="num" x="439.5" y="564.0" text-anchor="middle">4.5s</text>
 <rect x="613.3" y="546" width="58.1" height="28" fill="#005a40"/>
 <text class="num" x="642.4" y="564.0" text-anchor="middle">0.8s</text>
-<rect x="671.5" y="546" width="384.6" height="28" fill="#702828"/>
-<text class="num" x="863.8" y="564.0" text-anchor="middle">wait for GMS &#183; 5.0s</text>
-<rect x="1064.1" y="546" width="1.9" height="28" fill="#9a9a9a"/>
-<text class="total" x="1075.6" y="564.0">10.5s</text>
+<rect x="671.5" y="546" width="461.7" height="28" fill="#702828"/>
+<text class="num" x="902.4" y="564.0" text-anchor="middle">wait for GMS &#183; 6.0s</text>
+<rect x="1141.2" y="546" width="1.9" height="28" fill="#9a9a9a"/>
+<text class="total" x="1152.7" y="564.0">11.5s</text>
 <rect x="260.5" y="696" width="12" height="12" fill="#4a7500"/>
 <text class="legend" x="278.5" y="707">CRIU restore</text>
 <rect x="390.5" y="696" width="12" height="12" fill="#005a40"/>

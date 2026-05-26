@@ -301,7 +301,64 @@ function compileRestoreSource(sourceKey, comparisonMode) {
       lane,
     );
   }
-  return coalesce(segments);
+  const compiled = coalesce(segments);
+  return sourceKey === "gmsPvcRestore" || sourceKey === "gmsLocalSsdRestore"
+    ? adjustGmsLoadSetupUndermeasure(compiled)
+    : compiled;
+}
+
+function adjustGmsLoadSetupUndermeasure(rows) {
+  // The GMS loader setup interval is built from gms_load_wait_for_rw and
+  // gms_load_phase_a_allocate_va log spans. The benchmark logs miss roughly one
+  // second of setup work before those spans begin; carry that correction in the
+  // compiled data rather than editing the raw logs.
+  const correctionS = 1.0;
+  const adjusted = rows.map((row) => ({ ...row }));
+
+  for (const modelKey of modelOrder) {
+    const setup = adjusted.find((row) =>
+      row.model_key === modelKey
+      && row.lane === "GMS loader"
+      && row.phase === "GMS load setup"
+    );
+    if (!setup) {
+      continue;
+    }
+
+    const originalSetupEnd = setup.start_s + setup.duration_s;
+    setup.duration_s += correctionS;
+    setup.raw_phase = `${setup.raw_phase}; +1.000s setup correction`;
+
+    for (const row of adjusted) {
+      if (row.model_key !== modelKey) {
+        continue;
+      }
+      if (
+        row.lane === "GMS loader"
+        && row.phase !== "GMS load setup"
+        && row.start_s >= originalSetupEnd - 1e-9
+      ) {
+        row.start_s += correctionS;
+      }
+    }
+
+    const waitForGms = adjusted.find((row) =>
+      row.model_key === modelKey
+      && row.phase === "wait for GMS"
+    );
+    if (waitForGms) {
+      waitForGms.duration_s += correctionS;
+      waitForGms.raw_phase = `${waitForGms.raw_phase}; +1.000s GMS setup correction`;
+
+      for (const row of adjusted) {
+        if (row.model_key === modelKey && row.phase === "wake / remap") {
+          row.start_s += correctionS;
+        }
+      }
+    }
+  }
+
+  return adjusted;
 }
 
 function coalesce(rows) {
