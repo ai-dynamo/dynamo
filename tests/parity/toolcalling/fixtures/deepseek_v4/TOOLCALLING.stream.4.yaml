@@ -24,17 +24,15 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        calls: []
-        normal_text: ''
-      sglang:
-        unavailable: SGLang has no detector for family='deepseek_v4'
-      vllm:
+      dynamo: &d_4_a
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+      vllm: *d_4_a
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from TOOLCALLING.batch.5.c

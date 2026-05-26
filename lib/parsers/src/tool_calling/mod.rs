@@ -41,7 +41,7 @@ pub use response::{
 };
 pub use tools::{
     try_tool_call_parse_aggregate, try_tool_call_parse_aggregate_finalize,
-    try_tool_call_parse_stream,
+    try_tool_call_parse_aggregate_stream_finalize, try_tool_call_parse_stream,
 };
 pub use xml::try_tool_call_parse_kimi_k2;
 pub use xml::try_tool_call_parse_xml;
