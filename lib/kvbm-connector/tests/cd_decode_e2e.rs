@@ -1785,6 +1785,79 @@ async fn cd_decode_promotes_g3_prefix_to_g2_at_usaa() -> Result<()> {
     Ok(())
 }
 
+/// Stage 2d failure path: when `promote_g3_to_g2` Errs at USAA
+/// (the documented G3-eviction case + any infrastructure
+/// failure inside the shim), the spawned promotion task must
+/// call `session.close(reason)` with a tier-prefixed reason
+/// string. The prefill peer observes `Detached`/`Failed` and
+/// runs its standard CD failure cleanup; no `make_available`
+/// fires for the promoted prefix (those blocks were never
+/// produced).
+///
+/// Symmetric to the G1 failure handling — same task body, same
+/// `session.close` route — but pinned separately so a regression
+/// in tier-dispatch could not silently swap which arm closes
+/// the session on failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_g3_promotion_failure_closes_session() -> Result<()> {
+    let h = build_harness();
+    h.inner.install_g3_prefix("req-1", prefix_hashes(&h));
+    h.wrapper.create_slot(make_request())?;
+
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    h.inner.wait_g3_promotion_count(1).await;
+
+    // Resolve the G3 promotion with Err — models the G3-eviction
+    // case where the GNMT-time pinned hashes no longer match at
+    // USAA, or any infrastructure failure inside
+    // `stage_g3_to_g2`.
+    h.inner
+        .resolve_g3_promotion(0, Err(anyhow::anyhow!("simulated stage_g3_to_g2 failure")));
+
+    // The task must reach `session.close(Some("g3->g2 promotion: …"))`.
+    wait_until(|| session.closed_reason().is_some()).await;
+    let closed = session.closed_reason().expect("session closed");
+    let reason = closed.expect("close reason carried");
+    assert!(
+        reason.contains("g3->g2 promotion"),
+        "close reason must carry the G3 tier prefix; got: {reason:?}",
+    );
+    assert!(
+        reason.contains("simulated stage_g3_to_g2 failure"),
+        "close reason must propagate the underlying error; got: {reason:?}",
+    );
+
+    // No make_available for the promoted prefix — only the GNMT-time
+    // local_match call fired (the failure prevented the second
+    // make_available the task would have driven on success). The
+    // prefill peer therefore sees the prefix hashes committed but
+    // never available — it routes through its cleanup_failed_request
+    // when the close-induced lifecycle terminal arrives.
+    assert_eq!(
+        session.make_available_calls(),
+        vec![local_match_hashes(&h)],
+        "failed G3 promotion must NOT publish prefix availability",
+    );
+    // NOTE: do NOT assert on `finish_availability_called()`. Per
+    // p2p session CONTRACT §2.14, `session.close` IMPLIES
+    // `finish_availability` — the mock observes that implication
+    // and `finish_availability_called()` returns true after close.
+    // The discriminating assertion is the close reason + the
+    // absence of a prefix make_available, both pinned above.
+
+    Ok(())
+}
+
 /// Stage 2c: when neither G2 nor G3 holds the prefix, the
 /// wrapper must fall back to the existing Stage 1 G1 promotion
 /// path. This is the existing happy-path behavior; the test
