@@ -41,12 +41,62 @@ from gpu_memory_service.snapshot.transfer import (
 logger = logging.getLogger(__name__)
 
 _PINNED_COPY_BUFFERS_PER_WORKER = 2
+POSIX_IOS_POOL_SIZE_CONFIG_KEY = "nixl_posix_ios_pool_size"
+POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY = "nixl_posix_kernel_queue_size"
+DEFAULT_POSIX_IOS_POOL_SIZE = 1024
+DEFAULT_POSIX_KERNEL_QUEUE_SIZE = 128
 
 NixlFileGroup = Tuple[str, Sequence[FileTransferSource]]
 NixlWorkGroup = Tuple[str, Sequence[NixlFileGroup]]
 NixlGroupingFn = Callable[
     [Sequence[FileTransferSource]], Mapping[str, List[NixlFileGroup]]
 ]
+
+
+def _positive_int_config(
+    config: Mapping[str, object],
+    key: str,
+    default: int,
+) -> int:
+    raw_value = config.get(key)
+    if raw_value is None or raw_value == "":
+        return default
+
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a positive integer, got {raw_value!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{key} must be a positive integer, got {raw_value!r}")
+    return value
+
+
+def _posix_backend_params_from_config(
+    config: Mapping[str, object],
+) -> Mapping[str, str]:
+    """Return bounded NIXL POSIX backend params for GMS staging agents.
+
+    NIXL's POSIX backend default preallocates a large I/O pool.  GMS staging
+    workers issue one POSIX NIXL transfer at a time, so a smaller explicit
+    pool is sufficient and avoids spending agent startup time building an
+    oversized default pool.
+    """
+    return {
+        "ios_pool_size": str(
+            _positive_int_config(
+                config,
+                POSIX_IOS_POOL_SIZE_CONFIG_KEY,
+                DEFAULT_POSIX_IOS_POOL_SIZE,
+            )
+        ),
+        "kernel_queue_size": str(
+            _positive_int_config(
+                config,
+                POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY,
+                DEFAULT_POSIX_KERNEL_QUEUE_SIZE,
+            )
+        ),
+    }
 
 
 def _file_group_size(file_group: NixlFileGroup) -> int:
@@ -122,15 +172,20 @@ class NixlPosixStagingTransferBackend:
         self._api = load_nixl_api()
         self._device = config.device
         self._max_workers = config.max_workers
+        self._posix_backend_params = _posix_backend_params_from_config(
+            config.backend_config
+        )
         self._group_sources = group_sources
         self._group_kind = group_kind
         self._warn_under_parallelized = warn_under_parallelized
         cuda_utils.cuda_runtime_set_device(self._device)
         logger.info(
-            "%s initialized for device %d with %d workers using NIXL POSIX staging",
+            "%s initialized for device %d with %d workers using NIXL POSIX "
+            "staging backend_params=%s",
             backend_name,
             self._device,
             self._max_workers,
+            self._posix_backend_params,
         )
 
     def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
@@ -142,6 +197,7 @@ class NixlPosixStagingTransferBackend:
             group_sources=self._group_sources,
             group_kind=self._group_kind,
             warn_under_parallelized=self._warn_under_parallelized,
+            posix_backend_params=self._posix_backend_params,
             sources=sources,
         )
 
@@ -160,6 +216,7 @@ class _NixlPosixStagingTransferSession:
         group_sources: NixlGroupingFn,
         group_kind: str,
         warn_under_parallelized: bool,
+        posix_backend_params: Mapping[str, str],
         sources: Sequence[FileTransferSource],
     ) -> None:
         self._api = api
@@ -169,6 +226,7 @@ class _NixlPosixStagingTransferSession:
         self._group_sources = group_sources
         self._group_kind = group_kind
         self._warn_under_parallelized = warn_under_parallelized
+        self._posix_backend_params = dict(posix_backend_params)
         self._sources = list(sources)
         self._agent_name_base = (
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
@@ -260,6 +318,7 @@ class _NixlPosixStagingTransferSession:
             self._api,
             agent_name=agent_name,
             backend_name=NIXL_POSIX_BACKEND,
+            backend_params=self._posix_backend_params,
         )
         group_t0 = time.monotonic()
         group_bytes = 0
