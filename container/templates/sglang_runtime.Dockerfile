@@ -40,22 +40,17 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
-# Stage NIXL SDK + UCX on the system linker path so the stub-built nixl-sys
-# can dlopen libnixl_capi.so at runtime; mirrors vllm_runtime / trtllm_runtime.
-COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
-
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
-
-ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH:-}
-
-RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
-    echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
-    echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
-    echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
-    ldconfig
+# Expose upstream lmsysorg/sglang's bundled libnixl_capi.so on ld.so so the
+# stub-built nixl-sys (in dynamo's Rust wheel) can dlopen it. The wheel ships
+# libs only under .nixl_cu*.mesonpy.libs/, which ld.so never searches.
+RUN NIXL_DIR=$(python3 -c "import sysconfig, glob, os; \
+        d = sysconfig.get_paths()['purelib']; \
+        cands = sorted(glob.glob(os.path.join(d, '.nixl_cu*.mesonpy.libs'))); \
+        print(cands[0] if cands else '')") && \
+    test -n "$NIXL_DIR" && test -f "$NIXL_DIR/libnixl_capi.so" && \
+    echo "$NIXL_DIR" > /etc/ld.so.conf.d/nixl-upstream.conf && \
+    ldconfig && \
+    ldconfig -p | grep -q libnixl_capi.so
 
 # Runtime target installs only the prebuilt Dynamo wheels. SGLang and its NIXL
 # packages come from the upstream lmsysorg/sglang runtime image; --no-deps keeps

@@ -394,6 +394,9 @@ sglang_configs = {
             # TODO: bisect via tests/utils/profile_pytest.py for a tighter bound.
             pytest.mark.requested_sglang_kv_tokens(4096),
             pytest.mark.timeout(300),
+            # TEMPORARY pre_merge to validate the sglang cu13.0 NIXL fix in
+            # this PR; revert to post_merge-only before merge. See PR #9892.
+            pytest.mark.pre_merge,
             # post_merge: NIXL stubs outside docker can lack the Decoded
             # transport path. Same gating as vLLM's FD case
             # (tests/serve/multimodal_profiles/vllm.py:67-70).
