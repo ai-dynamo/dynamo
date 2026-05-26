@@ -553,6 +553,25 @@ impl DecodeDisaggLeader {
         self.release_request_if_matches(request_id, &handle.0)
     }
 
+    /// Test-only: peek at the `pending_promotion.source_tier`
+    /// recorded for `request_id` by `commit_gnmt_remote`. Returns
+    /// `None` if no promotion is planned; `Some("G1")` or
+    /// `Some("G3")` for the planned tier. Used by Stage 2
+    /// reproducer tests to verify the G3 path won the GNMT-time
+    /// finder race.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pending_promotion_tier_for_test(&self, request_id: &str) -> Option<&'static str> {
+        self.cd_request_state.get(request_id).and_then(|e| {
+            e.value()
+                .pending_promotion
+                .as_ref()
+                .map(|p| match p.source_tier {
+                    SourceTier::G1 => "G1",
+                    SourceTier::G3 => "G3",
+                })
+        })
+    }
+
     fn release_request(&self, request_id: &str) {
         if let Some((_, state)) = self.cd_request_state.remove(request_id) {
             self.inflight_budget.release(state.reserved_tokens);
@@ -857,27 +876,48 @@ impl DecodeDisaggLeader {
             );
         }
 
-        // Stage 1: when G2 didn't cover the prefix but vLLM is
-        // claiming one (`num_computed_tokens > 0`), plan a G1→G2
-        // promotion to fire at USAA. The slot's full sequence is
-        // the source of truth for the prefix hashes; vLLM will
-        // hand us the corresponding G1 `block_ids` at USAA.
+        // Stage 1/2: when G2 didn't cover the prefix but vLLM is
+        // claiming one (`num_computed_tokens > 0`), plan a
+        // promotion to fire at USAA. Try G3 first (decode's NVMe
+        // tier) since promoting from G3 doesn't need vLLM's G1
+        // `block_ids` and avoids contending for the G1 offload
+        // pipeline; fall back to G1 (Stage 1 path) if G3 doesn't
+        // hold the prefix.
         //
-        // Stage 2 will extend this arm to first try G3 (decode's
-        // NVMe tier); on G3 hit, the plan's `source_tier` flips to
-        // G3 and the promotion task at USAA dispatches through
-        // `promote_g3_to_g2` instead.
+        // The slot's full sequence is the source of truth for the
+        // prefix hashes; the G3 finder is contract-bound to return
+        // the same canonical chain on hit (verified by debug
+        // assert).
         let pending_promotion = if prefix_g2.is_empty() && num_prefix_blocks > 0 {
-            let prefix_hashes: Vec<SequenceHash> =
+            let prefix_hashes_from_slot: Vec<SequenceHash> =
                 split.all_sequence_hashes[..num_prefix_blocks].to_vec();
-            crate::audit!(
-                "prefix_g1_to_g2_promotion_planned",
-                role = "decode",
-                request_id,
-                prefix_block_count = num_prefix_blocks
-            );
+            let g3_hashes = self
+                .inner
+                .find_prefix_g3_hashes(request_id, num_prefix_blocks)
+                .map_err(release_pre_insert_budget)?;
+            let (source_tier, prefix_hashes) = if !g3_hashes.is_empty() {
+                debug_assert_eq!(
+                    g3_hashes, prefix_hashes_from_slot,
+                    "find_prefix_g3_hashes returned hashes inconsistent with slot PLH chain"
+                );
+                crate::audit!(
+                    "prefix_g3_to_g2_promotion_planned",
+                    role = "decode",
+                    request_id,
+                    prefix_block_count = num_prefix_blocks
+                );
+                (SourceTier::G3, g3_hashes)
+            } else {
+                crate::audit!(
+                    "prefix_g1_to_g2_promotion_planned",
+                    role = "decode",
+                    request_id,
+                    prefix_block_count = num_prefix_blocks
+                );
+                (SourceTier::G1, prefix_hashes_from_slot)
+            };
             Some(PendingTierPromotion {
-                source_tier: SourceTier::G1,
+                source_tier,
                 prefix_block_count: num_prefix_blocks,
                 prefix_hashes,
             })

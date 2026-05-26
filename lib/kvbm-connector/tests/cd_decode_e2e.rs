@@ -1573,6 +1573,134 @@ fn _ensure_inner_used(h: &TestHarness) {
     let _ = h.coordinator.active_count();
 }
 
+/// Stage 2c: when decode's G3 holds the prefix range that vLLM
+/// reports (`num_computed_tokens > 0`) AND the G2 cache has no
+/// record of it, the wrapper must plan a G3→G2 promotion (not a
+/// G1→G2 one). Producer wiring lives in `commit_gnmt_remote`'s
+/// empty-prefix arm: try `find_prefix_g3_hashes` first, fall
+/// back to G1 promotion only if G3 misses.
+///
+/// What this test pins:
+///   1. `find_prefix_g3_hashes` is called and returns the
+///      prefix slice (the mock is pre-loaded with
+///      `install_g3_prefix`).
+///   2. The recorded `PendingTierPromotion.source_tier` is `G3`
+///      (visible via the `pending_promotion_tier_for_test`
+///      accessor).
+///   3. The session-side commit shape is the same as the G1
+///      path — `session.commit(prefix ∪ local_match)` +
+///      `finish_commits` + deferred `finish_availability`.
+///      Stage 2's promotion source change does not alter the
+///      session-side committed set or sealing.
+///   4. No `promote_g1_to_g2` call fires at this point (G1 path
+///      not taken) and no `promote_g3_to_g2` call fires yet
+///      (Stage 2d wires the USAA-time dispatch).
+///
+/// Discriminating quality: pre-Stage-2c code does not call
+/// `find_prefix_g3_hashes`, so even with `install_g3_prefix`
+/// the planned tier would be `G1` (the only branch in the
+/// arm). The `Some("G3")` assertion fails on pre-2c code and
+/// passes only when the empty-prefix arm consults G3 first.
+///
+/// This test does NOT drive USAA — Stage 2a's guard in
+/// `commit_usaa1` bails on G3 dispatch until Stage 2d wires it.
+/// The Stage 2d test will exercise the USAA path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_plans_g3_to_g2_promotion_when_g3_holds_prefix() -> Result<()> {
+    let h = build_harness();
+
+    // Pre-load the mock's G3 universe with the prefix hashes so
+    // `find_prefix_g3_hashes` returns Some on the GNMT-time query.
+    h.inner.install_g3_prefix("req-1", prefix_hashes(&h));
+
+    h.wrapper.create_slot(make_request())?;
+
+    // GNMT — wrapper opens session, plans G3 promotion in the
+    // empty-prefix arm.
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(count, Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE));
+    assert!(async_flag);
+
+    // Pin: the planned promotion's source tier is G3 (not G1).
+    assert_eq!(
+        h.wrapper.pending_promotion_tier_for_test("req-1"),
+        Some("G3"),
+        "with G3 pre-loaded, commit_gnmt_remote must plan a G3 promotion",
+    );
+
+    // Pin: session-side shape matches the G1 path. The committed
+    // set is `prefix ∪ local_match`; `finish_commits` is sealed;
+    // `finish_availability` is deferred until the promotion task
+    // (lands in Stage 2d) drives `session.make_available` for the
+    // promoted blocks.
+    let session = h.factory.last_opened().expect("decode opened a session");
+    let mut expected_first_commit = prefix_hashes(&h);
+    expected_first_commit.extend(local_match_hashes(&h));
+    assert_eq!(
+        session.commit_calls(),
+        vec![expected_first_commit],
+        "GNMT must commit prefix ∪ local_match regardless of source tier",
+    );
+    assert_eq!(
+        session.make_available_calls(),
+        vec![local_match_hashes(&h)],
+        "GNMT must NOT expose planned-promotion blocks before they land",
+    );
+    assert!(
+        session.finish_commits_called(),
+        "GNMT must seal commits at the GNMT-time planned set",
+    );
+    assert!(
+        !session.finish_availability_called(),
+        "GNMT must DEFER finish_availability — Stage 2d wires the G3 task",
+    );
+
+    // Pin: no G1 promotion fired at GNMT; no G3 promotion yet
+    // either (USAA-time dispatch lands in Stage 2d).
+    assert_eq!(
+        h.inner.promotion_count(),
+        0,
+        "G1 promotion must NOT fire when G3 path wins the finder race",
+    );
+    assert_eq!(
+        h.inner.g3_promotion_count(),
+        0,
+        "G3 promotion dispatch lands in Stage 2d, not here",
+    );
+
+    Ok(())
+}
+
+/// Stage 2c: when neither G2 nor G3 holds the prefix, the
+/// wrapper must fall back to the existing Stage 1 G1 promotion
+/// path. This is the existing happy-path behavior; the test
+/// pins it explicitly so a future regression in the G3
+/// short-circuit doesn't silently route G1-only flows through
+/// the wrong branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_falls_back_to_g1_promotion_when_g3_misses() -> Result<()> {
+    let h = build_harness();
+
+    // NOTE: deliberately NOT calling `install_g3_prefix` — the
+    // mock's G3 universe is empty, so `find_prefix_g3_hashes`
+    // returns empty and `commit_gnmt_remote` falls back to G1.
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    assert_eq!(
+        h.wrapper.pending_promotion_tier_for_test("req-1"),
+        Some("G1"),
+        "G3 miss must fall back to G1 promotion (existing Stage 1 path)",
+    );
+
+    Ok(())
+}
+
 /// Install a second slot ("req-2") on an existing harness. Mirrors
 /// `build_harness`'s req-1 setup but with a different token seed so
 /// the two slots have distinct hash chains (and therefore distinct
