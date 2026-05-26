@@ -31,10 +31,10 @@ mod inner;
 mod types;
 
 use inner::InnerPrefillRouter;
-pub use types::{PrefillError, PrefillQueryOutcome};
 use types::{
     ConditionalPrefillPolicy, PrefillOutcome, PrefillResolveDecision, build_decode_router_override,
 };
+pub use types::{PrefillError, PrefillQueryOutcome};
 
 /// Annotation marker the conditional-prefill bypass path sets on a request before
 /// dispatching it to a DECODE-mode worker. The worker's Python wrapper checks for
