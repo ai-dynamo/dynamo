@@ -82,6 +82,7 @@ const (
 // --- GPU model tokens ---
 const (
 	tokenGB200  = "GB200"
+	tokenGB10   = "GB10"
 	tokenB200   = "B200"
 	tokenH200   = "H200"
 	tokenH100   = "H100"
@@ -123,6 +124,7 @@ type gpuRule struct {
 var gpuRules = []gpuRule{
 	// Blackwell
 	{token: tokenGB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM},
+	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
 	{token: tokenB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB200SXM},
 
 	// Hopper

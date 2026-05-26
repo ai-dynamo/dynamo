@@ -438,6 +438,16 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
 		},
 		{
+			name:     "GB10 bare",
+			input:    "GB10",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB10,
+		},
+		{
+			name:     "NVIDIA GB10 (DCGM format)",
+			input:    "NVIDIA GB10",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB10,
+		},
+		{
 			name:     "B200 SXM",
 			input:    "B200 SXM",
 			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,
