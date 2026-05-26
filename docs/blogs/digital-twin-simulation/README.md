@@ -3,64 +3,30 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Working title: DynoSim: A Dynamo Digital Twin
+# Tentative title: DynoSim: A Dynamo Digital Twin
 
 Tentative author list: Yongming Ding, Rudy Pei, Hongkuan Zhou, Ryan Olson, Dan Gil, Vikram Sharma Mailthody
 
-[placeholder: final hero/lead image if needed]
+## 1. Intro
 
-Before investing millions, or even billions, of dollars in data center
-infrastructure, teams want a clear view of the value that infrastructure is
-likely to produce. That is especially hard for modern LLM serving, where a
-deployment has to choose the model backend, tensor-parallel shape,
-prefill/decode split, worker counts, scheduler settings, routing policy, KV
-reuse and offload behavior, autoscaling thresholds, and deployment topology.
+Modern LLM serving is hard to tune because each deployment is a stack of
+interacting choices: model backend, tensor-parallel shape, prefill/decode split,
+worker counts, scheduler settings, routing policy, KV cache behavior,
+autoscaling thresholds, and topology.
 
 Those choices interact across layers. Engine schedulers turn backend pass timing
-into token-producing batches. Dynamo's
-[Router](../../components/router/router-guide.md) decides where each request
-lands, autoscaling decisions adjust capacity only after startup or
-specialization delays, and the
-[KV Block Manager (KVBM)](../../components/kvbm/kvbm-guide.md) determines when
-cached state is reused, moved, offloaded, or recomputed. A local improvement can
-shift the bottleneck somewhere else, and for larger models even one realistic
-experiment can require many GPUs or nodes before we learn whether the idea was
-worth testing.
+into token-producing batches. Dynamo's [Router](https://github.com/ai-dynamo/dynamo/blob/main/docs/components/router/router-guide.md)
+decides where each request lands, autoscaling decisions adjust capacity only
+after startup or specialization delays, and the [KV Block Manager (KVBM)](https://github.com/ai-dynamo/dynamo/blob/main/docs/components/kvbm/kvbm-guide.md)
+determines when cached state is reused, moved, offloaded, or recomputed.
+A local improvement can shift the bottleneck somewhere else, and for larger
+models even one realistic experiment can require many GPUs or nodes before
+we learn whether the idea was worth testing.
 
-That is the motivation for DynoSim: a Dynamo digital twin.
-
-In this post, a digital twin means a workload-driven discrete-event simulation
-of the Dynamo serving stack: engine schedulers, forward-pass timing, KV and cache
-behavior, routers, autoscaling, and workload traces. The goal is not a purely
-analytical estimate and not a bit-exact hardware emulator. The goal is a faithful
-serving simulation at the atomic level of forward passes, with the Dynamo
-components above the engine included in the same event timeline.
-
-That puts Dynamo's simulation in the middle ground between spreadsheet estimates
-and full cluster experiments. It preserves component boundaries while studying
-their interactions on one simulated timeline, and it is cheap enough to screen
-many design candidates before spending hardware time. Because the simulator is
-implemented in Rust, it is also practical to simulate thousands of workers on a
-developer laptop.
-
-That fidelity has to be earned. DynoSim combines measured engine timing with
-real Dynamo component cores, swapping live async and runtime bridges for
-deterministic replay bridges: Router simulation uses KV router primitives and
-configuration, Planner replay drives the Planner state machine, and worker
-passes reuse the mocker scheduler cores. Live runs expose the remaining deltas,
-which become calibration inputs for the next simulation pass.
-
-DynoSim optimizes how existing engine profiles and Dynamo components are
-assembled for a workload.
-
-## Why Simulate LLM Serving?
-
-The real power of simulation is not just prediction. It is decision-making.
-
-The resulting loop is useful because it prices decisions before they hit the
-cluster. DynoSim can ask whether a different topology, transfer path, batching
-policy, or backend configuration changes the best Router, Planner, or KVBM
-choice, then send only the strongest candidates to real-cluster validation.
+DynoSim is a Dynamo digital twin for that deployment workflow: a workload-driven
+discrete-event simulation of the Dynamo serving stack. It combines measured
+engine forward-pass timing, Mocker scheduler cores, Router, and Planner behavior,
+KV cache effects and workload traces on one virtual timeline. The goal is not a purely analytical estimate and not a bit-exact hardware emulator. The goal is a faithful serving simulation at the atomic level of forward passes, with the Dynamo components above the engine included in the same event timeline.
 
 As a scale reference, on an Apple M4 MacBook Air, the single-threaded Rust
 offline replay simulated the full 23,608-request Mooncake trace with eight
@@ -69,76 +35,46 @@ wall time. The simulated serving window was 60.1 minutes, about 1,500x faster
 than real time. The replay loop is single-threaded by design; the intended
 scaling path is to run many independent replays in parallel.
 
-That gives Dynamo a practical loop for research, engineering scoping, and
-customer-facing sizing.
+![DynoSim turns exhaustive deployment search into a fast simulate-then-verify loop, screening thousands of candidates before spending GPU time.](./final_images/fig-1-hero-config-space.png)
 
-- **Research:** Test routing, autoscaling, prefill/decode, KV/cache, and
-  topology ideas, and generate KV cache traces before spending cluster time.
-- **Engineering:** Turn opportunity costs into thresholds. If specializing one
-  decode worker into N prefill workers takes X seconds, DynoSim can show when X
-  breaks the service-level agreement (SLA) and what target makes the work worth
-  prioritizing.
-- **Customer-facing sizing:** Compare GPU counts, worker layouts, backends, and
-  deployment topologies against a workload and SLA before committing capacity.
+*Figure 1. DynoSim turns exhaustive deployment search into a fast
+simulate-then-verify loop, screening thousands of candidates before spending
+GPU time.*
 
-## 1. Architecture: Composing Dynamo As Events
+The same replay metrics can support configuration search and bounded research. A
+sweep can map the Pareto frontier for a workload on existing hardware, while an
+autoresearch-style workflow can propose changes to a Router cost function,
+Planner heuristic, or cache policy, replay the trace, and keep only candidates
+that improve the selected objective.
 
-The key design choice is composition. Dynamo's simulation story is not one
-monolithic model. It is a set of components that mirror serving-system concepts
-and interact through a simulated timeline.
+That gives Dynamo a practical loop for research, engineering scoping, and customer-facing sizing.
 
-One of those components is the [Planner](../../components/planner/planner-guide.md):
-Dynamo's autoscaling component. It computes scaling targets from live metrics,
-profiles, and SLA goals.
+- Research: Test routing, autoscaling, prefill/decode, KV/cache, and topology ideas before spending cluster time.
+- Engineering: Turn opportunity costs into thresholds. If specializing one decode worker into N prefill workers takes X seconds, DynoSim can show when X breaks the service-level agreement (SLA) and what target makes the work worth prioritizing.
+- Customer-facing sizing: Compare GPU counts, worker layouts, backends, and deployment topologies against a workload and SLA before committing capacity.
 
-```mermaid
-flowchart TD
-    subgraph SEC[Single Engine Core]
-        subgraph SCH[Scheduler Modeling]
-            F[Fwd Pass Modeling]
-        end
-    end
+## 2. Architecture: Composing Dynamo As Events
 
-    KV[KV Transfer + Offloading Simulation]
-    KR[KV Router Simulation]
-    P[Planner Autoscaling Simulation]
+The key design choice is composition. DynoSim is not one monolithic model; it is
+a set of serving components that run on the same simulated timeline. A replay
+harness drives workload arrivals, single-engine simulations model worker-local
+scheduling and forward-pass timing, and multi-engine simulation adds the system
+behaviors that only exist across workers: routing, queueing, imbalance, and Planner
+decisions. KVBM and distributed cache simulation are part of future work.
 
-    SES[Single Engine Simulation]
-    MES[Multi Engine Simulation]
+![DynoSim composes workload replay, engine simulations, Router, Planner, and optional KVBM behavior on a single discrete-event timeline.](./final_images/fig-2-architecture-map.png)
 
-    SES --> SEC
+*Figure 2. DynoSim composes workload replay, engine simulations, Router,
+Planner, and optional KVBM behavior on a single discrete-event timeline.*
 
-    MES --> SEC
-    MES --> KV
-    MES --> KR
-    MES --> P
-```
+### 2.1 Replay On A Virtual Clock
 
-The **Single Engine Core** models one worker: scheduler behavior plus
-forward-pass timing. The **Single Engine Simulation** wraps that core as one
-modeled execution stream. The **Multi Engine Simulation** composes many workers
-and adds the system behaviors that only exist across workers: admission,
-routing, KV movement, queueing, imbalance, and Planner decisions.
+Discrete-event simulation, or DES, gives DynoSim a virtual clock and an event queue. Components do not wait in real time. Instead, they schedule future events with modeled
+durations: a request arrival, a scheduler step, a forward pass, a KV transfer,
+a worker startup, or a Planner action. The runtime jumps to the next timestamp,
+updates system state, and lets the affected components schedule more work.
 
-KVBM and distributed cache simulation are treated as near-future component work
-in this draft rather than as a fully hooked-up claim today.
-
-### 1.1 DES Basics: LLM Inference As Events
-
-Discrete-event simulation, or DES, is a simple idea with a lot of leverage. The
-simulator has a virtual clock and an event queue. Components do not wait in real
-time. Instead, they schedule future events: a request arrives, a forward pass
-finishes, a KV handoff completes, a worker becomes available, or the Planner
-takes an action. The runtime jumps to the next event, updates system state, and
-lets components schedule more events.
-
-That gives us deterministic, replayable timelines. The simulator can run a long
-serving workload without sleeping for the actual time the workload would take.
-The trace collector then computes metrics from the simulated timeline: time to
-first token (TTFT), time per output token (TPOT), end-to-end latency, output
-throughput, cache reuse, and feasibility against the selected objective or SLA.
-
-### 1.2 A Request's Journey Through The Twin
+#### A Request's Journey Through The Twin
 
 One request makes the DES model concrete:
 
@@ -148,53 +84,26 @@ One request makes the DES model concrete:
 3. The selected engine scheduler batches the request into a prefill or decode
    pass.
 4. Hardware-informed timing, such as timing backed by
-   [AI Configurator (AIC)](../../kubernetes/model-deployment-guide.md#rapid-default),
+   [AI Configurator (AIC)](https://github.com/ai-dynamo/aiconfigurator),
    estimates the duration of that pass.
 5. KV handoff, cache, or offload-related events may be scheduled on the same
    virtual timeline.
 6. Decode produces visible output tokens.
 7. The trace collector records request-level and system-level metrics.
 
-The important part is that every component decision changes future events: a
-router decision affects the worker's queue, a Planner scaling decision delays
-capacity, and a KV movement decision can change when decode begins.
+The important part is that every component decision changes future events: a router decision affects the worker's queue, a Planner scaling decision delays capacity, and a KV movement decision can change when decode begins.
 
-### 1.3 Replay Harness: Driving The Twin
-
-```mermaid
-flowchart LR
-    LD[Load Driver] --> H[Replay Harness]
-
-    H --> SES[Single Engine Simulation]
-    H --> MES[Multi Engine Simulation]
-
-    SES --> H
-    MES --> H
-
-    H --> TC[Trace Collector]
-    H -. "completion feedback" .-> LD
-```
+#### Replay Harness: Driving The Twin
 
 The replay harness connects workload generation to the simulated components and
-then back to metrics. The load side can be a recorded trace or a synthetic
-workload. At a high level, the same harness can represent open-loop and
-closed-loop styles of traffic, Mooncake-style trace inputs, and more advanced
-agentic or compute-heavy traffic patterns without making the blog post depend on
-one specific generator. It can also generate KV cache traces from the same run,
-so cache behavior can be inspected alongside request metrics.
+then back to metrics. For fixed traces, arrivals can be scheduled directly from
+the trace. For feedback-driven workloads, such as multi-turn or agentic traffic,
+the harness can wait for completions before issuing follow-up requests. The
+trace collector records throughput, TTFT, TPOT, end-to-end latency, prefix cache
+reuse, and other request-level or system-level metrics from the simulated
+timeline.
 
-The collector is the other end of the loop. It turns the simulated lifecycle into
-observable serving metrics: throughput, TTFT, TPOT, end-to-end latency, prefix
-cache reuse, and feasibility.
-
-## 2. Simulating The Dynamo Digital Twin
-
-The architecture and DES overview above explain the mechanism. The
-Dynamo-specific value comes from which components are placed into that mechanism:
-engine schedulers, forward-pass timing, routers, Planner decisions, and KV/cache
-behavior.
-
-### 2.1 Single Engine Simulation: Scheduler Fidelity Matters
+### 2.2 Single Engine Simulation: Scheduler Fidelity Matters
 
 A single engine is not just a tokens-per-second estimate. The scheduler decides
 which requests enter each pass, how prefill and decode work are batched, and how
@@ -203,25 +112,28 @@ models a waiting/running scheduler with shared token budget and
 preemption/recompute, while the SGLang path models radix-cache-aware admission,
 chunked-prefill budgets, and prefix-preserving decode retraction.
 
-AIC fits into this picture as engine-side timing: given the model, backend,
-system, tensor-parallel shape, and pass shape, it estimates how long prefill or
-decode work should take. The scheduler simulation decides what each pass
+AIC fits into this picture as forward-pass timing: given the model, backend,
+system, tensor-parallel shape, and pass shape, it estimates how long a prefill
+or decode pass should take. The Mocker scheduler decides what each pass
 contains; AIC estimates the duration of that chosen pass. The combination is the
-point: AIC informs pass speed, while the mocker/replay scheduler models the
-serving behavior around the pass.
+point: AIC informs pass speed, while Mocker models the serving behavior around
+the pass.
 
 The figure below shows why that scheduler layer matters. AIC gives strong
 fidelity to real silicon for engine-side performance, especially for throughput
 and token time. But TTFT is sensitive to how requests wait, batch, chunk, and
 enter prefill under high concurrency.
 
-![TPS/GPU, TPS/User, TPOT, and TTFT vs. concurrency for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K.](./images/hw_mocker_aic_4panel.png)
+![Scheduler-aware replay closes the gap between engine timing estimates and hardware measurements.](./final_images/fig-3-fidelity.png)
+
+*Figure 3. Scheduler-aware replay closes the gap between engine timing
+estimates and hardware measurements.*
 
 The model tested is MiniMax-M2.5 FP8 on B200, with TP=4, ISL=1K, OSL=1K, at
 concurrencies from 8 to 64. Mocker tracks the hardware trend across throughput
 and latency, with high-concurrency TTFT showing why scheduler modeling matters.
 
-### 2.2 Multi Engine Simulation: From Workers To Systems
+### 2.3 Multi Engine Simulation: From Workers To Systems
 
 For a purely feed-forward policy, multi-engine simulation is almost mechanical:
 pre-allocate each request to a worker queue, run the single-engine simulations in
@@ -236,12 +148,18 @@ replay. The Router experiment composes eight aggregated workers; the KVBM
 experiment uses one worker and toggles the G2 host-memory tier.
 
 The power of Dynamo, and any serious inference framework, comes from components
-that make online decisions from active system feedback. A Router may need current
-cache state and decode load. The Planner may need traffic, worker state, and SLA
-signals. KVBM may need transfer pressure, tier capacity, and future cache
-availability. Multi-engine simulation has to model those feedback loops: each
-component consumes events from the shared heap, observes the current simulated
-state, and schedules future decisions or completions back into that same heap.
+that make online decisions from active system feedback. A Router may need current cache state
+and decode load. The Planner may need traffic, worker state, and SLA signals.
+KVBM may need transfer pressure, tier capacity, and future cache availability.
+Multi-engine simulation models those feedback loops with the same
+timestamp-ordered event queue: each component observes the current simulated
+state and schedules future decisions or completions back into that queue.
+
+Planner decisions fit naturally into this model because scale-up does not make
+capacity appear instantly. A Planner action schedules a future capacity change
+that interacts with requests already queued, router decisions still to come, and
+engine work already in progress. The concrete Planner results appear in the
+optimization section below.
 
 #### Router As A Simulated Dynamo Component
 
@@ -265,7 +183,10 @@ As a concrete routing example, the figure below compares round-robin routing
 with the KV Router. G2 offload is disabled, so the difference comes from routing
 and cache placement:
 
-![Mocker simulation, round-robin vs KV Router with 8 workers. Left: mean TTFT vs concurrency (log y), where KV Router reduces TTFT at every load point. Right: throughput-vs-interactivity Pareto; KV Router increases prefix reuse and shifts throughput per GPU upward while trading some per-user interactivity at higher concurrency.](./images/kv_router_exp.png)
+![KV-aware routing improves prefix reuse, reducing TTFT and lifting throughput compared with round-robin placement across the concurrency sweep.](./final_images/fig-7-router-experiment.png)
+
+*Figure 4. KV-aware routing improves prefix reuse, reducing TTFT and lifting
+throughput compared with round-robin placement across the concurrency sweep.*
 
 The KV Router raises prefix reuse from about 0.38 to 0.44-0.45. That produces
 higher throughput per GPU and much lower TTFT across the sweep: at c=256, 171
@@ -284,10 +205,13 @@ read, and placement decisions affect routing, scheduling, queueing, and future
 cache state, so they need to be registered as events on the same timeline as the
 rest of the serving harness.
 
-The KVBM example below shows what the mocker predicts when the G2 host-memory
+The KVBM example below shows what Mocker predicts when the G2 host-memory
 tier is enabled and sized at 32,768 blocks:
 
-![Mocker simulation, baseline vs G2-enabled (32K blocks). Left: mean TTFT vs concurrency (log y), with 8.5–19.3% reduction across c=8 to c=64. Right: throughput-vs-interactivity Pareto; G2 weakly dominates the baseline at every concurrency.](./images/kvbm_g2_exp.png)
+![Enabling the KVBM G2 host-memory tier reduces prefill recompute, improving TTFT while shifting the throughput-interactivity Pareto curve upward.](./final_images/fig-8-kvbm-g2.png)
+
+*Figure 5. Enabling the KVBM G2 host-memory tier reduces prefill recompute,
+improving TTFT while shifting the throughput-interactivity Pareto curve upward.*
 
 Mean TTFT improves the most at c=32 (-19.3%), where prefill cost still
 dominates and host-memory KV hits skip prefill work; the benefit narrows at
@@ -297,35 +221,11 @@ baseline at every concurrency: throughput per GPU shifts modestly (+2–4%),
 while interactivity gains the most at c=64 where avoided prefill recompute
 frees decode capacity.
 
-Replay can also drive
+In the future, Replay can also drive
 [NIXL (NVIDIA Inference tranXfer Library)](../../api/nixl-connect/README.md)
 reads and writes against a real distributed cache target. Those measurements
 calibrate transfer cost, placement behavior, and contention, then feed back into
 the distributed cache model instead of relying only on hand-tuned assumptions.
-
-#### Planner As A Feedback-Driven Component
-
-Like the Router and KVBM, the Planner makes decisions from feedback produced by
-the rest of the system: engine metrics, traffic, cache state, and worker state.
-
-Planner framing:
-
-| Stage | Planner role |
-|---|---|
-| Inputs | Traffic observations, forward-pass metrics, worker state, capacity signals |
-| Decision | Scale workers, change allocation, or hold steady |
-| System effect | Future capacity, responsiveness, stability, routing pressure, and prefill/decode balance |
-
-Planner decisions are especially natural in DES because scale-up does not make
-capacity appear instantly. It schedules future state changes that interact with
-requests already in the system, router decisions still to come, and engine
-queues already forming.
-
-The Planner is also a component under active development and research, so
-Planner simulation is not a light switch that can simply be flicked on. It is a
-complex, dynamic part of the serving system. This section frames why it belongs
-in the event model; we defer a deeper discussion of Planner simulation results
-to the next major section.
 
 ## 3. Optimization And Discovery With DynoSim
 
@@ -343,11 +243,6 @@ still small and locally smooth enough for coarse coordinate search to find usefu
 candidates. As the search space grows, the same replay scoring loop can be
 connected to richer black-box optimizers such as Hyperopt-style Bayesian search,
 genetic algorithms, or [Vizier](https://github.com/google/vizier).
-
-```mermaid
-flowchart LR
-    A["TP search<br/>choose TP shape<br/>(prefill_tp, decode_tp)<br/>under GPU budget"] --> B["Worker search<br/>choose worker split<br/>(prefill_workers, decode_workers)<br/>for the chosen TP"] --> C["Router search<br/>choose routing mode<br/>and overlap_score_weight"] --> A
-```
 
 The point is joint search. The best parallel mapping depends on the worker
 layout, and the best worker layout depends on the router policy. The same
@@ -428,7 +323,10 @@ planner runs (`optimization_target` ∈ {throughput, latency, sla}) on the
 resulting Pareto plane. The SLA runs use a representative target of
 TTFT=1500 ms, ITL=50 ms.
 
-![Planner experiment 1 — setup tradeoffs](images/planner_exp_1.png)
+![SLA-targeted Planner finds a better cost-latency operating point than static deployment.](./final_images/fig-4-planner-setup-tradeoffs.png)
+
+*Figure 6. SLA-targeted Planner finds a better cost-latency operating point
+than static deployment.*
 
 The agg SLA planner sits below the static-deployment Pareto curve on TTFT —
 roughly the same GPU-hours as a 4-GPU static deployment, but with p90 TTFT
@@ -444,7 +342,10 @@ scaling disabled, `load_adjustment_interval` is the only knob driving fast
 reactions. Sweeping it across {1, 2, 5, 10, 20, 30, 60, 120, 300} s with
 instantaneous engine startup isolates the responsiveness-vs-flap tradeoff.
 
-![Planner experiment 2 — load adjustment interval](images/planner_exp_2.png)
+![Load adjustment works best around 5-10 seconds, balancing responsiveness and scaling churn.](./final_images/fig-5-planner-load-interval.png)
+
+*Figure 7. Load adjustment works best around 5-10 seconds, balancing
+responsiveness and scaling churn.*
 
 p90 TTFT is essentially flat between 1 s and 10 s intervals (~3.1–3.6 s),
 while the total number of scaling events drops from **1,529 to 233** over
@@ -462,7 +363,10 @@ instant; a fresh engine pod takes seconds to minutes to become usable. The
 mocker's `startup_time` parameter injects this delay and lets us measure
 how the planner copes.
 
-![Planner experiment 3 — engine cold-start time](images/planner_exp_3.png)
+![Startup delay produces an SLA cliff once new capacity arrives too late to absorb bursts.](./final_images/fig-6-planner-cold-start.png)
+
+*Figure 8. Startup delay produces an SLA cliff once new capacity arrives too
+late to absorb bursts.*
 
 For Qwen3-32B at TP=2 the planner holds SLA cleanly up to ~180 s of
 startup delay; the curve bends sharply at the **~200 s cliff** marked on
@@ -535,10 +439,16 @@ that a small amount of simulation inside the live Router could improve serving
 behavior. That is more than configuration scoring; it is policy discovery
 feeding back into Dynamo itself.
 
-## 4. Simulation As The Inner Loop
+### 3.4 Simulation As The Inner Loop
 
 The goal is not to replace real-cluster validation. The goal is to make that
 validation more focused.
+
+![DynoSim makes simulation the inner loop for deployment tuning: sweep broadly, shortlist Pareto candidates, verify on the cluster, then calibrate from telemetry.](./final_images/fig-9-tuning-loop.png)
+
+*Figure 9. DynoSim makes simulation the inner loop for deployment tuning: sweep
+broadly, shortlist Pareto candidates, verify on the cluster, then calibrate from
+telemetry.*
 
 Simulation becomes the inner loop for design exploration. Real clusters remain
 the outer loop for validation. Between those loops, Dynamo can test serving
