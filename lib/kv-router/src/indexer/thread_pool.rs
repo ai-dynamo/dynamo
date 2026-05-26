@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    any::Any,
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
@@ -18,21 +17,11 @@ use tokio::sync::oneshot;
 
 use super::{
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
-    WorkerLookupStats, WorkerTask,
+    WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
-
-fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
-    if let Some(s) = panic_payload.downcast_ref::<&str>() {
-        s.to_string()
-    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "Unknown panic payload".to_string()
-    }
-}
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
 ///

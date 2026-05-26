@@ -4,7 +4,7 @@
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
-use std::{any::Any, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     DumpRequest, EventKind, FlushRequest, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics,
     KvRouterError, MatchDetails, MatchDetailsRequest, MatchRequest, PreBoundEventCounters,
-    RadixTree, RoutingDecisionRequest,
+    RadixTree, RoutingDecisionRequest, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -36,16 +36,6 @@ fn apply_event_with_counters(
         );
     }
     counters.inc(kind, result);
-}
-
-fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
-    if let Some(s) = panic_payload.downcast_ref::<&str>() {
-        s.to_string()
-    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "Unknown panic payload".to_string()
-    }
 }
 
 fn apply_routing_decision_with_prune_tracking(
