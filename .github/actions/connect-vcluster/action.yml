@@ -5,6 +5,7 @@ inputs:
   host_kubeconfig_base64:
     description: 'Base64-encoded kubeconfig for host cluster access'
     required: false
+    default: ''
   vcluster_name:
     description: 'Name of the vCluster to connect to'
     required: true
