@@ -104,11 +104,13 @@ tsh kubectl cp ${NAMESPACE}/q32b-1p1d-nscale-ib-benchmark:/perf-cache/artifacts 
 - **No `FI_*` env, no `LD_LIBRARY_PATH=/opt/amazon/efa/lib`** — those are AWS-EFA only; would silently break UCX device selection or load unrelated libfabric on this cluster.
 - **`--gpu-cluster`-style placement domain (Nebius):** Nscale's analog (rack/island grouping) is *unverified*; pod anti-affinity on `kubernetes.io/hostname` is enough for the 1P1D measurement here. If you scale to many workers, verify IB-island alignment with Nscale support.
 
-## Status: IB cluster-blocked; **TCP fallback measured 2026-05-26**
+## Status: cross-pod NIXL fails (root cause likely image-side, NOT cluster SR-IOV); **TCP fallback measured 2026-05-26**
 
-**Cluster RDMA was blocked.** Cross-pod NIXL via UCX `rc_mlx5` cannot complete on this cluster — `mlx5dv_devx_general_cmd(ALLOW_OTHER_VHCA_ACCESS) failed: syndrome 0x172df6: Remote I/O error`. The Nscale IB SR-IOV config refuses cross-VHCA memory-key permission. NCCL TP works (different RDMA path); UCX cross-pod RDMA does not.
+> **2026-05-26 correction:** An earlier hypothesis claimed the cluster's SR-IOV / cross-VHCA policy was the blocker. **That was wrong.** A peer in namespace `nnoble` on this same cluster ran `ibv_rc_pingpong` between two pods on different B200 nodes (`prctr-7wrxm` ↔ `prctr-9c2x7`) using `mlx5_0` on both sides — it passed at 7740 Mbit/sec with proper QP setup, MR-key exchange, and RDMA writes across SR-IOV VFs. Cross-pod RDMA at the firmware layer demonstrably works. The actual root cause of our NIXL failure is most likely **GDRCopy missing in `vllm-runtime:1.1.1`** (`libgdrapi.so.2: cannot open shared object file` in the trace) — NIXL registers GPU memory via DMA-BUF; the peer's test uses host memory; the gate is in the GPU-memory registration path, not cluster policy. Full discussion + follow-up plan in `dynamo-writings/csp/2026-05-26-nscale-detailed-experiments.md` § "Update 2026-05-26 (later)".
 
-**Recipe pivoted to `UCX_TLS=tcp` over `eth0`** as a working fallback. Loses IB performance, but gives a real cross-node disagg measurement to compare against AWS EFA and AKS IB.
+**What we still observe:** Cross-pod NIXL via UCX `rc_mlx5` cannot complete — workers log `mlx5dv_devx_general_cmd(ALLOW_OTHER_VHCA_ACCESS) failed: syndrome 0x172df6` then `NIXL_ERR_REMOTE_DISCONNECT` on the first transfer. (The syndrome line is likely noise — UCX probing an unrelated capability that's not load-bearing.) NCCL TP works (intra-pod, uses host memory).
+
+**Recipe pivoted to `UCX_TLS=tcp` over `eth0`** as a working fallback while the root cause is investigated. Loses IB performance, but gives a real cross-node disagg measurement to compare against AWS EFA and AKS IB.
 
 ### Measured numbers (TCP fallback, 2026-05-26)
 
