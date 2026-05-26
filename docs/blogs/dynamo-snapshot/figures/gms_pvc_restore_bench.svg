@@ -29,8 +29,8 @@
 <text class="model" x="40" y="182">Qwen3-0.6B</text>
 <text class="lane-label" x="245" y="224.0" text-anchor="end">Snapshot Agent</text>
 <text class="lane-label" x="245" y="272.0" text-anchor="end">GMS Loader</text>
-<rect x="262.7" y="254" width="12.0" height="28" fill="#7a5030"/>
-<rect x="272.1" y="254" width="12.0" height="28" fill="#9a7800"/>
+<rect x="262.7" y="254" width="12.0" height="28" fill="#3a1050"/>
+<rect x="272.1" y="254" width="12.0" height="28" fill="#0a4a80"/>
 <circle cx="260.0" cy="220.0" r="3.5" fill="#8c8c8c"><title>Snapshot Agent setup</title></circle>
 <rect x="265.9" y="206" width="193.5" height="28" fill="#4a7500"/>
 <text class="num" x="362.6" y="224.0" text-anchor="middle">2.5s</text>
@@ -41,10 +41,10 @@
 <text class="model" x="40" y="352">Qwen3-8B</text>
 <text class="lane-label" x="245" y="394.0" text-anchor="end">Snapshot Agent</text>
 <text class="lane-label" x="245" y="442.0" text-anchor="end">GMS Loader</text>
-<rect x="260.5" y="424" width="56.3" height="28" fill="#7a5030"/>
+<rect x="260.5" y="424" width="56.3" height="28" fill="#3a1050"/>
 <text class="num" x="288.6" y="442.0" text-anchor="middle">0.7s</text>
-<rect x="316.8" y="424" width="140.4" height="28" fill="#9a7800"/>
-<text class="num-on-green" x="387.0" y="442.0" text-anchor="middle">1.8s</text>
+<rect x="316.8" y="424" width="140.4" height="28" fill="#0a4a80"/>
+<text class="num" x="387.0" y="442.0" text-anchor="middle">1.8s</text>
 <circle cx="260.0" cy="390.0" r="3.5" fill="#8c8c8c"><title>Snapshot Agent setup</title></circle>
 <rect x="265.7" y="376" width="238.6" height="28" fill="#4a7500"/>
 <text class="num" x="385.0" y="394.0" text-anchor="middle">3.1s</text>
@@ -55,10 +55,10 @@
 <text class="model" x="40" y="522">gpt-oss-120b</text>
 <text class="lane-label" x="245" y="564.0" text-anchor="end">Snapshot Agent</text>
 <text class="lane-label" x="245" y="612.0" text-anchor="end">GMS Loader</text>
-<rect x="261.8" y="594" width="79.7" height="28" fill="#7a5030"/>
+<rect x="261.8" y="594" width="79.7" height="28" fill="#3a1050"/>
 <text class="num" x="301.6" y="612.0" text-anchor="middle">1.0s</text>
-<rect x="341.4" y="594" width="710.7" height="28" fill="#9a7800"/>
-<text class="num-on-green" x="696.8" y="612.0" text-anchor="middle">9.2s</text>
+<rect x="341.4" y="594" width="710.7" height="28" fill="#0a4a80"/>
+<text class="num" x="696.8" y="612.0" text-anchor="middle">9.2s</text>
 <circle cx="260.0" cy="560.0" r="3.5" fill="#8c8c8c"><title>Snapshot Agent setup</title></circle>
 <rect x="265.7" y="546" width="347.6" height="28" fill="#4a7500"/>
 <text class="num" x="439.5" y="564.0" text-anchor="middle">4.5s</text>
@@ -76,8 +76,8 @@
 <text class="legend" x="543.5" y="707">wait for GMS</text>
 <rect x="663.5" y="696" width="12" height="12" fill="#9a9a9a"/>
 <text class="legend" x="681.5" y="707">wake / remap</text>
-<rect x="802.5" y="696" width="12" height="12" fill="#7a5030"/>
+<rect x="802.5" y="696" width="12" height="12" fill="#3a1050"/>
 <text class="legend" x="820.5" y="707">GMS load setup</text>
-<rect x="962.5" y="696" width="12" height="12" fill="#9a7800"/>
+<rect x="962.5" y="696" width="12" height="12" fill="#0a4a80"/>
 <text class="legend" x="980.5" y="707">GMS weight transfer</text>
 </svg>
