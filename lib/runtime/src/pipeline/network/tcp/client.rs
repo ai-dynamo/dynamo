@@ -256,6 +256,11 @@ async fn handle_request_reader(
                 break;
             }
 
+            _ = context.stopped() => {
+                tracing::trace!("context stop signal received on request stream; draining and shutting down");
+                break;
+            }
+
             msg = framed_reader.next() => {
                 match msg {
                     Some(Ok(two_part_msg)) => match two_part_msg.into_message_type() {
