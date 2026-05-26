@@ -80,7 +80,7 @@ async def test_encode_with_cache_partial_hit_and_reuse(
         None,
     )
 
-    grid, full_embeddings, group_model_data = await cache_handler._encode_with_cache(
+    grid, full_embeddings, entries = await cache_handler._encode_with_cache(
         urls, Modality.IMAGE
     )
 
@@ -89,10 +89,10 @@ async def test_encode_with_cache_partial_hit_and_reuse(
     )
 
     assert grid.tolist() == [[1, 2, 4], [1, 2, 2], [1, 2, 2]]
-    assert group_model_data == [
-        {"image_grid_thw": [1, 2, 4]},
-        {"image_grid_thw": [1, 2, 2]},
-        {"image_grid_thw": [1, 2, 2]},
+    assert [entry.image_grid_thw for entry in entries] == [
+        [1, 2, 4],
+        [1, 2, 2],
+        [1, 2, 2],
     ]
     assert torch.equal(full_embeddings[:8], encoded[:8])
     assert torch.equal(full_embeddings[8:12], cached_tensor)
@@ -101,22 +101,24 @@ async def test_encode_with_cache_partial_hit_and_reuse(
         cache_handler._url_hash(urls[0])
     )
     assert new_cached_entry is not None
-    assert new_cached_entry.image_grid_thw is None
-    assert new_cached_entry.model_specific_data == {"image_grid_thw": [1, 2, 4]}
+    assert new_cached_entry.image_grid_thw == [1, 2, 4]
+    assert new_cached_entry.video_grid_thw is None
 
     new_cached_entry = cache_handler._embedding_cache.get(
         cache_handler._url_hash(urls[0])
     )
     assert new_cached_entry is not None
-    assert new_cached_entry.image_grid_thw is None
-    assert new_cached_entry.model_specific_data == {"image_grid_thw": [1, 2, 4]}
+    assert new_cached_entry.image_grid_thw == [1, 2, 4]
+    assert new_cached_entry.video_grid_thw is None
 
-    grid2, full_embeddings2, group_model_data2 = await cache_handler._encode_with_cache(
+    grid2, full_embeddings2, entries2 = await cache_handler._encode_with_cache(
         urls, Modality.IMAGE
     )
     assert cache_handler.encoder.encode_mock.await_count == 1
     assert grid2.tolist() == grid.tolist()
-    assert group_model_data2 == group_model_data
+    assert [entry.image_grid_thw for entry in entries2] == [
+        entry.image_grid_thw for entry in entries
+    ]
     assert torch.equal(full_embeddings2, full_embeddings)
 
 
@@ -138,14 +140,14 @@ async def test_encode_with_cache_all_hit_no_remote_call(
         CachedEmbedding(tensor=y, image_grid_thw=[1, 1, 1]),
     )
 
-    grid, full_embeddings, group_model_data = await cache_handler._encode_with_cache(
+    grid, full_embeddings, entries = await cache_handler._encode_with_cache(
         urls, Modality.IMAGE
     )
     cache_handler.encoder.encode_mock.assert_not_called()
     assert grid.tolist() == [[1, 1, 2], [1, 1, 1]]
-    assert group_model_data == [
-        {"image_grid_thw": [1, 1, 2]},
-        {"image_grid_thw": [1, 1, 1]},
+    assert [entry.image_grid_thw for entry in entries] == [
+        [1, 1, 2],
+        [1, 1, 1],
     ]
     assert torch.equal(full_embeddings, torch.cat([x, y], dim=0))
 
@@ -162,7 +164,7 @@ async def test_video_requests_reuse_cached_embeddings(
     cache_handler.video_token_id = video_token_id
 
     cache_handler.encoder.encode_mock.return_value = (
-        torch.tensor([[2, 3, 4]]),
+        torch.tensor([2, 3, 4]),
         torch.arange(24, dtype=torch.float32).reshape(6, 4),
         {
             "second_per_grid_ts": [0.5],
@@ -226,11 +228,9 @@ async def test_video_requests_reuse_cached_embeddings(
         cache_handler._media_cache_key(video_url, Modality.VIDEO, cache_handler.encoder)
     )
     assert cached_entry is not None
-    assert cached_entry.model_specific_data == {
-        "video_grid_thw": [2, 3, 4],
-        "second_per_grid_ts": 0.5,
-        "video_timestamps": [0.25, 0.75],
-    }
+    assert cached_entry.video_grid_thw == [2, 3, 4]
+    assert cached_entry.second_per_grid_ts == 0.5
+    assert cached_entry.video_timestamps == [0.25, 0.75]
 
     assert len(cache_handler.pd_worker_client.requests) == 2
     for pd_request, request_context in cache_handler.pd_worker_client.requests:
@@ -239,10 +239,10 @@ async def test_video_requests_reuse_cached_embeddings(
             102
         ]
         group = pd_request["multimodal_inputs"][0]
-        assert group["modality"] == "VIDEO"
         assert group["video_grid_thw"] == [2, 3, 4]
+        assert group["second_per_grid_ts"] == 0.5
+        assert group["video_timestamps"] == [0.25, 0.75]
         assert group["num_mm_tokens"] == 6
-        assert group["model_specific_data"] == cached_entry.model_specific_data
 
 
 @pytest.mark.asyncio

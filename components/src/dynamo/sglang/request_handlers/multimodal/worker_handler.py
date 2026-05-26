@@ -118,9 +118,10 @@ class EmbeddingsProcessor:
     @staticmethod
     def create_multimodal_item(
         embeddings: torch.Tensor,
-        grid_values=None,
+        grid_values,
         modality: str = "IMAGE",
-        model_specific_data: dict[str, Any] | None = None,
+        second_per_grid_ts: Any | None = None,
+        video_timestamps: Any | None = None,
     ) -> dict:
         """Create processor_output mm_item for SGLang async_generate."""
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
@@ -131,20 +132,16 @@ class EmbeddingsProcessor:
                 f"Unsupported modality for precomputed mm_item: {modality}"
             )
         grid_key = GRID_KEYS[modality]
-        mm_item: dict[str, Any] = {}
-        model_specific_data = dict(model_specific_data or {})
-        if grid_key not in model_specific_data:
-            if grid_values is None:
-                raise ValueError(f"{grid_key} is required")
-            model_specific_data[grid_key] = grid_values
+        grid_payload = torch.tensor(grid_values)
 
-        for key, value in model_specific_data.items():
-            if key in GRID_KEYS.values():
-                mm_item[key] = torch.tensor(value)
-            elif key == "second_per_grid_ts":
-                mm_item[key] = torch.tensor(value, dtype=torch.float32)
-            else:
-                mm_item[key] = value
+        mm_item: dict[str, Any] = {grid_key: grid_payload}
+        if modality == "VIDEO":
+            if second_per_grid_ts is not None:
+                mm_item["second_per_grid_ts"] = torch.tensor(
+                    second_per_grid_ts, dtype=torch.float32
+                )
+            if video_timestamps is not None:
+                mm_item["video_timestamps"] = video_timestamps
 
         mm_item.update(
             {
@@ -275,45 +272,28 @@ async def _build_mm_items(
     image_mm_items: list[dict] = []
     video_data_items: list[dict] = []
 
-    encoded_groups: list[tuple[str, Any, int, dict[str, Any]]] = []
+    encoded_groups: list[tuple[str, Any, int, Any, Any]] = []
 
     for group in request.multimodal_inputs:
         if group.num_mm_tokens is not None and group.num_mm_tokens > 0:
-            group_model_data = dict(group.model_specific_data)
-            if (
-                group.image_grid_thw is not None
-                and "image_grid_thw" not in group_model_data
-            ):
-                group_model_data["image_grid_thw"] = group.image_grid_thw
-            if (
-                group.video_grid_thw is not None
-                and "video_grid_thw" not in group_model_data
-            ):
-                group_model_data["video_grid_thw"] = group.video_grid_thw
-
-            group_modality = group.modality
-            if group_modality is None:
-                if "image_grid_thw" in group_model_data:
-                    group_modality = "IMAGE"
-                elif "video_grid_thw" in group_model_data:
-                    group_modality = "VIDEO"
-
-            if group_modality == "IMAGE":
+            if group.image_grid_thw is not None:
                 encoded_groups.append(
                     (
                         "IMAGE",
-                        group_model_data["image_grid_thw"],
+                        group.image_grid_thw,
                         group.num_mm_tokens,
-                        group_model_data,
+                        None,
+                        None,
                     )
                 )
-            elif group_modality == "VIDEO":
+            elif group.video_grid_thw is not None:
                 encoded_groups.append(
                     (
                         "VIDEO",
-                        group_model_data["video_grid_thw"],
+                        group.video_grid_thw,
                         group.num_mm_tokens,
-                        group_model_data,
+                        group.second_per_grid_ts,
+                        group.video_timestamps,
                     )
                 )
             else:
@@ -327,17 +307,27 @@ async def _build_mm_items(
 
         grouped_grids: dict[str, list[Any]] = {"IMAGE": [], "VIDEO": []}
         grouped_embeds: dict[str, list[torch.Tensor]] = {"IMAGE": [], "VIDEO": []}
-        grouped_model_data: dict[str, dict[str, list[Any]]] = {"IMAGE": {}, "VIDEO": {}}
+        video_second_per_grid_ts: list[Any] = []
+        video_timestamps: list[Any] = []
 
         offset = 0
-        for modality, grid_item, token_count, group_model_data in encoded_groups:
+        for (
+            modality,
+            grid_item,
+            token_count,
+            second_per_grid_ts,
+            timestamps,
+        ) in encoded_groups:
             next_offset = offset + int(token_count)
             if next_offset > embeddings.shape[0]:
                 raise ValueError("Encoded token counts exceed received embedding rows")
             grouped_grids[modality].append(grid_item)
             grouped_embeds[modality].append(embeddings[offset:next_offset])
-            for key, value in group_model_data.items():
-                grouped_model_data[modality].setdefault(key, []).append(value)
+            if modality == "VIDEO":
+                if second_per_grid_ts is not None:
+                    video_second_per_grid_ts.append(second_per_grid_ts)
+                if timestamps is not None:
+                    video_timestamps.append(timestamps)
             offset = next_offset
 
         if offset != embeddings.shape[0]:
@@ -349,16 +339,28 @@ async def _build_mm_items(
                     torch.cat(grouped_embeds["IMAGE"], dim=0),
                     grouped_grids["IMAGE"],
                     modality="IMAGE",
-                    model_specific_data=grouped_model_data["IMAGE"],
                 )
             )
         if grouped_embeds["VIDEO"]:
+            video_group_count = len(grouped_grids["VIDEO"])
+            if (
+                video_second_per_grid_ts
+                and len(video_second_per_grid_ts) != video_group_count
+            ):
+                raise ValueError(
+                    "second_per_grid_ts must be present for every video group"
+                )
+            if video_timestamps and len(video_timestamps) != video_group_count:
+                raise ValueError(
+                    "video_timestamps must be present for every video group"
+                )
             video_data_items.append(
                 embeddings_processor.create_multimodal_item(
                     torch.cat(grouped_embeds["VIDEO"], dim=0),
                     grouped_grids["VIDEO"],
                     modality="VIDEO",
-                    model_specific_data=grouped_model_data["VIDEO"],
+                    second_per_grid_ts=video_second_per_grid_ts or None,
+                    video_timestamps=video_timestamps or None,
                 )
             )
 

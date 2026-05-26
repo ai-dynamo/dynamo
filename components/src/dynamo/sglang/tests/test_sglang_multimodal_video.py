@@ -75,13 +75,18 @@ async def test_build_mm_items_routes_video_to_video_data():
 
         @staticmethod
         def create_multimodal_item(
-            embeddings, grid_values=None, modality="IMAGE", model_specific_data=None
+            embeddings,
+            grid_values,
+            modality="IMAGE",
+            second_per_grid_ts=None,
+            video_timestamps=None,
         ):
             return EmbeddingsProcessor.create_multimodal_item(
                 embeddings,
                 grid_values,
                 modality=modality,
-                model_specific_data=model_specific_data,
+                second_per_grid_ts=second_per_grid_ts,
+                video_timestamps=video_timestamps,
             )
 
     request = SglangMultimodalRequest(
@@ -93,14 +98,10 @@ async def test_build_mm_items_routes_video_to_video_data():
         multimodal_inputs=[
             MultiModalGroup(
                 multimodal_input=MultiModalInput(),
-                modality="VIDEO",
                 video_grid_thw=[2, 3, 4],
+                second_per_grid_ts=0.5,
+                video_timestamps=[0.25, 0.75],
                 num_mm_tokens=6,
-                model_specific_data={
-                    "video_grid_thw": [2, 3, 4],
-                    "second_per_grid_ts": 0.5,
-                    "video_timestamps": [0.25, 0.75],
-                },
             )
         ],
     )
