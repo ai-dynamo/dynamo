@@ -10,74 +10,74 @@
   .num-small { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 10px; font-weight: 400; fill: #cdcdcd; }
   .total { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 14px; font-weight: 500; fill: #ffffff; }
   .axis { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #8c8c8c; }
-  .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
+  .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 400; fill: #cdcdcd; }
 </style>
 <text class="title" x="40" y="58">GMS restore over NFS</text>
-<text class="subtitle" x="40" y="88">Two paths run in parallel: snapshot agent restores process state while GMS streams weights from network storage</text>
-<line x1="260.0" y1="160" x2="260.0" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="260.0" y="668" text-anchor="middle">0s</text>
-<line x1="414.1" y1="160" x2="414.1" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="414.1" y="668" text-anchor="middle">2s</text>
-<line x1="568.2" y1="160" x2="568.2" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="568.2" y="668" text-anchor="middle">4s</text>
-<line x1="722.3" y1="160" x2="722.3" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="722.3" y="668" text-anchor="middle">6s</text>
-<line x1="876.4" y1="160" x2="876.4" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="876.4" y="668" text-anchor="middle">8s</text>
-<line x1="1030.6" y1="160" x2="1030.6" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="1030.6" y="668" text-anchor="middle">10s</text>
-<text class="model" x="40" y="182">Qwen3 0.6B</text>
-<text class="lane-label" x="245" y="224.0" text-anchor="end">snapshot agent</text>
-<text class="lane-label" x="245" y="272.0" text-anchor="end">GMS loader</text>
-<rect x="262.7" y="254" width="12.0" height="28" fill="#5a5a5a"/>
-<rect x="272.1" y="254" width="12.0" height="28" fill="#74b711"/>
-<rect x="260.0" y="206" width="12.0" height="28" fill="#5a5a5a"/>
-<rect x="265.9" y="206" width="193.5" height="28" fill="#7a7a7a"/>
+<text class="subtitle" x="40" y="88">Two paths run in parallel: Snapshot Agent restores process state while GMS Loader streams weights from network storage</text>
+<line x1="260.0" y1="160" x2="260.0" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="260.0" y="648" text-anchor="middle">0s</text>
+<line x1="414.1" y1="160" x2="414.1" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="414.1" y="648" text-anchor="middle">2s</text>
+<line x1="568.2" y1="160" x2="568.2" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="568.2" y="648" text-anchor="middle">4s</text>
+<line x1="722.3" y1="160" x2="722.3" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="722.3" y="648" text-anchor="middle">6s</text>
+<line x1="876.4" y1="160" x2="876.4" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="876.4" y="648" text-anchor="middle">8s</text>
+<line x1="1030.6" y1="160" x2="1030.6" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="1030.6" y="648" text-anchor="middle">10s</text>
+<text class="model" x="40" y="182">Qwen3-0.6B</text>
+<text class="lane-label" x="245" y="224.0" text-anchor="end">Snapshot Agent</text>
+<text class="lane-label" x="245" y="272.0" text-anchor="end">GMS Loader</text>
+<rect x="262.7" y="254" width="12.0" height="28" fill="#7a5030"/>
+<rect x="272.1" y="254" width="12.0" height="28" fill="#9a7800"/>
+<circle cx="260.0" cy="220.0" r="3.5" fill="#8c8c8c"><title>Snapshot Agent setup</title></circle>
+<rect x="265.9" y="206" width="193.5" height="28" fill="#4a7500"/>
 <text class="num" x="362.6" y="224.0" text-anchor="middle">2.5s</text>
-<rect x="459.3" y="206" width="35.6" height="28" fill="#9a9a9a"/>
+<rect x="459.3" y="206" width="35.6" height="28" fill="#005a40"/>
 <text class="num" x="477.1" y="224.0" text-anchor="middle">0.5s</text>
-<rect x="494.9" y="206" width="2.9" height="28" fill="#c0c0c0"/>
+<rect x="494.9" y="206" width="2.9" height="28" fill="#9a9a9a"/>
 <text class="total" x="506.9" y="224.0">3.1s</text>
-<text class="model" x="40" y="352">Qwen3 8B</text>
-<text class="lane-label" x="245" y="394.0" text-anchor="end">snapshot agent</text>
-<text class="lane-label" x="245" y="442.0" text-anchor="end">GMS loader</text>
-<rect x="260.5" y="424" width="56.3" height="28" fill="#5a5a5a"/>
+<text class="model" x="40" y="352">Qwen3-8B</text>
+<text class="lane-label" x="245" y="394.0" text-anchor="end">Snapshot Agent</text>
+<text class="lane-label" x="245" y="442.0" text-anchor="end">GMS Loader</text>
+<rect x="260.5" y="424" width="56.3" height="28" fill="#7a5030"/>
 <text class="num" x="288.6" y="442.0" text-anchor="middle">0.7s</text>
-<rect x="316.8" y="424" width="140.4" height="28" fill="#74b711"/>
+<rect x="316.8" y="424" width="140.4" height="28" fill="#9a7800"/>
 <text class="num-on-green" x="387.0" y="442.0" text-anchor="middle">1.8s</text>
-<rect x="260.0" y="376" width="12.0" height="28" fill="#5a5a5a"/>
-<rect x="265.7" y="376" width="238.6" height="28" fill="#7a7a7a"/>
+<circle cx="260.0" cy="390.0" r="3.5" fill="#8c8c8c"><title>Snapshot Agent setup</title></circle>
+<rect x="265.7" y="376" width="238.6" height="28" fill="#4a7500"/>
 <text class="num" x="385.0" y="394.0" text-anchor="middle">3.1s</text>
-<rect x="504.3" y="376" width="38.5" height="28" fill="#9a9a9a"/>
+<rect x="504.3" y="376" width="38.5" height="28" fill="#005a40"/>
 <text class="num" x="523.6" y="394.0" text-anchor="middle">0.5s</text>
-<rect x="542.8" y="376" width="2.9" height="28" fill="#c0c0c0"/>
+<rect x="542.8" y="376" width="2.9" height="28" fill="#9a9a9a"/>
 <text class="total" x="554.8" y="394.0">3.8s</text>
 <text class="model" x="40" y="522">gpt-oss-120b</text>
-<text class="lane-label" x="245" y="564.0" text-anchor="end">snapshot agent</text>
-<text class="lane-label" x="245" y="612.0" text-anchor="end">GMS loader</text>
-<rect x="261.8" y="594" width="79.7" height="28" fill="#5a5a5a"/>
+<text class="lane-label" x="245" y="564.0" text-anchor="end">Snapshot Agent</text>
+<text class="lane-label" x="245" y="612.0" text-anchor="end">GMS Loader</text>
+<rect x="261.8" y="594" width="79.7" height="28" fill="#7a5030"/>
 <text class="num" x="301.6" y="612.0" text-anchor="middle">1.0s</text>
-<rect x="341.4" y="594" width="710.7" height="28" fill="#74b711"/>
+<rect x="341.4" y="594" width="710.7" height="28" fill="#9a7800"/>
 <text class="num-on-green" x="696.8" y="612.0" text-anchor="middle">9.2s</text>
-<rect x="260.0" y="546" width="12.0" height="28" fill="#5a5a5a"/>
-<rect x="265.7" y="546" width="347.6" height="28" fill="#7a7a7a"/>
+<circle cx="260.0" cy="560.0" r="3.5" fill="#8c8c8c"><title>Snapshot Agent setup</title></circle>
+<rect x="265.7" y="546" width="347.6" height="28" fill="#4a7500"/>
 <text class="num" x="439.5" y="564.0" text-anchor="middle">4.5s</text>
-<rect x="613.3" y="546" width="58.1" height="28" fill="#9a9a9a"/>
+<rect x="613.3" y="546" width="58.1" height="28" fill="#005a40"/>
 <text class="num" x="642.4" y="564.0" text-anchor="middle">0.8s</text>
-<rect x="671.5" y="546" width="384.6" height="28" fill="#e44848"/>
+<rect x="671.5" y="546" width="384.6" height="28" fill="#702828"/>
 <text class="num" x="863.8" y="564.0" text-anchor="middle">wait for GMS &#183; 5.0s</text>
-<rect x="1064.1" y="546" width="1.9" height="28" fill="#c0c0c0"/>
+<rect x="1064.1" y="546" width="1.9" height="28" fill="#9a9a9a"/>
 <text class="total" x="1075.6" y="564.0">10.5s</text>
-<rect x="298.5" y="680" width="12" height="12" fill="#5a5a5a"/>
-<text class="legend" x="316.5" y="690">agent setup</text>
-<rect x="411.5" y="680" width="12" height="12" fill="#7a7a7a"/>
-<text class="legend" x="429.5" y="690">CRIU restore</text>
-<rect x="531.5" y="680" width="12" height="12" fill="#9a9a9a"/>
-<text class="legend" x="549.5" y="690">CUDA restore</text>
-<rect x="651.5" y="680" width="12" height="12" fill="#e44848"/>
-<text class="legend" x="669.5" y="690">wait for GMS</text>
-<rect x="767.5" y="680" width="12" height="12" fill="#c0c0c0"/>
-<text class="legend" x="785.5" y="690">wake / remap</text>
-<rect x="884.5" y="680" width="12" height="12" fill="#74b711"/>
-<text class="legend" x="902.5" y="690">GMS load weights</text>
+<rect x="260.5" y="696" width="12" height="12" fill="#4a7500"/>
+<text class="legend" x="278.5" y="707">CRIU restore</text>
+<rect x="390.5" y="696" width="12" height="12" fill="#005a40"/>
+<text class="legend" x="408.5" y="707">CUDA restore</text>
+<rect x="525.5" y="696" width="12" height="12" fill="#702828"/>
+<text class="legend" x="543.5" y="707">wait for GMS</text>
+<rect x="663.5" y="696" width="12" height="12" fill="#9a9a9a"/>
+<text class="legend" x="681.5" y="707">wake / remap</text>
+<rect x="802.5" y="696" width="12" height="12" fill="#7a5030"/>
+<text class="legend" x="820.5" y="707">GMS load setup</text>
+<rect x="962.5" y="696" width="12" height="12" fill="#9a7800"/>
+<text class="legend" x="980.5" y="707">GMS weight transfer</text>
 </svg>
