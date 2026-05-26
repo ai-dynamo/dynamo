@@ -264,7 +264,7 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 		return false
 	}
 
-	return containerHasArg(&podSpec.Containers[0], distributedExecutorFlag, "mp")
+	return containerCommandLineHasArg(&podSpec.Containers[0], distributedExecutorFlag, "mp")
 }
 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
