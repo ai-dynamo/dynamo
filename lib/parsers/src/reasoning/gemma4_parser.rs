@@ -268,6 +268,34 @@ impl ReasoningParser for Gemma4ReasoningParser {
             reasoning_text: reasoning_emit,
         }
     }
+
+    fn finish_reasoning_stream(&mut self) -> ParserResult {
+        if self.buffer.is_empty() {
+            return ParserResult::default();
+        }
+
+        let buffered = std::mem::take(&mut self.buffer);
+        if !self.in_reasoning {
+            return ParserResult {
+                normal_text: buffered,
+                reasoning_text: String::new(),
+            };
+        }
+
+        let reasoning_text = if self.prefix_resolved {
+            buffered
+        } else {
+            self.reasoning_accum.push_str(&buffered);
+            let (emit, resolved) = resolve_prefix(&self.reasoning_accum, &buffered);
+            self.prefix_resolved = resolved;
+            emit.to_string()
+        };
+        self.reset_span();
+        ParserResult {
+            normal_text: String::new(),
+            reasoning_text,
+        }
+    }
 }
 
 #[cfg(test)]

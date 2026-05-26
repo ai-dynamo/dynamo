@@ -7,7 +7,8 @@ use dynamo_llm::protocols::openai::ParsingOptions;
 use dynamo_llm::protocols::openai::chat_completions::{
     DeltaAggregator, NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
 };
-use dynamo_parsers::reasoning::get_available_reasoning_parsers;
+use dynamo_parsers::ReasoningParser;
+use dynamo_parsers::reasoning::{ReasoningParserType, get_available_reasoning_parsers};
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers::tool_calling::parsers::{
     detect_and_parse_tool_call_with_recovery, get_available_tool_parsers,
@@ -243,6 +244,103 @@ fn decode_arguments(arguments: &str) -> Value {
     }
 }
 
+/// Parse reasoning from a complete model output string using the specified parser.
+///
+/// Args:
+///     parser_name: Parser name (e.g. "qwen3"). Empty string falls back to the
+///                  default reasoning parser.
+///     message:     Model output text to parse.
+///     token_ids:   Optional token IDs for parsers that need token-level markers.
+///     in_reasoning:
+///                  Start the parser in reasoning mode when the chat template
+///                  already injected the opening reasoning marker.
+///
+/// Returns:
+///     JSON-serialized string `{"reasoning_text": str, "normal_text": str}`.
+#[pyfunction]
+#[pyo3(signature = (parser_name, message, token_ids=None, in_reasoning=false))]
+pub fn parse_reasoning_batch(
+    parser_name: String,
+    message: String,
+    token_ids: Option<Vec<u32>>,
+    in_reasoning: bool,
+) -> PyResult<String> {
+    let mut parser = ReasoningParserType::get_reasoning_parser_from_name(&parser_name);
+    if in_reasoning {
+        parser.set_in_reasoning(true);
+    }
+
+    let token_ids = token_ids.unwrap_or_default();
+    let result = parser.detect_and_parse_reasoning(&message, &token_ids);
+    let out = serde_json::json!({
+        "reasoning_text": result.reasoning_text,
+        "normal_text": result.normal_text,
+    });
+    Ok(out.to_string())
+}
+
+/// Parse reasoning from streaming chunks using one stateful parser instance.
+///
+/// Args:
+///     parser_name: Parser name (e.g. "qwen3"). Empty string falls back to the
+///                  default reasoning parser.
+///     chunks:      Model output text chunks in stream order.
+///     token_chunks:
+///                  Optional token ID chunks aligned 1:1 with `chunks`.
+///     in_reasoning:
+///                  Start the parser in reasoning mode when the chat template
+///                  already injected the opening reasoning marker.
+///
+/// Returns:
+///     JSON-serialized string with accumulated `reasoning_text` and `normal_text`.
+#[pyfunction]
+#[pyo3(signature = (parser_name, chunks, token_chunks=None, in_reasoning=false))]
+pub fn parse_reasoning_stream(
+    parser_name: String,
+    chunks: Vec<String>,
+    token_chunks: Option<Vec<Vec<u32>>>,
+    in_reasoning: bool,
+) -> PyResult<String> {
+    if let Some(ref token_chunks) = token_chunks
+        && token_chunks.len() != chunks.len()
+    {
+        return Err(PyValueError::new_err(format!(
+            "token_chunks length ({}) must match chunks length ({})",
+            token_chunks.len(),
+            chunks.len()
+        )));
+    }
+
+    let mut parser = ReasoningParserType::get_reasoning_parser_from_name(&parser_name);
+    if in_reasoning {
+        parser.set_in_reasoning(true);
+    }
+
+    let mut reasoning_text = String::new();
+    let mut normal_text = String::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let token_ids = token_chunks
+            .as_ref()
+            .map(|chunks| chunks[i].as_slice())
+            .unwrap_or(&[]);
+        let result = parser.parse_reasoning_streaming_incremental(chunk, token_ids);
+        reasoning_text.push_str(&result.reasoning_text);
+        normal_text.push_str(&result.normal_text);
+    }
+
+    // Flush delimiter prefixes held while waiting for the next chunk. At EOF,
+    // there is no next chunk that can complete the marker.
+    let result = parser.finish_reasoning_stream();
+    reasoning_text.push_str(&result.reasoning_text);
+    normal_text.push_str(&result.normal_text);
+
+    let out = serde_json::json!({
+        "reasoning_text": reasoning_text,
+        "normal_text": normal_text,
+    });
+    Ok(out.to_string())
+}
+
 /// Convert OpenAI-style or flat tools JSON into `Vec<ToolDefinition>`.
 ///
 /// Accepts either of these shapes per element:
@@ -283,5 +381,7 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_reasoning_parser_names, m)?)?;
     m.add_function(wrap_pyfunction!(parse_tool_calls_batch, m)?)?;
     m.add_function(wrap_pyfunction!(parse_tool_calls_stream, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_reasoning_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_reasoning_stream, m)?)?;
     Ok(())
 }
