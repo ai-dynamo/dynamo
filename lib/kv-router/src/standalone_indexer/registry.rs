@@ -109,6 +109,9 @@ pub struct WorkerInfo {
     instance_id: WorkerId,
     source: WorkerSource,
     status: ListenerStatus,
+    model_name: String,
+    tenant_id: String,
+    block_size: u32,
     endpoints: HashMap<u32, String>,
     listeners: HashMap<u32, ListenerInfo>,
 }
@@ -628,33 +631,74 @@ impl WorkerRegistry {
     }
 
     pub fn list(&self) -> Vec<WorkerInfo> {
-        #[allow(unused_mut)]
-        let mut result: Vec<WorkerInfo> = self
-            .workers
+        self.list_filtered(None, None)
+    }
+
+    /// Return registered workers, optionally filtered by `model_name` and/or
+    /// `tenant_id`.  Pass `None` for a field to skip that filter.
+    ///
+    /// Workers that are mid-deregistration (listener map temporarily empty
+    /// before the worker entry is removed) are silently omitted to avoid
+    /// exposing `block_size = 0` in the response.
+    pub fn list_filtered(
+        &self,
+        model_name: Option<&str>,
+        tenant_id: Option<&str>,
+    ) -> Vec<WorkerInfo> {
+        self.workers
             .iter()
-            .map(|entry| {
-                let listeners: HashMap<u32, ListenerInfo> = entry
-                    .value()
+            .filter_map(|entry| {
+                let worker = entry.value();
+                let key = &worker.key;
+
+                // Apply caller-supplied filters.
+                if !model_name.map_or(true, |m| key.model_name == m)
+                    || !tenant_id.map_or(true, |t| key.tenant_id == t)
+                {
+                    return None;
+                }
+
+                // Skip workers that are mid-deregistration.  deregister_dp_rank
+                // removes the last listener from the HashMap *before* calling
+                // workers.remove(), so a concurrent list() can observe an empty
+                // listener set.  Omit these entries rather than serializing
+                // block_size = 0.
+                if worker.listeners.is_empty() {
+                    return None;
+                }
+
+                // block_size is authoritative on IndexerEntry (validated on
+                // every register() call), not on individual listener records.
+                // Read it from there to avoid the same TOCTOU.
+                let block_size = self
+                    .indexers
+                    .get(key)
+                    .map(|e| e.block_size)
+                    .unwrap_or(0);
+
+                let listeners: HashMap<u32, ListenerInfo> = worker
                     .listeners
                     .iter()
                     .map(|(dp_rank, record)| (*dp_rank, record.snapshot()))
                     .collect();
-                let endpoints = listeners
+                let endpoints: HashMap<u32, String> = listeners
                     .iter()
                     .map(|(dp_rank, info)| (*dp_rank, info.endpoint.clone()))
                     .collect();
-                let status = ListenerStatus::aggregate(listeners.values().map(|info| info.status));
-                WorkerInfo {
+                let status =
+                    ListenerStatus::aggregate(listeners.values().map(|info| info.status));
+                Some(WorkerInfo {
                     instance_id: *entry.key(),
                     source: WorkerSource::Zmq,
                     status,
+                    model_name: key.model_name.clone(),
+                    tenant_id: key.tenant_id.clone(),
+                    block_size,
                     endpoints,
                     listeners,
-                }
+                })
             })
-            .collect();
-
-        result
+            .collect()
     }
 
     pub fn get_indexer(&self, key: &IndexerKey) -> Option<Ref<'_, IndexerKey, IndexerEntry>> {
@@ -894,6 +938,171 @@ mod tests {
         assert!(
             !registry.watermarks.contains_key(&(1, 0)),
             "watermark should be removed after deregister_all_tenants"
+        );
+    }
+
+    // ── list_filtered tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_filtered_returns_metadata_fields() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                10,
+                "tcp://127.0.0.1:15570".to_string(),
+                0,
+                "llama3".to_string(),
+                "acme".to_string(),
+                4,
+                None,
+            )
+            .await
+            .unwrap();
+
+        registry
+            .register(
+                11,
+                "tcp://127.0.0.1:15571".to_string(),
+                0,
+                "mistral".to_string(),
+                "acme".to_string(),
+                8,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let workers = registry.list();
+        assert_eq!(workers.len(), 2);
+
+        let llama = workers.iter().find(|w| w.model_name == "llama3").unwrap();
+        assert_eq!(llama.block_size, 4);
+        assert_eq!(llama.tenant_id, "acme");
+
+        let mistral = workers.iter().find(|w| w.model_name == "mistral").unwrap();
+        assert_eq!(mistral.block_size, 8);
+        assert_eq!(mistral.tenant_id, "acme");
+    }
+
+    #[tokio::test]
+    async fn list_filtered_by_model_name() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                10,
+                "tcp://127.0.0.1:15572".to_string(),
+                0,
+                "llama3".to_string(),
+                "acme".to_string(),
+                4,
+                None,
+            )
+            .await
+            .unwrap();
+
+        registry
+            .register(
+                11,
+                "tcp://127.0.0.1:15573".to_string(),
+                0,
+                "mistral".to_string(),
+                "acme".to_string(),
+                8,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let filtered = registry.list_filtered(Some("llama3"), None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].model_name, "llama3");
+
+        let empty = registry.list_filtered(Some("nonexistent"), None);
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_filtered_by_tenant_id() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                10,
+                "tcp://127.0.0.1:15574".to_string(),
+                0,
+                "llama3".to_string(),
+                "acme".to_string(),
+                4,
+                None,
+            )
+            .await
+            .unwrap();
+
+        registry
+            .register(
+                11,
+                "tcp://127.0.0.1:15575".to_string(),
+                0,
+                "llama3".to_string(),
+                "other-tenant".to_string(),
+                4,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let acme = registry.list_filtered(None, Some("acme"));
+        assert_eq!(acme.len(), 1);
+        assert_eq!(acme[0].tenant_id, "acme");
+
+        let other = registry.list_filtered(None, Some("other-tenant"));
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].tenant_id, "other-tenant");
+
+        let both = registry.list_filtered(None, None);
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn list_filtered_skips_empty_listener_workers() {
+        // Directly inject a WorkerEntry with an empty listener map into the
+        // registry's workers DashMap.  This is the exact state that exists in
+        // the TOCTOU window inside deregister_dp_rank: the last listener has
+        // been removed from the HashMap (inside the shard lock at line ~525)
+        // but workers.remove() has not yet been called (line ~538, outside the
+        // lock).  Calling list() on this state must not return the entry.
+        //
+        // The previous approach (register + deregister both dp_ranks) was
+        // vacuous: after the second deregister_dp_rank returns, the worker is
+        // already gone, so workers.iter() is empty and the assertion held
+        // trivially without exercising the filter.
+        let registry = test_registry();
+
+        let key = IndexerKey {
+            model_name: "llama3".to_string(),
+            tenant_id: "acme".to_string(),
+        };
+
+        // Inject the empty-listener WorkerEntry directly.
+        registry.workers.insert(
+            99u64,
+            WorkerEntry {
+                key,
+                listeners: HashMap::new(),
+            },
+        );
+
+        let workers = registry.list();
+        assert!(
+            workers.is_empty(),
+            "worker with empty listener map must be omitted from list(); \
+             got {} entries",
+            workers.len()
         );
     }
 }
