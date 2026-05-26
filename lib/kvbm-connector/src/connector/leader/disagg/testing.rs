@@ -294,6 +294,16 @@ impl PendingPromotion {
     }
 }
 
+/// Per-call record for `promote_g3_to_g2`, recorded in
+/// [`MockInnerLeaderShim::g3_promotions`]. Tests inspect entries
+/// and resolve them manually via
+/// [`MockInnerLeaderShim::resolve_g3_promotion`].
+pub struct PendingG3Promotion {
+    pub hashes: Vec<SequenceHash>,
+    /// One-shot resolver consumed by the returned future.
+    resolver: Option<oneshot::Sender<Result<Vec<ImmutableBlock<G2>>>>>,
+}
+
 pub struct MockInnerLeaderShim {
     block_size: usize,
     local_id: crate::InstanceId,
@@ -315,6 +325,17 @@ pub struct MockInnerLeaderShim {
     /// `resolve_promotion(index, Ok(g2_blocks))` to drive the
     /// returned futures forward.
     promotions: Mutex<Vec<PendingPromotion>>,
+    /// G3→G2 promotion requests recorded by `promote_g3_to_g2`.
+    /// Tests inspect entries and resolve them via
+    /// `resolve_g3_promotion(index, Ok(g2_blocks))`. Stage 2
+    /// counterpart of `promotions`.
+    g3_promotions: Mutex<Vec<PendingG3Promotion>>,
+    /// Per-slot G3 hash universe used by `find_prefix_g3_hashes`.
+    /// Empty by default — `install_g3_prefix(rid, hashes)` lets
+    /// tests script which hashes the mock "has" in G3. The
+    /// returned set is the prefix slice of the slot's full hash
+    /// chain that matches against this universe.
+    g3_universe: Mutex<std::collections::HashMap<String, Vec<SequenceHash>>>,
 }
 
 impl MockInnerLeaderShim {
@@ -327,6 +348,8 @@ impl MockInnerLeaderShim {
             gnmt_call_counts: Mutex::new(std::collections::HashMap::new()),
             apply_block_assignments_hook: Mutex::new(None),
             promotions: Mutex::new(Vec::new()),
+            g3_promotions: Mutex::new(Vec::new()),
+            g3_universe: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -372,6 +395,49 @@ impl MockInnerLeaderShim {
     /// have been recorded.
     pub async fn wait_promotion_count(&self, n: usize) {
         wait_until(|| self.promotions.lock().len() >= n).await;
+    }
+
+    /// Number of `promote_g3_to_g2` calls observed so far.
+    pub fn g3_promotion_count(&self) -> usize {
+        self.g3_promotions.lock().len()
+    }
+
+    /// Snapshot of recorded G3 promotion requests as the hashes
+    /// the caller passed in. Tests assert on these to verify the
+    /// caller sourced the right prefix slice.
+    pub fn snapshot_g3_promotion(&self, index: usize) -> Option<Vec<SequenceHash>> {
+        self.g3_promotions
+            .lock()
+            .get(index)
+            .map(|p| p.hashes.clone())
+    }
+
+    /// Resolve a recorded G3 promotion request. Mirrors
+    /// [`Self::resolve_promotion`].
+    pub fn resolve_g3_promotion(&self, index: usize, result: Result<Vec<ImmutableBlock<G2>>>) {
+        let mut promotions = self.g3_promotions.lock();
+        let pending = promotions
+            .get_mut(index)
+            .expect("promote_g3_to_g2 call not yet recorded");
+        let resolver = pending
+            .resolver
+            .take()
+            .expect("promote_g3_to_g2 call already resolved");
+        let _ = resolver.send(result);
+    }
+
+    pub async fn wait_g3_promotion_count(&self, n: usize) {
+        wait_until(|| self.g3_promotions.lock().len() >= n).await;
+    }
+
+    /// Script which prefix hashes the mock's G3 "has." When
+    /// `find_prefix_g3_hashes(rid, n)` is called, the mock
+    /// returns `slot.all_hashes[..n].to_vec()` ONLY if all those
+    /// hashes appear in this universe; otherwise empty. Empty
+    /// universe (the default) returns empty — falls back to the
+    /// G1 promotion path in production code.
+    pub fn install_g3_prefix(&self, request_id: impl Into<String>, hashes: Vec<SequenceHash>) {
+        self.g3_universe.lock().insert(request_id.into(), hashes);
     }
 
     /// Install a one-shot side-effect hook that fires synchronously
@@ -618,6 +684,54 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         async move {
             rx.await
                 .map_err(|err| anyhow!("promote_g1_to_g2 resolver dropped: {err}"))?
+        }
+        .boxed()
+    }
+
+    fn find_prefix_g3_hashes(
+        &self,
+        request_id: &str,
+        num_prefix_blocks: usize,
+    ) -> Result<Vec<SequenceHash>> {
+        if num_prefix_blocks == 0 {
+            return Ok(Vec::new());
+        }
+        let slot = self.require_slot(request_id)?;
+        let prefix = slot
+            .all_hashes
+            .get(..num_prefix_blocks)
+            .ok_or_else(|| {
+                anyhow!(
+                    "find_prefix_g3_hashes ({}): num_prefix_blocks {} exceeds slot hashes",
+                    request_id,
+                    num_prefix_blocks
+                )
+            })?
+            .to_vec();
+        let universe = self.g3_universe.lock();
+        let g3 = match universe.get(request_id) {
+            Some(set) => set,
+            None => return Ok(Vec::new()),
+        };
+        if prefix.iter().all(|h| g3.contains(h)) {
+            Ok(prefix)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn promote_g3_to_g2(
+        &self,
+        hashes: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>> {
+        let (tx, rx) = oneshot::channel();
+        self.g3_promotions.lock().push(PendingG3Promotion {
+            hashes,
+            resolver: Some(tx),
+        });
+        async move {
+            rx.await
+                .map_err(|err| anyhow!("promote_g3_to_g2 resolver dropped: {err}"))?
         }
         .boxed()
     }
