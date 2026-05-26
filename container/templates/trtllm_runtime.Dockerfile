@@ -77,6 +77,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ldconfig && \
     rm -f /usr/local/bin/etcd && \
     mkdir -p /opt/dynamo && \
+    test -f "/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6" && \
     ln -sf "/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6" /opt/dynamo/libstdc++.so.6
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
