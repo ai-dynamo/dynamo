@@ -30,73 +30,73 @@
 <text class="axis" x="1164.7" y="488" text-anchor="middle">90s</text>
 <text class="model" x="40" y="210.0">Qwen3 0.6B</text>
 <rect x="170" y="160" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<rect x="170.0" y="181.0" width="110.8" height="48" fill="#b5b5b5"/>
-<text class="num-dark" x="225.4" y="209.0" text-anchor="middle">10.0s</text>
-<rect x="281.0" y="181.0" width="180.8" height="48" fill="#7a7a7a"/>
+<rect x="170.0" y="181.0" width="110.8" height="48" fill="#7a5030"/>
+<text class="num" x="225.4" y="209.0" text-anchor="middle">10.0s</text>
+<rect x="281.0" y="181.0" width="180.8" height="48" fill="#0a4a80"/>
 <text class="num" x="371.4" y="209.0" text-anchor="middle">16.4s</text>
-<rect x="461.8" y="181.0" width="43.0" height="48" fill="#aaaaaa"/>
-<text class="num-dark" x="483.3" y="209.0" text-anchor="middle">3.9s</text>
-<rect x="504.8" y="181.0" width="11.8" height="48" fill="#5a5a5a"/>
-<rect x="516.6" y="181.0" width="1.6" height="48" fill="#9a9a9a"/>
-<rect x="518.2" y="181.0" width="184.2" height="48" fill="#3a3a3a"/>
+<rect x="461.8" y="181.0" width="43.0" height="48" fill="#3a1050"/>
+<text class="num" x="483.3" y="209.0" text-anchor="middle">3.9s</text>
+<rect x="504.8" y="181.0" width="11.8" height="48" fill="#005a40"/>
+<rect x="516.6" y="181.0" width="1.6" height="48" fill="#555555"/>
+<rect x="518.2" y="181.0" width="184.2" height="48" fill="#702828"/>
 <text class="num" x="610.3" y="209.0" text-anchor="middle">16.7s</text>
-<rect x="702.4" y="181.0" width="16.6" height="48" fill="#9a9a9a"/>
-<rect x="719.3" y="181.0" width="1.1" height="48" fill="#8a8a8a"/>
-<rect x="720.3" y="181.0" width="32.0" height="48" fill="#6a6a6a"/>
+<rect x="702.4" y="181.0" width="16.6" height="48" fill="#555555"/>
+<rect x="719.3" y="181.0" width="1.1" height="48" fill="#9a7800"/>
+<rect x="720.3" y="181.0" width="32.0" height="48" fill="#4a7500"/>
 <text class="num" x="736.3" y="209.0" text-anchor="middle">2.9s</text>
 <text class="total" x="764.3" y="210.0">52.7s</text>
 <text class="model" x="40" y="320.0">Qwen3 8B</text>
 <rect x="170" y="270" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<rect x="170.0" y="291.0" width="110.7" height="48" fill="#b5b5b5"/>
-<text class="num-dark" x="225.3" y="319.0" text-anchor="middle">10.0s</text>
-<rect x="280.8" y="291.0" width="178.0" height="48" fill="#7a7a7a"/>
+<rect x="170.0" y="291.0" width="110.7" height="48" fill="#7a5030"/>
+<text class="num" x="225.3" y="319.0" text-anchor="middle">10.0s</text>
+<rect x="280.8" y="291.0" width="178.0" height="48" fill="#0a4a80"/>
 <text class="num" x="369.9" y="319.0" text-anchor="middle">16.1s</text>
-<rect x="458.9" y="291.0" width="41.8" height="48" fill="#aaaaaa"/>
-<text class="num-dark" x="479.8" y="319.0" text-anchor="middle">3.8s</text>
-<rect x="500.7" y="291.0" width="41.8" height="48" fill="#5a5a5a"/>
+<rect x="458.9" y="291.0" width="41.8" height="48" fill="#3a1050"/>
+<text class="num" x="479.8" y="319.0" text-anchor="middle">3.8s</text>
+<rect x="500.7" y="291.0" width="41.8" height="48" fill="#005a40"/>
 <text class="num" x="521.6" y="319.0" text-anchor="middle">3.8s</text>
-<rect x="542.5" y="291.0" width="1.3" height="48" fill="#9a9a9a"/>
-<rect x="543.9" y="291.0" width="209.4" height="48" fill="#3a3a3a"/>
+<rect x="542.5" y="291.0" width="1.3" height="48" fill="#555555"/>
+<rect x="543.9" y="291.0" width="209.4" height="48" fill="#702828"/>
 <text class="num" x="648.6" y="319.0" text-anchor="middle">18.9s</text>
-<rect x="753.3" y="291.0" width="18.4" height="48" fill="#9a9a9a"/>
-<rect x="772.0" y="291.0" width="1.7" height="48" fill="#8a8a8a"/>
-<rect x="773.7" y="291.0" width="44.7" height="48" fill="#6a6a6a"/>
+<rect x="753.3" y="291.0" width="18.4" height="48" fill="#555555"/>
+<rect x="772.0" y="291.0" width="1.7" height="48" fill="#9a7800"/>
+<rect x="773.7" y="291.0" width="44.7" height="48" fill="#4a7500"/>
 <text class="num" x="796.0" y="319.0" text-anchor="middle">4.0s</text>
 <text class="total" x="830.4" y="320.0">58.7s</text>
 <text class="model" x="40" y="430.0">gpt-oss-120b</text>
 <rect x="170" y="380" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<rect x="170.0" y="401.0" width="110.9" height="48" fill="#b5b5b5"/>
-<text class="num-dark" x="225.5" y="429.0" text-anchor="middle">10.0s</text>
-<rect x="281.3" y="401.0" width="189.9" height="48" fill="#7a7a7a"/>
+<rect x="170.0" y="401.0" width="110.9" height="48" fill="#7a5030"/>
+<text class="num" x="225.5" y="429.0" text-anchor="middle">10.0s</text>
+<rect x="281.3" y="401.0" width="189.9" height="48" fill="#0a4a80"/>
 <text class="num" x="376.2" y="429.0" text-anchor="middle">17.2s</text>
-<rect x="471.2" y="401.0" width="41.9" height="48" fill="#aaaaaa"/>
-<text class="num-dark" x="492.1" y="429.0" text-anchor="middle">3.8s</text>
-<rect x="513.1" y="401.0" width="150.0" height="48" fill="#5a5a5a"/>
+<rect x="471.2" y="401.0" width="41.9" height="48" fill="#3a1050"/>
+<text class="num" x="492.1" y="429.0" text-anchor="middle">3.8s</text>
+<rect x="513.1" y="401.0" width="150.0" height="48" fill="#005a40"/>
 <text class="num" x="588.1" y="429.0" text-anchor="middle">13.6s</text>
-<rect x="663.1" y="401.0" width="1.4" height="48" fill="#9a9a9a"/>
-<rect x="664.5" y="401.0" width="173.2" height="48" fill="#3a3a3a"/>
+<rect x="663.1" y="401.0" width="1.4" height="48" fill="#555555"/>
+<rect x="664.5" y="401.0" width="173.2" height="48" fill="#702828"/>
 <text class="num" x="751.1" y="429.0" text-anchor="middle">15.7s</text>
-<rect x="837.7" y="401.0" width="26.5" height="48" fill="#9a9a9a"/>
-<text class="num-dark" x="850.9" y="429.0" text-anchor="middle">2.4s</text>
-<rect x="864.3" y="401.0" width="106.3" height="48" fill="#8a8a8a"/>
-<text class="num-dark" x="917.5" y="429.0" text-anchor="middle">9.6s</text>
-<rect x="970.7" y="401.0" width="144.0" height="48" fill="#6a6a6a"/>
+<rect x="837.7" y="401.0" width="26.5" height="48" fill="#555555"/>
+<text class="num" x="850.9" y="429.0" text-anchor="middle">2.4s</text>
+<rect x="864.3" y="401.0" width="106.3" height="48" fill="#9a7800"/>
+<text class="num" x="917.5" y="429.0" text-anchor="middle">9.6s</text>
+<rect x="970.7" y="401.0" width="144.0" height="48" fill="#4a7500"/>
 <text class="num" x="1042.7" y="429.0" text-anchor="middle">13.0s</text>
 <text class="total" x="1126.7" y="430.0">85.5s</text>
-<rect x="349.5" y="654" width="12" height="12" fill="#b5b5b5"/>
+<rect x="349.5" y="654" width="12" height="12" fill="#7a5030"/>
 <text class="legend" x="367.5" y="664">Python/Dynamo boot</text>
-<rect x="511.5" y="654" width="12" height="12" fill="#7a7a7a"/>
+<rect x="511.5" y="654" width="12" height="12" fill="#0a4a80"/>
 <text class="legend" x="529.5" y="664">vLLM config + inspect</text>
-<rect x="694.5" y="654" width="12" height="12" fill="#aaaaaa"/>
+<rect x="694.5" y="654" width="12" height="12" fill="#3a1050"/>
 <text class="legend" x="712.5" y="664">EngineCore setup</text>
-<rect x="842.5" y="654" width="12" height="12" fill="#5a5a5a"/>
+<rect x="842.5" y="654" width="12" height="12" fill="#005a40"/>
 <text class="legend" x="860.5" y="664">Model load</text>
-<rect x="363.5" y="680" width="12" height="12" fill="#9a9a9a"/>
+<rect x="363.5" y="680" width="12" height="12" fill="#555555"/>
 <text class="legend" x="381.5" y="690">Profile/KV sizing</text>
-<rect x="518.5" y="680" width="12" height="12" fill="#3a3a3a"/>
+<rect x="518.5" y="680" width="12" height="12" fill="#702828"/>
 <text class="legend" x="536.5" y="690">torch.compile</text>
-<rect x="645.5" y="680" width="12" height="12" fill="#8a8a8a"/>
+<rect x="645.5" y="680" width="12" height="12" fill="#9a7800"/>
 <text class="legend" x="663.5" y="690">Kernel warmup</text>
-<rect x="772.5" y="680" width="12" height="12" fill="#6a6a6a"/>
+<rect x="772.5" y="680" width="12" height="12" fill="#4a7500"/>
 <text class="legend" x="790.5" y="690">CUDA graph capture</text>
 </svg>
