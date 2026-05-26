@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use kvbm_engine::p2p::session::{
     AvailabilityDelta, CommitDelta, CommittedBlock, Session, SessionFactory,
 };
@@ -556,13 +556,25 @@ impl ConditionalDisaggCoordinator {
             let next = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    anyhow::bail!(
-                        "prefill run_setup: session cancelled mid-commits-drain \
-                         (seen {}/{}) for {}",
-                        commit_seen.len(),
-                        expected_count,
-                        request_id
-                    );
+                    // Tie tolerance: cancel and a normal terminator
+                    // (CommitsClosed, or sufficient Added) can land in
+                    // the same poll cycle. Take ONE synchronous poll —
+                    // if a delta is buffered, prefer it; bail only if
+                    // nothing is ready. The biased select would
+                    // otherwise spuriously fail an otherwise-successful
+                    // drain on the rare same-cycle race.
+                    match commits.next().now_or_never() {
+                        Some(d) => d,
+                        None => {
+                            anyhow::bail!(
+                                "prefill run_setup: session cancelled mid-commits-drain \
+                                 (seen {}/{}) for {}",
+                                commit_seen.len(),
+                                expected_count,
+                                request_id
+                            );
+                        }
+                    }
                 }
                 d = commits.next() => d,
             };
@@ -607,12 +619,18 @@ impl ConditionalDisaggCoordinator {
             let next = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    anyhow::bail!(
-                        "prefill run_setup: session cancelled mid-availability-drain \
-                         ({} hash(es) still unavailable) for {}",
-                        remaining.len(),
-                        request_id
-                    );
+                    // Tie tolerance — see the commits-drain comment.
+                    match avail.next().now_or_never() {
+                        Some(d) => d,
+                        None => {
+                            anyhow::bail!(
+                                "prefill run_setup: session cancelled mid-availability-drain \
+                                 ({} hash(es) still unavailable) for {}",
+                                remaining.len(),
+                                request_id
+                            );
+                        }
+                    }
                 }
                 d = avail.next() => d,
             };
@@ -631,8 +649,28 @@ impl ConditionalDisaggCoordinator {
                     if chunk.is_empty() {
                         continue;
                     }
-                    self.pull_and_register_chunk(&request_id, &state, chunk, &mut filled_index)
-                        .await?;
+                    // Race the pull against the cancel. The pull awaits
+                    // `Frame::PullComplete` from the peer (see
+                    // velo.rs::pull); a hung peer that stops responding
+                    // to pull authorizations would otherwise pin the
+                    // setup task here even though the lifecycle stream
+                    // has surfaced Detached/Failed and run the
+                    // watcher's `cancel.cancel()`. Mirror the same
+                    // biased cancel-first shape as the drain loops.
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            anyhow::bail!(
+                                "prefill run_setup: session cancelled mid-pull \
+                                 ({} hash(es) still unavailable) for {}",
+                                remaining.len(),
+                                request_id
+                            );
+                        }
+                        r = self.pull_and_register_chunk(&request_id, &state, chunk, &mut filled_index) => {
+                            r?;
+                        }
+                    }
                     let registered = bits.registered_g2.lock();
                     remaining = expected_set.clone();
                     for b in registered.iter() {
@@ -1336,6 +1374,18 @@ impl ConditionalDisaggCoordinator {
             session_id,
             session,
         })
+    }
+
+    /// Production-callable clone of the per-request CancellationToken
+    /// for `request_id`. Used by the decode-side remote-pipeline
+    /// spawn to race its session awaits against the lifecycle
+    /// watcher's cancel — same signal the coordinator's prefill
+    /// `run_setup` uses. Returns `None` if the request is no longer
+    /// tracked (e.g., lifecycle watcher already evicted the state).
+    pub fn cancel_for(&self, request_id: &str) -> Option<tokio_util::sync::CancellationToken> {
+        self.states
+            .get(request_id)
+            .map(|e| e.value().cancel.clone())
     }
 
     pub fn session_for(&self, request_id: &str) -> Option<Arc<dyn Session>> {

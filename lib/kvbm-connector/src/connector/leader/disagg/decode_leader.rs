@@ -481,7 +481,16 @@ impl DecodeDisaggLeader {
                     self.commit_gnmt_remote(request_id, full_block_external_tokens, &inputs)
                 {
                     tracing::error!(error = %err, "decode_gnmt: commit_gnmt_remote failed");
-                    self.inflight_budget.release(full_block_external_tokens);
+                    // Idempotent: routes through `release_request`, which
+                    // guards budget release on `cd_request_state.remove`
+                    // returning Some. Critical because the payload Drop
+                    // (fired synchronously on install_cd_onboarding_payload
+                    // failure inside `coordinator.begin_remote_prefill`)
+                    // already called `release_request`, removing the
+                    // entry and releasing budget. A direct
+                    // `inflight_budget.release(N)` here would double-
+                    // count and trip the capacity debug_assert.
+                    self.release_request(request_id);
                     return Err(err);
                 }
 
@@ -749,9 +758,16 @@ impl DecodeDisaggLeader {
             Err(err) => {
                 tracing::error!(error = %err, "commit_gnmt_remote: begin_remote_prefill failed");
                 // Coordinator state was already rolled back inside
-                // begin_remote_prefill on payload-install failure; we
-                // also drop our wrapper-side cd_request_state.
-                self.cd_request_state.remove(request_id);
+                // begin_remote_prefill on payload-install failure (the
+                // payload Drop ran wrapper.release_request → removed
+                // cd_request_state + released budget). We do NOT
+                // remove cd_request_state here — the caller
+                // (`decode_gnmt`) routes through `release_request`
+                // which is idempotent against the Drop path. For
+                // pre-payload bailout paths (e.g. begin_remote_prefill
+                // "called twice" at driver.rs:1085), cd_request_state
+                // still has the entry and the caller's release_request
+                // cleans it up.
                 Err(err)
             }
         }
@@ -1138,6 +1154,20 @@ impl DecodeDisaggLeader {
         state: Arc<CdRequestState>,
         session: Arc<dyn Session>,
     ) -> Result<()> {
+        // Per-request lifecycle-driven bail. The coordinator's
+        // CdRequest holds the canonical token; we grab a clone here
+        // so the session awaits below race against velo's
+        // Detached/Failed via the watcher's `cancel.cancel()`. If
+        // the coordinator already evicted state (watcher fired
+        // before this task started running), bail immediately —
+        // there's nothing left to pipeline against.
+        let cancel = self.coordinator.cancel_for(request_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "run_remote_pipeline: coordinator state already evicted for {}",
+                request_id
+            )
+        })?;
+
         // 1. Drain commits opportunistically. Break as soon as
         //    we've seen all expected remote hashes; if peer signals
         //    Closed before that, treat it as a protocol-level
@@ -1148,7 +1178,31 @@ impl DecodeDisaggLeader {
         let expected_count = state.remote_slots.len();
         let mut commit_seen: HashSet<SequenceHash> = HashSet::new();
         let mut commits = session.commits();
-        while let Some(d) = commits.next().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // Tie tolerance — biased select would spuriously
+                    // fail when cancel + a normal terminator
+                    // (CommitsClosed, or sufficient Added) land in
+                    // the same poll cycle. Synchronously poll once
+                    // more; bail only if nothing is buffered.
+                    match commits.next().now_or_never() {
+                        Some(d) => d,
+                        None => {
+                            anyhow::bail!(
+                                "run_remote_pipeline: session cancelled mid-commits-drain \
+                                 (seen {}/{}) for {}",
+                                commit_seen.len(),
+                                expected_count,
+                                request_id
+                            );
+                        }
+                    }
+                }
+                d = commits.next() => d,
+            };
+            let Some(d) = next else { break };
             match d {
                 CommitDelta::Added(hashes) => {
                     for h in hashes {
@@ -1181,10 +1235,35 @@ impl DecodeDisaggLeader {
         }
         drop(commits);
 
-        // 2. Drain availability and pull each chunk.
+        // 2. Drain availability and pull each chunk. Same cancel
+        //    discipline as the commits drain plus a select around
+        //    the per-chunk pull — velo's `pull` awaits a
+        //    `Frame::PullComplete` from the peer and would
+        //    otherwise pin this task on a hung peer even though
+        //    velo already surfaced Detached/Failed.
         let mut filled: HashSet<SequenceHash> = HashSet::new();
         let mut avail = session.availability();
-        while let Some(d) = avail.next().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // Tie tolerance — see commits-drain comment above.
+                    match avail.next().now_or_never() {
+                        Some(d) => d,
+                        None => {
+                            anyhow::bail!(
+                                "run_remote_pipeline: session cancelled mid-availability-drain \
+                                 ({} of {} filled) for {}",
+                                filled.len(),
+                                state.remote_slots.len(),
+                                request_id
+                            );
+                        }
+                    }
+                }
+                d = avail.next() => d,
+            };
+            let Some(d) = next else { break };
             match d {
                 AvailabilityDelta::Available(blocks) => {
                     // Validate every incoming hash is expected. Any
@@ -1210,13 +1289,26 @@ impl DecodeDisaggLeader {
                         continue;
                     }
                     let chunk_hashes: Vec<SequenceHash> = chunk.iter().map(|b| b.hash).collect();
-                    self.pull_register_onboard_chunk(
-                        request_id,
-                        &state,
-                        chunk_hashes.clone(),
-                        Arc::clone(&session),
-                    )
-                    .await?;
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            anyhow::bail!(
+                                "run_remote_pipeline: session cancelled mid-pull \
+                                 ({} of {} filled) for {}",
+                                filled.len(),
+                                state.remote_slots.len(),
+                                request_id
+                            );
+                        }
+                        r = self.pull_register_onboard_chunk(
+                            request_id,
+                            &state,
+                            chunk_hashes.clone(),
+                            Arc::clone(&session),
+                        ) => {
+                            r?;
+                        }
+                    }
                     filled.extend(chunk_hashes);
                     if filled.len() == state.remote_slots.len() {
                         break;
