@@ -671,6 +671,7 @@ def _print_recommendations(
 
 _SGLANG_NODEID_MARKERS = ["test_sglang", "sglang"]
 _TRTLLM_NODEID_MARKERS = ["test_trtllm", "trtllm"]
+_VLLM_NODEID_MARKERS = ["test_vllm", "vllm"]
 
 
 def _is_sglang_test(pytest_args: list[str]) -> bool:
@@ -685,6 +686,11 @@ def _is_trtllm_test(pytest_args: list[str]) -> bool:
     return any(
         marker in arg for arg in pytest_args for marker in _TRTLLM_NODEID_MARKERS
     )
+
+
+def _is_vllm_test(pytest_args: list[str]) -> bool:
+    """Check if any pytest arg looks like a vLLM test node ID."""
+    return any(marker in arg for arg in pytest_args for marker in _VLLM_NODEID_MARKERS)
 
 
 _OOM_PATTERNS = [
@@ -831,19 +837,32 @@ def _run_once(
     return rc, wall_secs, reports, sampler.samples, captured_stdout
 
 
-def _detect_framework(pytest_args: list[str]) -> str:
-    """Best-effort framework detection for the structured JSON output."""
+def _detect_framework(pytest_args: list[str]) -> str | None:
+    """Classify the test by inference framework for the JSON output.
+
+    Each backend has its own positive check. Returns ``None`` when no
+    framework can be identified, so automation can skip tests it cannot
+    classify rather than silently assuming a default.
+    """
     if _is_sglang_test(pytest_args):
         return "sglang"
     if _is_trtllm_test(pytest_args):
         return "trtllm"
-    return "vllm"
+    if _is_vllm_test(pytest_args):
+        return "vllm"
+    return None
 
 
 def _extract_pytest_nodeid(pytest_args: list[str]) -> str:
-    """First positional arg (typically the pytest nodeid)."""
+    """Return the first arg that looks like a pytest nodeid.
+
+    A nodeid contains ``::`` (file::test selector) or ends with ``.py``
+    (a whole-file selection). This skips option values like ``-k expr``
+    where ``expr`` is positional from argparse's perspective but is not a
+    test path.
+    """
     for a in pytest_args:
-        if not a.startswith("-"):
+        if "::" in a or a.endswith(".py"):
             return a
     return ""
 
@@ -853,8 +872,7 @@ def _write_json_payload(
     *,
     nodeid: str,
     status: str,
-    framework: str,
-    wall_secs: float | None = None,
+    framework: str | None,
     num_runs: int = 0,
     model: str | None = None,
     recommendations: "list[MarkerRecommendation] | None" = None,
@@ -865,14 +883,15 @@ def _write_json_payload(
     """Emit a structured JSON summary of this profile run.
 
     Consumed by the dynamo-profiler bot. Bump ``schema_version`` on any
-    breaking change to the contract.
+    breaking change to the contract. Wall-time decisions (e.g. e2e vs
+    pre_merge) are already captured by the marker recommendations'
+    ``reason`` field, so the raw wall time is not surfaced separately.
     """
     payload: dict = {
         "schema_version": 1,
         "nodeid": nodeid,
         "status": status,
         "framework": framework,
-        "wall_secs": wall_secs,
         "num_runs": num_runs,
         "model": model,
         "recommendations": [
@@ -893,6 +912,33 @@ def _write_json_payload(
         payload["error"] = error
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
+
+
+def _maybe_emit_failed_json(
+    json_out: str | None,
+    *,
+    pytest_args: list[str],
+    model_name: str | None = None,
+    gpu_reports: "list[GpuReport] | None" = None,
+    error: str,
+) -> None:
+    """Emit a ``status='failed'`` JSON payload if ``--json-out`` was requested.
+
+    Centralises the ``framework=`` / ``nodeid=`` extraction so every early
+    failure path inside ``_find_min_vram`` produces a payload with the same
+    fields. No-op when ``json_out`` is None.
+    """
+    if not json_out:
+        return
+    _write_json_payload(
+        json_out,
+        nodeid=_extract_pytest_nodeid(pytest_args),
+        status="failed",
+        framework=_detect_framework(pytest_args),
+        model=model_name,
+        gpu_reports=gpu_reports,
+        error=error,
+    )
 
 
 def _find_min_vram(
@@ -1076,16 +1122,13 @@ def _find_min_vram(
             else "test broken (not OOM)"
         )
         print(f"  [FAIL] Cannot determine minimum KV cache: {reason}.")
-        if json_out:
-            _write_json_payload(
-                json_out,
-                nodeid=_extract_pytest_nodeid(pytest_args),
-                status="failed",
-                framework=_detect_framework(pytest_args),
-                model=model_name,
-                gpu_reports=reports,
-                error=f"validation run failed: {reason}",
-            )
+        _maybe_emit_failed_json(
+            json_out,
+            pytest_args=pytest_args,
+            model_name=model_name,
+            gpu_reports=reports,
+            error=f"validation run failed: {reason}",
+        )
         return rc
 
     peak_mib = max((r.peak_mib for r in reports), default=0)
@@ -1109,6 +1152,13 @@ def _find_min_vram(
                     "  [ERROR] Could not extract max_tokens from TensorRT-LLM output.\n"
                     "  The launch script must log '[MemUsageChange] Allocated ... for max tokens in paged KV cache (N)'."
                 )
+                _maybe_emit_failed_json(
+                    json_out,
+                    pytest_args=pytest_args,
+                    model_name=model_name,
+                    gpu_reports=reports,
+                    error="could not extract max_tokens from TensorRT-LLM output",
+                )
                 return 4
             backend_label = "TensorRT-LLM"
         else:
@@ -1117,6 +1167,13 @@ def _find_min_vram(
                 print(
                     "  [ERROR] Could not extract max_total_tokens from SGLang output.\n"
                     "  The launch script must log 'max_total_tokens=N' (SGLang does this by default)."
+                )
+                _maybe_emit_failed_json(
+                    json_out,
+                    pytest_args=pytest_args,
+                    model_name=model_name,
+                    gpu_reports=reports,
+                    error="could not extract max_total_tokens from SGLang output",
                 )
                 return 4
             backend_label = "SGLang"
@@ -1274,6 +1331,11 @@ def _find_min_vram(
                 break
 
     # -- Results --
+    # Track whether the final safe-KV validation probe passed. If it fails,
+    # the recommended `requested_*` marker is for a configuration that was
+    # just observed not to work, so we report status="failed" rather than
+    # let automation accept the unvalidated recommendation.
+    final_probe_failed = False
     test_name = next(
         (a for a in pytest_args if "::" in a or a.endswith(".py")),
         " ".join(pytest_args),
@@ -1319,6 +1381,7 @@ def _find_min_vram(
                 f"peak {_format_mib(last_pass_peak_mib)}, wall {wall_final:.0f}s"
             )
         else:
+            final_probe_failed = True
             print(
                 f"  [FAIL] kv_cache={safe_kv_mib} MiB failed unexpectedly, "
                 f"using VRAM from min_kv_bytes={min_kv_mib} MiB instead"
@@ -1387,6 +1450,7 @@ def _find_min_vram(
                 f"wall {wall_final:.0f}s"
             )
         else:
+            final_probe_failed = True
             print(
                 f"  [FAIL] tokens={safe_tokens} failed unexpectedly, "
                 f"using VRAM from min_tokens={min_tokens} instead"
@@ -1437,24 +1501,28 @@ def _find_min_vram(
         _write_json_payload(
             json_out,
             nodeid=_extract_pytest_nodeid(pytest_args),
-            status="ok",
+            status="failed" if final_probe_failed else "ok",
             framework=_detect_framework(pytest_args),
-            wall_secs=avg_pass_wall,
             num_runs=len(pass_wall_times),
             model=model_name,
             recommendations=recs,
             warnings=warnings,
             gpu_reports=last_pass_reports,
+            error=(
+                "final safe-KV validation probe failed; the recommended "
+                "`requested_*` marker is for a configuration that was just "
+                "observed not to run"
+                if final_probe_failed
+                else None
+            ),
         )
 
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s: %(message)s",
-    )
+def _build_argparser() -> argparse.ArgumentParser:
+    """Construct the CLI parser. Factored out so the top-level crash handler
+    can reuse the exact same option definitions to split argv on failure."""
     parser = argparse.ArgumentParser(
         description="Profile GPU memory during a pytest run.",
         usage="%(prog)s [options] [-- ] pytest-args...",
@@ -1524,15 +1592,32 @@ def main(argv: list[str] | None = None) -> int:
         "result and marker recommendations to PATH. Intended for automation "
         "(e.g. the dynamo-profiler bot).",
     )
+    return parser
 
-    raw = argv if argv is not None else sys.argv[1:]
 
-    if "--" in raw:
-        split_idx = raw.index("--")
-        args = parser.parse_args(raw[:split_idx])
-        pytest_args = raw[split_idx + 1 :]
+def _split_argv(
+    parser: argparse.ArgumentParser, argv: list[str]
+) -> tuple[argparse.Namespace, list[str]]:
+    """Apply the same ``--``-aware splitting both ``main()`` and the crash
+    handler use, so option values like ``-k expr`` are never misread as
+    pytest nodeids."""
+    if "--" in argv:
+        split_idx = argv.index("--")
+        args = parser.parse_args(argv[:split_idx])
+        pytest_args = argv[split_idx + 1 :]
     else:
-        args, pytest_args = parser.parse_known_args(raw)
+        args, pytest_args = parser.parse_known_args(argv)
+    return args, pytest_args
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
+    parser = _build_argparser()
+    raw = argv if argv is not None else sys.argv[1:]
+    args, pytest_args = _split_argv(parser, raw)
 
     if not pytest_args:
         parser.error("No pytest arguments provided")
@@ -1626,7 +1711,6 @@ def main(argv: list[str] | None = None) -> int:
             nodeid=_extract_pytest_nodeid(pytest_args),
             status="ok" if rc == 0 else "failed",
             framework=_detect_framework(pytest_args),
-            wall_secs=wall_secs,
             num_runs=1,
             model=model_name,
             recommendations=recs,
@@ -1638,19 +1722,39 @@ def main(argv: list[str] | None = None) -> int:
     return rc
 
 
+def _find_json_out_in_raw_argv(argv: list[str]) -> str | None:
+    """Last-resort scan that handles both ``--json-out PATH`` and
+    ``--json-out=PATH`` and is robust to argparse already having failed."""
+    for i, token in enumerate(argv):
+        if token == "--json-out" and i + 1 < len(argv):
+            return argv[i + 1]
+        if token.startswith("--json-out="):
+            return token.split("=", 1)[1]
+    return None
+
+
 def _emit_failure_json_on_crash(argv: list[str], exc: BaseException) -> None:
     """If --json-out was given on the command line, ensure a failed payload
-    is written even when main() raises (NVML errors, validation errors, etc.).
-    The bot relies on every dispatched run producing exactly one JSON file.
+    is written even when main() raises (NVML errors, validation errors,
+    nonzero argparse SystemExit, etc.). The bot relies on every dispatched
+    run producing exactly one JSON file.
+
+    Reuses the real argparse setup so profiler options (``--gpus 0``,
+    ``-k expr``) never get misread as pytest nodeids.
     """
+    json_out = _find_json_out_in_raw_argv(argv)
+    if json_out is None:
+        return
+
+    # Best-effort: use the real parser to recover pytest_args. If parsing
+    # itself blew up (e.g. unknown option), fall through with an empty list
+    # so we still emit *something*.
+    pytest_args: list[str] = []
     try:
-        idx = argv.index("--json-out")
-    except ValueError:
-        return
-    if idx + 1 >= len(argv):
-        return
-    json_out = argv[idx + 1]
-    pytest_args = argv[idx + 2 :]
+        _args, pytest_args = _split_argv(_build_argparser(), argv)
+    except SystemExit:
+        pass
+
     try:
         _write_json_payload(
             json_out,
@@ -1660,7 +1764,7 @@ def _emit_failure_json_on_crash(argv: list[str], exc: BaseException) -> None:
             error=f"{type(exc).__name__}: {exc}",
         )
     except Exception:  # noqa: BLE001 — last-ditch crash handler
-        pass
+        logger.exception("failed to emit crash JSON to %s", json_out)
 
 
 if __name__ == "__main__":
@@ -1672,9 +1776,16 @@ if __name__ == "__main__":
         print("ERROR: profile_pytest.py must not run in CI.", file=sys.stderr)
         raise SystemExit(1)
     try:
-        raise SystemExit(main())
-    except SystemExit:
+        exit_code = main()
+    except SystemExit as _exc:
+        # argparse and other callers raise SystemExit. Only treat nonzero
+        # exits as crashes worth recording — successful returns from main()
+        # already wrote their own JSON.
+        code = _exc.code
+        if isinstance(code, int) and code != 0:
+            _emit_failure_json_on_crash(sys.argv[1:], _exc)
         raise
     except BaseException as _exc:  # noqa: BLE001 — propagate after recording
         _emit_failure_json_on_crash(sys.argv[1:], _exc)
         raise
+    raise SystemExit(exit_code)
