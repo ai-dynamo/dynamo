@@ -314,33 +314,13 @@ impl AddressedPushRouter {
             (None, None)
         };
 
-        let recv_subject: Option<String> =
-            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&resp_stream_conn_info.info)
-                .ok()
-                .map(|ci| ci.subject);
-        let send_subject: Option<String> = req_stream_conn_info.as_ref().and_then(|ci| {
-            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&ci.info)
-                .ok()
-                .map(|ci| ci.subject)
-        });
-
-        // Tombstone check (same semantics as the unary path) before any
-        // request-plane write.
-        let endpoint_instance_id = instance.endpoint_instance_id();
-        if let Some(subject) = &recv_subject
-            && !self
-                .resp_transport
-                .associate_instance(subject, send_subject.as_deref(), &endpoint_instance_id)
-                .await
-        {
-            self.cancel_both(&recv_subject, &send_subject).await;
-            return Err(anyhow::anyhow!(
-                DynamoError::builder()
-                    .error_type(ErrorType::Disconnected)
-                    .message("Worker removed before request could be sent (tombstoned instance)")
-                    .build()
-            ));
-        }
+        let (recv_subject, send_subject) = self
+            .resolve_subjects(
+                &resp_stream_conn_info,
+                req_stream_conn_info.as_ref(),
+                Some(&instance),
+            )
+            .await?;
 
         let control_message = RequestControlMessage {
             id: engine_ctx.id().to_string(),
@@ -558,6 +538,53 @@ impl AddressedPushRouter {
 
         (send_stream, recv_stream)
     }
+
+    /// Resolve the TCP subjects from the recv-side (always present on TCP)
+    /// and the optional send-side connection-info, then run the tombstone
+    /// check via `resp_transport.associate_instance`. On tombstone, defensively
+    /// invokes `cancel_both` (idempotent with the transport's internal cleanup)
+    /// before returning a migratable `Disconnected` error.
+    ///
+    /// `send_conn_info` is `None` for the unary path; bidirectional dispatch
+    /// passes `Some` when the send half was registered. `instance` is `None`
+    /// for non-addressed unary callers; bidirectional always passes `Some`.
+    async fn resolve_subjects(
+        &self,
+        recv_conn_info: &ConnectionInfo,
+        send_conn_info: Option<&ConnectionInfo>,
+        instance: Option<&Instance>,
+    ) -> Result<(Option<String>, Option<String>), Error> {
+        let recv_subject: Option<String> =
+            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&recv_conn_info.info)
+                .ok()
+                .map(|ci| ci.subject);
+        let send_subject: Option<String> = send_conn_info.and_then(|ci| {
+            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&ci.info)
+                .ok()
+                .map(|ci| ci.subject)
+        });
+
+        if let (Some(subject), Some(inst)) = (&recv_subject, instance)
+            && !self
+                .resp_transport
+                .associate_instance(
+                    subject,
+                    send_subject.as_deref(),
+                    &inst.endpoint_instance_id(),
+                )
+                .await
+        {
+            self.cancel_both(&recv_subject, &send_subject).await;
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::Disconnected)
+                    .message("Worker removed before request could be sent (tombstoned instance)")
+                    .build()
+            ));
+        }
+
+        Ok((recv_subject, send_subject))
+    }
 }
 
 #[async_trait::async_trait]
@@ -593,31 +620,9 @@ where
         let (connection_info, response_stream_provider) =
             pending_response_stream.unwrap().into_parts();
 
-        // Snapshot subject before connection_info is moved; used for cleanup.
-        let recv_subject: Option<String> =
-            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&connection_info.info)
-                .ok()
-                .map(|ci| ci.subject);
-
-        // If the instance is already tombstoned, fail fast with a migratable
-        // error instead of writing to the request plane.
-        if let (Some(subject), Some(inst)) = (&recv_subject, &instance_info) {
-            let endpoint_instance_id = inst.endpoint_instance_id();
-            if !self
-                .resp_transport
-                .associate_instance(subject, None, &endpoint_instance_id)
-                .await
-            {
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::Disconnected)
-                        .message(
-                            "Worker removed before request could be sent (tombstoned instance)"
-                        )
-                        .build()
-                ));
-            }
-        }
+        let (recv_subject, _send_subject) = self
+            .resolve_subjects(&connection_info, None, instance_info.as_ref())
+            .await?;
 
         // package up the connection info as part of the "header" component of the two part message
         // used to issue the request on the
