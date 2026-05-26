@@ -56,13 +56,18 @@ cuda = ["dep:kvbm-kernels", "dynamo-device/cuda"]
 collectives = []
 static-kernels = ["kvbm-kernels/static-kernels"]
 testing = []
-testing-kvbm = []
+# Layout / planner / executor source unconditionally references
+# `kvbm_kernels::TensorDataType` and `kvbm_kernels::BlockLayout` (pure-Rust
+# enums; no kernel code required to compile them). The `cuda` / `xpu-sycl`
+# features already pull in `kvbm-kernels`, but `testing-kvbm` is meant to
+# run without any backend, so it must also pull the crate in for the types.
+testing-kvbm = ["dep:kvbm-kernels"]
 testing-nixl-gds = []
 testing-xpu-sycl = ["xpu-sycl"]
 xpu-sycl = [
     "dep:kvbm-kernels",
     "dep:oneapi-rs",
-    "kvbm-kernels/xpu-sycl",
+    "kvbm-kernels/xpu-sycl-permute",
     "dynamo-device/xpu-sycl",
     "dynamo-memory/xpu-sycl",
 ]

@@ -57,7 +57,7 @@ pub use stub::StubCollectiveOps;
 #[cfg(feature = "nccl")]
 pub use bootstrap::NcclBootstrap;
 #[cfg(feature = "nccl")]
-pub use nccl::{CudaEventRegistrar, NcclCollectives};
+pub use nccl::{DeviceEventRegistrar, NcclCollectives};
 
 #[cfg(feature = "oneccl")]
 pub use oneccl_bootstrap::OneCclBootstrap;

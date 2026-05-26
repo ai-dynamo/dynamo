@@ -43,7 +43,7 @@ fn device_fc(agent: NixlAgent, num_blocks: usize) -> PhysicalLayout {
         .with_config(config)
         .with_block_layout(KvBlockLayout::OperationalNHD)
         .fully_contiguous()
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
         .unwrap()
 }

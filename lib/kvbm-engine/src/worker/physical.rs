@@ -860,7 +860,7 @@ impl WorkerTransfers for PhysicalWorker {
             .collect();
 
         // Project WirePullOptions onto TransferOptions. The wire subset
-        // intentionally omits bounce_buffer / cuda_stream / kv_layout
+        // intentionally omits bounce_buffer / device_stream / kv_layout
         // overrides / use_planner / layer_range; execute_transfer_selection
         // forces use_planner=true internally, and layer_range is the PP
         // story.

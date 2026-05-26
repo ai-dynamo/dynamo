@@ -119,7 +119,7 @@ fn build_layout_on_agent(
         LayoutType::FC => builder.fully_contiguous(),
         LayoutType::LW => builder.layer_separate(BlockDimension::BlockIsFirstDim),
     };
-    typed.allocate_device(0).build()
+    typed.allocate_device(test_allocator(0)).build()
 }
 
 /// Run one cross-agent NIXL transfer and verify the destination
@@ -318,7 +318,7 @@ fn build_fc_with_block_layout_on_agent(
         .with_config(config)
         .with_block_layout(block_layout)
         .fully_contiguous()
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
 }
 

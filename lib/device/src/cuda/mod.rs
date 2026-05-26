@@ -102,6 +102,10 @@ impl CudaDeviceContext {
 }
 
 impl DeviceContextOps for CudaDeviceContext {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn device_id(&self) -> u32 {
         self.device_id
     }
@@ -201,10 +205,6 @@ impl DeviceContextOps for CudaDeviceContext {
 
     fn raw_handle(&self) -> Option<u64> {
         Some(self.context.cu_device() as u64)
-    }
-
-    fn cuda_context_arc(&self) -> Option<Arc<cudarc::driver::CudaContext>> {
-        Some(self.context.clone())
     }
 
     fn pci_bdf_address(&self) -> Option<String> {
@@ -345,6 +345,10 @@ impl CudaDeviceStream {
 }
 
 impl DeviceStreamOps for CudaDeviceStream {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn bind_to_thread(&self) -> Result<()> {
         self.stream
             .context()
@@ -535,6 +539,71 @@ impl DeviceEventOps for CudaDeviceEvent {
 
     fn raw_handle(&self) -> Option<u64> {
         Some(self.event.cu_event() as u64)
+    }
+}
+
+// =====================================================================
+// CudaDeviceSlice<T> — owned cudarc-backed device buffer
+// =====================================================================
+
+/// Owned CUDA device-allocated buffer of `T` elements.
+///
+/// Wraps `cudarc::driver::CudaSlice<T::CudaRepr>`. The associated type
+/// indirection keeps the public [`crate::DeviceSlice`] surface element-
+/// typed in `T` while the cuda layer holds the concrete cudarc slice
+/// over `T::CudaRepr`. For the current `usize` impl the two coincide,
+/// so `clone_htod` passes the host slice straight through to cudarc
+/// without an intermediate `Vec` collect.
+pub struct CudaDeviceSlice<T: crate::DeviceDtype> {
+    inner: cudarc::driver::CudaSlice<T::CudaRepr>,
+}
+
+impl<T: crate::DeviceDtype> CudaDeviceSlice<T> {
+    /// Allocate a CUDA device buffer of `host.len()` elements and copy
+    /// `host` to it on `stream`'s queue.
+    pub(crate) fn clone_htod(
+        stream: &CudaDeviceStream,
+        host: &[T],
+    ) -> Result<Self>
+    where
+        T: crate::DeviceDtype<CudaRepr = T> + cudarc::driver::DeviceRepr,
+    {
+        // Identity-shape fast path: host slice is already in the cuda
+        // representation, so cudarc consumes it without an intermediate
+        // `Vec`. For non-identity element types a future overload would
+        // collect into `Vec<T::CudaRepr>` here; gated on `where` so the
+        // cost only appears when the shapes actually differ.
+        let inner = stream
+            .stream
+            .clone_htod(host)
+            .map_err(|e| anyhow::anyhow!("CUDA clone_htod failed: {:?}", e))?;
+        Ok(Self { inner })
+    }
+
+    /// Borrow the underlying cudarc slice — used by callers that need
+    /// the typed cudarc handle (e.g. graph-replay capture).
+    pub fn inner(&self) -> &cudarc::driver::CudaSlice<T::CudaRepr> {
+        &self.inner
+    }
+}
+
+impl<T: crate::DeviceDtype> crate::DeviceSliceOps<T> for CudaDeviceSlice<T> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn with_device_ptr(&self, f: &mut dyn FnMut(u64)) {
+        use cudarc::driver::DevicePtr;
+        let stream = self.inner.stream();
+        // `_guard` is cudarc's `SyncOnDrop`; keeping it alive for the
+        // entire closure body ensures any kernel dispatch inside `f`
+        // is ordered against the slice's owning stream.
+        let (raw, _guard) = self.inner.device_ptr(stream);
+        f(raw as u64);
     }
 }
 

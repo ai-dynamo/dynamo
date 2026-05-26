@@ -10,19 +10,19 @@
 //!   `crate::device::DeviceStream` (the SYCL-or-CUDA wrapper). Also
 //!   handles `BlockingH2D` / `BlockingD2H` for unpinned-host
 //!   copies on either backend.
-//! - **Planner-driven `planner::execute_planner_cuda_transfer`** — CUDA-only,
-//!   gated behind `#[cfg(feature = "cuda")]`. Used when `use_planner=true`
-//!   (or when the layout pair requires a kernel transform). Operates
-//!   against `cudarc::driver::CudaStream` directly.
+//! - **Planner-driven `planner::execute_planner_device_transfer`** —
+//!   backend-agnostic entry that dispatches per-backend via
+//!   `match stream.backend()`. The Transform arm runs on both CUDA
+//!   and SYCL through the unified `dispatch_transform_kernel`. The
+//!   Direct / SmallStridedCopy / CudaGraphReplay arms are CUDA-only
+//!   today; the SYCL backend bails explicitly on those until SYCL
+//!   lowering helpers land in `kvbm-kernels`.
 //!
-//! Caller-provided streams come in via either `device_stream` (multi-backend)
-//! or `cuda_stream` (CUDA-typed planner). Setting both is rejected at build
-//! time.
+//! Caller-provided streams come in via `device_stream` for both paths.
 
 pub(super) mod device;
 mod memcpy;
 mod nixl;
-#[cfg(feature = "cuda")]
 pub(crate) mod planner;
 
 use super::strategy::select_strategy;
@@ -36,8 +36,6 @@ use crate::manager::LayoutHandle;
 use crate::transfer::BounceBufferInternal;
 use crate::transfer::{StorageKind, context::TransferCompleteNotification};
 use anyhow::Result;
-#[cfg(feature = "cuda")]
-use cudarc::driver::CudaStream;
 use kvbm_common::KvbmTransferRoute;
 use std::ops::Range;
 use std::sync::Arc;
@@ -47,7 +45,6 @@ use tokio::sync::Mutex;
 pub use nixl::NixlTransferBuilder;
 
 // PR-7.5.1: expose the transform-kernel dispatcher for benchmark.rs timing.
-#[cfg(feature = "cuda")]
 pub(crate) use planner::dispatch_transform_kernel;
 
 /// Transformation kernel types for converting between different block layouts.
@@ -144,14 +141,12 @@ pub(crate) struct TransferOptionsInternal {
     /// Override destination block layout interpretation.
     /// If None, uses the layout's block_layout() method.
     pub(crate) dst_kv_layout: Option<KvBlockLayout>,
-    /// Caller-provided multi-backend device stream. When set, the
-    /// device executor uses this stream and skips event recording
-    /// (caller manages sync). Mutually exclusive with `cuda_stream`.
+    /// Caller-provided device stream. When set, the executor uses
+    /// this stream and skips event recording (caller manages sync).
+    /// Used by both the multi-backend device executor and the CUDA
+    /// planner path; the planner downcasts to a concrete
+    /// `Arc<CudaStream>` internally.
     pub(crate) device_stream: Option<Arc<DeviceStream>>,
-    /// Caller-provided CUDA-typed stream for the planner path.
-    /// Mutually exclusive with `device_stream`.
-    #[cfg(feature = "cuda")]
-    pub(crate) cuda_stream: Option<Arc<CudaStream>>,
     /// Logical route used for transfer metrics.
     pub(crate) metric_route: Option<KvbmTransferRoute>,
     /// Route through the stride-aware planner instead of legacy
@@ -183,8 +178,6 @@ pub(crate) struct TransferOptionsInternalBuilder {
     src_kv_layout: Option<KvBlockLayout>,
     dst_kv_layout: Option<KvBlockLayout>,
     device_stream: Option<Arc<DeviceStream>>,
-    #[cfg(feature = "cuda")]
-    cuda_stream: Option<Arc<CudaStream>>,
     metric_route: Option<KvbmTransferRoute>,
     use_planner: bool,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
@@ -234,13 +227,6 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
-    #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
-    pub(crate) fn cuda_stream(mut self, stream: Arc<CudaStream>) -> Self {
-        self.cuda_stream = Some(stream);
-        self
-    }
-
     pub(crate) fn metric_route(mut self, route: KvbmTransferRoute) -> Self {
         self.metric_route = Some(route);
         self
@@ -270,14 +256,6 @@ impl TransferOptionsInternalBuilder {
         if !self.axis_slices.is_empty() && !self.use_planner {
             anyhow::bail!("TransferOptionsInternal: axis_slices requires use_planner=true");
         }
-        // device_stream and cuda_stream are mutually exclusive — the
-        // dispatch path is fixed by which one is set.
-        #[cfg(feature = "cuda")]
-        if self.device_stream.is_some() && self.cuda_stream.is_some() {
-            anyhow::bail!(
-                "TransferOptionsInternal: device_stream and cuda_stream are mutually exclusive"
-            );
-        }
         Ok(TransferOptionsInternal {
             layer_range: self.layer_range,
             nixl_write_notification: self.nixl_write_notification,
@@ -285,8 +263,6 @@ impl TransferOptionsInternalBuilder {
             src_kv_layout: self.src_kv_layout,
             dst_kv_layout: self.dst_kv_layout,
             device_stream: self.device_stream,
-            #[cfg(feature = "cuda")]
-            cuda_stream: self.cuda_stream,
             metric_route: self.metric_route,
             use_planner: self.use_planner,
             axis_slices: self.axis_slices,
@@ -334,14 +310,15 @@ pub(crate) fn execute_transfer(
     // into a universal block writes the slice without head-interleave
     // corruption (see `kvbm_kernels_block_to_universal_kernel`).
     //
-    // Planner is CUDA-only — under `xpu-sycl` the auto-promotion is a
-    // no-op (kernel-transform pairs unsupported until SYCL planner port).
+    // The planner module compiles under both backends; under `xpu-sycl`
+    // it bails at dispatch time. Auto-promotion remains common: callers
+    // get a precise "planner not yet available under xpu-sycl" error
+    // rather than a silent layout-validation failure.
     let mut options = options;
     let needs_transform = src
         .layout()
         .block_layout()
         .requires_transform(&dst.layout().block_layout());
-    #[cfg(feature = "cuda")]
     if needs_transform && !options.use_planner {
         tracing::debug!(
             src = ?src.layout().block_layout(),
@@ -349,28 +326,6 @@ pub(crate) fn execute_transfer(
             "executor: auto-promoting to use_planner=true for cross-layout transform"
         );
         options.use_planner = true;
-    }
-    #[cfg(not(feature = "cuda"))]
-    {
-        // No planner under xpu-sycl. If a kernel transform is required,
-        // surface the gap explicitly rather than silently dispatching to
-        // the device executor (which would fail layout validation).
-        if needs_transform {
-            anyhow::bail!(
-                "execute_transfer: cross-layout kernel transform requires the CUDA planner; \
-                 planner is not yet available under xpu-sycl"
-            );
-        }
-        // axis_slices imply use_planner; same gap.
-        if !options.axis_slices.is_empty() {
-            anyhow::bail!(
-                "execute_transfer: axis_slices require the CUDA planner; \
-                 planner is not yet available under xpu-sycl"
-            );
-        }
-        // Force-clear the flag so downstream branches can't reach the
-        // (cfg-gated) planner module.
-        options.use_planner = false;
     }
 
     // Select transfer plan based on locations and capabilities
@@ -386,8 +341,6 @@ pub(crate) fn execute_transfer(
             options.layer_range,
             strategy,
             options.device_stream,
-            #[cfg(feature = "cuda")]
-            options.cuda_stream,
             options.use_planner,
             options.bounce_buffer.as_ref(),
             options.axis_slices,
@@ -430,7 +383,6 @@ fn execute_direct_transfer(
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
     device_stream: Option<Arc<DeviceStream>>,
-    #[cfg(feature = "cuda")] cuda_stream: Option<Arc<CudaStream>>,
     use_planner: bool,
     bounce_buffer: Option<&BounceBufferInternal>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
@@ -454,12 +406,6 @@ fn execute_direct_transfer(
                     "device_stream option is not supported for Memcpy strategy"
                 ));
             }
-            #[cfg(feature = "cuda")]
-            if cuda_stream.is_some() {
-                return Err(anyhow::anyhow!(
-                    "cuda_stream option is not supported for Memcpy strategy"
-                ));
-            }
             memcpy::execute_memcpy_transfer(
                 src,
                 dst,
@@ -472,7 +418,6 @@ fn execute_direct_transfer(
         TransferStrategy::AsyncH2D
         | TransferStrategy::AsyncD2H
         | TransferStrategy::AsyncD2D => {
-            #[cfg(feature = "cuda")]
             if use_planner {
                 // PR-5: planner-driven path for Async H2D / D2H / D2D.
                 // Errors here are NOT silently fallen back to the
@@ -498,30 +443,18 @@ fn execute_direct_transfer(
                          kernel catalog)"
                     ));
                 }
-                if device_stream.is_some() {
-                    return Err(anyhow::anyhow!(
-                        "device_stream is not supported on the planner path; pass cuda_stream"
-                    ));
-                }
-                return planner::execute_planner_cuda_transfer(
+                return planner::execute_planner_device_transfer(
                     src,
                     dst,
                     src_block_ids,
                     dst_block_ids,
                     strategy,
-                    cuda_stream,
+                    device_stream,
                     layer_range,
                     axis_slices,
                     plan_handles,
                     ctx,
                 );
-            }
-            #[cfg(feature = "cuda")]
-            if cuda_stream.is_some() {
-                return Err(anyhow::anyhow!(
-                    "cuda_stream is only honoured on the planner path; pass device_stream \
-                     for the multi-backend executor or set use_planner=true"
-                ));
             }
             // Multi-backend device executor (CUDA + SYCL). Handles
             // Async* via async stream-ordered enqueue.
@@ -540,12 +473,6 @@ fn execute_direct_transfer(
             // Blocking variants always go through the multi-backend device
             // executor — these exist specifically for unpinned `System`
             // memory paths on either CUDA or SYCL.
-            #[cfg(feature = "cuda")]
-            if cuda_stream.is_some() {
-                return Err(anyhow::anyhow!(
-                    "cuda_stream is not supported for Blocking* strategies"
-                ));
-            }
             Ok(device::execute_device_transfer(
                 src,
                 dst,
@@ -566,13 +493,6 @@ fn execute_direct_transfer(
                     "device_stream option is not supported for NIXL strategies"
                 ));
             }
-            #[cfg(feature = "cuda")]
-            if cuda_stream.is_some() {
-                return Err(anyhow::anyhow!(
-                    "cuda_stream option is not supported for NIXL strategies"
-                ));
-            }
-            #[cfg(feature = "cuda")]
             if use_planner {
                 // PR-5.6: planner-driven NIXL path. Errors propagate;
                 // no silent fallback to legacy (caller flipped the flag).
@@ -719,8 +639,6 @@ async fn execute_two_hop_transfer_chunk(
         layer_range.clone(),
         first_strategy,
         None, // device_stream: two-hop transfers don't use caller-provided streams
-        #[cfg(feature = "cuda")]
-        None, // cuda_stream
         false, // Two-hop chunks stay on the legacy path for now
         None,  // bounce_buffer only used by use_planner=true NIXL transforms
         Vec::new(), // axis_slices: two-hop chunks never carry slices (rejected upstream)
@@ -737,8 +655,6 @@ async fn execute_two_hop_transfer_chunk(
         layer_range.clone(),
         second_strategy,
         None, // device_stream
-        #[cfg(feature = "cuda")]
-        None, // cuda_stream
         false, // Two-hop chunks stay on the legacy path for now
         None,
         Vec::new(), // axis_slices: two-hop chunks never carry slices

@@ -28,7 +28,7 @@ use oneapi_rs::sycl::SyclQueue;
 // TestDtype trait
 // ---------------------------------------------------------------------------
 
-trait TestDtype: oneapi_rs::sycl::DeviceCopy + Clone + Debug + Default + Send + 'static {
+trait TestDtype: oneapi_rs::sycl::DeviceRepr + Clone + Debug + Default + Send + 'static {
     const ELEM_SIZE: usize;
     const ATOL: f64;
     const RTOL: f64;

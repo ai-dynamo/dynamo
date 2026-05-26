@@ -6,8 +6,6 @@
 use super::BounceBuffer;
 use crate::device::DeviceStream;
 use crate::layout::KvBlockLayout;
-#[cfg(feature = "cuda")]
-use cudarc::driver::CudaStream;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use kvbm_common::KvbmTransferRoute;
@@ -19,13 +17,10 @@ use std::sync::Arc;
 /// This structure provides configuration for block and layer transfers,
 /// including layer ranges, NIXL write notifications, and bounce buffers.
 ///
-/// Caller-provided streams come in two flavours:
-/// - `device_stream` — multi-backend `Arc<DeviceStream>` consumed by the
-///   XPU/CUDA unified executor (`device::execute_device_transfer`).
-/// - `cuda_stream` — CUDA-typed `Arc<CudaStream>` consumed by the planner
-///   path. Only available when the `cuda` Cargo feature is enabled.
-///
-/// Setting both is rejected at builder time on the internal options struct.
+/// Caller-provided streams flow through `device_stream` — a unified
+/// multi-backend `Arc<DeviceStream>` consumed by both the XPU/CUDA
+/// device executor and the CUDA planner path. The planner downcasts
+/// to a concrete `Arc<CudaStream>` internally.
 ///
 /// # Examples
 ///
@@ -79,29 +74,14 @@ pub struct TransferOptions {
     #[builder(default, setter(strip_option))]
     pub dst_kv_layout: Option<KvBlockLayout>,
 
-    /// Caller-provided multi-backend device stream.
+    /// Caller-provided device stream.
     ///
     /// When set, the transfer executor uses this stream instead of acquiring
     /// one from the context pool, and skips event recording (caller manages
-    /// synchronization). Returns `completed()` immediately.
-    ///
-    /// Mutually exclusive with `cuda_stream` (enforced at internal-builder
-    /// build time).
+    /// synchronization). Returns `completed()` immediately. Used by both the
+    /// multi-backend device executor and the CUDA planner path.
     #[builder(default, setter(strip_option))]
     pub device_stream: Option<Arc<DeviceStream>>,
-
-    /// Caller-provided CUDA-typed stream for the planner path.
-    ///
-    /// When set, the planner-driven executor uses this stream instead of
-    /// acquiring one from the pool. Caller manages synchronization. Useful
-    /// for layer-wise transfers where all layers must execute on the same
-    /// stream to allow proper event sequencing (e.g. forward-pass overlap
-    /// in `kvbm-connector`).
-    ///
-    /// Mutually exclusive with `device_stream`.
-    #[cfg(feature = "cuda")]
-    #[builder(default, setter(strip_option))]
-    pub cuda_stream: Option<Arc<CudaStream>>,
 
     /// Optional logical route for transfer metrics.
     ///

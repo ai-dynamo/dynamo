@@ -127,7 +127,7 @@ pub struct PullShard {
 ///   PR will reintroduce a layer-range field and reconcile with
 ///   `transfer/executor/mod.rs`'s `use_planner + layer_range`
 ///   rejection.
-/// - `bounce_buffer`, `cuda_stream`, `src_kv_layout`, `dst_kv_layout` —
+/// - `bounce_buffer`, `device_stream`, `src_kv_layout`, `dst_kv_layout` —
 ///   per-allocation references that cannot be serialised meaningfully.
 ///
 /// Every field is `#[serde(default)]` so a newer sender can add fields

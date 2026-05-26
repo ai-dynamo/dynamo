@@ -39,7 +39,7 @@ fn build_fc_device(
         .with_config(config)
         .with_block_layout(block_layout)
         .fully_contiguous()
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
         .unwrap()
 }
@@ -56,7 +56,7 @@ fn build_lw_device(
         .with_config(config)
         .with_block_layout(block_layout)
         .layer_separate(BlockDimension::BlockIsFirstDim)
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
         .unwrap()
 }
@@ -69,7 +69,7 @@ fn build_universal_pinned(agent: NixlAgent, num_blocks: usize) -> PhysicalLayout
         .with_config(config)
         .with_block_layout(KvBlockLayout::Universal)
         .fully_contiguous()
-        .allocate_pinned(None)
+        .allocate_pinned(test_allocator(0))
         .build()
         .unwrap()
 }

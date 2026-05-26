@@ -328,22 +328,7 @@ impl TransferManager {
             (src, dst)
         };
 
-        // The dissolve tuple shape mirrors `TransferOptions` field order; the
-        // `cuda_stream` slot is only present when the `cuda` Cargo feature is
-        // enabled, so the destructure is cfg-gated.
-        #[cfg(feature = "cuda")]
-        let (
-            layer_range,
-            nixl_write_notification,
-            bounce_buffer,
-            src_kv_layout,
-            dst_kv_layout,
-            device_stream,
-            cuda_stream,
-            metric_route,
-            use_planner,
-        ) = options.dissolve();
-        #[cfg(not(feature = "cuda"))]
+        // Dissolve tuple shape mirrors `TransferOptions` field order.
         let (
             layer_range,
             nixl_write_notification,
@@ -375,10 +360,6 @@ impl TransferManager {
         }
         if let Some(stream) = device_stream {
             builder = builder.device_stream(stream);
-        }
-        #[cfg(feature = "cuda")]
-        if let Some(stream) = cuda_stream {
-            builder = builder.cuda_stream(stream);
         }
         if let Some(layout) = src_kv_layout {
             builder = builder.src_kv_layout(layout);

@@ -93,11 +93,6 @@ impl From<SerializableTransferOptions> for TransferOptions {
             // bounce_buffer requires TransportManager to resolve handle to layout
             bounce_buffer: None,
             device_stream: None,
-            // The CUDA-typed `cuda_stream` field exists because the
-            // planner path (`dispatch_transform_kernel`) is still
-            // CUDA-typed.
-            #[cfg(feature = "cuda")]
-            cuda_stream: None,
             // KV layout overrides are not serialized; they must be set locally
             src_kv_layout: None,
             dst_kv_layout: None,

@@ -33,7 +33,10 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoolOps};
+pub use traits::{
+    DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoolOps,
+    DeviceDtype, DeviceSliceOps, HtodDtype,
+};
 
 /// Device backend type selector.
 ///
@@ -227,12 +230,14 @@ impl DeviceContext {
     /// device context wraps the CUDA backend.
     ///
     /// Returns `None` for non-CUDA backends. CUDA-typed callers (planner,
-    /// benchmark cache) use this to build their parallel `Arc<CudaStream>`
-    /// pool from the same context that backs the multi-backend `DeviceStream`
-    /// pool, avoiding a duplicate `cuCtxCreate`.
+    /// benchmark cache) use this to call cudarc APIs that take an
+    /// `Arc<CudaContext>` directly, avoiding a duplicate `cuCtxCreate`.
     #[cfg(feature = "cuda")]
     pub fn cuda_context(&self) -> Option<std::sync::Arc<cudarc::driver::CudaContext>> {
-        self.ops.cuda_context_arc()
+        self.ops
+            .as_any()
+            .downcast_ref::<cuda::CudaDeviceContext>()
+            .map(|c| c.inner().clone())
     }
 }
 
@@ -290,6 +295,68 @@ impl DeviceStream {
         })
     }
 
+    /// Stream-ordered host-to-device copy returning an owned device buffer.
+    ///
+    /// Allocates a device buffer of `host.len()` `T`s, enqueues a copy
+    /// of the host bytes onto this stream, and returns a [`DeviceSlice`]
+    /// whose Drop frees the device memory.
+    ///
+    /// On CUDA the underlying allocation/free is stream-ordered via
+    /// the cudarc API. On SYCL the free runs synchronously because no
+    /// stream-ordered free exists in the safe oneapi-rs surface — this
+    /// is a known perf gap on the transform-scratch path.
+    pub fn clone_htod<T>(&self, host: &[T]) -> Result<DeviceSlice<T>>
+    where
+        T: HtodDtype,
+    {
+        match self.backend {
+            DeviceBackend::Cuda => {
+                #[cfg(feature = "cuda")]
+                {
+                    let cuda_stream_handle = self
+                        .ops
+                        .as_any()
+                        .downcast_ref::<cuda::CudaDeviceStream>()
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "DeviceStream::clone_htod: backend tagged Cuda but stream is not a CudaDeviceStream"
+                        ))?;
+                    let slice_ops: Box<dyn DeviceSliceOps<T>> = Box::new(
+                        cuda::CudaDeviceSlice::<T>::clone_htod(cuda_stream_handle, host)?,
+                    );
+                    Ok(DeviceSlice {
+                        backend: DeviceBackend::Cuda,
+                        len: host.len(),
+                        ops: slice_ops,
+                    })
+                }
+                #[cfg(not(feature = "cuda"))]
+                { bail!("DeviceStream::clone_htod: CUDA backend not compiled") }
+            }
+            DeviceBackend::Sycl => {
+                #[cfg(feature = "xpu-sycl")]
+                {
+                    let sycl_stream = self
+                        .ops
+                        .as_any()
+                        .downcast_ref::<sycl::SyclDeviceStream>()
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "DeviceStream::clone_htod: backend tagged Sycl but stream is not a SyclDeviceStream"
+                        ))?;
+                    let slice_ops: Box<dyn DeviceSliceOps<T>> = Box::new(
+                        sycl::SyclDeviceSlice::<T>::clone_htod(sycl_stream, host)?,
+                    );
+                    Ok(DeviceSlice {
+                        backend: DeviceBackend::Sycl,
+                        len: host.len(),
+                        ops: slice_ops,
+                    })
+                }
+                #[cfg(not(feature = "xpu-sycl"))]
+                { bail!("DeviceStream::clone_htod: SYCL backend not compiled") }
+            }
+        }
+    }
+
     /// Insert a wait-for-event dependency on this stream.
     ///
     /// Subsequent work submitted to this stream will not begin until `event`
@@ -300,6 +367,40 @@ impl DeviceStream {
 
     pub fn synchronize(&self) -> Result<()> {
         self.ops.synchronize()
+    }
+
+    /// Recover the underlying `Arc<cudarc::driver::CudaStream>` if this
+    /// stream wraps the CUDA backend.
+    ///
+    /// C-FFI handle escape hatch for raw kernel launch sites that need
+    /// the underlying `cudaStream_t` (graph capture/replay, transform
+    /// kernel FFI, benchmark direct DMA). Returns `None` for non-CUDA
+    /// backends. Prefer the device-agnostic `DeviceStream` API
+    /// (`batch_copy`, `vectorized_copy`, `clone_htod`, `with_device_ptr`)
+    /// at all non-FFI call sites.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_stream_arc(&self) -> Option<std::sync::Arc<cudarc::driver::CudaStream>> {
+        self.ops
+            .as_any()
+            .downcast_ref::<cuda::CudaDeviceStream>()
+            .map(|s| s.inner().clone())
+    }
+
+    /// Recover the underlying [`sycl::SyclDeviceStream`] if this stream
+    /// wraps the SYCL backend.
+    ///
+    /// C-FFI handle escape hatch for raw kernel launch sites that need
+    /// the underlying `sycl::queue*` (transform kernel FFI; benchmark
+    /// direct DMA, when wired). Mirrors [`Self::cuda_stream_arc`] on
+    /// the SYCL side and exists so kvbm-physical can launch
+    /// elem-size-typed C kernels without leaking `oneapi-rs` types
+    /// through the device abstraction. Prefer the device-agnostic
+    /// `DeviceStream` API at all non-FFI call sites.
+    #[cfg(feature = "xpu-sycl")]
+    pub fn sycl_stream(&self) -> Option<&sycl::SyclDeviceStream> {
+        self.ops
+            .as_any()
+            .downcast_ref::<sycl::SyclDeviceStream>()
     }
 }
 
@@ -344,6 +445,20 @@ pub struct DeviceEvent {
 }
 
 impl DeviceEvent {
+    /// Wrap a raw `cudarc::driver::CudaEvent` in the device-agnostic
+    /// `DeviceEvent`.
+    ///
+    /// Used by callers that obtained a `CudaEvent` directly from
+    /// `cudarc` (e.g. NCCL stream `record_event`) and need to hand it
+    /// to a backend-agnostic registrar.
+    #[cfg(feature = "cuda")]
+    pub fn from_cuda_event(event: cudarc::driver::CudaEvent) -> Self {
+        Self {
+            backend: DeviceBackend::Cuda,
+            ops: Box::new(cuda::CudaDeviceEvent { event }),
+        }
+    }
+
     pub fn backend(&self) -> DeviceBackend {
         self.backend
     }
@@ -382,6 +497,94 @@ impl std::fmt::Debug for DeviceEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeviceEvent")
             .field("backend", &self.backend)
+            .finish()
+    }
+}
+
+// ======================================================================
+// DeviceSlice<T> — owned device-allocated buffer
+// ======================================================================
+
+/// Owned device-allocated buffer of `T` elements.
+///
+/// Thin wrapper holding a `Box<dyn DeviceSliceOps<T>>` whose concrete
+/// type is constructed by the backend submodules (`cuda::CudaDeviceSlice`
+/// / `sycl::SyclDeviceSlice`). Drop frees the underlying allocation.
+///
+/// Use [`Self::with_device_ptr`] at kernel-dispatch sites to keep
+/// cudarc's `SyncOnDrop` guard alive across the launch.
+pub struct DeviceSlice<T: DeviceDtype> {
+    backend: DeviceBackend,
+    len: usize,
+    ops: Box<dyn DeviceSliceOps<T>>,
+}
+
+impl<T: DeviceDtype> DeviceSlice<T> {
+    pub fn backend(&self) -> DeviceBackend { self.backend }
+    pub fn len(&self) -> usize { self.len }
+    pub fn is_empty(&self) -> bool { self.len == 0 }
+
+    /// Run `f` with the underlying device pointer as a `u64`.
+    ///
+    /// On CUDA, the closure body executes while cudarc's `SyncOnDrop`
+    /// guard from `DevicePtr::device_ptr` is still alive, so any kernel
+    /// dispatch inside `f` is correctly ordered against the buffer's
+    /// owning stream. On SYCL the pointer is intrinsically stable for
+    /// the slice's lifetime; the closure shape is purely for API
+    /// symmetry.
+    ///
+    /// This is the preferred accessor at kernel-dispatch sites. Use
+    /// [`Self::device_ptr_u64`] only when the surrounding code already
+    /// holds the slice alive across a same-stream synchronous launch
+    /// and a closure scope is structurally awkward.
+    pub fn with_device_ptr<R>(&self, f: impl FnOnce(u64) -> R) -> R {
+        // The trait surface is `&mut dyn FnMut(u64)` so it can be a
+        // dyn-trait object; we adapt the FnOnce caller to that shape
+        // by stashing the FnOnce in an `Option` and `.take()`-ing it
+        // on first invocation, then capturing the result through `out`.
+        let mut f_once: Option<_> = Some(f);
+        let mut out: Option<R> = None;
+        let mut adapter = |raw: u64| {
+            let f = f_once
+                .take()
+                .expect("DeviceSliceOps::with_device_ptr invoked the closure more than once");
+            out = Some(f(raw));
+        };
+        self.ops.with_device_ptr(&mut adapter);
+        out.expect("DeviceSliceOps::with_device_ptr did not invoke the closure")
+    }
+
+    /// Recover the underlying device pointer as a `u64`.
+    ///
+    /// Prefer [`Self::with_device_ptr`] at kernel-dispatch sites — it
+    /// keeps cudarc's `SyncOnDrop` guard alive across the launch. This
+    /// accessor drops the guard immediately and is only sound when the
+    /// caller dispatches synchronously on the slice's owning stream
+    /// before the slice is dropped.
+    pub fn device_ptr_u64(&self) -> u64 {
+        self.with_device_ptr(|raw| raw)
+    }
+
+    /// Recover the underlying `cudarc::driver::CudaSlice` if this slice
+    /// was allocated via the CUDA backend.
+    ///
+    /// Returns `None` for non-CUDA backends. Used by cudarc-typed
+    /// callers (e.g. cudarc graph-replay capture) that need the typed
+    /// slice handle directly.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_slice(&self) -> Option<&cudarc::driver::CudaSlice<T::CudaRepr>> {
+        self.ops
+            .as_any()
+            .downcast_ref::<cuda::CudaDeviceSlice<T>>()
+            .map(|s| s.inner())
+    }
+}
+
+impl<T: DeviceDtype> std::fmt::Debug for DeviceSlice<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceSlice")
+            .field("backend", &self.backend)
+            .field("len", &self.len)
             .finish()
     }
 }

@@ -204,6 +204,10 @@ impl SyclDeviceContext {
 }
 
 impl DeviceContextOps for SyclDeviceContext {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn device_id(&self) -> u32 {
         self.device_id
     }
@@ -219,6 +223,8 @@ impl DeviceContextOps for SyclDeviceContext {
         Ok(Box::new(SyclDeviceStream {
             queue,
             device_id: self.device_id,
+            device: Arc::clone(&self.device),
+            shared_context: Arc::clone(&self.shared_context),
         }))
     }
 
@@ -368,6 +374,16 @@ impl dynamo_memory::PinnedAllocator for SyclPinnedAllocator {
 pub struct SyclDeviceStream {
     queue: Arc<SyclQueue>,
     device_id: u32,
+    device: Arc<SyclDevice>,
+    shared_context: Arc<SyclContext>,
+}
+
+impl SyclDeviceStream {
+    /// Get the underlying SYCL queue (used by kernel-launch helpers
+    /// that take `*mut c_void` raw queue pointers).
+    pub fn queue(&self) -> &Arc<SyclQueue> {
+        &self.queue
+    }
 }
 
 impl std::fmt::Debug for SyclDeviceStream {
@@ -382,6 +398,10 @@ unsafe impl Send for SyclDeviceStream {}
 unsafe impl Sync for SyclDeviceStream {}
 
 impl DeviceStreamOps for SyclDeviceStream {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn batch_copy(&self, src_ptrs: &[u64], dst_ptrs: &[u64], size: usize) -> Result<()> {
         assert_eq!(src_ptrs.len(), dst_ptrs.len(), "batch_copy: src/dst length mismatch");
 
@@ -569,6 +589,114 @@ impl DeviceEventOps for SyclDeviceEvent {
 
     fn raw_handle(&self) -> Option<u64> {
         Some(self.event.handle as u64)
+    }
+}
+
+// =====================================================================
+// SyclDeviceSlice<T> — owned USM device buffer
+// =====================================================================
+
+/// Owned SYCL USM-device allocation. Drops free the buffer through the
+/// `SyclContext::free_raw` path after a synchronize on the source queue
+/// — no stream-ordered free is exposed by the safe oneapi-rs surface
+/// today, so a brief queue sync at drop time is the safe baseline.
+pub struct SyclDeviceSlice<T: crate::DeviceDtype> {
+    queue: Arc<SyclQueue>,
+    context: Arc<SyclContext>,
+    ptr: u64,
+    len: usize,
+    bytes: usize,
+    _marker: std::marker::PhantomData<T>,
+}
+
+// Send/Sync don't depend on `T`'s Send/Sync: the struct only holds
+// `Arc<SyclQueue>`, `Arc<SyclContext>`, a `u64` USM pointer, and
+// `PhantomData<T>`. The buffer it points at lives on the device.
+// `DeviceSliceOps<T>` requires `Send + Sync` for every `T: DeviceDtype`,
+// and `DeviceDtype` only bounds `Copy + Send + 'static` — without
+// these unconditional unsafe impls, blanket dispatch through
+// `Box<dyn DeviceSliceOps<T>>` fails when `T` is not `Sync`.
+unsafe impl<T: crate::DeviceDtype> Send for SyclDeviceSlice<T> {}
+unsafe impl<T: crate::DeviceDtype> Sync for SyclDeviceSlice<T> {}
+
+impl<T: crate::DeviceDtype> SyclDeviceSlice<T> {
+    /// Allocate a USM-device buffer of `host.len()` elements and copy
+    /// `host` to it on `stream`'s queue.
+    pub(crate) fn clone_htod(stream: &SyclDeviceStream, host: &[T]) -> Result<Self>
+    where
+        T: crate::DeviceDtype<SyclRepr = T>,
+    {
+        // Identity-shape fast path: host slice is already in the SYCL
+        // representation, so the memcpy reads the caller's bytes
+        // directly without an intermediate `Vec`. For non-identity
+        // element types a future overload would collect into
+        // `Vec<T::SyclRepr>` here.
+        let bytes = std::mem::size_of_val(host);
+        let len = host.len();
+        let ptr = if bytes == 0 {
+            0u64
+        } else {
+            stream
+                .shared_context
+                .malloc_device(&stream.device, bytes)
+                .map_err(|e| anyhow::anyhow!(
+                    "SYCL clone_htod malloc_device failed ({} bytes): {}", bytes, e
+                ))? as u64
+        };
+        if bytes > 0 {
+            unsafe {
+                stream.queue.memcpy_raw_async(
+                    ptr as *mut c_void,
+                    host.as_ptr() as *const c_void,
+                    bytes,
+                )
+            }
+            .map_err(|e| anyhow::anyhow!("SYCL clone_htod memcpy failed: {}", e))?;
+        }
+        Ok(Self {
+            queue: Arc::clone(&stream.queue),
+            context: Arc::clone(&stream.shared_context),
+            ptr,
+            len,
+            bytes,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    pub fn ptr_u64(&self) -> u64 {
+        self.ptr
+    }
+}
+
+impl<T: crate::DeviceDtype> crate::DeviceSliceOps<T> for SyclDeviceSlice<T> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn with_device_ptr(&self, f: &mut dyn FnMut(u64)) {
+        // SYCL USM pointers are stable for the slice's lifetime, so
+        // there is no equivalent of cudarc's SyncOnDrop guard to keep
+        // alive. The closure shape is preserved for API symmetry.
+        f(self.ptr);
+    }
+}
+
+impl<T: crate::DeviceDtype> Drop for SyclDeviceSlice<T> {
+    fn drop(&mut self) {
+        if self.ptr == 0 || self.bytes == 0 {
+            return;
+        }
+        // Drain any in-flight ops on the source queue before freeing.
+        if let Err(e) = self.queue.synchronize() {
+            tracing::warn!("SyclDeviceSlice drop: queue synchronize failed: {}", e);
+        }
+        if let Err(e) = self.context.free_raw(self.ptr as *mut c_void) {
+            tracing::warn!("SyclDeviceSlice drop: free_raw failed: {}", e);
+        }
     }
 }
 

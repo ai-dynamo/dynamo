@@ -447,6 +447,18 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn test_asymmetric_tp_session_round_trip() -> Result<()> {
+        // Skip on hosts where no compiled-in device backend is physically
+        // present (e.g. stub-CUDA CI runners). The test allocates real
+        // pinned memory through `DeviceContext::new(detect_backend()?, ..)`,
+        // which would otherwise fail with "No supported device backend
+        // available on this system".
+        if DeviceBackend::list_available().is_empty() {
+            eprintln!(
+                "Skipping {}: no device backend available on this host",
+                module_path!()
+            );
+            return Ok(());
+        }
         let pair = create_asymmetric_leader_pair_with_workers(StorageKind::Pinned).await?;
         let AsymmetricPair { holder, puller } = pair;
 

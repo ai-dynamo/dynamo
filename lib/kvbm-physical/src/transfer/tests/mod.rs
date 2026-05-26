@@ -185,6 +185,16 @@ pub fn create_test_agent_with_backends(name: &str, backends: &[&str]) -> Result<
     NixlAgent::with_backends(name, backends)
 }
 
+/// Build a `DeviceAllocator` for the active test backend (SYCL > CUDA), at
+/// the given `device_id`. Used by the `allocate_device` / `allocate_pinned`
+/// builder calls below — the builder API takes an `Arc<dyn DeviceAllocator>`
+/// since there's no longer a CUDA-typed shortcut.
+pub(crate) fn test_allocator(
+    device_id: u32,
+) -> std::sync::Arc<dyn dynamo_memory::DeviceAllocator> {
+    std::sync::Arc::new(DeviceContext::new(test_device_backend(), device_id).unwrap())
+}
+
 /// Select device backend for transfer tests.
 ///
 /// Priority: SYCL (xpu-sycl) > CUDA.
@@ -267,8 +277,8 @@ pub fn create_layout_with_page_size(
                 .fully_contiguous();
             match spec.storage {
                 StorageKind::System => b.allocate_system().build().unwrap(),
-                StorageKind::Pinned => b.allocate_pinned(None).build().unwrap(),
-                StorageKind::Device(id) => b.allocate_device(id).build().unwrap(),
+                StorageKind::Pinned => b.allocate_pinned(test_allocator(0)).build().unwrap(),
+                StorageKind::Device(id) => b.allocate_device(test_allocator(id)).build().unwrap(),
                 StorageKind::Disk(_) => b.allocate_disk(None).build().unwrap(),
             }
         }
@@ -278,8 +288,8 @@ pub fn create_layout_with_page_size(
                 .layer_separate(BlockDimension::BlockIsFirstDim);
             match spec.storage {
                 StorageKind::System => b.allocate_system().build().unwrap(),
-                StorageKind::Pinned => b.allocate_pinned(None).build().unwrap(),
-                StorageKind::Device(id) => b.allocate_device(id).build().unwrap(),
+                StorageKind::Pinned => b.allocate_pinned(test_allocator(0)).build().unwrap(),
+                StorageKind::Device(id) => b.allocate_device(test_allocator(id)).build().unwrap(),
                 StorageKind::Disk(_) => b.allocate_disk(None).build().unwrap(),
             }
         }

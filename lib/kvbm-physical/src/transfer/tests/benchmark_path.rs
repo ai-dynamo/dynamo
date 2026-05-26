@@ -43,7 +43,7 @@ fn build_fc_with_block_layout(
         .with_config(config)
         .with_block_layout(block_layout)
         .fully_contiguous()
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
         .unwrap()
 }

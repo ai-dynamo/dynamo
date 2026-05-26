@@ -7,11 +7,19 @@
 //! (CUDA, SYCL/XPU) must implement.
 
 use anyhow::Result;
+use std::any::Any;
 use std::fmt::Debug;
 
 
 /// Device context operations — the main interface for device management.
 pub trait DeviceContextOps: Send + Sync + Debug {
+    /// Downcasting hook for backend-specific escape hatches.
+    ///
+    /// Lives on the trait so callers holding `Box<dyn DeviceContextOps>`
+    /// can recover the concrete type when they need APIs the abstraction
+    /// doesn't cover (e.g. cudarc-typed planner calls). Backend-specific
+    /// accessors live on the [`crate::DeviceContext`] wrapper, not here.
+    fn as_any(&self) -> &dyn Any;
     /// Get the device ID this context is bound to.
     fn device_id(&self) -> u32;
 
@@ -64,16 +72,6 @@ pub trait DeviceContextOps: Send + Sync + Debug {
         None
     }
 
-    /// Recover the underlying `cudarc::driver::CudaContext` if this is
-    /// the CUDA backend implementation. Default `None` for SYCL.
-    ///
-    /// Used by CUDA-typed consumers (planner, benchmark cache) to build
-    /// `Arc<CudaStream>` pools from the same context that backs the
-    /// multi-backend `DeviceStream` pool.
-    #[cfg(feature = "cuda")]
-    fn cuda_context_arc(&self) -> Option<std::sync::Arc<cudarc::driver::CudaContext>> {
-        None
-    }
 }
 
 /// Device stream/queue operations — async execution interface.
@@ -84,6 +82,10 @@ pub trait DeviceContextOps: Send + Sync + Debug {
 /// - `vectorized_copy`: N independent copies executed in parallel via a GPU kernel.
 ///   Pointer arrays are uploaded to device memory for kernel consumption.
 pub trait DeviceStreamOps: Send + Sync + Debug {
+    /// Downcasting hook for backend-specific escape hatches.
+    /// See [`DeviceContextOps::as_any`].
+    fn as_any(&self) -> &dyn Any;
+
     /// Bind the underlying device context to the calling thread.
     fn bind_to_thread(&self) -> Result<()> {
         Ok(())
@@ -159,6 +161,7 @@ pub trait DeviceStreamOps: Send + Sync + Debug {
     fn raw_handle(&self) -> Option<u64> {
         None
     }
+
 }
 
 /// Device event operations — async completion tracking.
@@ -220,4 +223,156 @@ pub trait DeviceMemPoolOps: Send + Sync + Debug {
     /// * `ptr` - Device pointer previously allocated from this pool
     /// * `stream` - Device stream ops for ordering
     fn free_async(&self, ptr: u64, stream: &dyn DeviceStreamOps) -> Result<()>;
+}
+
+
+// =====================================================================
+// DeviceDtype and per-backend representation marker traits.
+// =====================================================================
+
+/// Sealed module to keep [`DeviceDtype`] closed to the variants
+/// declared in this crate.
+mod private {
+    pub trait Sealed {}
+    impl Sealed for usize {}
+}
+
+/// Logical scalar data types that can live in a [`crate::DeviceSlice`].
+///
+/// Describes the byte/bit shape of a scalar that is legal as a device
+/// slice element. The per-backend `*Repr` associated types name the
+/// concrete representation each backend's allocator / memcpy expects.
+/// For all current impls (only `usize` today) the host shape *is* the
+/// device shape, so `to_cuda` / `to_sycl` are the identity and the
+/// `clone_htod` fast path passes the host slice straight through with
+/// no allocation or per-element conversion.
+///
+/// New dtypes are a one-line addition: implement the sealed
+/// `private::Sealed`, declare the two `*Repr` types and the two
+/// converters. If `T == CudaRepr == SyclRepr`, both converters are
+/// the identity and no per-element copy is paid on either backend.
+pub trait DeviceDtype: Copy + Send + 'static + private::Sealed {
+    /// CUDA-side representation of `Self`.
+    ///
+    /// Must be `cudarc::driver::DeviceRepr` so cudarc's H2D / kernel
+    /// APIs accept it. For identity-shaped scalars (e.g. `usize`),
+    /// `type CudaRepr = Self`.
+    #[cfg(feature = "cuda")]
+    type CudaRepr: cudarc::driver::DeviceRepr + Copy;
+
+    /// SYCL-side representation of `Self`.
+    ///
+    /// Must be `oneapi_rs::safe::DeviceRepr` so SYCL's USM allocator
+    /// and memcpy APIs accept it. Same identity-by-default story as
+    /// `CudaRepr`. The trait name mirrors cudarc's `DeviceRepr` to
+    /// keep both backends conceptually symmetric.
+    #[cfg(feature = "xpu-sycl")]
+    type SyclRepr: oneapi_rs::safe::DeviceRepr + Copy;
+
+    /// Convert a host element into the CUDA representation. Identity
+    /// for the common case; reserved for future scalars whose host and
+    /// device shapes differ.
+    #[cfg(feature = "cuda")]
+    fn to_cuda(self) -> Self::CudaRepr;
+
+    /// SYCL counterpart to [`Self::to_cuda`].
+    #[cfg(feature = "xpu-sycl")]
+    fn to_sycl(self) -> Self::SyclRepr;
+}
+
+impl DeviceDtype for usize {
+    #[cfg(feature = "cuda")]
+    type CudaRepr = usize;
+    #[cfg(feature = "xpu-sycl")]
+    type SyclRepr = usize;
+
+    #[cfg(feature = "cuda")]
+    #[inline(always)]
+    fn to_cuda(self) -> usize {
+        self
+    }
+    #[cfg(feature = "xpu-sycl")]
+    #[inline(always)]
+    fn to_sycl(self) -> usize {
+        self
+    }
+}
+
+
+// =====================================================================
+// DeviceSliceOps — owned, device-allocated buffer of `T` elements.
+// =====================================================================
+
+/// Identity-shape constraint used by [`crate::DeviceStream::clone_htod`].
+///
+/// Asserts that the host element type is also the per-backend
+/// representation (no per-element conversion needed). All current
+/// `DeviceDtype` impls satisfy this; a future non-identity element
+/// type would need a separate API that performs the conversion.
+///
+/// Defined as a single combined trait because Rust does not allow
+/// `#[cfg]` on individual `where`-clause predicates — expressing the
+/// per-backend bounds inline at the call site fails to parse. Each
+/// cfg variant of this trait inlines the right per-backend bound so
+/// callers can write `T: HtodDtype` and get the correct projection.
+#[cfg(all(feature = "cuda", feature = "xpu-sycl"))]
+pub trait HtodDtype:
+    DeviceDtype<CudaRepr = Self, SyclRepr = Self>
+    + cudarc::driver::DeviceRepr
+{}
+
+#[cfg(all(feature = "cuda", feature = "xpu-sycl"))]
+impl<T> HtodDtype for T where
+    T: DeviceDtype<CudaRepr = T, SyclRepr = T>
+        + cudarc::driver::DeviceRepr
+{}
+
+#[cfg(all(feature = "cuda", not(feature = "xpu-sycl")))]
+pub trait HtodDtype:
+    DeviceDtype<CudaRepr = Self> + cudarc::driver::DeviceRepr
+{}
+
+#[cfg(all(feature = "cuda", not(feature = "xpu-sycl")))]
+impl<T> HtodDtype for T where
+    T: DeviceDtype<CudaRepr = T> + cudarc::driver::DeviceRepr
+{}
+
+#[cfg(all(not(feature = "cuda"), feature = "xpu-sycl"))]
+pub trait HtodDtype: DeviceDtype<SyclRepr = Self> {}
+
+#[cfg(all(not(feature = "cuda"), feature = "xpu-sycl"))]
+impl<T> HtodDtype for T where T: DeviceDtype<SyclRepr = T> {}
+
+#[cfg(not(any(feature = "cuda", feature = "xpu-sycl")))]
+pub trait HtodDtype: DeviceDtype {}
+
+#[cfg(not(any(feature = "cuda", feature = "xpu-sycl")))]
+impl<T> HtodDtype for T where T: DeviceDtype {}
+
+/// Backend-agnostic surface for an owned device-allocated buffer.
+///
+/// Concrete impls live in the `cuda` / `sycl` submodules
+/// (`CudaDeviceSlice<T>` / `SyclDeviceSlice<T>`). The wrapper struct
+/// [`crate::DeviceSlice`] holds `Box<dyn DeviceSliceOps<T>>` and
+/// dispatches through this trait.
+///
+/// This trait is element-typed (`<T>`) on purpose: a `DeviceSlice<u32>`
+/// and a `DeviceSlice<usize>` are different concrete types, just as
+/// `cudarc::driver::CudaSlice<T>` is generic.
+pub trait DeviceSliceOps<T: DeviceDtype>: Send + Sync {
+    /// Downcasting hook for backend-specific escape hatches.
+    /// Mirrors [`DeviceContextOps::as_any`].
+    fn as_any(&self) -> &dyn Any;
+
+    /// Number of `T` elements in this buffer.
+    fn len(&self) -> usize;
+
+    /// Run `f` with the underlying device pointer as a `u64`.
+    ///
+    /// On CUDA the closure body executes while cudarc's `SyncOnDrop`
+    /// guard from `DevicePtr::device_ptr` is still alive, so any kernel
+    /// dispatch inside `f` is correctly ordered against the buffer's
+    /// owning stream. On SYCL the pointer is intrinsically stable for
+    /// the slice's lifetime; the closure shape is for API symmetry.
+    fn with_device_ptr(&self, f: &mut dyn FnMut(u64));
 }
