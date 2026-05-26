@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! LoRA Allocation Algorithms - HRW, Random, and Min-Cost Flow
+//! LoRA Allocation Algorithms - HRW and Random
+//!
+//! Min-Cost Flow placement is implemented separately in [`McfPlacementSolver`]
+//! and is not yet wired into the per-LoRA allocator path. It is not exposed
+//! as a config value until that integration lands.
 
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use std::collections::HashMap;
@@ -42,15 +46,18 @@ pub trait LoraAllocator: Send + Sync {
     fn name(&self) -> &str;
 }
 
-/// Factory for creating allocation algorithms
+/// Per-LoRA allocation algorithm selectable via `DYN_LORA_ALLOCATION_ALGORITHM`.
+///
+/// `MinCostFlow` is intentionally absent: `McfPlacementSolver` operates as a
+/// standalone global solver and has no `LoraAllocator` adapter yet. Accepting
+/// the config string while silently running HRW was misleading; it will be
+/// re-added here once the integration is complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocationAlgorithmType {
     /// Rendezvous (Highest Random Weight) hashing
     Hrw,
     /// Random selection (for testing)
     Random,
-    /// Min-Cost Flow global placement (churn-aware bipartite assignment)
-    MinCostFlow,
 }
 
 impl FromStr for AllocationAlgorithmType {
@@ -60,31 +67,21 @@ impl FromStr for AllocationAlgorithmType {
         match s.to_lowercase().as_str() {
             "hrw" => Ok(Self::Hrw),
             "random" => Ok(Self::Random),
-            "mcf" | "min_cost_flow" | "mincostflow" => Ok(Self::MinCostFlow),
-            _ => Err(format!("Unknown allocation algorithm type: {}", s)),
+            "mcf" | "min_cost_flow" | "mincostflow" => Err(
+                "MCF placement is not yet available as a per-LoRA allocator config value; \
+                 use McfPlacementSolver directly for global MCF placement"
+                    .to_string(),
+            ),
+            _ => Err(format!("Unknown allocation algorithm type: {s}")),
         }
     }
 }
 
 /// Create a LoRA allocation algorithm instance.
-///
-/// `MinCostFlow` does not yet have a production call site wired through this
-/// factory — `McfPlacementSolver` operates as a standalone global solver and
-/// has no adapter implementing `LoraAllocator`. Until that integration is
-/// complete, requesting `MinCostFlow` here falls back to HRW and emits a
-/// warning so operators are not misled by a silent no-op.
 pub fn create_lora_allocator(algo_type: AllocationAlgorithmType) -> Box<dyn LoraAllocator> {
     match algo_type {
         AllocationAlgorithmType::Hrw => Box::new(RendezvousHasher),
         AllocationAlgorithmType::Random => Box::new(RandomAllocation),
-        AllocationAlgorithmType::MinCostFlow => {
-            tracing::warn!(
-                "DYN_LORA_ALLOCATION_ALGORITHM=mcf is not yet wired into the per-LoRA \
-                 allocator path; falling back to HRW. Use McfPlacementSolver directly \
-                 for global MCF placement."
-            );
-            Box::new(RendezvousHasher)
-        }
     }
 }
 
@@ -118,6 +115,21 @@ mod tests {
 
         let random = create_lora_allocator(AllocationAlgorithmType::Random);
         assert_eq!(random.name(), "random");
+    }
+
+    #[test]
+    fn test_mcf_config_string_is_rejected() {
+        for s in &["mcf", "MCF", "min_cost_flow", "mincostflow"] {
+            let result = AllocationAlgorithmType::from_str(s);
+            assert!(
+                result.is_err(),
+                "'{s}' should be rejected until MCF is wired into the allocator path"
+            );
+            assert!(
+                result.unwrap_err().contains("not yet available"),
+                "error message should explain why mcf is rejected"
+            );
+        }
     }
 
     #[test]
