@@ -7,11 +7,17 @@ import pytest
 
 try:
     from gpu_memory_service.snapshot.backends.nixl_staging import (
+        DEFAULT_POSIX_IOS_POOL_SIZE,
+        DEFAULT_POSIX_KERNEL_QUEUE_SIZE,
         NixlFileGroup,
+        POSIX_IOS_POOL_SIZE_CONFIG_KEY,
+        POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY,
         NixlWorkGroup,
+        _NixlPosixStagingTransferSession,
+        _posix_backend_params_from_config,
         _split_work_groups,
     )
-    from gpu_memory_service.snapshot.transfer import FileTransferSource
+    from gpu_memory_service.snapshot.transfer import FileTransferSource, GMSTransferTarget
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
@@ -76,3 +82,112 @@ def test_split_work_groups_balances_by_bytes():
     )
 
     assert bucket_sizes == [12, 12]
+
+
+def test_posix_backend_params_default_to_bounded_pool():
+    assert _posix_backend_params_from_config({}) == {
+        "ios_pool_size": str(DEFAULT_POSIX_IOS_POOL_SIZE),
+        "kernel_queue_size": str(DEFAULT_POSIX_KERNEL_QUEUE_SIZE),
+    }
+
+
+def test_posix_backend_params_allow_override():
+    assert _posix_backend_params_from_config(
+        {
+            POSIX_IOS_POOL_SIZE_CONFIG_KEY: "64",
+            POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY: 16,
+        }
+    ) == {
+        "ios_pool_size": "64",
+        "kernel_queue_size": "16",
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (POSIX_IOS_POOL_SIZE_CONFIG_KEY, "0"),
+        (POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY, "-1"),
+        (POSIX_IOS_POOL_SIZE_CONFIG_KEY, "not-an-int"),
+    ],
+)
+def test_posix_backend_params_reject_invalid_values(key, value):
+    with pytest.raises(ValueError, match=key):
+        _posix_backend_params_from_config({key: value})
+
+
+def test_posix_backend_params_are_forwarded_to_nixl_agent(monkeypatch):
+    from gpu_memory_service.snapshot.backends import nixl_staging
+
+    source = FileTransferSource(
+        allocation_id="alloc-0",
+        file_path="/checkpoint/shard.bin",
+        file_offset=0,
+        byte_count=4096,
+    )
+    target = GMSTransferTarget(
+        allocation_id="alloc-0",
+        va=0x1000,
+        device=0,
+        byte_count=4096,
+    )
+    captured = {}
+
+    class FakeApi:
+        @staticmethod
+        def agent_config_type(*, backends):
+            captured["config_backends"] = backends
+            return {"backends": backends}
+
+        @staticmethod
+        def agent_type(agent_name, _config):
+            captured["agent_name"] = agent_name
+            return FakeAgent()
+
+    class FakeAgent:
+        def create_backend(self, backend_name, backend_params=None):
+            captured["backend_name"] = backend_name
+            captured["backend_params"] = backend_params
+
+    def group_sources(_sources):
+        return {"file": [(source.file_path, [source])]}
+
+    def fake_restore_file_groups_with_nixl_staging(**kwargs):
+        captured["restore_agent"] = kwargs["agent"]
+        captured["restore_agent_name"] = kwargs["agent_name"]
+        captured["restore_file_groups"] = kwargs["file_groups"]
+        return source.byte_count
+
+    monkeypatch.setattr(
+        nixl_staging.cuda_utils,
+        "cuda_runtime_set_device",
+        lambda _device: None,
+    )
+    monkeypatch.setattr(
+        nixl_staging,
+        "restore_file_groups_with_nixl_staging",
+        fake_restore_file_groups_with_nixl_staging,
+    )
+
+    session = _NixlPosixStagingTransferSession(
+        api=FakeApi(),
+        backend_name="test-backend",
+        device=0,
+        max_workers=1,
+        group_sources=group_sources,
+        group_kind="file",
+        warn_under_parallelized=False,
+        posix_backend_params={"ios_pool_size": "64", "kernel_queue_size": "16"},
+        sources=[source],
+    )
+
+    session.restore({"alloc-0": target})
+
+    assert captured["config_backends"] == []
+    assert captured["backend_name"] == "POSIX"
+    assert captured["backend_params"] == {
+        "ios_pool_size": "64",
+        "kernel_queue_size": "16",
+    }
+    assert captured["restore_agent_name"] == captured["agent_name"]
+    assert captured["restore_file_groups"] == [(source.file_path, [source])]
