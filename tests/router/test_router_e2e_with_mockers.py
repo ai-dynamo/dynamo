@@ -1578,15 +1578,22 @@ def test_router_decisions_disagg(
 
 
 @pytest.mark.timeout(180)
+@pytest.mark.parametrize("discovery_backend", ["file"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
+)
 def test_disagg_background_prefill_sticky(
     request,
+    runtime_services_dynamic_ports,
     file_storage_backend,
     predownload_tokenizers,
+    discovery_backend,
+    request_plane,
+    durable_kv_events,
 ):
     """Sticky session affinity pins disagg background prefill on TCP/ZMQ."""
-    _ = (file_storage_backend, predownload_tokenizers)
-    discovery_backend = "file"
-    request_plane = "tcp"
+    _ = (runtime_services_dynamic_ports, file_storage_backend, durable_kv_events)
 
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
