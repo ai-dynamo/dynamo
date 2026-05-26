@@ -2314,28 +2314,45 @@ impl DecodeDisaggLeader {
         // If `cd_request_state` is absent (state already evicted by a
         // prior cleanup's `release_request`), no CAS is needed —
         // there is nothing to notify or release.
-        if let Some(state) = self.cd_request_state.get(request_id)
-            && state
-                .cleanup_claimed
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Relaxed,
-                )
-                .is_err()
-        {
-            tracing::debug!(
-                request_id,
-                "cleanup_failed_request: cleanup already claimed; no-op"
-            );
-            return;
-        }
+        //
+        // Also capture the per-lifecycle Arc once at the top so the
+        // release calls at the bottom use identity-checked variants
+        // (`release_request_if_matches` /
+        // `coordinator.release_if_matches`). Under
+        // `kv_load_failure_policy=recompute`, the `mark_failed_onboarding.await`
+        // below can park unbounded while a recompute reschedule
+        // replaces the DashMap entry with a new lifecycle's Arc —
+        // by-name release would wipe the new lifecycle's state. See
+        // `lib/kvbm-connector/CONTRACT.md` §"Cross-lifecycle
+        // stale-release race".
+        let captured_wrapper = match self.cd_request_state.get(request_id) {
+            Some(entry) => {
+                let arc = Arc::clone(entry.value());
+                if arc
+                    .cleanup_claimed
+                    .compare_exchange(
+                        false,
+                        true,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_err()
+                {
+                    tracing::debug!(
+                        request_id,
+                        "cleanup_failed_request: cleanup already claimed; no-op"
+                    );
+                    return;
+                }
+                Some(arc)
+            }
+            None => None,
+        };
+        let captured_coord = self.coordinator.state_for_decode(request_id);
 
-        let unfilled_ids = self
-            .cd_request_state
-            .get(request_id)
-            .map(|e| e.unfilled_g1_block_ids())
+        let unfilled_ids = captured_wrapper
+            .as_ref()
+            .map(|s| s.unfilled_g1_block_ids())
             .unwrap_or_default();
 
         if unfilled_ids.is_empty() {
@@ -2349,7 +2366,15 @@ impl DecodeDisaggLeader {
             // (e.g. vLLM cancels the request first), the stash is
             // dropped via the slot's RAII payload — no notification
             // is needed.
-            if let Some(state) = self.cd_request_state.get(request_id) {
+            //
+            // Stash on the captured per-lifecycle Arc (not a fresh
+            // `cd_request_state.get`) — if a recompute reschedule
+            // replaced the DashMap entry while this method was
+            // running, we still want the stash to land on THIS
+            // lifecycle's state (USAA for this lifecycle is the
+            // consumer; the new lifecycle gets its own fresh
+            // pending_failure=None).
+            if let Some(state) = captured_wrapper.as_ref() {
                 let mut slot = state.pending_failure.lock();
                 if slot.is_none() {
                     *slot = Some(reason.clone());
@@ -2390,8 +2415,23 @@ impl DecodeDisaggLeader {
             );
         }
 
-        self.release_request(request_id);
-        self.coordinator.release(request_id);
+        // Identity-checked release: if a recompute reschedule
+        // replaced the DashMap entry while `mark_failed_onboarding`
+        // was awaiting, these no-op against the new lifecycle's
+        // state. See `release_request_if_matches` /
+        // `coordinator.release_if_matches` doc-comments.
+        if let Some(wrapper_arc) = captured_wrapper.as_ref() {
+            self.release_request_if_matches(request_id, wrapper_arc);
+        } else {
+            // No prior wrapper-side state — nothing to release.
+            // (Original code unconditionally called
+            // `self.release_request(rid)` here; under the new
+            // identity-checked variant we skip when we never
+            // captured an Arc, which is a no-op equivalent.)
+        }
+        if let Some(coord_arc) = captured_coord.as_ref() {
+            self.coordinator.release_if_matches(request_id, coord_arc);
+        }
     }
 }
 

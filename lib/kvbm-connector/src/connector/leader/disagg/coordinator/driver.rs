@@ -457,7 +457,17 @@ impl ConditionalDisaggCoordinator {
             session.close(Some(reason));
         }
 
-        self.states.remove(request_id);
+        // Identity-checked remove: under
+        // `kv_load_failure_policy=recompute`, the await above can
+        // park unbounded while a recompute reschedule replaces the
+        // DashMap entry with a new lifecycle's Arc. A by-name
+        // `states.remove` would wipe the new lifecycle's state.
+        // `state` was captured at the top of this method (line ~353);
+        // `remove_if` only fires when the captured Arc still matches
+        // what the DashMap holds. See `lib/kvbm-connector/CONTRACT.md`
+        // §"Cross-lifecycle stale-release race".
+        self.states
+            .remove_if(request_id, |_, v| Arc::ptr_eq(&state, v));
     }
 
     // =========================================================================
