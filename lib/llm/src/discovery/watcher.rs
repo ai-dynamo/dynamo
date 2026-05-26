@@ -49,6 +49,7 @@ use crate::{
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
+    types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
 };
 
 use super::ModelManager;
@@ -104,6 +105,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Prefill,
+    ModelType::Realtime,
 ];
 
 /// Returns true if no models in the manager support the given model type.
@@ -124,6 +126,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_tensor_models().is_empty()
     } else if model_type == ModelType::Prefill {
         manager.list_prefill_models().is_empty()
+    } else if model_type == ModelType::Realtime {
+        manager.list_realtime_models().is_empty()
     } else {
         true
     }
@@ -396,7 +400,11 @@ impl ModelWatcher {
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
-                anyhow::bail!("Missing ModelDeploymentCard for {}", key);
+                tracing::warn!(
+                    key = %key,
+                    "ModelDeploymentCard already absent during removal; ignoring duplicate or stale remove event"
+                );
+                return Ok(None);
             }
         };
         let model_name = card.name().to_string();
@@ -721,89 +729,104 @@ impl ModelWatcher {
             // handle Chat or Completions requests, so handle whatever the model supports.
 
             let endpoint = component.endpoint(&mcid.endpoint);
-            // Create the KV router whenever any local routed pipeline will be built.
-            // The chat factory builds its own router, but completions currently always
-            // uses the local routed pipeline and therefore still needs a chooser.
-            let needs_local_chat_pipeline =
-                card.model_type.supports_chat() && self.chat_engine_factory.is_none();
-            let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let kv_chooser = if router_config.router_mode == RouterMode::KV
-                && (needs_local_chat_pipeline || needs_local_completions_pipeline)
-            {
-                Some(
-                    self.manager
-                        .kv_chooser_for(
-                            &endpoint,
-                            card.kv_cache_block_size,
-                            Some(router_config.kv_router_config.clone()),
-                            self.prefill_load_estimator.clone(),
-                            WORKER_TYPE_DECODE, // This is the decode router
-                            Some(card.display_name.clone()),
-                            card.runtime_config.enable_eagle,
-                        )
-                        .await?,
-                )
-            } else {
-                None
-            };
-
             // Loading the tokenizer is expensive (~10 MiB JSON), so only do it
             // once and only when a local pipeline actually needs it.  Models
             // without tokenizer.json (e.g. Qwen3-Omni) set tokenizer = None;
             // they rely on a Python chat_engine_factory for tokenization.
             // When a chat_engine_factory handles chat and no completions are
             // needed, skip tokenizer loading entirely — even if the file exists.
-            let needs_rust_tokenizer =
-                needs_local_chat_pipeline || needs_local_completions_pipeline;
-            let tokenizer = if needs_rust_tokenizer && card.has_tokenizer() {
+            let needs_local_chat_pipeline =
+                card.model_type.supports_chat() && self.chat_engine_factory.is_none();
+            let needs_local_completions_pipeline = card.model_type.supports_completions();
+            let tokenizer = if (needs_local_chat_pipeline || needs_local_completions_pipeline)
+                && card.has_tokenizer()
+            {
                 Some(card.tokenizer().context("tokenizer")?)
             } else {
                 None
             };
 
+            // Routing is required whenever any pipeline (factory chat or local) will exist.
+            // tokenizer.is_some() implies a local chat or completions pipeline will be built.
+            let needs_factory_chat_pipeline =
+                card.model_type.supports_chat() && self.chat_engine_factory.is_some();
+            let needs_preprocessed_routing = needs_factory_chat_pipeline || tokenizer.is_some();
+
+            // Create the KV router whenever any routed pipeline will be built.
+            // Python chat factories receive a Rust-routed engine, so they also
+            // need the shared chooser in KV mode.
+            let kv_chooser =
+                if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
+                    Some(
+                        self.manager
+                            .kv_chooser_for(
+                                &endpoint,
+                                card.kv_cache_block_size,
+                                Some(router_config.kv_router_config.clone()),
+                                self.prefill_load_estimator.clone(),
+                                WORKER_TYPE_DECODE, // This is the decode router
+                                Some(card.display_name.clone()),
+                                card.runtime_config.enable_eagle,
+                            )
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
             let model_name = card.name().to_string();
-            let prefill_chooser = self
-                .manager
-                .register_prefill_router(&model_name, &namespace)
-                .map(|rx| {
-                    // Create prefill-specific config with track_active_blocks disabled
-                    let mut prefill_config = router_config.kv_router_config.clone();
-                    prefill_config.router_track_active_blocks = false;
+            let prefill_chooser = if needs_preprocessed_routing {
+                self.manager
+                    .register_prefill_router(&model_name, &namespace)
+                    .map(|rx| {
+                        // Create prefill-specific config with track_active_blocks disabled
+                        let mut prefill_config = router_config.kv_router_config.clone();
+                        prefill_config.router_track_active_blocks = false;
+                        // Prefill KV events are emitted by prefill workers; do not inherit
+                        // decode-only speculative hash mode.
+                        let prefill_enable_eagle = false;
 
-                    PrefillRouter::new(
-                        rx,
-                        self.manager.clone(),
-                        router_config.router_mode,
-                        card.kv_cache_block_size,
-                        Some(prefill_config),
-                        self.prefill_load_estimator.clone(),
-                        router_config.enforce_disagg,
-                        model_name.clone(),
-                        namespace.clone(),
-                        card.runtime_config.enable_eagle,
-                    )
-                });
+                        PrefillRouter::new(
+                            rx,
+                            self.manager.clone(),
+                            router_config.router_mode,
+                            card.kv_cache_block_size,
+                            Some(prefill_config),
+                            self.prefill_load_estimator.clone(),
+                            router_config.enforce_disagg,
+                            model_name.clone(),
+                            namespace.clone(),
+                            prefill_enable_eagle,
+                        )
+                    })
+            } else {
+                None
+            };
 
             // Create a new worker monitor for this WorkerSet. Each WorkerSet gets its own
             // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
             // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
-            // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
+            // worker TTFT/ITL cleanup). The thresholds control overload detection behavior only.
             //
             // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
-            // so that busy-state updates (via update_free_instances) are visible to the
+            // so that overload-state updates (via set_overloaded_instances) are visible to the
             // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
             // Using a different Client instance would cause the PushRouter to never see
-            // busy workers, since each Client::new() creates independent ArcSwap state.
-            let monitor_client = kv_chooser
-                .as_ref()
-                .map(|chooser| chooser.client().clone())
-                .unwrap_or_else(|| client.clone());
-            let worker_monitor = Some(KvWorkerMonitor::new(
-                monitor_client,
-                router_config.load_threshold_config.clone(),
-            ));
+            // overloaded workers, since each Client::new() creates independent ArcSwap state.
+            let worker_monitor = if needs_preprocessed_routing {
+                let monitor_client = kv_chooser
+                    .as_ref()
+                    .map(|chooser| chooser.client().clone())
+                    .unwrap_or_else(|| client.clone());
+                Some(KvWorkerMonitor::new(
+                    monitor_client,
+                    router_config.load_threshold_config.clone(),
+                ))
+            } else {
+                None
+            };
 
             // Store KV router, worker monitor, and prefill router on the WorkerSet.
             // The prefill router is stored so the watcher can deactivate/reactivate it
@@ -812,19 +835,41 @@ impl ModelWatcher {
             worker_set.worker_monitor = worker_monitor.clone();
             worker_set.prefill_router = prefill_chooser.clone();
 
+            let preprocessed_routing = if needs_preprocessed_routing {
+                Some(
+                    entrypoint::build_preprocessed_routing(
+                        &client,
+                        self.manager.clone(),
+                        router_config.router_mode,
+                        worker_monitor.clone(),
+                        kv_chooser.clone(),
+                        prefill_chooser.clone(),
+                        router_config.enforce_disagg,
+                    )
+                    .await
+                    .context("build_preprocessed_routing")?,
+                )
+            } else {
+                None
+            };
+
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
-                let factory_engine = if let Some(ref factory) = self.chat_engine_factory {
-                    match factory(mcid.clone(), card.clone()).await {
-                        Ok(engine) => Some(engine),
-                        Err(err) => return Err(err).context("python chat_engine_factory"),
-                    }
-                } else {
-                    None
-                };
-
-                let chat_engine = if let Some(engine) = factory_engine {
-                    engine
+                let routing = preprocessed_routing.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("chat pipeline requires preprocessed routing")
+                })?;
+                let chat_engine = if let Some(ref factory) = self.chat_engine_factory {
+                    let routed_engine = routing
+                        .build_preprocessed_pipeline(
+                            card,
+                            self.migration_limit,
+                            self.migration_max_seq_len,
+                            self.metrics.clone(),
+                        )
+                        .context("PreprocessedRouting::build_preprocessed_pipeline")?;
+                    factory(mcid.clone(), card.clone(), routed_engine)
+                        .await
+                        .context("python chat_engine_factory")?
                 } else {
                     let tk = tokenizer.clone().ok_or_else(|| {
                         anyhow::anyhow!(
@@ -833,25 +878,24 @@ impl ModelWatcher {
                              tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)."
                         )
                     })?;
-                    entrypoint::build_routed_pipeline::<
-                        NvCreateChatCompletionRequest,
-                        NvCreateChatCompletionStreamResponse,
-                    >(
-                        card,
-                        &client,
-                        self.manager.clone(),
-                        router_config.router_mode,
-                        worker_monitor.clone(),
-                        kv_chooser.clone(),
-                        tk,
-                        prefill_chooser.clone(),
-                        router_config.enforce_disagg,
-                        self.migration_limit,
-                        self.migration_max_seq_len,
-                        self.metrics.clone(),
-                    )
-                    .await
-                    .context("build_routed_pipeline")?
+                    let PromptFormatter::OAI(formatter) =
+                        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
+                    let preprocessor =
+                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
+                            .context("OpenAIPreprocessor.new_with_parts")?;
+                    routing
+                        .build_pipeline::<
+                            NvCreateChatCompletionRequest,
+                            NvCreateChatCompletionStreamResponse,
+                        >(
+                            card,
+                            preprocessor,
+                            tk,
+                            self.migration_limit,
+                            self.migration_max_seq_len,
+                            self.metrics.clone(),
+                        )
+                        .context("PreprocessedRouting::build_pipeline")?
                 };
                 worker_set.chat_engine = Some(chat_engine);
                 tracing::info!("Chat completions is ready");
@@ -866,26 +910,19 @@ impl ModelWatcher {
                     let preprocessor =
                         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
                             .context("OpenAIPreprocessor::new_with_parts")?;
-                    let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
-                        NvCreateCompletionRequest,
-                        NvCreateCompletionResponse,
-                    >(
-                        card,
-                        &client,
-                        self.manager.clone(),
-                        router_config.router_mode,
-                        worker_monitor,
-                        kv_chooser,
-                        preprocessor,
-                        tk,
-                        prefill_chooser,
-                        router_config.enforce_disagg,
-                        self.migration_limit,
-                        self.migration_max_seq_len,
-                        self.metrics.clone(),
-                    )
-                    .await
-                    .context("build_routed_pipeline_with_preprocessor")?;
+                    let routing = preprocessed_routing.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("completions pipeline requires preprocessed routing")
+                    })?;
+                    let completions_engine = routing
+                        .build_pipeline::<NvCreateCompletionRequest, NvCreateCompletionResponse>(
+                            card,
+                            preprocessor,
+                            tk,
+                            self.migration_limit,
+                            self.migration_max_seq_len,
+                            self.metrics.clone(),
+                        )
+                        .context("PreprocessedRouting::build_pipeline")?;
                     worker_set.completions_engine = Some(completions_engine);
                     tracing::info!("Completions is ready");
                 } else {
@@ -1033,6 +1070,17 @@ impl ModelWatcher {
             )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_realtime() {
+            // Case 7: Text + Realtime
+            // 'Text' is being overloaded here, it simply means the I/O will be passed through
+            let realtime_router = PushRouter::<
+                RealtimeClientEvent,
+                Annotated<RealtimeServerEvent>,
+            >::from_client_with_monitor(
+                client, router_config.router_mode, None
+            )
+            .await?;
+            worker_set.realtime_engine = Some(Arc::new(realtime_router));
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens
@@ -1191,6 +1239,20 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
+        assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    #[test]
+    fn test_is_model_type_list_empty_realtime_after_register() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+        mm.add_realtime_model("rt-echo", "0", engine).unwrap();
+        assert!(!is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    #[test]
+    fn test_realtime_in_all_model_types() {
+        assert!(ALL_MODEL_TYPES.contains(&ModelType::Realtime));
     }
 
     #[test]

@@ -10,6 +10,9 @@ from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.frontend_decoding_args import (
+    add_frontend_decoding_arg,
+)
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
@@ -148,10 +151,19 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--publish-events-and-metrics",
-            env_var="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS",
+            flag_name="--publish-kv-events",
+            env_var="DYN_TRTLLM_PUBLISH_KV_EVENTS",
             default=False,
-            help="If set, publish events and metrics to Dynamo components.",
+            help=(
+                "If set, publish KV cache events to the KV router. The "
+                "`dynamo_component_*` gauges and `trtllm_*` vendor metrics "
+                "emit unconditionally regardless of this flag."
+            ),
+            dest="publish_events_and_metrics",
+            # `obsolete_flag` accepts the old `--publish-events-and-metrics`
+            # / `--no-publish-events-and-metrics` aliases automatically.
+            # DeprecationWarning fires in args.py:parse_args.
+            obsolete_flag="--publish-events-and-metrics",
         )
         add_argument(
             g,
@@ -208,17 +220,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="Maximum size of downloadable embedding files/Image URLs.",
         )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--frontend-decoding",
-            env_var="DYN_TRTLLM_FRONTEND_DECODING",
-            default=False,
-            help=(
-                "Enable frontend decoding of multimodal images. "
-                "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
-                "Without this flag, images are decoded in the Python backend (default behavior)."
-            ),
-        )
+        add_frontend_decoding_arg(g, env_prefix="TRTLLM")
 
         # --- Guided Decoding ---
         add_argument(

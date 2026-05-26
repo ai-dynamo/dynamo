@@ -21,6 +21,9 @@ from sglang.srt.function_call.function_call_parser import (  # type: ignore[impo
     DeepSeekV31Detector,
     Glm47MoeDetector,
 )
+from sglang.srt.function_call.gemma4_detector import (
+    Gemma4Detector,  # type: ignore[import-untyped]
+)
 from sglang.srt.function_call.gpt_oss_detector import (
     GptOssDetector,  # type: ignore[import-untyped]
 )
@@ -29,6 +32,9 @@ from sglang.srt.function_call.hermes_detector import (
 )
 from sglang.srt.function_call.kimik2_detector import (
     KimiK2Detector,  # type: ignore[import-untyped]
+)
+from sglang.srt.function_call.llama32_detector import (
+    Llama32Detector,  # type: ignore[import-untyped]
 )
 from sglang.srt.function_call.minimax_m2 import (
     MinimaxM2Detector,  # type: ignore[import-untyped]
@@ -46,7 +52,7 @@ from sglang.srt.function_call.qwen25_detector import (
     Qwen25Detector,  # type: ignore[import-untyped]
 )
 
-from tests.parity.common import ParseResult, decode_arguments
+from tests.parity.common import ParseResult, decode_arguments, decode_stream_calls
 
 # Maps parser_family → SGLang detector class. SGLang doesn't have a registry-by-name
 # like vLLM; the class is imported directly.
@@ -58,7 +64,9 @@ _FAMILY_TO_SGLANG_DETECTOR = {
     "deepseek_v3_1": DeepSeekV31Detector,
     "deepseek_v3_2": DeepSeekV32Detector,
     "deepseek_v3": DeepSeekV3Detector,
+    "gemma4": Gemma4Detector,
     "harmony": GptOssDetector,
+    "llama3_json": Llama32Detector,
     "minimax_m2": MinimaxM2Detector,
     "pythonic": PythonicDetector,
     "hermes": HermesDetector,
@@ -66,10 +74,10 @@ _FAMILY_TO_SGLANG_DETECTOR = {
 }
 
 # Families with no SGLang detector today: nemotron_deci, nemotron_nano,
-# gemma4, deepseek_v4, jamba, llama3_json, phi4.
+# deepseek_v4, jamba, phi4.
 
 
-def parse(
+def parse_tool_calls_batch(
     parser_family: str,
     raw_text: str,
     tools: list[dict[str, Any]] | None,
@@ -104,6 +112,50 @@ def parse(
     return ParseResult(calls=calls, normal_text=info.normal_text)
 
 
+def parse_tool_calls_stream(
+    parser_family: str,
+    chunks: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> ParseResult:
+    detector_cls = _FAMILY_TO_SGLANG_DETECTOR.get(parser_family)
+    if detector_cls is None:
+        return ParseResult(
+            error=f"UNAVAILABLE: SGLang has no detector for family={parser_family!r}"
+        )
+
+    normal_text_parts: list[str] = []
+    stream_calls: dict[int, dict[str, Any]] = {}
+
+    try:
+        detector = detector_cls()
+        sg_tools = _build_tools(tools)
+        for chunk in chunks:
+            info = detector.parse_streaming_increment(
+                chunk.get("delta_text") or "", sg_tools
+            )
+            if info.normal_text:
+                normal_text_parts.append(info.normal_text)
+            for position, tool_call in enumerate(info.calls or []):
+                index = int(getattr(tool_call, "tool_index", position) or 0)
+                call = stream_calls.setdefault(index, {"name": None, "arguments": ""})
+                if tool_call.name:
+                    call["name"] = tool_call.name
+                arguments = getattr(tool_call, "parameters", None) or getattr(
+                    tool_call, "arguments", None
+                )
+                if isinstance(arguments, str):
+                    call["arguments"] += arguments
+                elif arguments:
+                    call["arguments"] = arguments
+    except Exception as e:
+        return ParseResult(error=f"{type(e).__name__}: {e}")
+
+    return ParseResult(
+        calls=decode_stream_calls(stream_calls),
+        normal_text="".join(normal_text_parts),
+    )
+
+
 def _build_tools(tools: list[dict[str, Any]] | None) -> list[Any] | None:
     """Wrap flat tool defs as duck-typed objects with `.function.name` /
     `.function.parameters`. SGLang detectors access these via attribute,
@@ -113,11 +165,12 @@ def _build_tools(tools: list[dict[str, Any]] | None) -> list[Any] | None:
         return None
     return [
         SimpleNamespace(
+            type="function",
             function=SimpleNamespace(
                 name=(t["function"] if "function" in t else t)["name"],
                 parameters=(t["function"] if "function" in t else t).get("parameters"),
                 strict=False,
-            )
+            ),
         )
         for t in tools
     ]

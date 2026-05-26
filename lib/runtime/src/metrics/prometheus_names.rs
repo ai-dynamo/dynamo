@@ -136,7 +136,7 @@ pub mod labels {
     /// When a metric already has a label, injection does not overwrite it (original is preserved).
     pub const MODEL_NAME: &str = "model_name";
 
-    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
 
     /// Label for router instance (discovery.instance_id() of the frontend)
@@ -169,6 +169,9 @@ pub mod frontend_service {
 
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
+
+    /// Total number of LLM requests accepted by the frontend handler
+    pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
 
     /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
     pub const QUEUED_REQUESTS: &str = "queued_requests";
@@ -219,6 +222,11 @@ pub mod frontend_service {
 
     /// Inter-token latency in seconds
     pub const INTER_TOKEN_LATENCY_SECONDS: &str = "inter_token_latency_seconds";
+
+    /// End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
+    /// Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
+    /// pooling-model latencies (sub-second) without sacrificing resolution.
+    pub const EMBEDDING_LATENCY_SECONDS: &str = "embedding_latency_seconds";
 
     /// Model configuration metrics
     ///
@@ -615,6 +623,10 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
+    /// L1 tokenizer cache hits (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
+    pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
+    /// L1 tokenizer cache misses (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
+    pub const TOKENIZER_CACHE_MISSES_TOTAL: &str = "tokenizer_cache_misses_total";
     /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
     /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average

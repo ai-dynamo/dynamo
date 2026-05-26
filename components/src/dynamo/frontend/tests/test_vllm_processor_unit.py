@@ -7,19 +7,23 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
+from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
+from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
 
 from dynamo.frontend.prepost import _prepare_request
 
-# Needs vllm packages (gpu_1 container).  No need for parallel marker.
+# Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -174,12 +178,10 @@ class TestReasoningParserMetadata:
         assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "high"}}
 
     def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
-        from dynamo.frontend.vllm_processor import (
-            _copy_reasoning_metadata_to_extra_args,
-        )
+        from dynamo.frontend.vllm_processor import _inject_routing_metadata
 
         kv_kwargs = {"extra_args": {"mm_hashes": [123]}}
-        _copy_reasoning_metadata_to_extra_args(
+        _inject_routing_metadata(
             {
                 "reasoning_ended": False,
                 "reasoning_parser_kwargs": {
@@ -196,3 +198,214 @@ class TestReasoningParserMetadata:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
+
+
+class _FakeOutputProcessor:
+    def __init__(self):
+        self.request_states = {}
+        self.added_requests = []
+        self.aborted_requests = []
+
+    def add_request(self, preproc, *args, **kwargs):
+        self.added_requests.append((preproc, args, kwargs))
+        self.request_states[preproc.request_id] = object()
+
+    def process_outputs(self, outputs):
+        return SimpleNamespace(
+            reqs_to_abort=[],
+            request_outputs=[SimpleNamespace(outputs=[SimpleNamespace(index=0)])],
+        )
+
+    def abort_requests(self, request_ids, internal=False):
+        self.aborted_requests.append((request_ids, internal))
+        for request_id in request_ids:
+            self.request_states.pop(request_id, None)
+
+
+class _FakePostProcessor:
+    def process_output(self, output):
+        return {
+            "index": output.index,
+            "delta": {"content": "x"},
+            "finish_reason": None,
+        }
+
+
+@pytest.fixture
+def vllm_processor_module(monkeypatch):
+    import dynamo.frontend.vllm_processor as module
+
+    class FakeEngineCoreOutput:
+        __struct_fields__ = ()
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(module, "EngineCoreOutput", FakeEngineCoreOutput)
+    monkeypatch.setattr(module._nvtx, "start_range", lambda *args, **kwargs: object())
+    monkeypatch.setattr(module._nvtx, "end_range", lambda rng: None)
+    return module
+
+
+def _make_processor(module, routed_engine):
+    processor = module.VllmProcessor.__new__(module.VllmProcessor)
+    processor.routed_engine = routed_engine
+    processor.output_processor = _FakeOutputProcessor()
+    return processor
+
+
+def _base_preproc():
+    return {
+        "model": MODEL,
+        "token_ids": [1, 2, 3],
+        "stop_conditions": {"max_tokens": 4},
+        "sampling_options": {"temperature": 0.0},
+        "output_options": {},
+        "eos_token_ids": [],
+        "annotations": [],
+        "routing": None,
+    }
+
+
+async def _run_generate(processor, preproc, *, mm_routing_info=None, context=None):
+    vllm_preproc = SimpleNamespace(
+        sampling_params=SimpleNamespace(n=1),
+        request_id="vllm-request",
+        external_req_id=None,
+    )
+    post_processors = {0: _FakePostProcessor()}
+
+    return [
+        item
+        async for item in processor._generate_and_stream(
+            "request-id",
+            {"model": MODEL},
+            preproc,
+            preproc["token_ids"],
+            vllm_preproc,
+            post_processors,
+            mm_routing_info=mm_routing_info,
+            context=context,
+        )
+    ]
+
+
+class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
+        routed_engine = _FakeRoutedEngine()
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        preproc = _base_preproc()
+        preproc["extra_args"] = {"mm_hashes": [123]}
+        preproc["reasoning_ended"] = False
+        preproc["reasoning_parser_kwargs"] = {
+            "chat_template_kwargs": {"reasoning_effort": "high"}
+        }
+        preproc["mm_processor_kwargs"] = {"use_audio_in_video": True}
+
+        await _run_generate(processor, preproc)
+
+        assert routed_engine.requests[0]["extra_args"] == {
+            "mm_hashes": [123],
+            "reasoning_ended": False,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+            "mm_processor_kwargs": {"use_audio_in_video": True},
+        }
+
+    @pytest.mark.asyncio
+    async def test_routed_stream_produces_openai_chunks(self, vllm_processor_module):
+        routed_engine = _FakeRoutedEngine(
+            [{"token_ids": [101], "index": 0, "finish_reason": None}]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        chunks = await _run_generate(processor, _base_preproc())
+
+        assert chunks == [
+            {
+                "id": "request-id",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "x"},
+                        "finish_reason": None,
+                    }
+                ],
+                "created": chunks[0]["created"],
+                "model": MODEL,
+                "object": "chat.completion.chunk",
+            }
+        ]
+
+
+OBJECT_TYPED_TOOL_REQUEST = {
+    "model": MODEL,
+    "messages": [{"role": "user", "content": "set my profile"}],
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "set_profile",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "profile": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "age": {"type": "integer"},
+                            },
+                        }
+                    },
+                    "required": ["profile"],
+                },
+            },
+        }
+    ],
+    "tool_choice": "auto",
+}
+
+
+# ---------------------------------------------------------------------------
+# _prepare_request: schema-aware tool-parser end-to-end regression
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaAwareToolParser:
+    """Schema-aware parsers (e.g. qwen3_coder) need ``tools`` at construction
+    to coerce object/array-typed parameter values from raw text into JSON;
+    without them, the value comes through as a string-in-a-string inside the
+    final ``arguments`` JSON.
+    """
+
+    def test_qwen3_coder_coerces_object_typed_arg(self, tokenizer):
+        """qwen3_coder must coerce object-typed parameter values into nested
+        objects, not leave them as JSON-encoded strings inside ``arguments``.
+        """
+        model_output = (
+            "<tool_call><function=set_profile>\n"
+            "<parameter=profile>\n"
+            '{"name": "Alice", "age": 30}\n'
+            "</parameter>\n"
+            "</function></tool_call>"
+        )
+
+        request_for_sampling, parser, _, _, _ = _prepare_request(
+            OBJECT_TYPED_TOOL_REQUEST,
+            tokenizer=tokenizer,
+            tool_parser_class=Qwen3CoderToolParser,
+        )
+        assert parser is not None, "Expected _prepare_request to construct the parser"
+
+        result = parser.extract_tool_calls(model_output, request_for_sampling)
+
+        assert result.tools_called, f"Expected tools_called=True; got {result!r}"
+        assert len(result.tool_calls) == 1
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert isinstance(args["profile"], dict), (
+            f"Schema-aware parser should coerce object-typed arg to dict; "
+            f"got {type(args['profile']).__name__}: {args['profile']!r}"
+        )
+        assert args["profile"] == {"name": "Alice", "age": 30}

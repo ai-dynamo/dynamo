@@ -11,7 +11,7 @@ For quick start instructions, see the [SGLang README](README.md). This document 
 For local/bare-metal development, start etcd and optionally NATS using Docker Compose:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 <Note>
@@ -188,6 +188,6 @@ Ensure both prefill and decode workers can reach each other over TCP. The bootst
 - **[SGLang README](README.md)**: Quick start and feature overview
 - **[Reference Guide](sglang-reference-guide.md)**: Architecture, configuration, and operational details
 - **[SGLang Multimodal](../../features/multimodal/multimodal-sglang.md)**: Vision model deployment patterns
-- **[SGLang HiCache](../../integrations/sglang-hicache.md)**: Hierarchical cache integration
+- **[SGLang HiCache](sglang-hicache.md)**: Hierarchical cache integration
 - **[Benchmarking](../../benchmarks/benchmarking.md)**: Performance benchmarking tools
 - **[Tuning Disaggregated Performance](../../performance/tuning.md)**: P/D tuning guide

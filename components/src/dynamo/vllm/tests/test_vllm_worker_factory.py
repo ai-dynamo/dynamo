@@ -14,9 +14,11 @@ from dynamo.vllm.worker_factory import EngineSetupResult, WorkerFactory
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
     # runners with "Failed to infer device type" even for mock tests.
     pytest.mark.gpu_1,
+    pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
 
@@ -30,6 +32,7 @@ def _make_config(**overrides) -> Mock:
         "omni": False,
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
+        "embedding_worker": False,
     }
     defaults.update(overrides)
     return Mock(**defaults)
@@ -52,6 +55,7 @@ class TestCreate:
         factory._create_multimodal_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_prefill_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_embedding_worker = AsyncMock()  # type: ignore[assignment]
         return factory
 
     # Tests for non-legacy worker config, 'route_to_encode' is worker internal config
@@ -102,6 +106,20 @@ class TestCreate:
         await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_multimodal_encode_worker.assert_called_once()  # type: ignore[union-attr]
+
+    async def test_embedding_worker_takes_priority(
+        self, factory: WorkerFactory
+    ) -> None:
+        """--embedding-worker is checked first; disaggregation_mode is ignored."""
+        config = _make_config(embedding_worker=True)
+        shutdown_event = asyncio.Event()
+
+        await factory.create(Mock(), config, shutdown_event, [])
+
+        factory._create_embedding_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
 
     async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
         config = _make_config(multimodal_worker=True)

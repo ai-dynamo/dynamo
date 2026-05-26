@@ -456,6 +456,9 @@ class InstrumentedScheduler(AsyncScheduler):
         decode_kv = WelfordAccumulator()
 
         for req in new_reqs:
+            if self._bench_new_request_counts_as_decode(req.req_id):
+                decode_kv.add(req.num_computed_tokens)
+                continue
             num_prefill += 1
             sum_prefill_tokens += num_scheduled.get(req.req_id, 0)
             prompt_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
@@ -480,6 +483,15 @@ class InstrumentedScheduler(AsyncScheduler):
             num_decode_requests=decode_kv.n,
             sum_decode_kv_tokens=decode_kv.s,
             var_decode_kv_tokens=decode_kv.variance(),
+        )
+
+    def _bench_new_request_counts_as_decode(self, req_id: str) -> bool:
+        """Synthetic decode benchmark requests register as new requests."""
+        return (
+            getattr(self, "_bench_active", False)
+            and getattr(self, "_bench_phase", _BenchPhase.IDLE)
+            == _BenchPhase.DECODE_SWEEP
+            and req_id in getattr(self, "_bench_active_req_ids", set())
         )
 
     def _compute_queued(self) -> QueuedRequestMetrics:

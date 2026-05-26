@@ -15,10 +15,10 @@ use dynamo_kv_router::config::{
     apply_deprecated_overlap_score_weight_override,
 };
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
-use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
+use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
@@ -83,6 +83,9 @@ pub struct AicPerfConfig {
     aic_backend_version: Option<String>,
     aic_tp_size: usize,
     aic_model_path: String,
+    aic_moe_tp_size: Option<usize>,
+    aic_moe_ep_size: Option<usize>,
+    aic_attention_dp_size: Option<usize>,
 }
 
 impl AicPerfConfig {
@@ -105,18 +108,34 @@ impl AicPerfConfig {
     pub(crate) fn model_path(&self) -> &str {
         &self.aic_model_path
     }
+
+    pub(crate) fn moe_tp_size(&self) -> Option<usize> {
+        self.aic_moe_tp_size
+    }
+
+    pub(crate) fn moe_ep_size(&self) -> Option<usize> {
+        self.aic_moe_ep_size
+    }
+
+    pub(crate) fn attention_dp_size(&self) -> Option<usize> {
+        self.aic_attention_dp_size
+    }
 }
 
 #[pymethods]
 impl AicPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None))]
+    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         aic_backend: String,
         aic_system: String,
         aic_model_path: String,
         aic_tp_size: usize,
         aic_backend_version: Option<String>,
+        aic_moe_tp_size: Option<usize>,
+        aic_moe_ep_size: Option<usize>,
+        aic_attention_dp_size: Option<usize>,
     ) -> PyResult<Self> {
         if aic_backend.is_empty() {
             return Err(PyValueError::new_err("aic_backend must be non-empty"));
@@ -130,6 +149,15 @@ impl AicPerfConfig {
         if aic_tp_size == 0 {
             return Err(PyValueError::new_err("aic_tp_size must be >= 1"));
         }
+        for (name, value) in [
+            ("aic_moe_tp_size", aic_moe_tp_size),
+            ("aic_moe_ep_size", aic_moe_ep_size),
+            ("aic_attention_dp_size", aic_attention_dp_size),
+        ] {
+            if matches!(value, Some(0)) {
+                return Err(PyValueError::new_err(format!("{name} must be >= 1")));
+            }
+        }
 
         Ok(Self {
             aic_backend,
@@ -137,6 +165,9 @@ impl AicPerfConfig {
             aic_backend_version,
             aic_tp_size,
             aic_model_path,
+            aic_moe_tp_size,
+            aic_moe_ep_size,
+            aic_attention_dp_size,
         })
     }
 }
@@ -144,7 +175,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(4.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", *, overlap_score_credit=1.0, prefill_load_scale=1.0))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -169,8 +200,10 @@ impl KvRouterConfig {
         serve_indexer: bool,
         shared_cache_multiplier: f64,
         shared_cache_type: &str,
+        router_predicted_ttl_secs: Option<f64>,
         mut overlap_score_credit: f64,
         mut prefill_load_scale: f64,
+        router_queue_by_incoming_missing_isl: Option<Vec<(usize, usize)>>,
     ) -> PyResult<Self> {
         if let Some(value) = overlap_score_weight {
             apply_deprecated_overlap_score_weight(
@@ -200,6 +233,13 @@ impl KvRouterConfig {
             router_reset_states,
             router_ttl_secs,
             router_queue_threshold,
+            router_queue_by_incoming_missing_isl: router_queue_by_incoming_missing_isl
+                .map(dynamo_kv_router::scheduling::config::RouterQueueDepthTiers::try_from)
+                .transpose()
+                .map_err(PyValueError::new_err)?
+                .unwrap_or_else(
+                    dynamo_kv_router::scheduling::config::RouterQueueDepthTiers::unbounded_cap,
+                ),
             router_event_threads,
             skip_initial_worker_wait: false,
             router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,
@@ -207,6 +247,7 @@ impl KvRouterConfig {
             serve_indexer,
             shared_cache_multiplier,
             shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
+            router_predicted_ttl_secs,
         };
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
@@ -218,11 +259,6 @@ impl KvRouterConfig {
             PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
         Ok(KvRouterConfig { inner })
-    }
-
-    fn dump_json(&self) -> PyResult<String> {
-        serde_json::to_string(&self.inner)
-            .map_err(|e| PyException::new_err(format!("Failed to serialize KvRouterConfig: {e}")))
     }
 
     fn copy(&self) -> Self {
@@ -432,6 +468,9 @@ impl EntrypointArgs {
         aic_perf_config: Option<AicPerfConfig>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
+        if let Some(runtime_config) = &runtime_config {
+            runtime_config.validate_config()?;
+        }
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
         {
@@ -557,7 +596,8 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
 
     Arc::new(
         move |instance_id: RsModelCardInstanceId,
-              card: RsModelDeploymentCard|
+              card: RsModelDeploymentCard,
+              routed_engine: PrefillRoutedEngine|
               -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
         > {
@@ -575,10 +615,15 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     let py_card = ModelDeploymentCard { inner: card };
                     let py_card_obj = Py::new(py, py_card)
                         .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {e}"))?;
+                    let py_routed = Py::new(
+                        py,
+                        crate::llm::routed_engine::RoutedEngine::new(routed_engine),
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to create Python RoutedEngine: {e}"))?;
 
                     // Call Python async function to get a coroutine
                     let coroutine = callback
-                        .call1(py, (py_instance_id, py_card_obj))
+                        .call1(py, (py_instance_id, py_card_obj, py_routed))
                         .map_err(|e| anyhow::anyhow!("Failed to call chat_engine_factory: {e}"))?;
 
                     // Use the TaskLocals captured at registration time
@@ -633,6 +678,9 @@ async fn select_engine(
                             config.model_path(),
                             config.tp_size(),
                             config.backend_version(),
+                            config.moe_tp_size(),
+                            config.moe_ep_size(),
+                            config.attention_dp_size(),
                         )
                     })
                 })

@@ -28,6 +28,14 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
     REASONING_PARSER_MAP.get_or_init(|| {
         let mut map = HashMap::new();
         map.insert("deepseek_r1", ReasoningParserType::DeepseekR1);
+        // DeepSeek V3.x thinking mode uses the same output shape as R1:
+        // reasoning text is already in progress and the completion emits
+        // `</think>` before the final answer. The V3.x tool-call parsers are
+        // distinct because their tool-call wire formats differ, but reasoning
+        // shares this forced think-tag parser.
+        map.insert("deepseek_v3", ReasoningParserType::DeepseekR1);
+        map.insert("deepseek_v3_1", ReasoningParserType::DeepseekR1);
+        map.insert("deepseek_v3_2", ReasoningParserType::DeepseekR1);
         map.insert("basic", ReasoningParserType::Basic);
         map.insert("gpt_oss", ReasoningParserType::GptOss);
         map.insert("qwen3", ReasoningParserType::Qwen);
@@ -117,6 +125,17 @@ pub trait ReasoningParser: Send + std::fmt::Debug {
         token_ids: &[u32],
     ) -> ParserResult;
 
+    /// Finalizes a stream after the last chunk, before parser state is dropped.
+    ///
+    /// Incremental parsing may buffer a partial delimiter prefix instead of
+    /// emitting it immediately because the next chunk could complete a marker
+    /// like `<think>` or `</think>`. At EOF, no next chunk is coming, so the
+    /// parser must flush the undecided bytes as normal or reasoning text based
+    /// on its current state.
+    fn finish_reasoning_stream(&mut self) -> ParserResult {
+        ParserResult::default()
+    }
+
     /// Override the parser's initial reasoning state. When called with `true`, the parser
     /// starts in reasoning mode without waiting for the start token in the completion stream.
     /// Use this when the chat template already injected the start token (e.g., `<think>`)
@@ -170,6 +189,10 @@ impl ReasoningParser for ReasoningParserWrapper {
     ) -> ParserResult {
         self.parser
             .parse_reasoning_streaming_incremental(text, token_ids)
+    }
+
+    fn finish_reasoning_stream(&mut self) -> ParserResult {
+        self.parser.finish_reasoning_stream()
     }
 
     fn set_in_reasoning(&mut self, in_reasoning: bool) {
@@ -287,6 +310,9 @@ mod tests {
         // Update this list when adding a new parser
         let available_parsers = [
             "deepseek_r1",
+            "deepseek_v3",
+            "deepseek_v3_1",
+            "deepseek_v3_2",
             "basic",
             "gpt_oss",
             "qwen3",
@@ -312,7 +338,7 @@ mod tests {
         }
     }
 
-    #[test] // REASONING.batch.1
+    #[test] // REASONING.batch.2.c
     fn test_deepseek_v4_detect_and_parse() {
         for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
             let mut parser = ReasoningParserType::get_reasoning_parser_from_name(parser_name);
@@ -322,7 +348,7 @@ mod tests {
         }
     }
 
-    #[test] // REASONING.batch.3, REASONING.batch.1
+    #[test] // REASONING.batch.1.b
     fn test_deepseek_v4_no_forced_reasoning_without_tags() {
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
         let result = parser.detect_and_parse_reasoning("answer only", &[]);
@@ -330,7 +356,7 @@ mod tests {
         assert_eq!(result.normal_text, "answer only");
     }
 
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c
     fn test_deepseek_v4_streaming() {
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
 
@@ -348,7 +374,7 @@ mod tests {
         assert_eq!(normal, "answer");
     }
 
-    #[test] // REASONING.batch.1
+    #[test] // REASONING.batch.2.a, REASONING.batch.2.c, REASONING.batch.2.e
     fn test_kimi_k25_detect_and_parse() {
         // (description, input, expected_reasoning, expected_normal)
         let cases = [
@@ -389,7 +415,7 @@ mod tests {
         }
     }
 
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.3.a, REASONING.stream.3.b, REASONING.batch.2.c
     fn test_kimi_k25_streaming_force_reasoning() {
         // Streaming: force_reasoning means tokens before <think> are treated as reasoning
         let mut parser = ReasoningParserType::KimiK25.get_reasoning_parser();
@@ -410,7 +436,7 @@ mod tests {
         assert_eq!(r3.normal_text, "Hello!");
     }
 
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c, REASONING.batch.2.e
     fn test_kimi_k25_streaming() {
         // (description, tokens, expected_reasoning, expected_content)
         let cases: Vec<(&str, &[&str], &str, &str)> = vec![
@@ -483,7 +509,7 @@ mod tests {
     // Simulates the OpenAI path where the preprocessor detects prompt-injected
     // reasoning and calls set_in_reasoning(true). The parser should correctly
     // transition from reasoning to content when </think> arrives.
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c — force-mode
     fn test_nemotron_streaming_with_set_in_reasoning() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
         parser.set_in_reasoning(true); // OpenAI path calls this
@@ -506,7 +532,7 @@ mod tests {
     // set_in_reasoning is never called. The parser still starts in reasoning
     // mode (force_reasoning=true) but stripped_think_start=false. The </think>
     // boundary must still be detected correctly.
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c — force-mode
     fn test_nemotron_streaming_force_reasoning_without_set_in_reasoning() {
         // DeepseekR1 has force_reasoning=true but we do NOT call set_in_reasoning
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
@@ -529,7 +555,7 @@ mod tests {
     // is false, the parser's prefix-check could buffer '<' and interfere with
     // </think> detection. This test verifies the boundary is detected even when
     // </think> arrives as individual characters.
-    #[test] // REASONING.stream.3, helper
+    #[test] // REASONING.stream.3.b, helper
     fn test_nemotron_streaming_split_end_think_tokens() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
         parser.set_in_reasoning(true);

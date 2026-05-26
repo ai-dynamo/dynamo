@@ -37,6 +37,8 @@ White-box helper unit tests of `detect_tool_call_start_*` /
 carry a numbered category since they have no cross-impl analogue and
 exist to pin internal Rust function behavior only.
 
+"Happy path" is used deliberately: it means a valid, well-formed parser flow where the parser should emit the expected calls/text without truncation recovery, malformed-input fallback, unknown-tool handling, or expected errors. If a category or sub-case is the happy case for that axis, the label says so explicitly.
+
 ## Quick reference
 
 ### Parser, batch mode
@@ -45,15 +47,18 @@ Universal behavior contract. Applies to every tool-call parser when
 fed the full model output as a single string.
 
 - **`PARSER.batch.1`** Single tool call — happy path (one complete, well-formed call).
-- **`PARSER.batch.2`** Multiple tool calls — sequential or parallel (2+ in one response).
+- **`PARSER.batch.2`** Multiple tool calls — multi-call happy path, sequential or parallel (2+ complete, well-formed calls in one response).
 - **`PARSER.batch.3`** No tool call (response is text only).
 - **`PARSER.batch.4`** Malformed / partial JSON args (truncated, missing close brace, invalid syntax). Recovery contract is impl-defined; document divergences rather than asserting one truth.
 - **`PARSER.batch.5`** Missing end-token recovery (recover calls when the closing fence is absent due to `max_tokens` / EOS).
-- **`PARSER.batch.6`** Empty args (`arguments={}` / no-arg call).
-- **`PARSER.batch.7`** Complex arg types (nested objects, arrays, bool, number, Unicode / newlines in values).
+- **`PARSER.batch.6`** Empty args — no-arg happy path (`arguments={}` / no-arg call).
+- **`PARSER.batch.7`** Complex arg types — typed-args happy path (nested objects, arrays, bool, number, Unicode / newlines in values).
 - **`PARSER.batch.8`** Normal text interleaved with tool calls.
 - **`PARSER.batch.9`** Empty content / empty `tool_calls` array / null response.
 - **`PARSER.batch.10`** Duplicate tool calls (same name twice, possibly with same args).
+- **`PARSER.batch.13`** Unknown / unregistered tool name (valid grammar, name absent from supplied `tools`).
+- **`PARSER.batch.30`** Separator characters inside argument string values.
+- **`PARSER.batch.31`** Multiple calls where one argument contains a separator character.
 
 ### Parser, stream mode
 
@@ -62,10 +67,16 @@ as batch mode, but driven through `parse_streaming_increment(delta)`.
 This requires a separate test harness; case numbers are independent
 of batch.
 
-- **`PARSER.stream.1`** Single tool call across N chunks (any chunk boundary).
-- **`PARSER.stream.2`** Multiple tool calls, each spanning multiple chunks.
+- **`PARSER.stream.1`** Single tool call across N chunks — streaming happy-path family (one complete, well-formed call with any legal chunk boundary).
+- **`PARSER.stream.1.a`** Single complete tool-call payload delivered in one content chunk — one-chunk streaming happy path.
+- **`PARSER.stream.1.b`** Single complete tool call split across parser-significant boundaries — buffering streaming happy path.
+- **`PARSER.stream.2`** Multiple tool calls, each spanning multiple chunks — multi-call streaming happy path.
 - **`PARSER.stream.3`** Partial-token chunking (chunk boundary splits a grammar token mid-string). Partial-token matching must return `keep buffering`, not flush as plain text.
 - **`PARSER.stream.4`** Streaming termination — final chunk arrives with `finish_reason=tool_calls` / EOS; parser flushes any in-flight call.
+- **`PARSER.stream.4.a`** Truncated before tool-call end — non-happy path where arguments are complete but the model omits `tool_call_end` / section end; recovery is implementation-defined and may diverge.
+- **`PARSER.stream.4.b`** Truncated mid-call body — non-happy path where the stream terminates before the in-flight argument payload is complete; recovery is implementation-defined and may diverge.
+
+Stream fixtures may include `delta_token_ids` on each chunk. Text-only chunks are enough for most parser families, but token-ID-dependent streaming parsers (currently vLLM's Harmony / `openai` parser) must record `delta_token_ids`; capture should mark those cases unavailable rather than inventing IDs.
 
 ### Format-conditional (scope narrower than "all parsers")
 
@@ -124,7 +135,7 @@ One complete, well-formed call in the response.
   see `PARSER.fmt.5` for the broader argument-shape contract.
   Reference: vLLM Kimi K2 PR #32768.
 
-## `PARSER.batch.2` — Multiple tool calls (sequential or parallel)
+## `PARSER.batch.2` — Multiple tool calls, multi-call happy path
 
 Two or more calls in one response, in the same block or back-to-back.
 
@@ -132,6 +143,26 @@ Two or more calls in one response, in the same block or back-to-back.
 - Some grammars emit parallel calls in one block (DSML, XML); others
   emit sequential top-level sentinels (JSON dialects). Either way,
   extract all.
+
+### Sub-cases
+
+vLLM's test corpus partitions multi-call coverage along call-structure
+axes — same-delta vs incremental, surrounding content, and ID/index
+distinctness. The bare bucket would collapse all of these into one
+parity cell; sub-cases preserve the distinction.
+
+- **`PARSER.batch.2.a`** Parallel calls (canonical batched). Two or
+  more calls present together in the same emission unit; harness
+  asserts each is extracted, and order matches input.
+- **`PARSER.batch.2.b`** Multi-invoke close-together. Calls arrive in
+  the same delta or in rapid sequential chunks; the parser's loop
+  must surface every closed invoke, not stop after the first.
+- **`PARSER.batch.2.c`** Multi-invoke with surrounding content. Normal
+  text wraps the call group (vs `batch.8`'s single-call interleaving);
+  asserts that the parser doesn't conflate text with subsequent calls.
+- **`PARSER.batch.2.d`** ID / index distinctness. Each emitted call
+  carries a unique `id` (or sequential index) — covers the surface
+  contract that downstream tool-result correlation depends on.
 
 ## `PARSER.batch.3` — No tool call
 
@@ -152,8 +183,30 @@ arguments payload.
   current behavior via
   `serde_json::from_str(...).unwrap_or_else(|_| String(...))`),
   drop-on-error, or explicit error are all valid choices. Cross-impl
-  parity tests should record divergences in their `KNOWN_DIVERGENCES`
+  parity tests should record divergences in the YAML fixture's `expected.<impl>` block
   registry rather than asserting one truth.
+
+### Sub-cases
+
+The bare bucket lumped four distinct malformation classes together; vLLM's
+test corpus targets each separately and the recovery contract differs by
+class.
+
+- **`PARSER.batch.4.a`** Generic catch-all (no-crash). Random / arbitrary
+  garbage in the call body. Contract: parser must not panic; any output
+  shape is acceptable. This is the inherited common-suite shape.
+- **`PARSER.batch.4.b`** Invalid JSON syntax. Bad quote, extra/missing
+  comma, leaked delimiter chars inside an otherwise well-formed wrapper.
+  Tests the JSON-decoder fallback path (typically: surface as raw string).
+- **`PARSER.batch.4.c`** Missing structural keys. Wrapper is well-formed
+  but the body lacks `name` / `arguments` / `parameters`. Tests
+  field-validation surface (skip vs error vs partial extraction).
+- **`PARSER.batch.4.d`** Malformed wrapper / XML structure. Unclosed tags,
+  missing delimiters, mismatched fences. Tests the wrapper-parser layer
+  (vs the JSON-body layer in `.b`).
+- **`PARSER.batch.4.e`** Recovery after malformed prefix. A bad tool-looking
+  fragment is followed by a valid complete call; parsers may either treat the
+  whole string as normal text or resynchronize and extract the later valid call.
 
 ## `PARSER.batch.5` — Missing end-token recovery
 
@@ -170,7 +223,30 @@ or the model emitted EOS mid-generation.
   return an explicit error. Either way, pin the behavior with a test
   so a future change is intentional.
 
-## `PARSER.batch.6` — Empty args
+### Sub-cases
+
+Five distinct truncation shapes with different recovery contracts:
+
+- **`PARSER.batch.5.a`** Missing closing tag. Open fence present,
+  matching close absent. The most common shape (model hit `max_tokens`
+  after emitting the call body but before the close fence).
+- **`PARSER.batch.5.b`** Missing opening tag. Close fence present
+  without a matching open — rare, but real (some grammars / streaming
+  edge cases). Most parsers no-op here; pin the behavior.
+- **`PARSER.batch.5.c`** Truncation / EOS mid-call. Stream ends
+  partway through the call body (mid-arguments, mid-name). The
+  recovery contract differs from `.a`/`.b`: the call body itself is
+  incomplete, not just the wrapper.
+- **`PARSER.batch.5.d`** Multi-call response where the last call is
+  complete but missing only the final end marker. Tests whether the
+  parser can recover already-closed earlier calls without treating the
+  unfinished tail as a valid call.
+- **`PARSER.batch.5.e`** Multi-call response where the last call is
+  truncated inside an argument value. Tests that completed earlier
+  calls remain recoverable while the partial trailing call is dropped,
+  preserved as text, or surfaced as an impl-defined error.
+
+## `PARSER.batch.6` — Empty args, no-arg happy path
 
 Tool call with `arguments={}`, or a no-parameter invoke.
 
@@ -178,7 +254,23 @@ Tool call with `arguments={}`, or a no-parameter invoke.
 - Must still return the call — empty args is a valid call, not a
   missing one.
 
-## `PARSER.batch.7` — Complex argument types
+### Sub-cases
+
+vLLM's tests separate three empty-args shapes that look identical at
+the API but exercise different parser code paths.
+
+- **`PARSER.batch.6.a`** Canonical empty `{}`. Wrapper present,
+  arguments key with literal `{}` value. The inherited common-suite
+  baseline.
+- **`PARSER.batch.6.b`** Zero-arg formatting variants. Same call
+  shape as `.a` but with whitespace/newline variations (inline `{}`
+  vs newline `{\n}`, streaming-chunked emission). Tests parser
+  whitespace tolerance.
+- **`PARSER.batch.6.c`** No-args-key / parameterless. The
+  `arguments` key is absent entirely (vs explicit `{}`). Tests that
+  the parser treats missing-key as "no args" rather than "invalid".
+
+## `PARSER.batch.7` — Complex argument types, typed-args happy path
 
 Nested objects, arrays, booleans, numbers, mixed types, Unicode
 values, and newlines inside argument values.
@@ -189,6 +281,39 @@ values, and newlines inside argument values.
   type-coercion half lives under `PARSER.xml.2` instead — here just
   verify that complex values make it through without truncation or
   escape bugs.
+
+### Sub-cases
+
+vLLM's `batch.7` is the largest single bucket (58 rows) and naturally
+splits along four type-handling axes:
+
+- **`PARSER.batch.7.a`** Standard scalar / container types. Canonical
+  type matrix: int, float, bool, null, list, object. The inherited
+  common-suite shape — verifies the parser preserves JSON-typed values
+  (vs stringifying everything).
+- **`PARSER.batch.7.b`** Escaped / Unicode / special chars. String
+  escapes (`\n`, `\"`), Unicode preservation (no `\uXXXX` re-encoding),
+  HTML inside argument values. Tests the JSON-decoder boundary.
+- **`PARSER.batch.7.c`** Schema mismatch — string value where schema
+  declares a typed primitive. Input is `{"celsius": "20"}` while the
+  schema says `celsius: integer`. The contract pinned here is
+  *value-preservation*: most parsers surface the raw string `"20"`
+  as-is and leave coercion to a downstream layer; a few parsers
+  (e.g. vLLM's deepseek_v3_2) opt to coerce at the parser layer and
+  produce `20` (int) instead. The test asserts preservation
+  (Dynamo's behavior); schema-coercing impls show up as registered
+  divergences.
+- **`PARSER.batch.7.d`** Multi-arg / nested. Multiple parameters in
+  one call plus ordinary nested object / array values. This is the
+  batch-mode nested-argument baseline.
+- **`PARSER.batch.7.e`** Large / deep / JSON-edge argument payloads.
+  Covers unusually deep objects, larger arrays, explicit JSON `null`,
+  empty nested objects, and duplicate-key / last-key-wins policy when
+  a grammar can represent it. Chunk-boundary versions of these shapes
+  belong under `PARSER.stream.3`, not here.
+- **`PARSER.batch.7.f`** Numeric precision edges. Integer-like number
+  literals above `f64`'s exact integer range must preserve the original
+  value rather than round through float parsing.
 
 ## `PARSER.batch.8` — Normal text interleaved with tool calls
 
@@ -209,9 +334,9 @@ The `b8` column of the cross-impl parity matrix shows broad divergence
 families; Dynamo preserves it). The sub-cases pin which positional
 shape is being exercised so divergences land on a precise row.
 
-- **`PARSER.batch.8.a`** Narration **before** the tool call only —
+- **`PARSER.batch.8.a`** Narration **before** the tool call only — historical interleaved-text happy path.
   model emits text, then a single tool call, then nothing else. Most
-  parsers handle this; it's the historical happy path.
+  parsers handle this.
 - **`PARSER.batch.8.b`** Narration **after** the tool call only —
   model emits the tool call, then trailing text. Common divergence
   point: vLLM and SGLang typically truncate at the wrapper close.
@@ -233,10 +358,23 @@ Engine emits a chunk with `delta.content = ""`, or a final response
 with `tool_calls: []`, or `null` values inside arguments.
 
 - Applies to every tool-call parser.
-- Null-value handling inside parameters is parser-level
-  (`parse_parameters` in DSML handles it via
-  `serde_json::Value::Null`). Empty-choices / empty-stream handling
-  is typically at the e2e integration layer.
+- Null-value handling inside parameters is parser-level argument
+  coverage and belongs under `PARSER.batch.7` (or `PARSER.xml.2` for
+  XML schema coercion), not under this empty-output bucket.
+- Empty-choices / empty-stream handling is typically at the e2e
+  integration layer; parser fixtures should pin only what can be
+  represented as parser input.
+
+### Sub-cases
+
+- **`PARSER.batch.9.a`** Empty model text (`""`). The parser should
+  return no calls and empty normal text.
+- **`PARSER.batch.9.b`** Blank / whitespace-only model text. The
+  parser should not invent a call; preservation vs trimming of
+  whitespace is an implementation contract recorded in the fixture.
+- **`PARSER.batch.9.c`** Explicit empty tool-call container when the
+  grammar has one, such as an empty JSON-array wrapper. Grammars
+  without an empty-container spelling should mark this `N/A`.
 
 ## `PARSER.batch.10` — Duplicate tool calls (same name twice)
 
@@ -248,16 +386,104 @@ the same arguments.
   distinct IDs. (The runtime / client is responsible for deciding
   whether duplicate invocation is intended.)
 
+## `PARSER.batch.13` — Unknown / unregistered tool name
+
+The model emits a syntactically valid tool call, but the function name is
+not present in the request's supplied `tools` list.
+
+- Applies to every parser that receives the tool schema at parse time.
+- Behavior is implementation-defined: some parsers forward the call with
+  an unknown name, some drop it, and some return the original block as
+  normal text. The fixture should record the parser's chosen contract.
+- Source: SGLang `test_unknown_tool_name.py` pins both default drop
+  behavior and opt-in forwarding via `SGLANG_FORWARD_UNKNOWN_TOOLS`.
+- Related existing tests: this is not `PARSER.batch.4.c` because the
+  emitted call is syntactically valid and contains the expected
+  structural keys. The unknown part is the function registry lookup
+  against the request's supplied `tools` list.
+
+### Sub-cases
+
+- **`PARSER.batch.13.a`** Unknown-only call under the implementation's
+  default behavior (drop, forward, or preserve as text).
+- **`PARSER.batch.13.b`** Unknown-only call under an explicit
+  forward-unknown-tools mode, where the implementation has such a
+  switch. Mark `N/A` when the parser has no opt-in mode.
+- **`PARSER.batch.13.c`** Mixed known and unknown calls in the same
+  response. The fixture records whether the implementation extracts
+  the known call and drops / forwards / preserves the unknown one.
+- **`PARSER.batch.13.d`** Unknown native index or registry index out
+  of range for grammars that reference tools by ordinal instead of
+  name.
+
+## `PARSER.batch.30` — Separator characters inside argument strings
+
+A single call contains a grammar-level separator character inside an
+argument string value. Examples: Llama JSON uses semicolon-separated
+calls while the SQL argument contains `SELECT a; SELECT b`; JSON-array
+families use commas between calls while the SQL argument contains
+`SELECT a, SELECT b`; Gemma4 uses comma/colon/brace delimiters inside
+its custom argument object.
+
+- Applies to delimiter-separated formats.
+- The parser must not split inside a JSON string.
+- Related existing tests: `PARSER.batch.7.b` already covers escaped /
+  special string values, but not a grammar separator embedded in a
+  string. SGLang's `JsonArrayParser` tests cover comma-separator state
+  and `}` inside string values; Dynamo's `base_json_parser` documents
+  the exact `<|python_tag|>` semicolon hazard. Keep this as a separate
+  delimiter-state regression rather than folding it into generic
+  string escaping.
+
+### Sub-cases
+
+- **`PARSER.batch.30.a`** Call separator character inside a single
+  argument string value, such as semicolon or comma.
+- **`PARSER.batch.30.b`** Structural delimiter inside a string value,
+  such as braces or brackets that would otherwise affect wrapper
+  depth tracking.
+- **`PARSER.batch.30.c`** Tool-call marker / format sentinel text
+  inside a string value. Tests marker detection state, not generic
+  Unicode or escaping.
+
+## `PARSER.batch.31` — Separator characters inside one call of a multi-call response
+
+Two or more calls are present, and one call's argument string contains a
+separator-looking character before the real call separator.
+
+- Applies to delimiter-separated formats.
+- Extends `PARSER.batch.30` to the parallel-call path so the parser has to
+  distinguish in-string separators from inter-call separators while continuing
+  to parse later calls.
+- Related existing tests: `PARSER.batch.2.a` covers real call
+  separators, but not a separator-looking character inside the first
+  call's argument. This case is the combined `2.a + 30` state-machine
+  check.
+
+### Sub-cases
+
+- **`PARSER.batch.31.a`** Two or more calls, with a call-separator
+  character inside one argument string before the real inter-call
+  separator.
+- **`PARSER.batch.31.b`** Two or more calls, with nested structures or
+  structural delimiters inside one call before later calls. Streaming
+  chunk-boundary versions remain `PARSER.stream.2` / `.3` co-tags.
+
 ---
 
-## `PARSER.stream.1` — Single tool call across N chunks
+## `PARSER.stream.1` — Single tool call across N chunks, streaming happy path
 
 One complete tool call delivered across multiple SSE chunks of any
 sizing. Parser incrementally reconstructs the call.
 
 - Applies to every tool-call parser. Dominant production path.
 
-## `PARSER.stream.2` — Multiple tool calls, each across N chunks
+### Sub-cases
+
+- **`PARSER.stream.1.a`** One-chunk streaming happy path. Single complete tool-call payload delivered in one content chunk, with stream termination handled separately. This protects the streaming path's non-buffered happy path, which is easy to regress when the jail only handles accumulated multi-chunk state.
+- **`PARSER.stream.1.b`** Buffering streaming happy path. Single complete tool call split across parser-significant boundaries such as start fence, function name, arguments, and end fence. This is the default buffering happy path for streaming parsers.
+
+## `PARSER.stream.2` — Multiple tool calls, each across N chunks, multi-call streaming happy path
 
 Two or more calls in the response, each spanning multiple chunks.
 Parser must emit each call as its complete invocation lands; must not
@@ -281,6 +507,11 @@ Final chunk arrives with `finish_reason=tool_calls` (or `length` /
 explicitly per `PARSER.batch.5`).
 
 - Applies to every tool-call parser.
+
+### Sub-cases
+
+- **`PARSER.stream.4.a`** Truncated before tool-call end. The model emits a start fence, function name, argument-begin marker, and complete JSON arguments, then terminates before `tool_call_end` / section end. This is a non-happy path: Dynamo currently treats the call as incomplete and emits no tool call, while vLLM/SGLang may recover the call from the complete argument JSON.
+- **`PARSER.stream.4.b`** Truncated mid-call body. The model emits a start fence and begins the argument payload, then terminates before the JSON/value body is complete. This is a non-happy path: parsers may drop the in-flight call, preserve residual markup as normal text, emit an error, or surface a raw partial argument string.
 
 ---
 
@@ -424,7 +655,7 @@ mirrored by `<|channel|>analysis<|message|>...<|end|>` for reasoning.
 The parser must walk the envelope correctly across its legal
 variations:
 
-- **Complete envelope** — all tags present (the happy path).
+- **Complete envelope happy path** — all tags present.
 - **Missing `<|start|>` / assistant prefix** — model output lands
   inside an existing turn.
 - **Missing `<|call|>` (truncation recovery)** — engine hit
@@ -486,7 +717,9 @@ Minimum viable set:
    non-negotiable for any parser that sits behind a streaming
    frontend.
 6. `PARSER.batch.8` — interleaved text.
-7. `PARSER.batch.{9, 10}` — empty/null and duplicate calls.
+7. `PARSER.batch.9.{a,b,c}`, `PARSER.batch.10`, and
+   `PARSER.batch.13.{a,c}` — empty / blank / empty-container inputs,
+   duplicate calls, and unknown tool names.
 8. Format variants where applicable (`PARSER.fmt.{1..5}`): cover
    any that the parser's grammar permits. Mark `N/A` for those that
    don't apply. JSON-family parsers (Mistral, Llama 3 JSON, Hermes)
