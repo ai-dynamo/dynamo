@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `MockWorker`: simulates G1↔G2/G2↔G3 transfer timing without moving real memory.
+//! `MockWorker`: simulates G1↔G2/G2↔G3/G2↔G4 transfer timing without moving real memory.
 //!
 //! Flow per transfer:
 //! 1. Caller sets the current simulation time via [`MockWorker::set_now_ms`].
@@ -13,8 +13,7 @@
 //!    and triggers the event for each drained `TransferId`, unblocking the
 //!    pipeline.
 //!
-//! Non-G1↔G2/G2↔G3 methods (remote NIXL, cross-instance, G4 object storage)
-//! return `bail!` / all-Err futures.
+//! Remote NIXL and cross-instance methods return `bail!` / all-Err futures.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,15 +36,17 @@ use velo::{Event, EventManager};
 
 use super::bandwidth_sharing_model::{BandwidthSharingModel, TransferId};
 use super::shared_g3::SharedG3Pool;
+use super::shared_g4::SharedG4Store;
 
-/// Direction of a G1↔G2/G2↔G3 transfer. Picked from the `src` / `dst`
-/// `LogicalLayoutHandle` values passed to `execute_local_transfer`.
+/// Direction of a G1↔G2/G2↔G3/G2↔G4 transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferDirection {
     G1ToG2,
     G2ToG1,
     G2ToG3,
     G3ToG2,
+    G2ToG4,
+    G4ToG2,
 }
 
 impl TransferDirection {
@@ -53,8 +54,12 @@ impl TransferDirection {
         matches!(self, Self::G2ToG3 | Self::G3ToG2)
     }
 
+    fn is_g4(self) -> bool {
+        matches!(self, Self::G2ToG4 | Self::G4ToG2)
+    }
+
     fn is_offload(self) -> bool {
-        matches!(self, Self::G1ToG2 | Self::G2ToG3)
+        matches!(self, Self::G1ToG2 | Self::G2ToG3 | Self::G2ToG4)
     }
 
     fn label(self) -> &'static str {
@@ -63,6 +68,8 @@ impl TransferDirection {
             Self::G2ToG1 => "G2→G1",
             Self::G2ToG3 => "G2→G3",
             Self::G3ToG2 => "G3→G2",
+            Self::G2ToG4 => "G2→G4",
+            Self::G4ToG2 => "G4→G2",
         }
     }
 }
@@ -135,6 +142,7 @@ impl DrainCounts {
 pub(crate) struct DrainSummary {
     pub(crate) local: DrainCounts,
     pub(crate) shared_g3: SharedDrainCounts,
+    pub(crate) shared_g4: SharedDrainCounts,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -170,6 +178,13 @@ impl SharedDrainCounts {
 pub(crate) struct DrainResult {
     pub(crate) total: DrainCounts,
     pub(crate) by_owner: HashMap<u64, DrainCounts>,
+    pub(crate) completed: Vec<CompletedTransfer>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CompletedTransfer {
+    pub(crate) id: TransferId,
+    pub(crate) direction: TransferDirection,
 }
 
 impl TransferState {
@@ -236,6 +251,7 @@ impl TransferState {
                 ..Default::default()
             },
             by_owner: HashMap::new(),
+            completed: Vec::new(),
         };
         for id in drained {
             if let Some(awaiter) = self.awaiters.remove(&id) {
@@ -257,6 +273,10 @@ impl TransferState {
                     .entry(awaiter.owner_id)
                     .or_default()
                     .add_transfer(awaiter.direction, awaiter.num_blocks);
+                result.completed.push(CompletedTransfer {
+                    id,
+                    direction: awaiter.direction,
+                });
                 // Ignore trigger errors — the velo event system may be
                 // shut down during cleanup.
                 let _ = awaiter.event.trigger();
@@ -294,8 +314,8 @@ fn us_to_ms(us: u64) -> f64 {
 
 /// Mock implementation of kvbm-engine's `Worker`, `WorkerTransfers`, and
 /// `ObjectBlockOps` traits. Simulates G1↔G2 transfer timing via a local
-/// processor-sharing bandwidth model, and G2↔G3 via a shared one; never
-/// touches real memory.
+/// processor-sharing bandwidth model, and G2↔G3/G2↔G4 via shared ones;
+/// never touches real memory.
 ///
 /// The mode (live / offline) is encoded purely in how the caller sets
 /// `now_ms` — wall-clock `elapsed()` for live, virtual `Runtime.now_ms`
@@ -328,6 +348,7 @@ pub struct MockWorker {
     g1_handle: Option<LayoutHandle>,
     g2_handle: Option<LayoutHandle>,
     shared_g3: Option<Arc<SharedG3Pool>>,
+    shared_g4: Option<Arc<SharedG4Store>>,
 }
 
 impl MockWorker {
@@ -345,6 +366,7 @@ impl MockWorker {
         g1_handle: Option<LayoutHandle>,
         g2_handle: Option<LayoutHandle>,
         shared_g3: Option<Arc<SharedG3Pool>>,
+        shared_g4: Option<Arc<SharedG4Store>>,
     ) -> Self {
         Self {
             owner_id: NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed),
@@ -357,6 +379,7 @@ impl MockWorker {
             g1_handle,
             g2_handle,
             shared_g3,
+            shared_g4,
         }
     }
 
@@ -400,7 +423,16 @@ impl MockWorker {
             .as_ref()
             .map(|shared_g3| shared_g3.drain_completions(now_ms, self.owner_id))
             .unwrap_or_default();
-        DrainSummary { local, shared_g3 }
+        let shared_g4 = self
+            .shared_g4
+            .as_ref()
+            .map(|shared_g4| shared_g4.drain_completions(now_ms, self.owner_id))
+            .unwrap_or_default();
+        DrainSummary {
+            local,
+            shared_g3,
+            shared_g4,
+        }
     }
 
     /// Reserve an onboard (G2→G1) transfer whose completion is observed
@@ -440,6 +472,7 @@ impl MockWorker {
         local
             .into_iter()
             .chain(self.shared_g3.as_ref().and_then(|g3| g3.earliest_finish()))
+            .chain(self.shared_g4.as_ref().and_then(|g4| g4.earliest_finish()))
             .reduce(f64::min)
     }
 
@@ -452,6 +485,12 @@ impl MockWorker {
         self.shared_g3
             .as_ref()
             .and_then(|g3| g3.earliest_offload_finish())
+    }
+
+    pub(crate) fn earliest_shared_g4_offload_finish(&self) -> Option<f64> {
+        self.shared_g4
+            .as_ref()
+            .and_then(|g4| g4.earliest_offload_finish())
     }
 
     /// Earliest deadline that can unblock scheduler-visible foreground work.
@@ -471,6 +510,11 @@ impl MockWorker {
                     .as_ref()
                     .and_then(|g3| g3.earliest_onboard_finish()),
             )
+            .chain(
+                self.shared_g4
+                    .as_ref()
+                    .and_then(|g4| g4.earliest_onboard_finish()),
+            )
             .reduce(f64::min)
     }
 
@@ -483,17 +527,34 @@ impl MockWorker {
         now_ms: f64,
         num_blocks: usize,
     ) -> Result<TransferCompleteNotification> {
+        self.reserve_transfer_with(direction, now_ms, num_blocks, |_| {})
+            .map(|(_id, notification)| notification)
+    }
+
+    fn reserve_transfer_with(
+        &self,
+        direction: TransferDirection,
+        now_ms: f64,
+        num_blocks: usize,
+        on_reserved: impl FnOnce(TransferId),
+    ) -> Result<(TransferId, TransferCompleteNotification)> {
         let bytes = num_blocks.saturating_mul(self.block_bytes);
-        let (state_arc, scope, already_drained) = if direction.is_g3() {
-            let shared_g3 = self
-                .shared_g3
-                .as_ref()
-                .ok_or_else(|| anyhow!("MockWorker: G2↔G3 transfer requested without shared G3"))?;
-            shared_g3.drain_completions_to_pending(now_ms);
-            (shared_g3.transfer_state(), "shared-g3", true)
-        } else {
-            (self.state.clone(), "worker", false)
-        };
+        let (state_arc, scope, already_drained) =
+            if direction.is_g3() {
+                let shared_g3 = self.shared_g3.as_ref().ok_or_else(|| {
+                    anyhow!("MockWorker: G2↔G3 transfer requested without shared G3")
+                })?;
+                shared_g3.drain_completions_to_pending(now_ms);
+                (shared_g3.transfer_state(), "shared-g3", true)
+            } else if direction.is_g4() {
+                let shared_g4 = self.shared_g4.as_ref().ok_or_else(|| {
+                    anyhow!("MockWorker: G2↔G4 transfer requested without shared G4")
+                })?;
+                shared_g4.drain_completions_to_pending(now_ms);
+                (shared_g4.transfer_state(), "shared-g4", true)
+            } else {
+                (self.state.clone(), "worker", false)
+            };
         let mut state = state_arc.lock().expect("TransferState mutex poisoned");
         if !already_drained {
             state.drain_completions(now_ms, scope);
@@ -537,8 +598,9 @@ impl MockWorker {
                 num_blocks,
             },
         );
+        on_reserved(id);
         drop(state);
-        Ok(TransferCompleteNotification::from_awaiter(awaiter))
+        Ok((id, TransferCompleteNotification::from_awaiter(awaiter)))
     }
 }
 
@@ -553,7 +615,7 @@ fn infer_direction(
         (LogicalLayoutHandle::G2, LogicalLayoutHandle::G3) => Ok(TransferDirection::G2ToG3),
         (LogicalLayoutHandle::G3, LogicalLayoutHandle::G2) => Ok(TransferDirection::G3ToG2),
         (s, d) => bail!(
-            "MockWorker only simulates G1↔G2 and G2↔G3 transfers; got src={:?} dst={:?}",
+            "MockWorker only simulates local G1↔G2 and G2↔G3 transfers; got src={:?} dst={:?}",
             s,
             d
         ),
@@ -643,31 +705,144 @@ impl Worker for MockWorker {
     }
 }
 
-// G4 is not supported yet. Mock implementation of the ObjectBlockOps trait.
+// Mock implementation of the G4 ObjectBlockOps trait.
 impl ObjectBlockOps for MockWorker {
     fn has_blocks(
         &self,
         keys: Vec<SequenceHash>,
     ) -> BoxFuture<'static, Vec<(SequenceHash, Option<usize>)>> {
-        Box::pin(async move { keys.into_iter().map(|k| (k, None)).collect() })
+        let shared_g4 = self.shared_g4.clone();
+        Box::pin(async move {
+            keys.into_iter()
+                .map(|key| {
+                    let size = shared_g4.as_ref().and_then(|store| store.has_object(&key));
+                    (key, size)
+                })
+                .collect()
+        })
     }
 
     fn put_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        _src_layout: LogicalLayoutHandle,
-        _block_ids: Vec<BlockId>,
+        src_layout: LogicalLayoutHandle,
+        block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
-        Box::pin(async move { keys.into_iter().map(Err).collect() })
+        if keys.is_empty() {
+            return Box::pin(async move { Vec::new() });
+        }
+        if src_layout != LogicalLayoutHandle::G2 || keys.len() != block_ids.len() {
+            tracing::warn!(
+                ?src_layout,
+                keys = keys.len(),
+                block_ids = block_ids.len(),
+                "kvbm-offload: rejected mock G2→G4 object put"
+            );
+            return Box::pin(async move { keys.into_iter().map(Err).collect() });
+        }
+        let Some(shared_g4) = self.shared_g4.clone() else {
+            tracing::warn!("kvbm-offload: put_blocks called without shared G4 store");
+            return Box::pin(async move { keys.into_iter().map(Err).collect() });
+        };
+        let block_bytes = self.block_bytes;
+        let publish_keys = keys.clone();
+        let publish_store = shared_g4.clone();
+        let notification = match self.reserve_transfer_with(
+            TransferDirection::G2ToG4,
+            self.now_ms(),
+            keys.len(),
+            move |transfer_id| {
+                publish_store.register_pending_put(transfer_id, publish_keys, block_bytes);
+            },
+        ) {
+            Ok((_transfer_id, notification)) => notification,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "kvbm-offload: failed to reserve mock G2→G4 object put"
+                );
+                return Box::pin(async move { keys.into_iter().map(Err).collect() });
+            }
+        };
+        Box::pin(async move {
+            match notification.await {
+                Ok(()) => {
+                    // Idempotent fallback: shared G4 publishes objects when
+                    // any worker drains the shared completion, but keeping the
+                    // owner future publish makes late polling harmless.
+                    for key in &keys {
+                        shared_g4.insert_object(*key, block_bytes);
+                    }
+                    keys.into_iter().map(Ok).collect()
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "kvbm-offload: mock G2→G4 object put did not complete"
+                    );
+                    keys.into_iter().map(Err).collect()
+                }
+            }
+        })
     }
 
     fn get_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        _dst_layout: LogicalLayoutHandle,
-        _block_ids: Vec<BlockId>,
+        dst_layout: LogicalLayoutHandle,
+        block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
-        Box::pin(async move { keys.into_iter().map(Err).collect() })
+        if keys.is_empty() {
+            return Box::pin(async move { Vec::new() });
+        }
+        if dst_layout != LogicalLayoutHandle::G2 || keys.len() != block_ids.len() {
+            tracing::warn!(
+                ?dst_layout,
+                keys = keys.len(),
+                block_ids = block_ids.len(),
+                "kvbm-offload: rejected mock G4→G2 object get"
+            );
+            return Box::pin(async move { keys.into_iter().map(Err).collect() });
+        }
+        let Some(shared_g4) = self.shared_g4.clone() else {
+            tracing::warn!("kvbm-offload: get_blocks called without shared G4 store");
+            return Box::pin(async move { keys.into_iter().map(Err).collect() });
+        };
+        let present: Vec<bool> = keys
+            .iter()
+            .map(|key| shared_g4.has_object(key).is_some())
+            .collect();
+        let present_count = present.iter().filter(|found| **found).count();
+        if present_count == 0 {
+            return Box::pin(async move { keys.into_iter().map(Err).collect() });
+        }
+        let notification =
+            match self.reserve_transfer(TransferDirection::G4ToG2, self.now_ms(), present_count) {
+                Ok(notification) => notification,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "kvbm-offload: failed to reserve mock G4→G2 object get"
+                    );
+                    return Box::pin(async move { keys.into_iter().map(Err).collect() });
+                }
+            };
+        Box::pin(async move {
+            match notification.await {
+                Ok(()) => keys
+                    .into_iter()
+                    .zip(present)
+                    .map(|(key, found)| if found { Ok(key) } else { Err(key) })
+                    .collect(),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "kvbm-offload: mock G4→G2 object get did not complete"
+                    );
+                    keys.into_iter().map(Err).collect()
+                }
+            }
+        })
     }
 
     fn put_blocks_with_layout(
@@ -693,13 +868,14 @@ impl ObjectBlockOps for MockWorker {
 mod tests {
     use super::super::config::KvbmOffloadConfig;
     use super::super::shared_g3::shared_g3_test_guard;
+    use super::super::shared_g4::{SharedG4Store, shared_g4_test_guard};
     use super::*;
 
     const EPS: f64 = 1e-6;
 
     fn make_worker() -> MockWorker {
         // 1 GB/s bandwidth on both links, 1 MB per block.
-        MockWorker::new(1_000_000, 1.0, 1.0, None, None, None)
+        MockWorker::new(1_000_000, 1.0, 1.0, None, None, None, None)
     }
 
     fn shared_g3_two_workers() -> (MockWorker, MockWorker) {
@@ -712,8 +888,67 @@ mod tests {
         };
         let shared_g3 = SharedG3Pool::get_or_create(&config).unwrap();
         (
-            MockWorker::new(1_000_000, 1.0, 1.0, None, None, shared_g3.clone()),
-            MockWorker::new(1_000_000, 1.0, 1.0, None, None, shared_g3),
+            MockWorker::new(1_000_000, 1.0, 1.0, None, None, shared_g3.clone(), None),
+            MockWorker::new(1_000_000, 1.0, 1.0, None, None, shared_g3, None),
+        )
+    }
+
+    fn shared_g4_worker() -> (MockWorker, Arc<SharedG4Store>) {
+        let config = KvbmOffloadConfig {
+            enable_g4_storage: true,
+            block_size_bytes: Some(1_000_000),
+            bandwidth_g2_to_g4_gbps: 1.0,
+            bandwidth_g4_to_g2_gbps: 1.0,
+            ..Default::default()
+        };
+        let shared_g4 = SharedG4Store::get_or_create(&config)
+            .unwrap()
+            .expect("G4 enabled");
+        (
+            MockWorker::new(
+                1_000_000,
+                1.0,
+                1.0,
+                None,
+                None,
+                None,
+                Some(shared_g4.clone()),
+            ),
+            shared_g4,
+        )
+    }
+
+    fn shared_g4_two_workers() -> (MockWorker, MockWorker, Arc<SharedG4Store>) {
+        let config = KvbmOffloadConfig {
+            enable_g4_storage: true,
+            block_size_bytes: Some(1_000_000),
+            bandwidth_g2_to_g4_gbps: 1.0,
+            bandwidth_g4_to_g2_gbps: 1.0,
+            ..Default::default()
+        };
+        let shared_g4 = SharedG4Store::get_or_create(&config)
+            .unwrap()
+            .expect("G4 enabled");
+        (
+            MockWorker::new(
+                1_000_000,
+                1.0,
+                1.0,
+                None,
+                None,
+                None,
+                Some(shared_g4.clone()),
+            ),
+            MockWorker::new(
+                1_000_000,
+                1.0,
+                1.0,
+                None,
+                None,
+                None,
+                Some(shared_g4.clone()),
+            ),
+            shared_g4,
         )
     }
 
@@ -932,6 +1167,75 @@ mod tests {
         assert_eq!(b_drained.counts.offload_blocks, 1);
         b.await
             .expect("worker B G2→G3 should complete after its own reservation");
+    }
+
+    #[tokio::test]
+    async fn mock_worker_object_put_updates_shared_g4_after_transfer() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g4_test_guard().await;
+        let (worker, shared_g4) = shared_g4_worker();
+        let plh = PositionalLineageHash::new(6_000, None, 0);
+
+        worker.set_now_ms(0.0);
+        let put = worker.put_blocks(vec![plh], LogicalLayoutHandle::G2, vec![0]);
+        assert_eq!(shared_g4.has_object(&plh), None);
+
+        let early = worker.drain_completions_summary(0.5).shared_g4.counts;
+        assert_eq!(early.offload_blocks, 0);
+        assert_eq!(shared_g4.has_object(&plh), None);
+
+        let drained = worker.drain_completions_summary(1.0).shared_g4.counts;
+        assert_eq!(drained.offload_blocks, 1);
+        assert_eq!(shared_g4.has_object(&plh), Some(1_000_000));
+        let results = put.await;
+        assert_eq!(results, vec![Ok(plh)]);
+        assert_eq!(shared_g4.has_object(&plh), Some(1_000_000));
+    }
+
+    #[tokio::test]
+    async fn mock_worker_object_put_visible_when_another_worker_drains_shared_g4() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g4_test_guard().await;
+        let (worker_a, worker_b, shared_g4) = shared_g4_two_workers();
+        let plh = PositionalLineageHash::new(6_050, None, 0);
+
+        worker_a.set_now_ms(0.0);
+        let put = worker_a.put_blocks(vec![plh], LogicalLayoutHandle::G2, vec![0]);
+        assert_eq!(shared_g4.has_object(&plh), None);
+
+        let b_drained = worker_b.drain_completions_summary(1.0).shared_g4.counts;
+        assert_eq!(
+            b_drained.offload_blocks, 0,
+            "worker B should not consume worker A's owner accounting"
+        );
+        assert_eq!(
+            shared_g4.has_object(&plh),
+            Some(1_000_000),
+            "shared G4 completion should publish the object even when another worker drains"
+        );
+
+        let results = put.await;
+        assert_eq!(results, vec![Ok(plh)]);
+    }
+
+    #[tokio::test]
+    async fn mock_worker_object_get_charges_present_g4_blocks_only() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g4_test_guard().await;
+        let (worker, shared_g4) = shared_g4_worker();
+        let present = PositionalLineageHash::new(6_100, None, 0);
+        let missing = PositionalLineageHash::new(6_101, None, 1);
+        shared_g4.insert_object(present, 1_000_000);
+
+        worker.set_now_ms(0.0);
+        let get = worker.get_blocks(vec![present, missing], LogicalLayoutHandle::G2, vec![0, 1]);
+        let drained = worker.drain_completions_summary(1.0).shared_g4.counts;
+        assert_eq!(drained.onboard_blocks, 1);
+        let results = get.await;
+        assert_eq!(results, vec![Ok(present), Err(missing)]);
     }
 
     #[tokio::test]

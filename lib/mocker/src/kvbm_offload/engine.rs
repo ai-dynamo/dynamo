@@ -30,9 +30,11 @@ use futures::task::noop_waker_ref;
 use kvbm_engine::leader::{
     FindMatchesOptions, FindMatchesResult, InstanceLeader, Leader, OnboardingStatus, StagingMode,
 };
+use kvbm_engine::object::ObjectBlockOps;
 use kvbm_engine::offload::{
-    ExternalBlock, OffloadEngine, PendingTracker, PipelineBuilder, PresenceFilter, SourceBlocks,
-    TransferHandle, TransferStatus,
+    ExternalBlock, ObjectPipelineBuilder, ObjectPresenceFilter, OffloadEngine, PendingTracker,
+    PipelineBuilder, PresenceFilter, S3PresenceChecker, SourceBlocks, TransferHandle,
+    TransferStatus,
 };
 use kvbm_engine::worker::Worker;
 use kvbm_engine::{BlockId, G1 as EngineG1, G2, G3, SequenceHash};
@@ -50,6 +52,7 @@ use super::capacity_reservation::{
 };
 use super::config::KvbmOffloadConfig;
 use super::shared_g3::SharedG3Pool;
+use super::shared_g4::SharedG4Store;
 use super::worker::MockWorker;
 
 // Successful offline barriers wake via kvbm-engine watch channels or the
@@ -60,12 +63,14 @@ const PIPELINE_BARRIER_TIMEOUT: Duration = Duration::from_secs(1);
 enum ReservationBlocker {
     LocalOffload,
     SharedG3Offload,
+    SharedG4Offload,
 }
 
 #[derive(Clone, Copy)]
 enum TransferLane {
     G1ToG2,
     G2ToG3,
+    G2ToG4,
 }
 
 /// Handle returned by [`MockOffloadEngine::start_onboard_prefix`]. Scheduler
@@ -155,11 +160,18 @@ impl PreparedSwapIn {
 struct LowerTierLookupPlan {
     g2_prefix_blocks: usize,
     g3_stage_blocks: usize,
+    g4_stage_blocks: usize,
 }
 
 impl LowerTierLookupPlan {
     fn reservation_blocks(self) -> usize {
-        self.g2_prefix_blocks.saturating_add(self.g3_stage_blocks)
+        self.g2_prefix_blocks
+            .saturating_add(self.g3_stage_blocks)
+            .saturating_add(self.g4_stage_blocks)
+    }
+
+    fn stage_blocks(self) -> usize {
+        self.g3_stage_blocks.saturating_add(self.g4_stage_blocks)
     }
 }
 
@@ -207,7 +219,7 @@ pub(crate) enum G2RouterEvent {
 
 struct PendingG1ToG2 {
     handle: TransferHandle,
-    g2_to_g3_chain_blocks: FxHashMap<BlockId, SequenceHash>,
+    g2_to_lower_chain_blocks: FxHashMap<BlockId, SequenceHash>,
     /// Reset G1 slots held until the simulated source copy completes.
     ///
     /// These tokens do not preserve old bytes — `MockWorker` never reads
@@ -218,10 +230,10 @@ struct PendingG1ToG2 {
 
 impl PendingG1ToG2 {
     fn source_slots_releasable(&self) -> bool {
-        if self.source_slots.is_empty() && self.g2_to_g3_chain_blocks.is_empty() {
+        if self.source_slots.is_empty() && self.g2_to_lower_chain_blocks.is_empty() {
             return true;
         }
-        if !self.g2_to_g3_chain_blocks.is_empty() {
+        if !self.g2_to_lower_chain_blocks.is_empty() {
             return false;
         }
         if self.handle.is_complete() {
@@ -250,24 +262,24 @@ impl PendingG1ToG2 {
     }
 
     fn collect_completed_chain_blocks(&mut self) -> Vec<SequenceHash> {
-        if self.g2_to_g3_chain_blocks.is_empty() {
+        if self.g2_to_lower_chain_blocks.is_empty() {
             return Vec::new();
         }
 
         let mut chain_blocks = Vec::new();
         for block_id in self.handle.completed_blocks() {
-            if let Some(seq_hash) = self.g2_to_g3_chain_blocks.remove(&block_id) {
+            if let Some(seq_hash) = self.g2_to_lower_chain_blocks.remove(&block_id) {
                 chain_blocks.push(seq_hash);
             }
         }
 
         for block_id in self.handle.failed_blocks() {
-            self.g2_to_g3_chain_blocks.remove(&block_id);
+            self.g2_to_lower_chain_blocks.remove(&block_id);
         }
 
         if !matches!(self.handle.status(), TransferStatus::Evaluating) {
             let passed: FxHashSet<BlockId> = self.handle.passed_blocks().into_iter().collect();
-            self.g2_to_g3_chain_blocks
+            self.g2_to_lower_chain_blocks
                 .retain(|block_id, _seq_hash| passed.contains(block_id));
         }
 
@@ -289,6 +301,16 @@ impl PendingG2ToG3 {
         unreleased
     }
 
+    fn is_complete(&self) -> bool {
+        self.handle.is_complete()
+    }
+}
+
+struct PendingG2ToG4 {
+    handle: TransferHandle,
+}
+
+impl PendingG2ToG4 {
     fn is_complete(&self) -> bool {
         self.handle.is_complete()
     }
@@ -318,8 +340,10 @@ pub struct MockOffloadEngine {
     g2_destination_reservations: Arc<CapacityReservations>,
     shared_g3: Option<Arc<SharedG3Pool>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
+    shared_g4: Option<Arc<SharedG4Store>>,
     pending_g1_to_g2: Mutex<Vec<PendingG1ToG2>>,
     pending_g2_to_g3: Mutex<Vec<PendingG2ToG3>>,
+    pending_g2_to_g4: Mutex<Vec<PendingG2ToG4>>,
     pending_staged_swap_ins: Mutex<Vec<PendingStagedSwapIn>>,
     g2_event_stream: Mutex<Pin<Box<dyn Stream<Item = LogicalKvCacheEvent> + Send>>>,
     g2_event_metadata: Mutex<FxHashMap<SequenceHash, G2BlockEventMetadata>>,
@@ -348,10 +372,12 @@ impl MockOffloadEngine {
         ));
         let shared_g3 = SharedG3Pool::get_or_create(&config)?;
         let g3_manager = shared_g3.as_ref().map(|pool| pool.manager());
+        let shared_g4 = SharedG4Store::get_or_create(&config)?;
         tracing::debug!(
             num_g2_blocks = config.num_g2_blocks,
             num_g3_blocks = config.num_g3_blocks,
             g3_enabled = g3_manager.is_some(),
+            g4_enabled = shared_g4.is_some(),
             "kvbm-offload: building mock offload engine"
         );
 
@@ -362,8 +388,12 @@ impl MockOffloadEngine {
             None,
             None,
             shared_g3.clone(),
+            shared_g4.clone(),
         ));
         let worker_for_leader: Arc<dyn Worker> = worker.clone();
+        let object_ops: Option<Arc<dyn ObjectBlockOps>> = shared_g4
+            .as_ref()
+            .map(|_| worker.clone() as Arc<dyn ObjectBlockOps>);
 
         // `InstanceLeader::build` calls `Handle::current()` internally,
         // hence the `async fn` and the in-runtime caller requirement.
@@ -374,6 +404,9 @@ impl MockOffloadEngine {
             .worker(worker_for_leader);
         if let Some(g3_manager) = &g3_manager {
             leader_builder = leader_builder.g3_manager(g3_manager.clone());
+        }
+        if let Some(object_ops) = &object_ops {
+            leader_builder = leader_builder.object_client(object_ops.clone());
         }
         let leader = Arc::new(leader_builder.build()?);
 
@@ -424,6 +457,26 @@ impl MockOffloadEngine {
                 .with_g2_to_g3_pipeline(g2_to_g3_pipeline);
         }
 
+        if let (Some(shared_g4), Some(object_ops)) = (&shared_g4, &object_ops) {
+            let g2_to_g4_pending = shared_g4.pending_tracker();
+            let g2_to_g4_presence = ObjectPresenceFilter::<G2>::new(Arc::new(
+                S3PresenceChecker::new(object_ops.clone()),
+            ))
+            .with_pending_tracker(g2_to_g4_pending.clone());
+            let g2_to_g4_pipeline = ObjectPipelineBuilder::<G2>::new()
+                .policy(Arc::new(g2_to_g4_presence))
+                .pending_tracker(g2_to_g4_pending)
+                .batch_size(config.offload_batch_size)
+                // Let object writes overlap; the shared G4 PS queue is the
+                // throughput limiter. The same cap as batch size bounds
+                // source pinning and spawned transfer tasks.
+                .max_concurrent_transfers(config.offload_batch_size)
+                .build();
+            engine_builder = engine_builder
+                .with_object_ops(object_ops.clone())
+                .with_g2_to_g4_pipeline(g2_to_g4_pipeline);
+        }
+
         let engine = engine_builder.build()?;
 
         Ok(Self {
@@ -436,8 +489,10 @@ impl MockOffloadEngine {
             g2_destination_reservations,
             shared_g3,
             g3_manager,
+            shared_g4,
             pending_g1_to_g2: Mutex::new(Vec::new()),
             pending_g2_to_g3: Mutex::new(Vec::new()),
+            pending_g2_to_g4: Mutex::new(Vec::new()),
             pending_staged_swap_ins: Mutex::new(Vec::new()),
             g2_event_stream: Mutex::new(g2_event_stream),
             g2_event_metadata: Mutex::new(FxHashMap::default()),
@@ -581,6 +636,9 @@ impl MockOffloadEngine {
                     ReservationBlocker::SharedG3Offload => {
                         self.worker.earliest_shared_g3_offload_finish().is_some()
                     }
+                    ReservationBlocker::SharedG4Offload => {
+                        self.worker.earliest_shared_g4_offload_finish().is_some()
+                    }
                 };
                 if blocked_by_active_transfer {
                     return false;
@@ -650,6 +708,16 @@ impl MockOffloadEngine {
                     .pending_g2_to_g3
                     .lock()
                     .expect("pending G2→G3 handles mutex poisoned");
+                pending
+                    .iter()
+                    .map(|pending| pending.handle.clone())
+                    .collect()
+            }
+            TransferLane::G2ToG4 => {
+                let pending = self
+                    .pending_g2_to_g4
+                    .lock()
+                    .expect("pending G2→G4 handles mutex poisoned");
                 pending
                     .iter()
                     .map(|pending| pending.handle.clone())
@@ -727,7 +795,7 @@ impl MockOffloadEngine {
         }
     }
 
-    fn wait_for_g3_staging_reservation_or_completion(
+    fn wait_for_staging_reservation_or_completion(
         &self,
         result: &FindMatchesResult,
         reservation_count_before: u64,
@@ -749,25 +817,42 @@ impl MockOffloadEngine {
         })
     }
 
-    fn build_lower_tier_lookup_plan(
-        &self,
-        plhs: &[SequenceHash],
-        g3_manager: &BlockManager<G3>,
-    ) -> LowerTierLookupPlan {
+    fn build_lower_tier_lookup_plan(&self, plhs: &[SequenceHash]) -> LowerTierLookupPlan {
         // This is a planning pass only. `check_presence` does not acquire
         // blocks, so the later G2-ready path must still call `match_blocks`
         // to pin the source blocks it will onboard.
         let g2_presence = self.g2_manager.block_registry().check_presence::<G2>(plhs);
-        let g3_presence = g3_manager.block_registry().check_presence::<G3>(plhs);
         let g2_prefix_blocks = g2_presence.iter().take_while(|(_, in_g2)| *in_g2).count();
-        let g3_stage_blocks = g3_presence
-            .iter()
-            .skip(g2_prefix_blocks)
-            .take_while(|(_, in_g3)| *in_g3)
-            .count();
+
+        let mut offset = g2_prefix_blocks;
+        let g3_stage_blocks = self
+            .g3_manager
+            .as_ref()
+            .map(|g3_manager| {
+                let g3_presence = g3_manager.block_registry().check_presence::<G3>(plhs);
+                g3_presence
+                    .iter()
+                    .skip(offset)
+                    .take_while(|(_, in_g3)| *in_g3)
+                    .count()
+            })
+            .unwrap_or_default();
+        offset = offset.saturating_add(g3_stage_blocks);
+
+        let g4_stage_blocks = self
+            .shared_g4
+            .as_ref()
+            .map(|shared_g4| {
+                plhs.iter()
+                    .skip(offset)
+                    .take_while(|hash| shared_g4.has_object(hash).is_some())
+                    .count()
+            })
+            .unwrap_or_default();
         LowerTierLookupPlan {
             g2_prefix_blocks,
             g3_stage_blocks,
+            g4_stage_blocks,
         }
     }
 
@@ -797,11 +882,19 @@ impl MockOffloadEngine {
         }
     }
 
+    fn cleanup_g2_to_g4_pending_handles(&self) {
+        let mut pending = self
+            .pending_g2_to_g4
+            .lock()
+            .expect("pending G2→G4 handles mutex poisoned");
+        pending.retain(|pending| !pending.is_complete());
+    }
+
     fn pump_pending_staged_swap_ins(&self, now_ms: f64) {
         // Waiting for a session while foreground transfers are active can stall
         // the virtual-time loop: the session may itself be waiting for a
-        // G3→G2 transfer deadline. When no foreground transfer is active, a
-        // bounded wait lets same-timestamp G3 staging publish G2 blocks before
+        // lower-tier transfer deadline. When no foreground transfer is active, a
+        // bounded wait lets same-timestamp staging publish G2 blocks before
         // the scheduler immediately retries admission.
         let should_wait_for_sessions = self.worker.earliest_foreground_finish().is_none();
         let pending = {
@@ -825,7 +918,7 @@ impl MockOffloadEngine {
                     tracing::trace!(
                         now_ms,
                         block_count,
-                        "kvbm-offload: G3→G2 staging produced G2 blocks"
+                        "kvbm-offload: lower-tier staging produced G2 blocks"
                     );
                     if block_count == 0 {
                         staged.complete.store(true, Ordering::Release);
@@ -848,14 +941,14 @@ impl MockOffloadEngine {
                         reservation_blocks = staged.reservation_blocks,
                         matched_blocks,
                         status = ?staged.result.as_async().map(|session| session.status()),
-                        "kvbm-offload: G3 staging session completed without available G2 blocks"
+                        "kvbm-offload: lower-tier staging session completed without available G2 blocks"
                     );
                     if matched_blocks.unwrap_or_default() > 0 {
                         tracing::debug!(
                             now_ms,
                             reservation_blocks = staged.reservation_blocks,
                             matched_blocks,
-                            "kvbm-offload: G3 staging completed with matches but no G2 blocks; treating as 0-block swap-in"
+                            "kvbm-offload: lower-tier staging completed with matches but no G2 blocks; treating as 0-block swap-in"
                         );
                     }
                     drop(staged.g2_capacity_reservation.take());
@@ -922,7 +1015,7 @@ impl MockOffloadEngine {
         released
     }
 
-    fn collect_g2_to_g3_chain_blocks(&self) -> Vec<SequenceHash> {
+    fn collect_g2_to_lower_chain_blocks(&self) -> Vec<SequenceHash> {
         let mut chain_blocks = Vec::new();
         let mut pending = self
             .pending_g1_to_g2
@@ -935,30 +1028,48 @@ impl MockOffloadEngine {
         chain_blocks
     }
 
-    fn enqueue_g2_to_g3_background(&self, hashes: Vec<SequenceHash>) {
-        if hashes.is_empty() || self.g3_manager.is_none() {
+    fn enqueue_lower_tier_background(&self, hashes: Vec<SequenceHash>) {
+        if hashes.is_empty() {
             return;
         }
+        if self.g3_manager.is_some() {
+            self.enqueue_g2_to_g3_background(hashes.clone());
+        }
+        if self.shared_g4.is_some() {
+            self.enqueue_g2_to_g4_background(hashes);
+        }
+    }
 
+    fn external_g2_source_for_hashes(&self, hashes: Vec<SequenceHash>) -> Option<SourceBlocks<G2>> {
         let mut matches = self.g2_manager.scan_matches(&hashes, false);
         let blocks: Vec<_> = hashes
             .into_iter()
             .filter_map(|seq_hash| matches.remove(&seq_hash))
             .collect();
         if blocks.is_empty() {
+            return None;
+        }
+        Some(SourceBlocks::Strong(blocks))
+    }
+
+    fn enqueue_g2_to_g3_background(&self, hashes: Vec<SequenceHash>) {
+        if hashes.is_empty() || self.g3_manager.is_none() {
             return;
         }
 
-        // Pin the G2 source while the G2→G3 write-through is in flight. Even
-        // though MockWorker only models timing, a real copy cannot let the
-        // source block reset/reuse before G3 has consumed its bytes.
-        let source: SourceBlocks<G2> = SourceBlocks::Strong(blocks);
+        let Some(source) = self.external_g2_source_for_hashes(hashes) else {
+            return;
+        };
+        self.enqueue_g2_to_g3_background_source(source);
+    }
+
+    fn enqueue_g2_to_g3_background_source(&self, source: SourceBlocks<G2>) {
         let reservation_count_before = self.worker.reservation_count();
         let Ok(handle) = self.engine.enqueue_g2_to_g3(source) else {
             return;
         };
         self.wait_for_policy_evaluation(&handle);
-        if !handle.passed_blocks().is_empty() {
+        if !handle.is_complete() {
             let mut pending = self
                 .pending_g2_to_g3
                 .lock()
@@ -972,6 +1083,40 @@ impl MockOffloadEngine {
                 &handle,
                 reservation_count_before + 1,
                 ReservationBlocker::SharedG3Offload,
+            );
+        }
+    }
+
+    fn enqueue_g2_to_g4_background(&self, hashes: Vec<SequenceHash>) {
+        if hashes.is_empty() || self.shared_g4.is_none() {
+            return;
+        }
+
+        let Some(source) = self.external_g2_source_for_hashes(hashes) else {
+            return;
+        };
+        self.enqueue_g2_to_g4_background_source(source);
+    }
+
+    fn enqueue_g2_to_g4_background_source(&self, source: SourceBlocks<G2>) {
+        let reservation_count_before = self.worker.reservation_count();
+        let Ok(handle) = self.engine.enqueue_g2_to_g4(source) else {
+            return;
+        };
+        self.wait_for_policy_evaluation(&handle);
+        if !handle.is_complete() {
+            let mut pending = self
+                .pending_g2_to_g4
+                .lock()
+                .expect("pending G2→G4 handles mutex poisoned");
+            pending.push(PendingG2ToG4 {
+                handle: handle.clone(),
+            });
+            drop(pending);
+            self.wait_for_reservations_or_completion(
+                &handle,
+                reservation_count_before + 1,
+                ReservationBlocker::SharedG4Offload,
             );
         }
     }
@@ -992,10 +1137,9 @@ impl MockOffloadEngine {
     /// same DRAM bandwidth, and concurrent offloads on the same worker
     /// fair-share via `BandwidthSharingModel`'s PS math.
     ///
-    /// G3 is modeled by the process-local shared pool hanging off the
-    /// worker, so G2↔G3 transfers contend globally while G1↔G2 remains
-    /// worker-local. Future shared tiers should follow the same pattern
-    /// instead of adding another worker-local PS queue.
+    /// G3/G4 are modeled by process-local shared resources hanging off the
+    /// worker, so lower-tier transfers contend globally while G1↔G2 remains
+    /// worker-local.
     pub fn tick(&self, now_ms: f64) {
         self.worker.set_now_ms(now_ms);
         let g2_registrations_before = Self::tier_registrations(&self.g2_manager);
@@ -1006,15 +1150,21 @@ impl MockOffloadEngine {
             .unwrap_or_default();
         let g1_to_g2_settled_before = self.settled_blocks(TransferLane::G1ToG2);
         let g2_to_g3_settled_before = self.settled_blocks(TransferLane::G2ToG3);
+        let g2_to_g4_settled_before = self.settled_blocks(TransferLane::G2ToG4);
         let drained = self.worker.drain_completions_summary(now_ms);
         let offload_drained = drained.local.offload_transfers;
         let offload_drained_blocks = drained.local.offload_blocks;
         let shared_g3 = drained.shared_g3.counts;
-        let current_shared_onboard_blocks = shared_g3
+        let shared_g4 = drained.shared_g4.counts;
+        let current_shared_g3_onboard_blocks = shared_g3
             .onboard_blocks
             .saturating_sub(drained.shared_g3.deferred_onboard_blocks);
-        let g2_publish_blocks =
-            offload_drained_blocks.saturating_add(current_shared_onboard_blocks);
+        let current_shared_g4_onboard_blocks = shared_g4
+            .onboard_blocks
+            .saturating_sub(drained.shared_g4.deferred_onboard_blocks);
+        let g2_publish_blocks = offload_drained_blocks
+            .saturating_add(current_shared_g3_onboard_blocks)
+            .saturating_add(current_shared_g4_onboard_blocks);
 
         // Offline replay owns a private runtime for the kvbm-engine
         // pipeline. Once drain fires transfer awaiters, give those
@@ -1052,8 +1202,10 @@ impl MockOffloadEngine {
                     now_ms,
                     offload_drained,
                     offload_drained_blocks,
-                    g3_to_g2_drained_blocks = current_shared_onboard_blocks,
+                    g3_to_g2_drained_blocks = current_shared_g3_onboard_blocks,
                     deferred_g3_to_g2_drained_blocks = drained.shared_g3.deferred_onboard_blocks,
+                    g4_to_g2_drained_blocks = current_shared_g4_onboard_blocks,
+                    deferred_g4_to_g2_drained_blocks = drained.shared_g4.deferred_onboard_blocks,
                     registrations_before = g2_registrations_before,
                     registrations_after,
                     "kvbm-offload: G2 registration barrier did not observe drained transfers"
@@ -1067,19 +1219,23 @@ impl MockOffloadEngine {
                     now_ms,
                     offload_drained_blocks,
                     expected_settled,
-                    "kvbm-offload: G1→G2 handle progress not yet visible for G2→G3 chaining"
+                    "kvbm-offload: G1→G2 handle progress not yet visible for lower-tier chaining"
                 );
             }
         }
-        let g2_to_g3_chain_blocks = self.collect_g2_to_g3_chain_blocks();
+        let g2_to_lower_chain_blocks = self.collect_g2_to_lower_chain_blocks();
 
-        if !g2_to_g3_chain_blocks.is_empty() && self.g3_manager.is_some() {
+        if !g2_to_lower_chain_blocks.is_empty()
+            && (self.g3_manager.is_some() || self.shared_g4.is_some())
+        {
             tracing::trace!(
                 now_ms,
-                blocks = g2_to_g3_chain_blocks.len(),
-                "kvbm-offload: enqueue G2→G3 background copies"
+                blocks = g2_to_lower_chain_blocks.len(),
+                g3_enabled = self.g3_manager.is_some(),
+                g4_enabled = self.shared_g4.is_some(),
+                "kvbm-offload: enqueue lower-tier background copies"
             );
-            self.enqueue_g2_to_g3_background(g2_to_g3_chain_blocks);
+            self.enqueue_lower_tier_background(g2_to_lower_chain_blocks);
         }
 
         if let (Some(g3_manager), blocks @ 1..) =
@@ -1118,18 +1274,29 @@ impl MockOffloadEngine {
                 );
             }
         }
+        if shared_g4.offload_blocks > 0 {
+            let expected_settled = g2_to_g4_settled_before.saturating_add(shared_g4.offload_blocks);
+            if !self.wait_for_pending_settled_blocks(TransferLane::G2ToG4, expected_settled) {
+                tracing::debug!(
+                    now_ms,
+                    drained_blocks = shared_g4.offload_blocks,
+                    expected_settled,
+                    "kvbm-offload: G2→G4 handle progress not yet visible after object put"
+                );
+            }
+        }
         self.cleanup_g2_to_g3_pending_handles();
+        self.cleanup_g2_to_g4_pending_handles();
         self.pump_pending_staged_swap_ins(now_ms);
     }
 
     /// Earliest transfer completion that can change offload-visible state.
     ///
-    /// G2→G3 write-through copies are background from the scheduler's matching
-    /// perspective, but they still pin G2 source blocks and hold shared G3
-    /// reservations. Offline replay must therefore drain those completions at
-    /// their DES timestamp, not at an arbitrary later arrival, otherwise G3 can
-    /// artificially reduce effective G2 capacity even when the G2→G3 link is
-    /// configured as instant.
+    /// G2→G3/G2→G4 write-through copies are background from the scheduler's
+    /// matching perspective, but they still pin G2 source blocks and may hold
+    /// shared lower-tier reservations. Offline replay must therefore drain
+    /// those completions at their DES timestamp, not at an arbitrary later
+    /// arrival.
     pub fn earliest_pending_deadline(&self) -> Option<f64> {
         self.worker.earliest_finish()
     }
@@ -1192,7 +1359,7 @@ impl MockOffloadEngine {
                 .expect("pending G1→G2 handles mutex poisoned");
             pending.push(PendingG1ToG2 {
                 handle: handle.clone(),
-                g2_to_g3_chain_blocks: evicted.iter().copied().collect(),
+                g2_to_lower_chain_blocks: evicted.iter().copied().collect(),
                 source_slots: source_slots
                     .into_iter()
                     .map(|slot| (slot.block_id(), slot))
@@ -1213,20 +1380,19 @@ impl MockOffloadEngine {
             );
         }
         if handle.is_complete() {
-            let g2_to_g3_chain_blocks = self.collect_g2_to_g3_chain_blocks();
-            if !g2_to_g3_chain_blocks.is_empty() && self.g3_manager.is_some() {
-                self.enqueue_g2_to_g3_background(g2_to_g3_chain_blocks);
-            }
+            let g2_to_lower_chain_blocks = self.collect_g2_to_lower_chain_blocks();
+            self.enqueue_lower_tier_background(g2_to_lower_chain_blocks);
             self.prune_releasable_g1_to_g2_sources();
         }
     }
 
     /// Prepare the longest lower-tier prefix without reserving G2→G1 bandwidth.
     ///
-    /// With G3 disabled this pins the currently available G2 prefix. With G3
-    /// enabled it first does a presence-only G2/G3 planning pass. If the G3
-    /// suffix can be staged into G2, it returns a deferred staging plan; if not,
-    /// it falls back to pinning only the G2 prefix that is available right now.
+    /// With only G2 configured this pins the currently available G2 prefix.
+    /// With G3/G4 configured it first does a presence-only lower-tier planning
+    /// pass. If the suffix can be staged into G2, it returns a deferred staging
+    /// plan; if not, it falls back to pinning only the G2 prefix that is
+    /// available right now.
     /// The caller must reserve destination G1 slots before passing the prepared
     /// lookup to [`start_onboard_prefix`](Self::start_onboard_prefix).
     pub(crate) fn prepare_onboard_prefix(
@@ -1237,18 +1403,18 @@ impl MockOffloadEngine {
             return None;
         }
 
-        let Some(g3_manager) = self.g3_manager.as_ref() else {
+        if self.g3_manager.is_none() && self.shared_g4.is_none() {
             let g2_blocks = self.g2_manager.match_blocks(plhs);
             if g2_blocks.is_empty() {
                 return None;
             }
             return Some(PreparedSwapIn::from_g2_blocks(plhs.len(), g2_blocks));
-        };
+        }
 
-        let lower_tier_plan = self.build_lower_tier_lookup_plan(plhs, g3_manager);
-        if lower_tier_plan.g3_stage_blocks > 0 {
+        let lower_tier_plan = self.build_lower_tier_lookup_plan(plhs);
+        if lower_tier_plan.stage_blocks() > 0 {
             let available_g2 = self.g2_manager.available_blocks();
-            let required_g2 = lower_tier_plan.g3_stage_blocks;
+            let required_g2 = lower_tier_plan.stage_blocks();
             if self
                 .g2_destination_reservations
                 .try_reserve(available_g2, required_g2)
@@ -1268,12 +1434,14 @@ impl MockOffloadEngine {
             tracing::debug!(
                 plhs_len = plhs.len(),
                 g2_prefix_blocks = lower_tier_plan.g2_prefix_blocks,
-                stage_blocks = lower_tier_plan.g3_stage_blocks,
+                g3_stage_blocks = lower_tier_plan.g3_stage_blocks,
+                g4_stage_blocks = lower_tier_plan.g4_stage_blocks,
+                stage_blocks = lower_tier_plan.stage_blocks(),
                 reservation_blocks = lower_tier_plan.reservation_blocks(),
                 available_g2,
                 required_g2,
                 reserved_g2 = self.g2_destination_reservations.reserved_blocks(),
-                "kvbm-offload: skipping G3 staging; insufficient G2 capacity"
+                "kvbm-offload: skipping lower-tier staging; insufficient G2 capacity"
             );
         }
 
@@ -1281,6 +1449,7 @@ impl MockOffloadEngine {
             tracing::debug!(
                 plhs_len = plhs.len(),
                 g3_stage_blocks = lower_tier_plan.g3_stage_blocks,
+                g4_stage_blocks = lower_tier_plan.g4_stage_blocks,
                 "kvbm-offload: lower-tier lookup MISS"
             );
             return None;
@@ -1340,7 +1509,7 @@ impl MockOffloadEngine {
                     now_ms,
                     plhs_len = requested_blocks,
                     reservation_blocks,
-                    "kvbm-offload: G3→G2 staging swap-in HIT"
+                    "kvbm-offload: lower-tier staging swap-in HIT"
                 );
                 let complete = Arc::new(AtomicBool::new(false));
                 let block_count = Arc::new(AtomicUsize::new(0));
@@ -1354,17 +1523,17 @@ impl MockOffloadEngine {
                             staging_mode: StagingMode::Full,
                         },
                     )
-                    .expect("find_matches_with_options must not fail for mocker G3 staging");
-                let reserved_or_done = self.wait_for_g3_staging_reservation_or_completion(
-                    &result,
-                    reservation_count_before,
-                );
+                    .expect(
+                        "find_matches_with_options must not fail for mocker lower-tier staging",
+                    );
+                let reserved_or_done = self
+                    .wait_for_staging_reservation_or_completion(&result, reservation_count_before);
                 if !reserved_or_done {
                     tracing::debug!(
                         now_ms,
                         plhs_len = requested_blocks,
                         reservation_blocks,
-                        "kvbm-offload: G3 staging session has not reserved transfer yet"
+                        "kvbm-offload: lower-tier staging session has not reserved transfer yet"
                     );
                 }
                 let mut pending = self
@@ -1403,6 +1572,11 @@ impl MockOffloadEngine {
     #[cfg(test)]
     pub(crate) fn g3_manager(&self) -> Option<&Arc<BlockManager<G3>>> {
         self.g3_manager.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_g4(&self) -> Option<&Arc<SharedG4Store>> {
+        self.shared_g4.as_ref()
     }
 }
 
@@ -1464,6 +1638,7 @@ fn build_g2_block_manager(
 mod tests {
     use super::*;
     use crate::kvbm_offload::shared_g3::{shared_g3_test_guard, shared_g3_test_guard_blocking};
+    use crate::kvbm_offload::shared_g4::{shared_g4_test_guard, shared_g4_test_guard_blocking};
 
     fn g3_config() -> KvbmOffloadConfig {
         KvbmOffloadConfig {
@@ -1473,6 +1648,18 @@ mod tests {
             bandwidth_g2_to_g1_gbps: 1.0,
             bandwidth_g2_to_g3_gbps: 1.0,
             bandwidth_g3_to_g2_gbps: 1.0,
+            ..Default::default()
+        }
+    }
+
+    fn g4_config() -> KvbmOffloadConfig {
+        KvbmOffloadConfig {
+            enable_g4_storage: true,
+            block_size_bytes: Some(1_000_000),
+            offload_batch_size: 4,
+            bandwidth_g2_to_g1_gbps: 1.0,
+            bandwidth_g2_to_g4_gbps: 1.0,
+            bandwidth_g4_to_g2_gbps: 1.0,
             ..Default::default()
         }
     }
@@ -1519,6 +1706,20 @@ mod tests {
         assert!(engine.engine.has_g1_to_g2());
         assert!(engine.engine.has_g2_to_g3());
         assert!(engine.g3_manager().is_some());
+        assert_eq!(engine.earliest_pending_deadline(), None);
+    }
+
+    #[tokio::test]
+    async fn mock_offload_engine_new_builds_g4_pipeline_when_enabled() {
+        let _guard = shared_g4_test_guard().await;
+        let engine = MockOffloadEngine::new(g4_config())
+            .await
+            .expect("construction should succeed");
+
+        assert!(engine.engine.has_g1_to_g2());
+        assert!(!engine.engine.has_g2_to_g3());
+        assert!(engine.engine.has_g2_to_g4());
+        assert!(engine.shared_g4().is_some());
         assert_eq!(engine.earliest_pending_deadline(), None);
     }
 
@@ -1744,7 +1945,41 @@ mod tests {
     }
 
     #[test]
-    fn g2_to_g3_background_copy_pins_g2_source_until_transfer_completes() {
+    fn g1_to_g2_completion_feeds_g4_with_object_presence_policy() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g4_test_guard_blocking();
+        let rt = single_thread_runtime();
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(g4_config()))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+        engine.tick(0.0);
+
+        let plh = PositionalLineageHash::new(6_500, None, 0);
+        engine.enqueue_g1_evictions_holding_sources(&[(0, plh)], Vec::new(), Some(0.0));
+
+        let first_deadline = engine
+            .earliest_pending_deadline()
+            .expect("G1→G2 should reserve bandwidth");
+        engine.tick(first_deadline);
+
+        let second_deadline = engine
+            .earliest_pending_deadline()
+            .expect("G2→G4 background copy should create a completion deadline");
+        engine.tick(second_deadline);
+
+        let shared_g4 = engine.shared_g4().expect("G4 enabled");
+        assert_eq!(
+            shared_g4.has_object(&plh),
+            Some(1_000_000),
+            "G2→G4 should store the block in shared object storage"
+        );
+        assert_eq!(shared_g4.object_count(), 1);
+    }
+
+    #[test]
+    fn g2_to_g3_background_copy_strong_pins_g2_source() {
         use dynamo_tokens::PositionalLineageHash;
 
         let _guard = shared_g3_test_guard_blocking();
@@ -1773,7 +2008,7 @@ mod tests {
         );
         assert!(
             engine.g2_manager.allocate_blocks(1).is_none(),
-            "in-flight G2→G3 copy must pin the G2 source block"
+            "in-flight G2→G3 mock copy should strong-pin the G2 source block"
         );
     }
 
@@ -2028,6 +2263,57 @@ mod tests {
         assert!(
             !handle.is_complete(),
             "G2→G1 transfer should start after G3 staging, not complete immediately"
+        );
+        assert_eq!(handle.block_count(), 1);
+        let second_deadline = engine
+            .earliest_pending_deadline()
+            .expect("G2→G1 onboard should reserve bandwidth after staging");
+        assert!(
+            (second_deadline - 2.0).abs() < 1e-6,
+            "second 1 MB / 1 GB/s hop should finish at 2 ms, got {second_deadline}"
+        );
+
+        engine.tick(second_deadline);
+        assert!(handle.is_complete());
+    }
+
+    #[test]
+    fn staged_g4_swap_in_runs_g4_to_g2_before_g2_to_g1() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g4_test_guard_blocking();
+        let rt = single_thread_runtime();
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(g4_config()))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+        engine.tick(0.0);
+
+        let plh = PositionalLineageHash::new(6_600, None, 0);
+        engine
+            .shared_g4()
+            .expect("G4 enabled")
+            .insert_object(plh, 1_000_000);
+
+        let prepared = engine
+            .prepare_onboard_prefix(&[plh])
+            .expect("G4 prefix match must produce a staged swap-in");
+        assert_eq!(prepared.reservation_block_count(), 1);
+        let handle = engine.start_onboard_prefix(prepared, Some(0.0));
+        assert!(!handle.is_complete());
+
+        let first_deadline = engine
+            .earliest_pending_deadline()
+            .expect("G4→G2 staging should reserve shared bandwidth");
+        assert!(
+            (first_deadline - 1.0).abs() < 1e-6,
+            "1 MB / 1 GB/s G4→G2 should finish at 1 ms, got {first_deadline}"
+        );
+
+        engine.tick(first_deadline);
+        assert!(
+            !handle.is_complete(),
+            "G2→G1 transfer should start after G4 staging, not complete immediately"
         );
         assert_eq!(handle.block_count(), 1);
         let second_deadline = engine
