@@ -40,8 +40,8 @@ require the opening tag to be present in the model output.
 
 | Parser Name | Models | Upstream name | Force-reasoning | Notes |
 |---|---|---|---|---|
-| `kimi_k25` | Kimi K2.5 | Dynamo-only | Yes | `<think>...</think>` with force-reasoning |
-| `kimi` | Kimi K2 Instruct / Thinking | Dynamo-only | No | `◁think▷...◁/think▷` |
+| `kimi_k25` | Kimi K2.5 / Kimi K2.6 format-compatible thinking models | Dynamo-only | Yes | `<think>...</think>` with force-reasoning |
+| `kimi` | Kimi K2 Instruct / Thinking with Unicode delimiters | Dynamo-only | No | `◁think▷...◁/think▷` |
 | `minimax_append_think` | MiniMax M2 / M2.1 | Dynamo-only | No | Implicit opening `<think>` prepended |
 | `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseek-v4` | No | `<think>...</think>`. Aliases: `deepseek-v4`, `deepseekv4` |
 | `deepseek_r1` | DeepSeek R1, DeepSeek V3.1, DeepSeek V3.2 | | Yes | Pass explicitly for V3.1/V3.2 (no alias) |
@@ -53,7 +53,7 @@ require the opening tag to be present in the model output.
 | `gemma4` | Google Gemma 4 (thinking models) | vLLM: `gemma4` | No | `<\|channel>thought\n...<channel\|>` with `thought\n` role label stripped. Aliases: `gemma-4` |
 | `gpt_oss` | gpt-oss-20b / -120b | Dynamo-only | No | Harmony channel reasoning format |
 | `mistral` | Magistral | | Yes | `[THINK]...[/THINK]` |
-| `granite` | Granite 3.x | | No | `Here's my thought process:` / `Here's my response:` |
+| `granite` | IBM Granite 3.x / Granite 3.2 language models | | No | `Here's my thought process:` / `Here's my response:` |
 | `step3` | Step-3 / Step-3-Reasoning | Dynamo-only | Yes | `<think>...</think>` |
 | `basic` | Generic CoT models | Dynamo-only | No | Plain `<think>...</think>` |
 
@@ -64,7 +64,7 @@ Some models need both parsers configured together. Common pairings include:
 - `openai/gpt-oss-*`: `--dyn-tool-call-parser harmony --dyn-reasoning-parser gpt_oss`
 - `deepseek-ai/DeepSeek-V4-*`: `--dyn-tool-call-parser deepseek_v4 --dyn-reasoning-parser deepseek_v4`
 - `zai-org/GLM-4.7`: `--dyn-tool-call-parser glm47 --dyn-reasoning-parser glm45`
-- `moonshotai/Kimi-K2.5*`: `--dyn-tool-call-parser kimi_k2 --dyn-reasoning-parser kimi_k25`
+- `moonshotai/Kimi-K2.5*` / Kimi K2.6 format-compatible outputs: `--dyn-tool-call-parser kimi_k2 --dyn-reasoning-parser kimi_k25`
 - `google/gemma-4-*` thinking models: `--dyn-tool-call-parser gemma4 --dyn-reasoning-parser gemma4 --custom-jinja-template examples/chat_templates/gemma4_tool.jinja`
 - `Qwen/Qwen3.5*`: `--dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3`
 - MiniMax M2.1 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_append_think`

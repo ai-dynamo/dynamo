@@ -33,7 +33,7 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
-async def parse_tool_call(
+async def parse_tool_calls_batch(
     parser_name: str,
     message: str,
     tools_json: Optional[str] = None,
@@ -55,6 +55,52 @@ async def parse_tool_call(
 
     Raises:
         ValueError on parser failure or malformed `tools_json`.
+    """
+    ...
+
+async def parse_tool_calls_stream(
+    parser_name: str,
+    chunks_json: str,
+    tools_json: Optional[str] = None,
+) -> str:
+    """Parse streamed tool-call chunks using the specified parser.
+
+    Args:
+        parser_name: Parser name (e.g. "kimi_k2"). Empty string falls back to default.
+        chunks_json: JSON-serialized list of chunks with `delta_text` and optional `finish_reason`.
+        tools_json: Optional JSON-serialized list of tool definitions.
+
+    Returns:
+        JSON-serialized string `{"calls": [{"name", "arguments"}], "normal_text": str}`.
+
+    Raises:
+        ValueError on parser failure or malformed JSON.
+    """
+    ...
+
+def parse_reasoning_batch(
+    parser_name: str,
+    message: str,
+    token_ids: Optional[List[int]] = None,
+    in_reasoning: bool = False,
+) -> str:
+    """Parse reasoning from a complete model output string using the specified parser.
+
+    Returns:
+        JSON-serialized string `{"reasoning_text": str, "normal_text": str}`.
+    """
+    ...
+
+def parse_reasoning_stream(
+    parser_name: str,
+    chunks: List[str],
+    token_chunks: Optional[List[List[int]]] = None,
+    in_reasoning: bool = False,
+) -> str:
+    """Parse reasoning from streaming chunks using one stateful parser instance.
+
+    Returns:
+        JSON-serialized string with accumulated `reasoning_text` and `normal_text`.
     """
     ...
 
@@ -479,6 +525,75 @@ class Context:
         """
         ...
 
+    def trace_headers(self) -> Optional[dict[str, str]]:
+        """
+        Build W3C trace headers for propagating to downstream inference engines.
+
+        Returns:
+            ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
+            carries trace context, ``None`` otherwise. Also emits ``tracestate``,
+            ``x-request-id``, ``request-id`` when upstream propagated them.
+            Forward unchanged to the inference engine's ``trace_headers`` kwarg.
+        """
+        ...
+
+    def current_span(self) -> "SpanProxy":
+        """
+        Handle on the framework's ``engine.generate`` span. Use it to
+        ``set_attribute`` / ``add_event`` / ``set_status`` on the parent
+        span. Returns a silent no-op proxy when no parent was plumbed in
+        (test contexts) or the OTel bridge isn't installed.
+
+        Engines normally reach this through
+        ``dynamo.common.backend.telemetry.current_span(context)``.
+        """
+        ...
+
+    def start_span(
+        self, name: str, attrs: Optional[dict[str, Any]] = None
+    ) -> "SpanProxy":
+        """
+        Open a child span under ``engine.generate`` with a dynamic name.
+        The returned ``SpanProxy`` is a context manager — the span ends on
+        ``__exit__`` / ``close()`` / drop.
+
+        Engines normally reach this through
+        ``dynamo.common.backend.telemetry.start_span(context, name)``.
+        """
+        ...
+
+class SpanProxy:
+    """
+    Unified span handle returned by ``Context.current_span()`` (the
+    framework auto-span) and ``Context.start_span()`` (child spans).
+    Mirrors the OTel ``Span`` API: ``set_attribute`` / ``add_event`` /
+    ``set_status``. Usable as a Python context manager (closes on
+    ``__exit__``). All methods are silent no-ops when the underlying
+    span is absent.
+    """
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        """Set an attribute on the span. Any key is accepted; OTel imposes
+        no pre-declaration constraint."""
+        ...
+
+    def add_event(self, name: str, attrs: Optional[dict[str, Any]] = None) -> None:
+        """Emit a structured event on the span."""
+        ...
+
+    def set_status(self, status: str, description: Optional[str] = None) -> None:
+        """Set the span's status. ``status`` is ``"ok"`` or ``"error"``;
+        ``description`` is optional context (typically a short error name)."""
+        ...
+
+    def close(self) -> None:
+        """End the underlying span (child spans only — no-op for the
+        auto-span). Idempotent."""
+        ...
+
+    def __enter__(self) -> "SpanProxy": ...
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool: ...
+
 class WorkerMetricsPublisher:
     """
     A metrics publisher will provide metrics to the router for load monitoring.
@@ -562,6 +677,10 @@ class ModelRuntimeConfig:
     taints: Set[str]
     stable_routing_id: str | None
     runtime_data: dict[str, Any]
+    topology_domains: dict[str, str]
+    kv_transfer_domain: str | None
+    kv_transfer_enforcement: str | None
+    kv_transfer_preferred_weight: float | None
     tensor_model_config: Any | None
     bootstrap_host: str | None
     bootstrap_port: int | None
@@ -1278,7 +1397,7 @@ class ModelInput:
 
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime or Prefill"""
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
@@ -1287,6 +1406,7 @@ class ModelType:
     Images: ModelType
     Audios: ModelType
     Videos: ModelType
+    Realtime: ModelType
 
     def __or__(self, other: ModelType) -> ModelType:
         ...
@@ -1378,6 +1498,7 @@ class KvRouterConfig:
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
+        router_queue_by_incoming_missing_isl: Optional[list[tuple[int, int]]] = None,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1412,6 +1533,19 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
+            router_queue_by_incoming_missing_isl: Tiered per-worker pending ISL token caps
+                keyed on the request's incoming missing ISL
+                (ISL minus best cached tokens across eligible workers). Each
+                entry is a `(missing_isl_floor, max_isl_tokens)` tuple; the
+                tier with the highest matched floor wins. The cap is multiplied
+                by worker count to get the total ISL token limit. The list must:
+                  * be non-empty, start with `missing_isl_floor == 0`,
+                    be strictly ascending in floor, and have
+                    `max_isl_tokens > 0` for each tier.
+                The cap is compared against the sum of ISL tokens for all requests
+                currently parked in the pending queue.
+                `None` disables ISL-token capping entirely (unbounded queue cap).
+                Backpressure (ResourceExhausted) is returned when the cap is reached.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
@@ -2589,6 +2723,7 @@ class backend:
             metrics_labels: List[Tuple[str, str]] = ...,
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
+            health_check_payload: Optional[Dict[str, Any]] = None,
         ) -> None: ...
 
     class Worker:

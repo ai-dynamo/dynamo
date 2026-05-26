@@ -5,6 +5,7 @@ inputs:
   kubeconfig_base64:
     description: 'Base64-encoded kubeconfig for host cluster access'
     required: true
+    default: ''
   vcluster_name:
     description: 'Name of the vCluster to look for'
     required: true
@@ -30,9 +31,11 @@ runs:
         VCLUSTER_NAME: ${{ inputs.vcluster_name }}
         NAMESPACE: ${{ inputs.vcluster_namespace }}
       run: |
-        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > /tmp/host-kubeconfig
-        chmod 600 /tmp/host-kubeconfig
-        export KUBECONFIG=/tmp/host-kubeconfig
+        if [ -n "${{ inputs.kubeconfig_base64 }}" ]; then
+          echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > /tmp/host-kubeconfig
+          chmod 600 /tmp/host-kubeconfig
+          export KUBECONFIG=/tmp/host-kubeconfig
+        fi
         RESULT=$(vcluster list --output json -n ${NAMESPACE})
         if echo "$RESULT" | jq -e 'arrays | map(select(.Name == "'"${VCLUSTER_NAME}"'")) | length > 0' &>/dev/null; then
           echo "exists=true" >> $GITHUB_OUTPUT

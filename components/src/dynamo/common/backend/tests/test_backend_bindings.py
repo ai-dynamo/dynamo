@@ -33,9 +33,15 @@ backend = pytest.importorskip(
 
 
 def test_module_exposes_expected_classes():
-    """The four binding classes must all be importable as top-level
+    """The five binding classes must all be importable as top-level
     attributes of ``dynamo._core.backend``."""
-    for name in ("Worker", "WorkerConfig", "EngineConfig", "RuntimeConfig"):
+    for name in (
+        "Worker",
+        "WorkerConfig",
+        "EngineConfig",
+        "RuntimeConfig",
+        "EngineMetrics",
+    ):
         assert hasattr(backend, name), f"missing {name} on dynamo._core.backend"
 
 

@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen3_coder
+mode: batch
+cases:
+  TOOLCALLING.batch.5.a:
+    description: Missing </tool_call> end marker
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_qwen3coder_tool_parser.py#L401
+    model_text: |-
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      NYC
+      </parameter>
+      </function>
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  TOOLCALLING.batch.5.b:
+    description: Closing </tool_call> without matching <tool_call> open
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_qwen3coder_tool_parser.py#L943
+    model_text: |-
+      <function=get_weather>
+      <parameter=location>
+      NYC
+      </parameter>
+      </function>
+      </tool_call>
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''
+        reason: impl-defined recovery contract (see TOOLCALLING_CASES.md)
+      sglang:
+        calls: []
+        normal_text: |-
+          <function=get_weather>
+          <parameter=location>
+          NYC
+          </parameter>
+          </function>
+          </tool_call>
+        reason: |-
+          SGLang's qwen3_coder detector gates parsing on the opening
+          <tool_call> sentinel (`if tool_call_start_token not in text: return
+          normal_text=text`); a bare </tool_call> close with a valid <function>
+          body short-circuits to zero calls and the full text as normal_text.
+          Dynamo/vLLM tolerate the missing open and extract the <function> body
+          per impl-defined recovery contract (see TOOLCALLING_CASES.md).
+  TOOLCALLING.batch.5.c:
+    description: Truncation mid-parameter value
+    ref: dynamo
+    model_text: |-
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      NY
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
+      vllm: *id003
+      sglang: *id003
+  TOOLCALLING.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      Boston
+      </parameter>
+      </function>
+      </tool_call>
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      New York
+      </parameter>
+      </function>
+    tools:
+    - *id002
+    expected:
+      dynamo: &id004
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm: *id004
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+        reason: |-
+          SGLang's non-streaming path uses `re.compile(r"<tool_call>(.*?)</tool_call>")`
+          which requires a matching </tool_call> close; an unterminated trailing
+          <tool_call> (even with a complete <function> body) is silently dropped.
+          Dynamo/vLLM recover the trailing call and emit it.
+  TOOLCALLING.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      Boston
+      </parameter>
+      </function>
+      </tool_call>
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      New York
+    tools:
+    - *id002
+    expected:
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm: *id005
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+        reason: |-
+          Same root cause as 5.d: SGLang's `<tool_call>(.*?)</tool_call>` regex
+          requires the closing sentinel, so the trailing call truncated mid-arg
+          value is dropped. Dynamo/vLLM recover the partial value
+          (location='New York') and emit the call.

@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -97,6 +98,14 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 
 	// Validate volume mounts
 	if err := v.validateVolumeMounts(); err != nil {
+		return nil, err
+	}
+
+	if err := v.validateCheckpointConfig(); err != nil {
+		return nil, err
+	}
+
+	if err := v.validateGMSClientContainerNames(); err != nil {
 		return nil, err
 	}
 
@@ -171,6 +180,72 @@ func (v *SharedSpecValidator) validateVolumeMount(index int, volumeMount *nvidia
 	// If useAsCompilationCache is false, mountPoint is required
 	if !volumeMount.UseAsCompilationCache && volumeMount.MountPoint == "" {
 		return fmt.Errorf("%s.volumeMounts[%d].mountPoint is required when useAsCompilationCache is false", v.fieldPath, index)
+	}
+	return nil
+}
+
+func (v *SharedSpecValidator) validateCheckpointConfig() error {
+	if v.spec.Checkpoint == nil {
+		return nil
+	}
+	if v.spec.Checkpoint.Job != nil &&
+		v.spec.Checkpoint.CheckpointRef != nil &&
+		*v.spec.Checkpoint.CheckpointRef != "" {
+		return fmt.Errorf("%s.checkpoint.job cannot be set when checkpointRef is specified", v.fieldPath)
+	}
+	if v.spec.Checkpoint.Job != nil &&
+		v.spec.Checkpoint.Mode != "" &&
+		v.spec.Checkpoint.Mode != nvidiacomv1alpha1.CheckpointModeAuto {
+		return fmt.Errorf("%s.checkpoint.job can only be set in Auto mode", v.fieldPath)
+	}
+	if v.spec.Checkpoint.TargetContainerName != "" {
+		if errs := k8svalidation.IsDNS1123Label(v.spec.Checkpoint.TargetContainerName); len(errs) > 0 {
+			return fmt.Errorf(
+				"%s.checkpoint.targetContainerName %q is not a valid Kubernetes container name: %s",
+				v.fieldPath,
+				v.spec.Checkpoint.TargetContainerName,
+				strings.Join(errs, "; "),
+			)
+		}
+	}
+	if v.spec.Checkpoint.Job != nil {
+		if len(v.spec.Checkpoint.Job.GMSClientContainers) > 0 {
+			if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+				return fmt.Errorf("%s.checkpoint.job.gmsClientContainers requires gpuMemoryService to be enabled", v.fieldPath)
+			}
+			if v.spec.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+				return fmt.Errorf("%s.checkpoint.job.gmsClientContainers is only supported with gpuMemoryService.mode=IntraPod", v.fieldPath)
+			}
+		}
+		for i, name := range v.spec.Checkpoint.Job.GMSClientContainers {
+			if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
+				return fmt.Errorf(
+					"%s.checkpoint.job.gmsClientContainers[%d] %q is not a valid Kubernetes container name: %s",
+					v.fieldPath,
+					i,
+					name,
+					strings.Join(errs, "; "),
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func (v *SharedSpecValidator) validateGMSClientContainerNames() error {
+	if v.spec.GPUMemoryService == nil {
+		return nil
+	}
+	for i, name := range v.spec.GPUMemoryService.ExtraClientContainers {
+		if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
+			return fmt.Errorf(
+				"%s.gpuMemoryService.extraClientContainers[%d] %q is not a valid Kubernetes container name: %s",
+				v.fieldPath,
+				i,
+				name,
+				strings.Join(errs, "; "),
+			)
+		}
 	}
 	return nil
 }
