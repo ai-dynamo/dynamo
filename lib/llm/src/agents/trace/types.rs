@@ -193,15 +193,14 @@ impl FinishReasonMetadata {
             return &mut self.choices[position];
         }
 
+        let position = self.choices.len();
         self.choices.push(ChoiceFinishReasonMetadata {
             choice_index,
             finish_reason: None,
             backend_finish_reason: None,
             stop_reason: None,
         });
-        self.choices
-            .last_mut()
-            .expect("choice metadata was just pushed")
+        &mut self.choices[position]
     }
 }
 

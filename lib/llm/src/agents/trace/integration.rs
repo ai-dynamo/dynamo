@@ -29,10 +29,13 @@ use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
 };
 
-pub(crate) type SharedFinishReasonMetadata = Arc<Mutex<FinishReasonMetadataState>>;
+#[derive(Clone, Debug, Default)]
+pub struct SharedFinishReasonMetadata {
+    state: Arc<Mutex<FinishReasonMetadataState>>,
+}
 
 #[derive(Debug, Default)]
-pub(crate) struct FinishReasonMetadataState {
+struct FinishReasonMetadataState {
     metadata: FinishReasonMetadata,
     pending_tool_calls: HashMap<(u32, u32), PendingToolCallMetadata>,
 }
@@ -41,7 +44,12 @@ pub(crate) struct FinishReasonMetadataState {
 struct PendingToolCallMetadata {
     id: Option<String>,
     name: Option<String>,
-    has_arguments: bool,
+}
+
+impl SharedFinishReasonMetadata {
+    fn lock(&self) -> parking_lot::MutexGuard<'_, FinishReasonMetadataState> {
+        self.state.lock()
+    }
 }
 
 impl FinishReasonMetadataState {
@@ -82,7 +90,6 @@ impl FinishReasonMetadataState {
         tool_call_index: u32,
         id: Option<&str>,
         name: Option<&str>,
-        arguments_present: bool,
     ) {
         let pending = self
             .pending_tool_calls
@@ -94,9 +101,8 @@ impl FinishReasonMetadataState {
         if let Some(name) = name {
             pending.name = Some(name.to_string());
         }
-        pending.has_arguments |= arguments_present;
 
-        if pending.name.is_some() && pending.has_arguments {
+        if pending.id.is_some() || pending.name.is_some() {
             self.metadata.record_tool_call(ToolCallMetadata {
                 choice_index,
                 tool_call_index,
@@ -214,7 +220,7 @@ pub(crate) fn build_agent_trace_request_end_state(
         request_tracker: tracker.clone(),
         x_request_id,
         replay_metrics: super::request_replay_metrics(&common_request.token_ids, trace_block_size),
-        finish_reason_metadata: Arc::new(Mutex::new(FinishReasonMetadataState::default())),
+        finish_reason_metadata: SharedFinishReasonMetadata::default(),
     })
 }
 
@@ -270,7 +276,6 @@ fn record_chat_finish_reason_metadata(
                 tool_call.index,
                 tool_call.id.as_deref(),
                 function.and_then(|function| function.name.as_deref()),
-                function.is_some_and(|function| function.arguments.is_some()),
             );
         }
     }
@@ -525,11 +530,10 @@ fn tool_events_namespace(local_model: &LocalModel) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, thread, time::Duration};
+    use std::{thread, time::Duration};
 
     use dynamo_runtime::protocols::annotated::Annotated;
     use futures::StreamExt;
-    use parking_lot::Mutex;
 
     use crate::agents::context::AgentContext;
     use crate::agents::trace::TraceEventType;
@@ -548,7 +552,7 @@ mod tests {
     };
 
     use super::{
-        AgentTraceRequestEndState, FinishReasonMetadataState,
+        AgentTraceRequestEndState, SharedFinishReasonMetadata,
         record_backend_finish_reason_metadata, request_metrics,
         wrap_agent_trace_chat_request_end_stream, wrap_agent_trace_completion_request_end_stream,
     };
@@ -633,7 +637,7 @@ mod tests {
         super::super::BUS.init(16);
         let mut rx = super::super::BUS.subscribe();
 
-        let finish_reason_metadata = Arc::new(Mutex::new(FinishReasonMetadataState::default()));
+        let finish_reason_metadata = SharedFinishReasonMetadata::default();
         record_backend_finish_reason_metadata(
             Some(&finish_reason_metadata),
             Some(0),
@@ -697,15 +701,7 @@ mod tests {
                         delta: ChatCompletionStreamResponseDelta {
                             content: None,
                             function_call: None,
-                            tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
-                                index: 0,
-                                id: None,
-                                r#type: None,
-                                function: Some(FunctionCallStream {
-                                    name: None,
-                                    arguments: Some(r#"{"q":"weather"}"#.to_string()),
-                                }),
-                            }]),
+                            tool_calls: None,
                             role: None,
                             refusal: None,
                             reasoning_content: None,
@@ -779,7 +775,7 @@ mod tests {
         super::super::BUS.init(16);
         let mut rx = super::super::BUS.subscribe();
 
-        let finish_reason_metadata = Arc::new(Mutex::new(FinishReasonMetadataState::default()));
+        let finish_reason_metadata = SharedFinishReasonMetadata::default();
         record_backend_finish_reason_metadata(
             Some(&finish_reason_metadata),
             Some(0),
