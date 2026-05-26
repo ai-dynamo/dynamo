@@ -1160,9 +1160,16 @@ impl ConditionalDisaggCoordinator {
         // If install fails, roll back coordinator state and close the
         // session — the wrapper has not yet committed to returning
         // (Some(N), true) for this request, so we abort cleanly.
+        //
+        // Order: close session, then remove from `states`. Matches the
+        // canonical `cleanup_failed_request` teardown order
+        // (close → remove); keeps observer semantics uniform across all
+        // rollback paths so any consumer of `states[request_id]` sees
+        // either {live state + live session} or {no state} but never a
+        // {live state + already-removed Arc<Session>} transient.
         if let Err(err) = install_payload(request_id) {
-            self.states.remove(request_id);
             session.close(Some(format!("payload install failed: {err}")));
+            self.states.remove(request_id);
             return Err(err);
         }
 
