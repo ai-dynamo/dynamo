@@ -13,7 +13,7 @@ Dynamo supports serving diffusion models across multiple backends, enabling gene
 
 | Modality | vLLM-Omni | SGLang | TRT-LLM |
 |----------|-----------|--------|---------|
-| Text-to-Text | ✅ | ✅ | ❌ |
+| Text-to-Text | ❌ | ✅ | ❌ |
 | Text-to-Image | ✅ | ✅ | ✅ |
 | Text-to-Video | ✅ | ✅ | ✅ |
 | Image-to-Video | ✅ | ❌ | ❌ |

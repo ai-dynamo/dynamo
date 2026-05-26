@@ -1193,6 +1193,16 @@ mod tests {
     }
 
     #[test]
+    fn test_into_chat_completion_preserves_omitted_max_output_tokens() {
+        let mut response_req = make_response_with_input("hi there");
+        response_req.inner.max_output_tokens = None;
+
+        let nv_req: NvCreateChatCompletionRequest = response_req.try_into().unwrap();
+
+        assert_eq!(nv_req.inner.max_completion_tokens, None);
+    }
+
+    #[test]
     fn test_store_mapped_to_chat_completion_request() {
         let mut req = make_response_with_input("audit me");
         req.inner.store = Some(true);

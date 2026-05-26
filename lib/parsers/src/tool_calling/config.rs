@@ -391,7 +391,10 @@ impl ToolCallConfig {
     pub fn harmony() -> Self {
         Self {
             parser_config: ParserConfig::Harmony(JsonParserConfig {
-                tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
+                tool_call_start_tokens: vec![
+                    "<|start|>assistant<|channel|>commentary".to_string(),
+                    "<|channel|>commentary".to_string(),
+                ],
                 tool_call_end_tokens: vec!["<|call|>".to_string()],
                 ..Default::default()
             }),

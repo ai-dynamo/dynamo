@@ -14,6 +14,7 @@ use crate::{
     kv_router::{KvRouter, PrefillRouter},
     model_card::ModelDeploymentCard,
     types::{
+        RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
         openai::{
             audios::OpenAIAudiosStreamingEngine,
@@ -44,6 +45,7 @@ pub struct WorkerSet {
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
+    pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
 
     /// KV router for this set's workers (if KV mode)
     pub(crate) kv_router: Option<Arc<KvRouter>>,
@@ -73,6 +75,7 @@ impl WorkerSet {
             videos_engine: None,
             audios_engine: None,
             tensor_engine: None,
+            realtime_engine: None,
             kv_router: None,
             worker_monitor: None,
             prefill_router: None,
@@ -120,6 +123,10 @@ impl WorkerSet {
         self.tensor_engine.is_some()
     }
 
+    pub fn has_realtime_engine(&self) -> bool {
+        self.realtime_engine.is_some()
+    }
+
     /// Whether this set has any decode engine (chat or completions)
     pub fn has_decode_engine(&self) -> bool {
         self.has_chat_engine() || self.has_completions_engine()
@@ -133,6 +140,7 @@ impl WorkerSet {
             && !self.has_videos_engine()
             && !self.has_audios_engine()
             && !self.has_tensor_engine()
+            && !self.has_realtime_engine()
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
@@ -173,6 +181,22 @@ impl WorkerSet {
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+    use crate::types::Annotated;
+    use crate::types::generic::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
+    use crate::types::openai::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
+    use crate::types::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+    };
+    use crate::types::openai::completions::{
+        NvCreateCompletionRequest, NvCreateCompletionResponse,
+    };
+    use crate::types::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
+    use crate::types::openai::images::{NvCreateImageRequest, NvImagesResponse};
+    use crate::types::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
+    use async_trait::async_trait;
+    use dynamo_runtime::engine::AsyncEngine;
+    use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
+    use std::marker::PhantomData;
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
         WorkerSet::new(
@@ -180,6 +204,30 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    /// Generic stub satisfying any `ServerStreamingEngine<Req, Annotated<Resp>>` trait
+    /// object. `generate` is unreachable: the stub exists only to populate typed engine
+    /// slots on `WorkerSet` so `is_prefill_set`'s exclusion logic can be exercised per
+    /// field. `Req` / `Resp` are inferred from the assignment-site engine alias.
+    struct StubEngine<Req, Resp>(PhantomData<fn() -> (Req, Resp)>);
+
+    impl<Req, Resp> StubEngine<Req, Resp> {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(PhantomData))
+        }
+    }
+
+    #[async_trait]
+    impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
+        for StubEngine<Req, Resp>
+    where
+        Req: dynamo_runtime::engine::Data,
+        Resp: dynamo_runtime::engine::Data,
+    {
+        async fn generate(&self, _req: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
+            unimplemented!("stub for is_prefill_set classification tests only")
+        }
     }
 
     #[test]
@@ -196,9 +244,82 @@ mod tests {
         assert!(!ws.has_completions_engine());
         assert!(!ws.has_embeddings_engine());
         assert!(!ws.has_images_engine());
+        assert!(!ws.has_videos_engine());
+        assert!(!ws.has_audios_engine());
         assert!(!ws.has_tensor_engine());
+        assert!(!ws.has_realtime_engine());
         assert!(!ws.has_decode_engine());
         assert!(ws.is_prefill_set());
+    }
+
+    /// `is_prefill_set` must exclude every serving-engine field on `WorkerSet`. If a new
+    /// engine variant is added without updating `is_prefill_set`, a worker that registers
+    /// only that engine would be misclassified as prefill — silent and easy to miss in
+    /// integration tests. This walks each engine in isolation so the failing arm names
+    /// itself.
+    #[test]
+    fn test_any_serving_engine_excludes_prefill() {
+        macro_rules! check {
+            ($field:ident, $has:ident, $engine:expr, $label:literal) => {{
+                let mut ws = make_worker_set("ns1", "abc123");
+                ws.$field = Some($engine);
+                assert!(ws.$has());
+                assert!(
+                    !ws.is_prefill_set(),
+                    concat!($label, "-only WorkerSet must not be classified as prefill")
+                );
+            }};
+        }
+
+        check!(
+            chat_engine,
+            has_chat_engine,
+            StubEngine::<NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse>::new(
+            ),
+            "chat"
+        );
+        check!(
+            completions_engine,
+            has_completions_engine,
+            StubEngine::<NvCreateCompletionRequest, NvCreateCompletionResponse>::new(),
+            "completions"
+        );
+        check!(
+            embeddings_engine,
+            has_embeddings_engine,
+            StubEngine::<NvCreateEmbeddingRequest, NvCreateEmbeddingResponse>::new(),
+            "embeddings"
+        );
+        check!(
+            images_engine,
+            has_images_engine,
+            StubEngine::<NvCreateImageRequest, NvImagesResponse>::new(),
+            "images"
+        );
+        check!(
+            videos_engine,
+            has_videos_engine,
+            StubEngine::<NvCreateVideoRequest, NvVideosResponse>::new(),
+            "videos"
+        );
+        check!(
+            audios_engine,
+            has_audios_engine,
+            StubEngine::<NvCreateAudioSpeechRequest, NvAudioSpeechResponse>::new(),
+            "audios"
+        );
+        check!(
+            tensor_engine,
+            has_tensor_engine,
+            StubEngine::<NvCreateTensorRequest, NvCreateTensorResponse>::new(),
+            "tensor"
+        );
+        check!(
+            realtime_engine,
+            has_realtime_engine,
+            Arc::new(crate::engines::EchoBidirectionalEngine),
+            "realtime"
+        );
     }
 
     #[test]

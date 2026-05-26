@@ -2038,19 +2038,14 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "opentelemetry",
+ "parking_lot",
+ "prometheus",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-opentelemetry",
-]
-
-[[package]]
-name = "dynamo-config"
-version = "1.2.0"
-dependencies = [
- "anyhow",
 ]
 
 [[package]]
@@ -2121,7 +2116,6 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2244,7 +2238,6 @@ name = "dynamo-parsers"
 version = "1.2.0"
 dependencies = [
  "anyhow",
- "dynamo-protocols",
  "num-traits",
  "openai-harmony",
  "regex",
@@ -2285,6 +2278,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-parsers",
+ "dynamo-protocols",
  "dynamo-runtime",
  "futures",
  "once_cell",
@@ -2326,7 +2320,6 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
- "dynamo-config",
  "educe",
  "either",
  "etcd-client",
@@ -2380,6 +2373,8 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake3",
+ "dashmap",
  "fastokens",
  "rayon",
  "rustc-hash 1.1.0",
@@ -2663,9 +2658,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d32240c0737afda27afb5c55c5e56b24b0d9e7d5058bf7f61898d83e9f01e32"
+checksum = "796a262ed47d1458a4b40d0ed831c927e6f54d5b9c1de2683bb4ac9b04f4c7cc"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
