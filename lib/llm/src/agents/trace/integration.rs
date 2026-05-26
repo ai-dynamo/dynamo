@@ -79,7 +79,7 @@ impl FinishReasonMetadataState {
         choice_index: u32,
         finish_reason: dynamo_protocols::types::FinishReason,
     ) {
-        self.metadata.finish_reason = Some(finish_reason.clone());
+        self.metadata.finish_reason = Some(finish_reason);
         self.metadata
             .record_choice_finish_reason(choice_index, finish_reason);
     }
@@ -263,7 +263,7 @@ fn record_chat_finish_reason_metadata(
     let mut metadata = finish_reason_metadata.lock();
     for choice in &data.inner.choices {
         if let Some(finish_reason) = choice.finish_reason.as_ref() {
-            metadata.record_choice_finish_reason(choice.index, finish_reason.clone());
+            metadata.record_choice_finish_reason(choice.index, *finish_reason);
         }
 
         let Some(tool_calls) = choice.delta.tool_calls.as_ref() else {
