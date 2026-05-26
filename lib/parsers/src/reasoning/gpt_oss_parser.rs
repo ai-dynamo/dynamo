@@ -365,7 +365,7 @@ impl ReasoningParser for GptOssReasoningParser {
 mod tests {
     use super::*;
 
-    #[test] // REASONING.batch.2.c, PARSER.harmony.1
+    #[test] // REASONING.batch.2.c, TOOLCALLING.harmony.1
     fn test_gpt_oss_reasoning_parser() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
@@ -377,7 +377,7 @@ mod tests {
         );
     }
 
-    #[test] // REASONING.stream.2.a, REASONING.batch.2.c, PARSER.harmony.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c, TOOLCALLING.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let chunks = vec![
@@ -401,7 +401,7 @@ mod tests {
         );
     }
 
-    #[test] // REASONING.stream.2.a, REASONING.batch.2.c, PARSER.harmony.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c, TOOLCALLING.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming_chunked() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let enc = get_harmony_encoding()
@@ -430,7 +430,7 @@ mod tests {
         );
     }
 
-    #[test] // REASONING.batch.3.a, PARSER.harmony.1
+    #[test] // REASONING.batch.3.a, TOOLCALLING.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming_variable_length_chunks() {
         let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
         let enc = get_harmony_encoding()
