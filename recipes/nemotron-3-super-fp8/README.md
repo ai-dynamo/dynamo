@@ -162,4 +162,4 @@ These recipes target Dynamo v1.0.0. To run on v0.9.1 containers, the following c
 - **Disaggregated mode**: Supported with TRT-LLM via UCX (`trtllm/disagg`) and SGLang via nixl or mooncake (`sglang/disagg`). Not supported with vLLM due to hybrid KV cache incompatibilities. TRT-LLM disagg requires UCX because NIXL/MOONCAKE cannot transfer Mamba SSM state.
 - **Storage class**: Update `storageClassName` in `model-cache/model-cache.yaml` before deploying.
 - **Model size**: ~240GB download; expect 30-60 minutes depending on bandwidth.
-- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers. Disable this variable on nodes with less than 64 GB of available memory.
+- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers (see [XET download buffers](https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers)). On machines with lower memory footprints, set `HF_XET_HIGH_PERFORMANCE=0` instead — this caps the reconstruction buffer at 8 GB.
