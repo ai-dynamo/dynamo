@@ -1294,6 +1294,20 @@ class HttpService:
         """
         ...
 
+    async def start_discovery_watcher(self, runtime: DistributedRuntime) -> None:
+        """
+        Spawn a background discovery watcher tied to the given runtime.
+
+        The watcher pulls model deployment cards out of the runtime's
+        discovery store and registers the matching typed engines (chat,
+        completions, realtime, etc.) on this service's model manager. It
+        runs until the runtime's primary cancellation token fires. This
+        is the wiring a full LLM frontend uses internally; tests use it
+        to exercise the realtime path against a worker that registers a
+        `ModelType::Realtime + ModelInput::Text` card via `register_model`.
+        """
+        ...
+
     def shutdown(self) -> None:
         """
         Shutdown the HTTP service by cancelling its internal token.
