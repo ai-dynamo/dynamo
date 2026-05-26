@@ -12,6 +12,7 @@
 //! the live runtime.
 
 use dynamo_kv_router::config::RouterConfigOverride;
+use dynamo_kv_router::protocols::RouterBackpressureReason;
 
 // Re-export so existing intra-module imports (`use super::types::*`) keep
 // working without each call site having to know the policy module moved.
@@ -45,8 +46,13 @@ pub enum PrefillError {
 pub(super) enum PrefillOutcome {
     /// Bootstrap optimization: prefill spawned in background, bootstrap info ready
     Bootstrap(BootstrapInfo),
-    /// Synchronous prefill completed with result
-    Completed(PrefillResult),
+    /// Synchronous prefill completed with result. `worker_link` carries the
+    /// prefill worker's `engine.generate` span pointer for the decode side
+    /// to render as an OTel `Link` via `PreprocessedRequest.migration_link`.
+    Completed {
+        result: PrefillResult,
+        worker_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+    },
 }
 
 pub(super) enum PrefillResolveDecision {
@@ -58,6 +64,29 @@ pub(super) enum PrefillResolveDecision {
     Unavailable,
     NotActivated,
     NoBootstrapEndpoint,
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
+}
+
+/// Structured outcome from `PrefillRouter::query_prefill_worker`.
+///
+/// Backpressure is surfaced as a variant rather than being collapsed into a
+/// generic error so callers (Rust resolve_prefill_worker, C FFI shim) can
+/// distinguish a queue-saturation reject from an ordinary lookup failure and
+/// translate it into a retryable signal upstream.
+pub enum PrefillQueryOutcome {
+    Routed {
+        worker_id: u64,
+        dp_rank: Option<u32>,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
 }
 
 pub(super) fn build_decode_router_override(

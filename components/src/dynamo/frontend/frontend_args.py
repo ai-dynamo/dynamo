@@ -161,7 +161,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             )
         if self.conditional_prefill_enabled and self.router_mode != "kv":
             raise ValueError("--router-conditional-prefill requires --router-mode=kv")
-        self.apply_no_admission_control()
+        self.apply_admission_control()
 
 
 @register_encoder(FrontendConfig)

@@ -78,6 +78,25 @@ const (
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
+	// KV transfer policy env vars (worker) — injected when
+	// spec.experimental.kvTransferPolicy is configured. Workers publish these
+	// in their MDC so the router reads policy per-worker rather than from its
+	// own env.
+	EnvKvTransferDomain          = "DYN_KV_TRANSFER_DOMAIN"
+	EnvKvTransferEnforcement     = "DYN_KV_TRANSFER_ENFORCEMENT"
+	EnvKvTransferPreferredWeight = "DYN_KV_TRANSFER_PREFERRED_WEIGHT"
+
+	// Topology env vars (worker) injected when
+	// spec.experimental.kvTransferPolicy is configured.
+	EnvTopologyEnabled   = "DYN_TOPOLOGY_ENABLED"
+	EnvTopologyMountPath = "DYN_TOPOLOGY_MOUNT_PATH"
+
+	// KubeAnnotationTopologyLabelKey is set on worker pods when
+	// spec.experimental.kvTransferPolicy.labelKey is configured. The topology
+	// label controller watches for pods with this annotation and copies the
+	// corresponding node label onto the pod after scheduling.
+	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
+
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
 	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"

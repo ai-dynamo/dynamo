@@ -12,16 +12,28 @@ use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, 
 use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
 use super::types::ConditionalPrefillDecisionInput;
-use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
+use super::{
+    InnerPrefillRouter, PrefillError, PrefillQueryOutcome, PrefillResolveDecision, PrefillRouter,
+};
 use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
-    preprocessor::{BootstrapInfo, PrefillResult},
+    preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
 };
 
 pub(super) struct ConditionalPrefillDecodeDecision {
     pub worker: WorkerWithDpRank,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
+}
+
+pub(super) struct PrefillCompletion {
+    pub result: PrefillResult,
+    /// (worker_id, dp_rank) parsed out of the engine's `disaggregated_params`.
+    /// Computed but unused today; kept here so adding a caller is a struct
+    /// field read rather than a return-type widening.
+    #[allow(dead_code)]
+    pub worker_info: Option<(u64, Option<u32>)>,
+    pub worker_link: Option<TraceLink>,
 }
 
 impl PrefillRouter {
@@ -84,12 +96,13 @@ impl PrefillRouter {
             .and_then(|r| r.routing_constraints.clone())
             .unwrap_or_default();
 
-        let details = decode_router
+        let outcome = decode_router
             .find_best_match_details(
                 Some(request_id),
                 routing_token_ids,
                 block_mm_infos,
                 req.router_config_override.as_ref(),
+                false,
                 false,
                 lora_name.clone(),
                 priority_jump,
@@ -99,10 +112,17 @@ impl PrefillRouter {
                 routing_constraints.clone(),
             )
             .await?;
-        let worker = details.worker;
-        let overlap_blocks = details.cache_hit.rounded_overlap_blocks();
-        let decode_chosen_tier_overlap_credit_blocks =
-            Some(details.cache_hit.effective_overlap_blocks);
+        let (worker, overlap_blocks, decode_chosen_tier_overlap_credit_blocks) = match outcome {
+            crate::kv_router::FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                effective_overlap_blocks,
+                ..
+            } => (worker, overlap_blocks, Some(effective_overlap_blocks)),
+            crate::kv_router::FindBestMatchOutcome::Backpressure { .. } => {
+                return Ok(None);
+            }
+        };
 
         let block_size = decode_router.block_size() as usize;
         let prompt_tokens = routing_token_ids.len();
@@ -257,13 +277,14 @@ impl PrefillRouter {
             InnerPrefillRouter::KvRouter(r) => r,
             InnerPrefillRouter::SimpleRouter(_) => return (None, None, None, None, None, None),
         };
-        let Ok(details) = kv
+        let Ok(outcome) = kv
             .chooser
             .find_best_match_details(
                 None,
                 token_ids,
                 block_mm_infos,
                 None,
+                false,
                 false,
                 lora_name,
                 priority_jump,
@@ -276,24 +297,34 @@ impl PrefillRouter {
         else {
             return (None, None, None, None, None, None);
         };
+        let (worker, effective_overlap_blocks) = match outcome {
+            crate::kv_router::FindBestMatchOutcome::Routed {
+                worker,
+                effective_overlap_blocks,
+                ..
+            } => (worker, effective_overlap_blocks),
+            crate::kv_router::FindBestMatchOutcome::Backpressure { .. } => {
+                return (None, None, None, None, None, None);
+            }
+        };
         let block_size = kv.chooser.block_size() as usize;
-        let tier_credit = Some(details.cache_hit.effective_overlap_blocks);
-        let load = kv.chooser.active_blocks_for(details.worker);
+        let tier_credit = Some(effective_overlap_blocks);
+        let load = kv.chooser.active_blocks_for(worker);
         let max_blocks = kv
             .chooser
-            .total_kv_blocks_for(details.worker.worker_id)
+            .total_kv_blocks_for(worker.worker_id)
             .map(|b| b as usize);
         let queued = kv
             .chooser
-            .pending_prefill_tokens_for(details.worker)
+            .pending_prefill_tokens_for(worker)
             .map(|t| t.div_ceil(block_size.max(1)) as u32);
         (
             tier_credit,
             load,
             max_blocks,
             queued,
-            Some(details.worker.worker_id),
-            Some(details.worker.dp_rank),
+            Some(worker.worker_id),
+            Some(worker.dp_rank),
         )
     }
 
@@ -355,7 +386,18 @@ impl PrefillRouter {
                 )
                 .await
             {
-                Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
+                Ok(PrefillQueryOutcome::Routed { worker_id, dp_rank }) => (worker_id, dp_rank),
+                Ok(PrefillQueryOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                }) => {
+                    return PrefillResolveDecision::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    };
+                }
                 Err(_) => return PrefillResolveDecision::Unavailable,
             }
         };
@@ -408,14 +450,12 @@ impl PrefillRouter {
     /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
     /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
     /// the prefill route must finish worker recording before the phase can change to Decode.
-    ///
-    /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     pub(super) async fn execute_prefill(
         router: Option<InnerPrefillRouter>,
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(PrefillResult, Option<(u64, Option<u32>)>), PrefillError> {
+    ) -> Result<PrefillCompletion, PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         // Clone tracker before request is consumed by generate_to_worker.
         // Used to record prefill_complete_time for KV transfer latency metric.
@@ -483,27 +523,29 @@ impl PrefillRouter {
             ));
         };
 
+        let worker_link = output.worker_trace_link.clone();
+
         // Extract prefill worker ID and dp_rank from disaggregated_params
-        let prefill_worker_info =
-            disaggregated_params
-                .get("worker_id")
-                .and_then(|worker_id_json| {
-                    let worker_id = worker_id_json
-                        .get("prefill_worker_id")
-                        .and_then(|v| v.as_u64())?;
-                    let dp_rank = worker_id_json
-                        .get("prefill_dp_rank")
-                        .and_then(|v| v.as_u64())
-                        .map(|r| r as u32);
-                    Some((worker_id, dp_rank))
-                });
-        Ok((
-            PrefillResult {
+        let worker_info = disaggregated_params
+            .get("worker_id")
+            .and_then(|worker_id_json| {
+                let worker_id = worker_id_json
+                    .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64())?;
+                let dp_rank = worker_id_json
+                    .get("prefill_dp_rank")
+                    .and_then(|v| v.as_u64())
+                    .map(|r| r as u32);
+                Some((worker_id, dp_rank))
+            });
+        Ok(PrefillCompletion {
+            result: PrefillResult {
                 disaggregated_params,
                 prompt_tokens_details,
             },
-            prefill_worker_info,
-        ))
+            worker_info,
+            worker_link,
+        })
     }
 
     /// Spawn prefill as a background task.
@@ -545,10 +587,11 @@ impl PrefillRouter {
     }
 
     /// Query the best prefill worker without executing a request.
-    /// Returns (worker_id, dp_rank).
     ///
-    /// This is the shared worker selection logic used by both `resolve_prefill_worker`
-    /// and `query_route`.
+    /// Returns `PrefillQueryOutcome::Routed` for the selected worker, or
+    /// `PrefillQueryOutcome::Backpressure` when the prefill scheduler queue is
+    /// saturated. This is the shared worker selection logic used by both
+    /// `resolve_prefill_worker` and `query_route`.
     #[expect(clippy::too_many_arguments)]
     pub async fn query_prefill_worker(
         &self,
@@ -559,7 +602,7 @@ impl PrefillRouter {
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<(u64, Option<u32>)> {
+    ) -> Result<PrefillQueryOutcome> {
         let prefill_router = self
             .prefill_router
             .get()
@@ -567,22 +610,40 @@ impl PrefillRouter {
 
         match prefill_router {
             InnerPrefillRouter::KvRouter(r) => {
-                let (worker, _overlap) = r
+                let outcome = r
                     .chooser
-                    .find_best_match(
+                    .find_best_match_details(
                         None,
                         token_ids,
                         block_mm_infos,
                         None,
                         update_states,
+                        false,
                         lora_name,
                         priority_jump,
+                        None,
                         None,
                         allowed_worker_ids,
                         routing_constraints,
                     )
                     .await?;
-                Ok((worker.worker_id, Some(worker.dp_rank)))
+                match outcome {
+                    crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
+                        Ok(PrefillQueryOutcome::Routed {
+                            worker_id: worker.worker_id,
+                            dp_rank: Some(worker.dp_rank),
+                        })
+                    }
+                    crate::kv_router::FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    } => Ok(PrefillQueryOutcome::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    }),
+                }
             }
             InnerPrefillRouter::SimpleRouter(r) => {
                 let worker_id = if update_states {
@@ -591,7 +652,10 @@ impl PrefillRouter {
                     r.peek_next_worker()
                 }
                 .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-                Ok((worker_id, None))
+                Ok(PrefillQueryOutcome::Routed {
+                    worker_id,
+                    dp_rank: None,
+                })
             }
         }
     }

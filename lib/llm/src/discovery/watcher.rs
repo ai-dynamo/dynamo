@@ -49,6 +49,7 @@ use crate::{
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
+    types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
 };
 
 use super::ModelManager;
@@ -104,6 +105,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Prefill,
+    ModelType::Realtime,
 ];
 
 /// Returns true if no models in the manager support the given model type.
@@ -124,6 +126,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_tensor_models().is_empty()
     } else if model_type == ModelType::Prefill {
         manager.list_prefill_models().is_empty()
+    } else if model_type == ModelType::Realtime {
+        manager.list_realtime_models().is_empty()
     } else {
         true
     }
@@ -780,6 +784,9 @@ impl ModelWatcher {
                         // Create prefill-specific config with track_active_blocks disabled
                         let mut prefill_config = router_config.kv_router_config.clone();
                         prefill_config.router_track_active_blocks = false;
+                        // Prefill KV events are emitted by prefill workers; do not inherit
+                        // decode-only speculative hash mode.
+                        let prefill_enable_eagle = false;
 
                         PrefillRouter::new(
                             rx,
@@ -792,7 +799,7 @@ impl ModelWatcher {
                             router_config.enforce_disagg,
                             model_name.clone(),
                             namespace.clone(),
-                            card.runtime_config.enable_eagle,
+                            prefill_enable_eagle,
                         )
                     })
             } else {
@@ -1064,6 +1071,17 @@ impl ModelWatcher {
             )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_realtime() {
+            // Case 7: Text + Realtime
+            // 'Text' is being overloaded here, it simply means the I/O will be passed through
+            let realtime_router = PushRouter::<
+                RealtimeClientEvent,
+                Annotated<RealtimeServerEvent>,
+            >::from_client_with_monitor(
+                client, router_config.router_mode, None
+            )
+            .await?;
+            worker_set.realtime_engine = Some(Arc::new(realtime_router));
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens
@@ -1222,6 +1240,20 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
+        assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    #[test]
+    fn test_is_model_type_list_empty_realtime_after_register() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+        mm.add_realtime_model("rt-echo", "0", engine).unwrap();
+        assert!(!is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    #[test]
+    fn test_realtime_in_all_model_types() {
+        assert!(ALL_MODEL_TYPES.contains(&ModelType::Realtime));
     }
 
     #[test]

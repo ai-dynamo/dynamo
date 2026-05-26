@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy::{RouterSchedulingPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::SchedulerQueue;
@@ -19,33 +20,40 @@ use super::types::{
     SchedulingResponse, TierOverlapBlocks,
 };
 use crate::protocols::RoutingConstraints;
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
     SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
 
-pub struct LocalScheduler<P, C, S = RouterSchedulingPolicy, Sel = DefaultWorkerSelector>
-where
+pub struct LocalScheduler<
+    P,
+    C,
+    S = RouterSchedulingPolicy,
+    Sel = DefaultWorkerSelector,
+    RF = NoopOverlapScoresRefresh,
+> where
     P: SequencePublisher,
     C: WorkerConfigLike,
     S: SchedulingPolicy,
     Sel: WorkerSelector<C>,
+    RF: OverlapScoresRefresh,
 {
     slots: Arc<ActiveSequencesMultiWorker<P>>,
-    queue: Arc<SchedulerQueue<P, C, S, Sel>>,
+    queue: Arc<SchedulerQueue<P, C, S, Sel, RF>>,
     queue_updates: watch::Sender<()>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
 
-impl<P, C, S, Sel> LocalScheduler<P, C, S, Sel>
+impl<P, C, S, Sel, RF> LocalScheduler<P, C, S, Sel, RF>
 where
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
     S: SchedulingPolicy + 'static,
     Sel: WorkerSelector<C> + Send + Sync + 'static,
+    RF: OverlapScoresRefresh + 'static,
 {
     fn worker_dp_range(workers: &HashMap<WorkerId, C>) -> HashMap<WorkerId, (u32, u32)> {
         workers
@@ -59,47 +67,18 @@ where
             .collect()
     }
 
+    /// Construct a scheduler with dequeue-time overlap refresh.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_with_overlap_refresh(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
+        queue_depth_tiers: crate::scheduling::config::RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         policy: S,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        recheck_interval: Duration,
-        track_prefill_tokens_default: bool,
-        cancellation_token: CancellationToken,
-        worker_type: &'static str,
-        monitor_worker_configs: bool,
-    ) -> Self {
-        Self::new_with_overload_provider(
-            slots,
-            workers_with_configs,
-            threshold_frac,
-            block_size,
-            selector,
-            policy,
-            prefill_load_estimator,
-            None,
-            recheck_interval,
-            track_prefill_tokens_default,
-            cancellation_token,
-            worker_type,
-            monitor_worker_configs,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_overload_provider(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        policy: S,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
@@ -141,14 +120,16 @@ where
             });
         }
 
-        let queue = Arc::new(SchedulerQueue::new_with_overload_provider(
+        let queue = Arc::new(SchedulerQueue::new_with_overlap_refresh(
             Arc::clone(&slots),
             workers_with_configs,
             threshold_frac,
+            queue_depth_tiers,
             block_size,
             selector,
             policy,
             prefill_load_estimator,
+            overlap_scores_refresh,
             overloaded_worker_provider,
         ));
         let (queue_updates, _) = watch::channel(());
@@ -224,6 +205,51 @@ where
         routing_constraints: RoutingConstraints,
         shared_cache_hits: Option<crate::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.schedule_with_block_hashes(
+            maybe_request_id,
+            isl_tokens,
+            token_seq,
+            None,
+            tier_overlap_blocks,
+            effective_overlap_blocks,
+            effective_cached_tokens,
+            router_config_override,
+            update_states,
+            lora_name,
+            priority_jump,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            shared_cache_hits,
+        )
+        .await
+    }
+
+    /// Like [`schedule`](Self::schedule) but also forwards the block hashes used to compute
+    /// the initial overlap scores. When the scheduler was constructed with an
+    /// [`OverlapScoresRefresh`], queued requests can be re-scored at dequeue time using
+    /// these hashes.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn schedule_with_block_hashes(
+        &self,
+        maybe_request_id: Option<String>,
+        isl_tokens: usize,
+        token_seq: Option<Vec<SequenceHash>>,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+        tier_overlap_blocks: TierOverlapBlocks,
+        effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        router_config_override: Option<&super::config::RouterConfigOverride>,
+        update_states: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        shared_cache_hits: Option<crate::SharedCacheHits>,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let track_prefill_tokens = router_config_override
             .and_then(|cfg| cfg.track_prefill_tokens)
@@ -250,7 +276,9 @@ where
             resp_tx: Some(resp_tx),
         };
 
-        self.queue.enqueue(request).await;
+        self.queue
+            .enqueue_with_block_hashes(request, block_hashes)
+            .await;
 
         resp_rx
             .await
@@ -284,6 +312,10 @@ where
 
     pub fn pending_isl_tokens(&self) -> usize {
         self.queue.pending_isl_tokens()
+    }
+
+    pub fn supports_overlap_refresh(&self) -> bool {
+        self.queue.supports_overlap_refresh()
     }
 
     pub fn worker_type(&self) -> &'static str {
@@ -374,6 +406,121 @@ where
     }
 }
 
+impl<P, C, S, Sel> LocalScheduler<P, C, S, Sel, NoopOverlapScoresRefresh>
+where
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
+    S: SchedulingPolicy + 'static,
+    Sel: WorkerSelector<C> + Send + Sync + 'static,
+{
+    /// Construct a scheduler without dequeue-time overlap refresh.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        queue_depth_tiers: crate::scheduling::config::RouterQueueDepthTiers,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Self {
+        Self::new_with_overload_provider(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            queue_depth_tiers,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            None,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+
+    /// Construct a scheduler without dequeue-time overlap refresh but with an overload
+    /// provider consulted during worker selection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_overload_provider(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        queue_depth_tiers: crate::scheduling::config::RouterQueueDepthTiers,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Self {
+        Self::new_with_overlap_refresh(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            queue_depth_tiers,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            None,
+            overloaded_worker_provider,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+
+    /// Backwards-compatible alias for callers that spell out the no-refresh path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_without_overlap_refresh(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        queue_depth_tiers: crate::scheduling::config::RouterQueueDepthTiers,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Self {
+        Self::new(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            queue_depth_tiers,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -441,10 +588,11 @@ mod tests {
         ));
         let (cfg_tx, cfg_rx) = watch::channel(workers);
         let cancel_token = CancellationToken::new();
-        let scheduler = Arc::new(LocalScheduler::new(
+        let scheduler = Arc::new(LocalScheduler::new_without_overlap_refresh(
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
+            crate::scheduling::config::RouterQueueDepthTiers::unbounded_cap(),
             64,
             DefaultWorkerSelector::new(None, "test"),
             FcfsPolicy,

@@ -21,13 +21,16 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -74,6 +77,83 @@ func dcgmPod(name, ip string) *corev1.Pod {
 	}
 }
 
+func TestGPUDiscoveryEnabledDefaults(t *testing.T) {
+	assert.True(t, (*DynamoGraphDeploymentRequestReconciler)(nil).gpuDiscoveryEnabled())
+	assert.True(t, (&DynamoGraphDeploymentRequestReconciler{}).gpuDiscoveryEnabled())
+	assert.True(t, (&DynamoGraphDeploymentRequestReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}).gpuDiscoveryEnabled())
+	assert.False(t, (&DynamoGraphDeploymentRequestReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{
+			GPU: configv1alpha1.GPUConfiguration{
+				DiscoveryEnabled: ptr.To(false),
+			},
+		},
+	}).gpuDiscoveryEnabled())
+}
+
+func TestEnrichHardwareFromDiscovery_SkipsOptionalMetadataWithoutAPIReader(t *testing.T) {
+	r := &DynamoGraphDeploymentRequestReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				VRAMMB:         ptr.To(81920.0),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(16)),
+			},
+		},
+	}
+
+	changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Empty(t, dgdr.Spec.Hardware.Interconnect)
+	assert.Nil(t, dgdr.Spec.Hardware.RDMA)
+}
+
+func TestEnrichHardwareFromDiscovery_RequiredFieldsMissingWithoutAPIReaderFails(t *testing.T) {
+	r := &DynamoGraphDeploymentRequestReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{},
+		},
+	}
+
+	changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APIReader is not configured")
+	assert.False(t, changed)
+}
+
+func TestEnrichHardwareFromDiscovery_SkipsOptionalMetadataWhenNodeDiscoveryDisabled(t *testing.T) {
+	node := gpuNode("gpu-node-rdma", "H100-SXM5-80GB", 8, 81920)
+	node.Labels[gpupkg.LabelNFDRDMAAvailable] = "true"
+	r := newFakeReconciler(node)
+	r.GPUDiscovery = nil
+	r.Config.GPU.DiscoveryEnabled = ptr.To(false)
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				VRAMMB:         ptr.To(81920.0),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(16)),
+			},
+		},
+	}
+
+	changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Nil(t, dgdr.Spec.Hardware.RDMA)
+}
+
 func TestEnrichHardwareFromDiscovery(t *testing.T) {
 	tests := []struct {
 		name string
@@ -90,29 +170,30 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 		wantVRAM      float64
 		wantGPUsNode  int32
 		wantTotalGPUs int32
+		wantChanged   bool
 	}{
 		{
-			name: "all four fields set, discovery skipped",
+			name: "required fields set, no discovery available",
 			hardware: &nvidiacomv1beta1.HardwareSpec{
 				GPUSKU: "h100_sxm", VRAMMB: ptr.To(81920.0),
 				NumGPUsPerNode: ptr.To(int32(8)), TotalGPUs: ptr.To(int32(16)),
 			},
-			wantGPUSKU: "h100_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 16,
+			wantGPUSKU: "h100_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 16, wantChanged: false,
 		},
 		{
 			name:          "nothing set, full discovery",
 			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "H100-SXM5-80GB", VRAMPerGPU: 81920},
-			wantGPUSKU:    "h100_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 8,
+			wantGPUSKU:    "h100_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
 		},
 		{
 			name:          "nothing set, V100 discovered",
 			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "Tesla-V100-SXM2-16GB", VRAMPerGPU: 16384},
-			wantGPUSKU:    "v100_sxm", wantVRAM: 16384, wantGPUsNode: 8, wantTotalGPUs: 8,
+			wantGPUSKU:    "v100_sxm", wantVRAM: 16384, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
 		},
 		{
 			name:          "nothing set, unknown GPU falls back to model name",
 			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 4, Model: "FutureGPU-X1000", VRAMPerGPU: 65536},
-			wantGPUSKU:    "FutureGPU-X1000", wantVRAM: 65536, wantGPUsNode: 4, wantTotalGPUs: 4,
+			wantGPUSKU:    "FutureGPU-X1000", wantVRAM: 65536, wantGPUsNode: 4, wantTotalGPUs: 4, wantChanged: true,
 		},
 		{
 			name: "only totalGpus missing, discovery fills it",
@@ -120,7 +201,7 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 				GPUSKU: "b200_sxm", VRAMMB: ptr.To(141312.0), NumGPUsPerNode: ptr.To(int32(8)),
 			},
 			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "B200-SXM-180GB", VRAMPerGPU: 141312},
-			wantGPUSKU:    "b200_sxm", wantVRAM: 141312, wantGPUsNode: 8, wantTotalGPUs: 8,
+			wantGPUSKU:    "b200_sxm", wantVRAM: 141312, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
 		},
 		{
 			name: "only gpuSku missing, discovery fills it",
@@ -128,7 +209,7 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 				VRAMMB: ptr.To(81920.0), NumGPUsPerNode: ptr.To(int32(8)), TotalGPUs: ptr.To(int32(16)),
 			},
 			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "H200-SXM5-141GB", VRAMPerGPU: 141312},
-			wantGPUSKU:    "h200_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 16, // user overrides win
+			wantGPUSKU:    "h200_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 16, wantChanged: true, // user overrides win
 		},
 		{
 			name: "vramMb and numGpusPerNode override discovery",
@@ -136,7 +217,7 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 				GPUSKU: "a100_sxm", VRAMMB: ptr.To(40960.0), NumGPUsPerNode: ptr.To(int32(4)),
 			},
 			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "A100-SXM4-80GB", VRAMPerGPU: 81920},
-			wantGPUSKU:    "a100_sxm", wantVRAM: 40960, wantGPUsNode: 4, wantTotalGPUs: 8,
+			wantGPUSKU:    "a100_sxm", wantVRAM: 40960, wantGPUsNode: 4, wantTotalGPUs: 8, wantChanged: true,
 		},
 		{
 			name:    "no fields set, discovery fails",
@@ -179,7 +260,7 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 				},
 			}
 
-			err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+			changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 
 			if tt.wantErr != "" {
 				require.Error(t, err)
@@ -187,6 +268,7 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			assert.Equal(t, tt.wantChanged, changed)
 			require.NotNil(t, dgdr.Spec.Hardware)
 			assert.Equal(t, tt.wantGPUSKU, string(dgdr.Spec.Hardware.GPUSKU))
 			assert.Equal(t, tt.wantVRAM, *dgdr.Spec.Hardware.VRAMMB)
@@ -194,6 +276,195 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 			assert.Equal(t, tt.wantTotalGPUs, *dgdr.Spec.Hardware.TotalGPUs)
 		})
 	}
+}
+
+func TestEnrichHardwareFromDiscovery_WritesOptionalHardwareMetadata(t *testing.T) {
+	r := newFakeReconciler()
+	r.GPUDiscovery = gpupkg.NewGPUDiscovery(nil)
+	r.GPUDiscoveryCache = gpupkg.NewGPUDiscoveryCache()
+	r.GPUDiscoveryCache.Set("", &gpupkg.GPUInfo{
+		NodeName:      "n1",
+		GPUsPerNode:   8,
+		NodesWithGPUs: 2,
+		Model:         "NVIDIA H100 80GB HBM3",
+		VRAMPerGPU:    81079,
+		System:        nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		Interconnect:  "pcie",
+		RDMAEnabled:   true,
+		RDMAType:      "rdma",
+	}, time.Minute)
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{},
+		},
+	}
+
+	changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotNil(t, dgdr.Spec.Hardware)
+	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100PCIe, dgdr.Spec.Hardware.GPUSKU)
+	assert.Equal(t, "pcie", dgdr.Spec.Hardware.Interconnect)
+	require.NotNil(t, dgdr.Spec.Hardware.RDMA)
+	assert.True(t, *dgdr.Spec.Hardware.RDMA)
+}
+
+func TestEnrichHardwareFromDiscovery_FillsOptionalMetadataWhenRequiredFieldsSet(t *testing.T) {
+	r := newFakeReconciler()
+	r.GPUDiscovery = gpupkg.NewGPUDiscovery(nil)
+	r.GPUDiscoveryCache = gpupkg.NewGPUDiscoveryCache()
+	r.GPUDiscoveryCache.Set(nvidiacomv1beta1.GPUSKUTypeH100PCIe, &gpupkg.GPUInfo{
+		NodeName:      "n1",
+		GPUsPerNode:   8,
+		NodesWithGPUs: 4,
+		Model:         "NVIDIA H100 80GB HBM3",
+		VRAMPerGPU:    81079,
+		System:        nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		Interconnect:  "pcie",
+		RDMAEnabled:   true,
+		RDMAType:      "rdma",
+	}, time.Minute)
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+				VRAMMB:         ptr.To(81920.0),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(16)),
+			},
+		},
+	}
+
+	changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.NoError(t, err)
+	require.True(t, changed)
+	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100PCIe, dgdr.Spec.Hardware.GPUSKU)
+	assert.Equal(t, float64(81920), *dgdr.Spec.Hardware.VRAMMB)
+	assert.Equal(t, int32(8), *dgdr.Spec.Hardware.NumGPUsPerNode)
+	assert.Equal(t, int32(16), *dgdr.Spec.Hardware.TotalGPUs)
+	assert.Equal(t, "pcie", dgdr.Spec.Hardware.Interconnect)
+	require.NotNil(t, dgdr.Spec.Hardware.RDMA)
+	assert.True(t, *dgdr.Spec.Hardware.RDMA)
+}
+
+func TestCreateProfilingJobPersistsDiscoveredHardware(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "persist-hardware",
+			Namespace: "default",
+		},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "test-model",
+			Backend: nvidiacomv1beta1.BackendTypeVllm,
+			Image:   "test-profiler:latest",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgdr).Build()
+
+	cache := gpupkg.NewGPUDiscoveryCache()
+	cache.Set("", &gpupkg.GPUInfo{
+		NodeName:      "n1",
+		GPUsPerNode:   8,
+		NodesWithGPUs: 2,
+		Model:         "NVIDIA H100 80GB HBM3",
+		VRAMPerGPU:    81079,
+		System:        nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		Interconnect:  "pcie",
+		RDMAEnabled:   true,
+		RDMAType:      "rdma",
+	}, time.Minute)
+
+	r := &DynamoGraphDeploymentRequestReconciler{
+		Client:            fakeClient,
+		APIReader:         fakeClient,
+		Recorder:          &record.FakeRecorder{},
+		Config:            &configv1alpha1.OperatorConfiguration{},
+		GPUDiscovery:      gpupkg.NewGPUDiscovery(nil),
+		GPUDiscoveryCache: cache,
+		RBACManager:       &MockRBACManager{},
+	}
+
+	var fetched nvidiacomv1beta1.DynamoGraphDeploymentRequest
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, &fetched))
+
+	requeue, err := r.createProfilingJob(ctx, &fetched)
+	require.NoError(t, err)
+	require.True(t, requeue)
+
+	var stored nvidiacomv1beta1.DynamoGraphDeploymentRequest
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, &stored))
+	require.NotNil(t, stored.Spec.Hardware)
+	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100PCIe, stored.Spec.Hardware.GPUSKU)
+	assert.Equal(t, float64(81079), *stored.Spec.Hardware.VRAMMB)
+	assert.Equal(t, int32(8), *stored.Spec.Hardware.NumGPUsPerNode)
+	assert.Equal(t, int32(16), *stored.Spec.Hardware.TotalGPUs)
+	assert.Equal(t, "pcie", stored.Spec.Hardware.Interconnect)
+	require.NotNil(t, stored.Spec.Hardware.RDMA)
+	assert.True(t, *stored.Spec.Hardware.RDMA)
+
+	requeue, err = r.createProfilingJob(ctx, &stored)
+	require.NoError(t, err)
+	require.False(t, requeue)
+
+	job := &batchv1.Job{}
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{
+		Name:      getProfilingJobName(&stored),
+		Namespace: stored.Namespace,
+	}, job))
+}
+
+func TestCreateProfilingJobWithManualHardwareDoesNotRequireAPIReader(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "manual-hardware",
+			Namespace: "default",
+		},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "test-model",
+			Backend: nvidiacomv1beta1.BackendTypeVllm,
+			Image:   "test-profiler:latest",
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				VRAMMB:         ptr.To(81920.0),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(16)),
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgdr).Build()
+	r := &DynamoGraphDeploymentRequestReconciler{
+		Client:      fakeClient,
+		Recorder:    &record.FakeRecorder{},
+		Config:      &configv1alpha1.OperatorConfiguration{},
+		RBACManager: &MockRBACManager{},
+	}
+
+	var fetched nvidiacomv1beta1.DynamoGraphDeploymentRequest
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, &fetched))
+
+	requeue, err := r.createProfilingJob(ctx, &fetched)
+	require.NoError(t, err)
+	require.False(t, requeue)
+
+	job := &batchv1.Job{}
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{
+		Name:      getProfilingJobName(&fetched),
+		Namespace: fetched.Namespace,
+	}, job))
 }
 
 // TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM is the regression test for
@@ -262,7 +533,7 @@ func TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM(t *testing.T) {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{},
 			}
 
-			err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+			_, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 			require.NoError(t, err)
 			require.NotNil(t, dgdr.Spec.Hardware)
 			assert.Equal(t, tt.expectedGPUSKU, string(dgdr.Spec.Hardware.GPUSKU),
@@ -287,7 +558,7 @@ func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T)
 		},
 	}
 
-	err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	_, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 	require.NoError(t, err)
 	require.NotNil(t, dgdr.Spec.Hardware)
 	assert.Equal(t, "Tesla-V100-SXM2-16GB", string(dgdr.Spec.Hardware.GPUSKU),

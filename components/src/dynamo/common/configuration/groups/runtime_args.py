@@ -36,6 +36,10 @@ class DynamoRuntimeConfig(ConfigBase):
     output_modalities: List[str]
     media_output_fs_url: str = "file:///tmp/dynamo_media"
     media_output_http_url: Optional[str] = None
+    # Raw `--health-check-payload` value (JSON object string or `@/path/to/file.json`).
+    # Honored only by the unified backend's `Worker`, where it overrides the engine's
+    # default `health_check_payload()` for the runtime canary.
+    health_check_payload: Optional[str] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -214,4 +218,15 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_MEDIA_OUTPUT_HTTP_URL",
             default=None,
             help="Base URL for rewriting media file paths in responses (e.g. http://localhost:8000/media). If unset, returns raw filesystem paths.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--health-check-payload",
+            env_var="DYN_HEALTH_CHECK_PAYLOAD",
+            default=None,
+            help="Override the runtime health-check canary payload. Accepts a JSON "
+            'object (e.g. \'{"token_ids": [1], "stop_conditions": {"max_tokens": 1}}\') '
+            "or '@/path/to/payload.json'. Takes precedence over the engine's "
+            "default health_check_payload(). Unified backend only.",
         )
