@@ -409,11 +409,18 @@ impl<T> AddressedRequest<T> {
 }
 
 pub struct AddressedPushRouter {
+    // Request transport (unified trait object - works with all transports)
     req_client: Arc<dyn RequestPlaneClient>,
+
+    // Response transport (TCP streaming - unchanged)
     resp_transport: Arc<tcp::server::TcpStreamServer>,
 }
 
 impl AddressedPushRouter {
+    /// Create a new router with a request plane client
+    ///
+    /// This is the unified constructor that works with any transport type.
+    /// The client is provided as a trait object, hiding the specific implementation.
     pub fn new(
         req_client: Arc<dyn RequestPlaneClient>,
         resp_transport: Arc<tcp::server::TcpStreamServer>,
@@ -555,13 +562,17 @@ impl AddressedPushRouter {
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id = ctx_unit.id(), "awaiting transport handshake");
 
+        // RecvError → migratable Disconnected (watcher cancelled the subject
+        // or the worker died before establishing the response stream).
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                // Migrate via CannotConnect: the dominant cause here is a
-                // worker-local setup/version issue, and the wire prologue
-                // carries only an opaque string today so app-level rejections
-                // also retry — safe because no side effects are visible yet.
+                // generate() failed before any response bytes; migrate via
+                // CannotConnect since the dominant cause is a worker-local
+                // setup/version issue. The wire prologue carries only an
+                // opaque string today, so app-level rejections also retry
+                // -- safe because no side effects are visible yet. Follow-up:
+                // structured prologue error type for finer routing.
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::CannotConnect)
