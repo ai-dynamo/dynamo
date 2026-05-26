@@ -40,6 +40,7 @@ def _load_device(
     max_workers: int,
     transfer_backend: str,
     sharded_ssd_roots: list[str],
+    sharded_ssd_queues_per_root: int,
 ) -> None:
     input_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info(
@@ -55,6 +56,7 @@ def _load_device(
         device=device,
         transfer_backend=transfer_backend,
         sharded_ssd_roots=sharded_ssd_roots,
+        sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
     )
     client.load_to_gms(
         input_dir,
@@ -91,6 +93,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sharded-ssd-roots",
         default="",
         help=("Comma-separated SSD roots for the sharded-ssd restore backend."),
+    )
+    parser.add_argument(
+        "--sharded-ssd-queues-per-root",
+        type=int,
+        default=1,
+        help=(
+            "Number of independent sharded-ssd restore queues per SSD root. "
+            "Default is 1, preserving one worker group per root."
+        ),
     )
     return parser
 
@@ -138,11 +149,14 @@ def main(argv: list[str] | None = None) -> None:
     max_workers = args.max_workers
     transfer_backend = args.transfer_backend
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
+    sharded_ssd_queues_per_root = int(args.sharded_ssd_queues_per_root)
     logger.info(
-        "Starting GMS load: transfer_backend=%s max_workers=%d sharded_ssd_roots=%s",
+        "Starting GMS load: transfer_backend=%s max_workers=%d "
+        "sharded_ssd_roots=%s sharded_ssd_queues_per_root=%d",
         transfer_backend,
         max_workers,
         ",".join(sharded_ssd_roots) or "-",
+        sharded_ssd_queues_per_root,
     )
     devices = _list_checkpoint_devices(checkpoint_dir)
 
@@ -156,6 +170,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_workers,
                 transfer_backend,
                 sharded_ssd_roots,
+                sharded_ssd_queues_per_root,
             ): dev
             for dev in devices
         }
