@@ -14,8 +14,8 @@
   .arrow-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 500; fill: #cdcdcd; }
   .arrow-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 10px; font-weight: 400; fill: #8c8c8c; }
 </style>
-<text class="title" x="40" y="58">Linux native AIO queues many checkpoint reads</text>
-<text class="subtitle" x="40" y="88">io_submit queues iocbs to an AIO context; io_getevents reaps completions.</text>
+<text class="title" x="40" y="58">Linux native AIO for anonymous memory restoration</text>
+<text class="subtitle" x="40" y="88">Many reads stay in flight at once, keeping storage busy instead of waiting between jobs</text>
 <text class="section-label" x="110.0" y="178">JOB LIST &#183; iocbs</text>
 <text class="section-label" x="380.0" y="178">AIO CONTEXT</text>
 <text class="section-label" x="890.0" y="178">PROCESS ADDRESS SPACE</text>
