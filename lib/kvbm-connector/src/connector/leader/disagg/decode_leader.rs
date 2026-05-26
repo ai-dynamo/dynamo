@@ -480,17 +480,13 @@ impl DecodeDisaggLeader {
                 if let Err(err) =
                     self.commit_gnmt_remote(request_id, full_block_external_tokens, &inputs)
                 {
+                    // `commit_gnmt_remote` owns the budget lifecycle for
+                    // every internal failure path: pre-insert paths
+                    // release directly; post-insert paths route through
+                    // `release_request` (idempotent against the
+                    // payload-Drop release). No additional cleanup
+                    // needed here — propagating the Err is correct.
                     tracing::error!(error = %err, "decode_gnmt: commit_gnmt_remote failed");
-                    // Idempotent: routes through `release_request`, which
-                    // guards budget release on `cd_request_state.remove`
-                    // returning Some. Critical because the payload Drop
-                    // (fired synchronously on install_cd_onboarding_payload
-                    // failure inside `coordinator.begin_remote_prefill`)
-                    // already called `release_request`, removing the
-                    // entry and releasing budget. A direct
-                    // `inflight_budget.release(N)` here would double-
-                    // count and trip the capacity debug_assert.
-                    self.release_request(request_id);
                     return Err(err);
                 }
 
@@ -520,7 +516,29 @@ impl DecodeDisaggLeader {
         full_block_external_tokens: usize,
         inputs: &PolicyInputs,
     ) -> Result<()> {
-        let split = self.inner.slot_match_split(request_id)?;
+        // Budget lifecycle for this call:
+        //   - decode_gnmt reserved `full_block_external_tokens` before
+        //     invoking us. The reservation is OURS to release on any
+        //     failure path until ownership transfers to per-request
+        //     state at the `cd_request_state.insert` below.
+        //   - Pre-insert failures (everything between here and the
+        //     insert at the bottom of this section) MUST release the
+        //     reservation explicitly via `release_pre_insert_budget`.
+        //     No `cd_request_state` exists yet, so `release_request`
+        //     would be a no-op and the reservation would leak.
+        //   - Post-insert failures (begin_remote_prefill Err arm) route
+        //     through `release_request`, which is state-guarded and
+        //     idempotent against the payload-Drop path.
+        let release_pre_insert_budget =
+            |e: anyhow::Error| -> anyhow::Error {
+                self.inflight_budget.release(full_block_external_tokens);
+                e
+            };
+
+        let split = self
+            .inner
+            .slot_match_split(request_id)
+            .map_err(release_pre_insert_budget)?;
         tracing::info!(
             local_match_blocks = split.local_match_blocks,
             computed_blocks = split.computed_blocks,
@@ -528,12 +546,16 @@ impl DecodeDisaggLeader {
             "commit_gnmt_remote: slot_match_split"
         );
 
-        let local_g2 = self.inner.take_local_match_g2_blocks(request_id)?;
+        let local_g2 = self
+            .inner
+            .take_local_match_g2_blocks(request_id)
+            .map_err(release_pre_insert_budget)?;
         tracing::info!(
             local_g2_len = local_g2.len(),
             "commit_gnmt_remote: took local-match G2 blocks"
         );
         if local_g2.len() != split.local_match_blocks {
+            self.inflight_budget.release(full_block_external_tokens);
             anyhow::bail!(
                 "GNMT split says {} local-match blocks but find_session yielded {}",
                 split.local_match_blocks,
@@ -608,7 +630,8 @@ impl DecodeDisaggLeader {
         let num_prefix_blocks = inputs.num_computed_tokens / block_size;
         let prefix_g2 = self
             .inner
-            .find_prefix_g2_blocks(request_id, num_prefix_blocks)?;
+            .find_prefix_g2_blocks(request_id, num_prefix_blocks)
+            .map_err(release_pre_insert_budget)?;
         if !prefix_g2.is_empty() {
             tracing::info!(
                 prefix_g2_len = prefix_g2.len(),
@@ -650,10 +673,14 @@ impl DecodeDisaggLeader {
         // `num_computed_tokens` rides separately on the wire so
         // prefill's vLLM knows to skip recomputing the prefix portion;
         // the connector pulls the prefix-G2 hashes decode published.
-        let all_token_ids = self.inner.slot_token_ids(request_id)?;
+        let all_token_ids = self
+            .inner
+            .slot_token_ids(request_id)
+            .map_err(release_pre_insert_budget)?;
         let base_offset = inputs.num_computed_tokens;
         let prefill_window_end = base_offset + full_block_external_tokens;
         if prefill_window_end > all_token_ids.len() {
+            self.inflight_budget.release(full_block_external_tokens);
             anyhow::bail!(
                 "prefill window [{}..{}] out of bounds for {} tokens",
                 base_offset,
@@ -720,8 +747,22 @@ impl DecodeDisaggLeader {
             });
             inner_for_install.install_cd_onboarding_payload(rid, payload)
         };
-        let lora_name = self.inner.slot_lora_name(request_id)?;
-        let salt = self.inner.slot_salt(request_id)?;
+        // Past the cd_request_state.insert: failures here clean up via
+        // release_request (removes state + releases budget; idempotent
+        // against the payload-Drop path that runs inside
+        // begin_remote_prefill on install failure).
+        let lora_name = self
+            .inner
+            .slot_lora_name(request_id)
+            .inspect_err(|_| {
+                self.release_request(request_id);
+            })?;
+        let salt = self
+            .inner
+            .slot_salt(request_id)
+            .inspect_err(|_| {
+                self.release_request(request_id);
+            })?;
         match self.coordinator.begin_remote_prefill(
             RemotePrefillStart {
                 request_id,
@@ -757,17 +798,16 @@ impl DecodeDisaggLeader {
             }
             Err(err) => {
                 tracing::error!(error = %err, "commit_gnmt_remote: begin_remote_prefill failed");
-                // Coordinator state was already rolled back inside
-                // begin_remote_prefill on payload-install failure (the
-                // payload Drop ran wrapper.release_request → removed
-                // cd_request_state + released budget). We do NOT
-                // remove cd_request_state here — the caller
-                // (`decode_gnmt`) routes through `release_request`
-                // which is idempotent against the Drop path. For
-                // pre-payload bailout paths (e.g. begin_remote_prefill
-                // "called twice" at driver.rs:1085), cd_request_state
-                // still has the entry and the caller's release_request
-                // cleans it up.
+                // Two cases collapse into one cleanup:
+                //   - Payload-install failed inside begin_remote_prefill:
+                //     the payload's Drop ran wrapper.release_request
+                //     (removed cd_request_state + released budget).
+                //     release_request here is a state-guarded no-op.
+                //   - Pre-payload bailout (e.g. "called twice" at
+                //     driver.rs:1085): cd_request_state still has the
+                //     entry, no Drop fired. release_request removes
+                //     it and releases budget.
+                self.release_request(request_id);
                 Err(err)
             }
         }
