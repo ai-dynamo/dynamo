@@ -16,8 +16,8 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
-from gpu_memory_service.common.cuda_utils import list_devices
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
@@ -95,6 +95,35 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
+    if checkpoint_dir:
+        devices: list[int] = []
+        for child in Path(checkpoint_dir).iterdir():
+            if not child.is_dir() or not child.name.startswith("device-"):
+                continue
+            suffix = child.name.removeprefix("device-")
+            if suffix.isdigit():
+                devices.append(int(suffix))
+        if devices:
+            discovered = sorted(set(devices))
+            logger.info(
+                "Discovered GMS checkpoint devices from %s: %s",
+                checkpoint_dir,
+                ",".join(str(device) for device in discovered),
+            )
+            return discovered
+
+        logger.info(
+            "No device-* checkpoint directories found under %s; falling back to "
+            "CUDA/NVML device discovery",
+            checkpoint_dir,
+        )
+
+    from gpu_memory_service.common.cuda_utils import list_devices
+
+    return list_devices()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -115,7 +144,7 @@ def main(argv: list[str] | None = None) -> None:
         max_workers,
         ",".join(sharded_ssd_roots) or "-",
     )
-    devices = list_devices()
+    devices = _list_checkpoint_devices(checkpoint_dir)
 
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:
