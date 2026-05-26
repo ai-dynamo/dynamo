@@ -479,22 +479,60 @@ impl AddressedPushRouter {
         T: Data + Serialize,
         U: Data + for<'de> Deserialize<'de> + MaybeError,
     {
-        let queue_start = Instant::now();
-        REQUEST_PLANE_INFLIGHT.inc();
-        let inflight_guard = InflightGuard::new();
-
         let engine_ctx = input.context();
         let (request_stream, ctx_unit) = input.into_parts();
         let input_stream = request_stream
             .take()
             .expect("RequestStream::take called twice on bidirectional dispatch input");
 
-        // Different from response (always streaming), the request stream is optional.
-        let enable_request_stream = true;
+        self.dispatch_and_finalize::<T, U>(
+            &ctx_unit,
+            address,
+            engine_ctx,
+            Some(&instance),
+            None,
+            Some(input_stream),
+        )
+        .await
+    }
+
+    /// Shared dispatch + receive + finalize core for both bidirectional and
+    /// unary requests. Owns the metric and inflight bookkeeping, registers the
+    /// response stream (and the request stream when `input_stream` is `Some` →
+    /// bidirectional), resolves subjects into a [`CancelGuard`], builds and
+    /// dispatches the wire envelope, spawns the request-frame forwarder when
+    /// applicable, awaits the response prologue, and assembles the final
+    /// `ManyOut<U>`.
+    ///
+    /// Wire shape is inferred from the inputs:
+    ///   - `input_stream = Some(_)` + `request = None` → bidirectional,
+    ///     header-only envelope. The worker dials back for both halves and
+    ///     pulls request frames off the forwarder as the engine asks for them.
+    ///   - `input_stream = None` + `request = Some(_)` → unary, two-part
+    ///     `[ctrl, data]` envelope. The payload travels in the data part.
+    async fn dispatch_and_finalize<T, U>(
+        &self,
+        ctx_unit: &context::Context<()>,
+        address: String,
+        engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+        instance: Option<&Instance>,
+        request: Option<&T>,
+        input_stream: Option<crate::engine::DataStream<T>>,
+    ) -> Result<ManyOut<U>, Error>
+    where
+        T: Data + Serialize,
+        U: Data + for<'de> Deserialize<'de> + MaybeError,
+    {
+        let queue_start = Instant::now();
+        REQUEST_PLANE_INFLIGHT.inc();
+        let inflight_guard = InflightGuard::new();
+
+        let enable_request_stream = input_stream.is_some();
 
         // Register both halves on the response transport: a `send_stream`
         // (upstream → worker, carrying subsequent request frames) and a
-        // `recv_stream` (worker → upstream, carrying response chunks).
+        // `recv_stream` (worker → upstream, carrying response chunks). The
+        // send half is only present in bidirectional mode.
         let (pending_send_stream, pending_recv_stream) = self
             .register_streams(engine_ctx.clone(), enable_request_stream, true)
             .await;
@@ -512,20 +550,15 @@ impl AddressedPushRouter {
             .resolve_subjects(
                 &resp_stream_conn_info,
                 req_stream_conn_info.as_ref(),
-                Some(&instance),
+                instance,
             )
             .await?;
 
-        // Bidirectional envelope is header-only: every request frame
-        // (including the first) flows on the request-stream socket. The
-        // worker decodes the control message, dials back for both streams,
-        // and pulls frames off the request-stream as the engine asks for
-        // them.
-        let buffer = build_request_envelope::<()>(
-            &ctx_unit,
+        let buffer = build_request_envelope(
+            ctx_unit,
             resp_stream_conn_info,
             req_stream_conn_info,
-            None,
+            request,
         )?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
@@ -533,18 +566,31 @@ impl AddressedPushRouter {
         self.dispatch_buffer(address, buffer, ctx_unit.id()).await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
-        // Resolve the request-stream dial-back first and spawn the forwarder
-        // immediately so frames start pre-loading into the worker's input
-        // buffer while the engine initialises in parallel. The response side
-        // carries the engine prologue and only resolves after
-        // `engine.generate()` returns — awaiting it second avoids stalling
-        // the request-side handshake on engine setup latency.
-        spawn_request_stream_forwarder(request_stream_provider, input_stream, engine_ctx.clone())
-            .await?;
+        // Bidirectional: spawn the forwarder before awaiting the response
+        // prologue so request frames pre-load into the worker's input buffer
+        // while the engine initialises in parallel. The response side carries
+        // the engine prologue and only resolves after `engine.generate()`
+        // returns — awaiting it second avoids stalling the request-side
+        // handshake on engine setup latency.
+        if let Some(stream) = input_stream {
+            spawn_request_stream_forwarder(request_stream_provider, stream, engine_ctx.clone())
+                .await?;
+        }
 
+        let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
+        tracing::trace!(request_id = ctx_unit.id(), "awaiting transport handshake");
+
+        // RecvError → migratable Disconnected (watcher cancelled the subject
+        // or the worker died before establishing the response stream).
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
+                // generate() failed before any response bytes; migrate via
+                // CannotConnect since the dominant cause is a worker-local
+                // setup/version issue. The wire prologue carries only an
+                // opaque string today, so app-level rejections also retry
+                // -- safe because no side effects are visible yet. Follow-up:
+                // structured prologue error type for finer routing.
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::CannotConnect)
@@ -554,7 +600,9 @@ impl AddressedPushRouter {
                         .build()
                 ));
             }
-            Err(_) => {
+            Err(_recv_err) => {
+                // oneshot dropped: either the discovery watcher cancelled
+                // this subject or the worker died mid-handshake.
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::Disconnected)
@@ -563,6 +611,7 @@ impl AddressedPushRouter {
                 ));
             }
         };
+        drop(_nvtx_wait);
 
         cancel_guard.disarm();
         Ok(finalize_response_stream(
@@ -711,87 +760,19 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
-        let queue_start = Instant::now();
-        REQUEST_PLANE_INFLIGHT.inc();
-        let inflight_guard = InflightGuard::new();
-
-        let request_id = request.context().id().to_string();
         let (addressed_request, context) = request.transfer(());
         let (request, address, instance_info) = addressed_request.into_parts();
         let engine_ctx = context.context();
 
-        let request_type = RequestType::SingleIn;
-        let response_type = ResponseType::ManyOut;
-
-        // Register only the recv half on the data plane for a single-in / many-out.
-        // Request will be passed as part of the control message to the worker.
-        let (_, pending_response_stream) = self
-            .register_streams(
-                engine_ctx.clone(),
-                request_type == RequestType::ManyIn,
-                response_type == ResponseType::ManyOut,
-            )
-            .await;
-
-        // separate out the connection info and the stream provider from the registered stream
-        let (connection_info, response_stream_provider) =
-            pending_response_stream.unwrap().into_parts();
-
-        let cancel_guard = self
-            .resolve_subjects(&connection_info, None, instance_info.as_ref())
-            .await?;
-
-        let buffer = build_request_envelope(&context, connection_info, None, Some(&request))?;
-        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
-
-        let tx_start = Instant::now();
-        self.dispatch_buffer(address, buffer, context.id()).await?;
-        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
-
-        let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
-        tracing::trace!(request_id, "awaiting transport handshake");
-
-        // RecvError → migratable Disconnected (watcher cancelled the subject
-        // or the worker died before establishing the response stream).
-        let response_stream = match response_stream_provider.await {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => {
-                // generate() failed before any response bytes; migrate via
-                // CannotConnect since the dominant cause is a worker-local
-                // setup/version issue. The wire prologue carries only an
-                // opaque string today, so app-level rejections also retry
-                // -- safe because no side effects are visible yet. Follow-up:
-                // structured prologue error type for finer routing.
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::CannotConnect)
-                        .message(format!(
-                            "Worker generate() failed before response stream: {e}"
-                        ))
-                        .build()
-                ));
-            }
-            Err(_recv_err) => {
-                // oneshot dropped: either the discovery watcher cancelled
-                // this subject or the worker died mid-handshake.
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::Disconnected)
-                        .message("Worker disconnected before response stream was established")
-                        .build()
-                ));
-            }
-        };
-        drop(_nvtx_wait);
-
-        cancel_guard.disarm();
-        Ok(finalize_response_stream(
-            response_stream.rx,
+        self.dispatch_and_finalize::<T, U>(
+            &context,
+            address,
             engine_ctx,
-            queue_start,
-            tx_start,
-            inflight_guard,
-        ))
+            instance_info.as_ref(),
+            Some(&request),
+            None,
+        )
+        .await
     }
 }
 
