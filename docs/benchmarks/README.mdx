@@ -74,6 +74,85 @@ Benchmarks evaluate Dynamo features under controlled traffic. Each page states t
 </symbol>
 </svg>
 
+<section className="dynamo-technique-guide" aria-labelledby="dynamo-technique-guide-title">
+<div className="dynamo-technique-guide-header">
+<h2 id="dynamo-technique-guide-title">Technique Guide</h2>
+<p>These are the Dynamo techniques and benchmark signals used across the cards below.</p>
+</div>
+<div className="dynamo-technique-grid">
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span>
+<div>
+<strong>KV routing</strong>
+<p>Routes traffic to workers with reusable KV cache so TTFT, ITL, and goodput can improve on prefix-heavy workloads.</p>
+</div>
+</div>
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span>
+<div>
+<strong>Prefill/decode split</strong>
+<p>Separates prompt prefill and token decode into specialized worker pools for long-context latency and throughput tests.</p>
+</div>
+</div>
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-ep" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ep" /></svg></span>
+<div>
+<strong>WideEP</strong>
+<p>Spreads MoE experts across a wider GPU set so expert-heavy requests get more parallel capacity.</p>
+</div>
+</div>
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-ec" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ec" /></svg></span>
+<div>
+<strong>Embedding cache</strong>
+<p>Reuses multimodal embeddings, especially repeated images, instead of recomputing them for every request.</p>
+</div>
+</div>
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-sp" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-sp" /></svg></span>
+<div>
+<strong>Speculative decoding</strong>
+<p>Drafts candidate tokens and verifies them with the target model; Eagle3 is the speculative path used here.</p>
+</div>
+</div>
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-of" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-of" /></svg></span>
+<div>
+<strong>KV offload</strong>
+<p>Moves colder KV blocks to a host-memory tier so longer context can fit without keeping all KV on GPU.</p>
+</div>
+</div>
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-fd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-fd" /></svg></span>
+<div>
+<strong>Frontend decoding</strong>
+<p>Moves decode coordination into the Dynamo frontend so routing and cache policy can act before backend execution.</p>
+</div>
+</div>
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-mn" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-mn" /></svg></span>
+<div>
+<strong>Multi-node topology</strong>
+<p>Runs serving workers across node boundaries to compare aggregate, single-node P/D, and multi-node P/D shapes.</p>
+</div>
+</div>
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-gpu" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-gpu" /></svg></span>
+<div>
+<strong>TPS/GPU</strong>
+<p>Normalizes throughput by GPU count so variants with different capacity can still be compared fairly.</p>
+</div>
+</div>
+<div className="dynamo-technique-card">
+<span className="dynamo-feature-symbol feature-ab" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ab" /></svg></span>
+<div>
+<strong>A/B experiment setup</strong>
+<p>Runs controlled configurations against the same traffic to isolate the effect of a feature, policy, or topology.</p>
+</div>
+</div>
+</div>
+</section>
+
 <div className="dynamo-benchmark-grid">
 <a className="dynamo-benchmark-card" href="/dynamo/dev/resources/benchmarks/qwen3-32b-kv-routing">
 <div className="dynamo-benchmark-card-head">

@@ -1892,6 +1892,83 @@ svg.card-icon{
     margin: 24px 0 28px;
 }
 
+.dynamo-technique-guide {
+    margin: 24px 0 26px;
+    padding: 16px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    background: var(--pst-color-surface);
+}
+
+.dark .dynamo-technique-guide {
+    background: var(--nv-dark-grey-2);
+}
+
+.dynamo-technique-guide-header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border, var(--grayscale-a5));
+}
+
+.dynamo-technique-guide-header h2 {
+    margin: 0;
+    font-size: 22px;
+    line-height: 1.2;
+}
+
+.dynamo-technique-guide-header p {
+    max-width: 520px;
+    margin: 0;
+    color: var(--pst-color-text-muted);
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+.dynamo-technique-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.dynamo-technique-card {
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+    min-width: 0;
+    padding: 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    background: var(--nv-color-bg-default);
+}
+
+.dark .dynamo-technique-card {
+    background: var(--nv-dark-grey-1);
+}
+
+.dynamo-technique-card .dynamo-feature-symbol {
+    flex: 0 0 auto;
+}
+
+.dynamo-technique-card strong {
+    display: block;
+    margin: 0 0 3px;
+    color: var(--pst-color-text-base);
+    font-size: 14px;
+    line-height: 1.25;
+}
+
+.dynamo-technique-card p {
+    margin: 0;
+    color: var(--pst-color-text-muted);
+    font-size: 11.5px;
+    line-height: 1.45;
+}
+
 .dynamo-benchmark-card {
     display: flex;
     flex-direction: column;
@@ -2412,6 +2489,7 @@ svg.card-icon{
     .dynamo-selected-facts,
     .dynamo-comparison-brief,
     .dynamo-evidence-grid,
+    .dynamo-technique-grid,
     .dynamo-benchmark-grid,
     .dynamo-benchmark-index,
     .dynamo-benchmark-hero {
@@ -2459,6 +2537,15 @@ svg.card-icon{
 
     .dynamo-benchmark-hero {
         padding: 16px;
+    }
+
+    .dynamo-technique-guide {
+        padding: 14px;
+    }
+
+    .dynamo-technique-guide-header {
+        display: grid;
+        gap: 6px;
     }
 
     .dynamo-benchmark-card {
