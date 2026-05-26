@@ -48,8 +48,10 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError(
                 "--serve-indexer and --use-remote-indexer are mutually exclusive"
             )
-        if self.conditional_prefill_max_new_tokens < 0:
-            raise ValueError("--router-conditional-prefill-max-new-tokens must be >= 0")
+        if self.conditional_prefill_bypass_below_tokens < 0:
+            raise ValueError(
+                "--router-conditional-prefill-bypass-below-tokens must be >= 0"
+            )
         if self.conditional_prefill_policy not in CONDITIONAL_PREFILL_POLICY_CHOICES:
             raise ValueError(
                 "--router-conditional-prefill-policy must be one of "

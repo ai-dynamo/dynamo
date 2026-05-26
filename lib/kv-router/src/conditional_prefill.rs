@@ -26,9 +26,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{
-    ConditionalPrefillPolicyKind, DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS, KvRouterConfig,
-};
+use crate::config::{ConditionalPrefillPolicyKind, KvRouterConfig};
 
 /// Inputs passed to a `ConditionalPrefillPolicy` when deciding whether to
 /// bypass remote prefill.
@@ -78,6 +76,19 @@ pub struct ConditionalPrefillDecisionInput {
     /// Projected active blocks on the cost-equation-chosen prefill worker.
     /// `None` if the prefill peek did not run.
     pub prefill_chosen_load_blocks: Option<usize>,
+
+    // === Candidate worker identities (for the slow-path RPC) ===
+    /// Cache-hot decode worker's identity. Same worker handles AGG-mode if
+    /// bypass is chosen. The slow-path RPC carries these so the cost_eval
+    /// sidecar can look up the candidate's live FPM (queue depth, in-flight
+    /// decode KV) instead of falling back to pool aggregates.
+    pub decode_chosen_worker_id: u64,
+    pub decode_chosen_dp_rank: u32,
+
+    /// Cost-equation-chosen prefill worker's identity. `None` if the prefill
+    /// peek didn't run (`needs_cost_terms() == false`) or returned no result.
+    pub prefill_chosen_worker_id: Option<u64>,
+    pub prefill_chosen_dp_rank: Option<u32>,
 
     // === Capacity / pending-prefill signals for Regression policy fast path ===
     //
@@ -194,6 +205,21 @@ pub struct CostEvalRequest {
     /// overlap credit on the cost-equation-chosen prefill worker. Passed
     /// straight into `PrefillRegressionModel.estimate_next_ttft(..., kv_hit_rate=...)`.
     pub disagg_kv_hit_rate: f64,
+
+    /// Cache-hot decode worker's identity (the AGG candidate). The sidecar
+    /// uses this to look up the candidate's live FPM (`queued_requests
+    /// .sum_prefill_tokens`, `scheduled_requests.sum_decode_kv_tokens`) and
+    /// feed those into `AggRegressionModel.estimate_next_ttft` — see
+    /// planner's per-worker pattern at `load_scaling.py:440-444`.
+    pub decode_chosen_worker_id: u64,
+    pub decode_chosen_dp_rank: u32,
+
+    /// Cost-equation-chosen prefill worker's identity (the DISAGG candidate).
+    /// Sidecar uses this for the prefill regression's `queued_prefill_tokens`
+    /// lookup. `None` if the prefill peek did not run — caller should
+    /// short-circuit to conservative DISAGG before issuing the RPC.
+    pub prefill_chosen_worker_id: Option<u64>,
+    pub prefill_chosen_dp_rank: Option<u32>,
 }
 
 /// Response from a `CostEvaluator`. `agg_ttft_ms` and `disagg_ttft_ms` are
@@ -205,6 +231,14 @@ pub struct CostEvalRequest {
 pub struct CostEvalResponse {
     pub agg_ttft_ms: Option<f64>,
     pub disagg_ttft_ms: Option<f64>,
+    /// Total predicted cost per side, in ms: `ttft + itl * avg_decode_length`.
+    /// `avg_decode_length` is the sidecar's rolling average decode KV per
+    /// request (from `AggRegressionModel._avg_decode_len`), used as the
+    /// OSL multiplier. AGG-side ITL is the 2D agg regression queried at the
+    /// chunked point `(prefill_tokens>0, decode_kv)`; DISAGG-side ITL is the
+    /// *same* 2D regression queried at the pure-decode slice `(0, decode_kv)`.
+    pub agg_total_cost_ms: Option<f64>,
+    pub disagg_total_cost_ms: Option<f64>,
     pub agg_warm: bool,
     pub disagg_warm: bool,
 }
@@ -217,6 +251,8 @@ impl CostEvalResponse {
         Self {
             agg_ttft_ms: None,
             disagg_ttft_ms: None,
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: false,
             disagg_warm: false,
         }
@@ -285,7 +321,7 @@ pub fn make_conditional_prefill_policy(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenCapConditionalPrefillPolicy {
     enabled: bool,
-    max_new_tokens: usize,
+    bypass_below_tokens: usize,
 }
 
 impl TokenCapConditionalPrefillPolicy {
@@ -296,7 +332,7 @@ impl TokenCapConditionalPrefillPolicy {
 
         Self {
             enabled: config.conditional_prefill_enabled,
-            max_new_tokens: config.conditional_prefill_max_new_tokens,
+            bypass_below_tokens: config.conditional_prefill_bypass_below_tokens,
         }
     }
 }
@@ -305,7 +341,7 @@ impl Default for TokenCapConditionalPrefillPolicy {
     fn default() -> Self {
         Self {
             enabled: false,
-            max_new_tokens: DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS,
+            bypass_below_tokens: DEFAULT_CONDITIONAL_PREFILL_BYPASS_BELOW_TOKENS,
         }
     }
 }
@@ -317,7 +353,7 @@ impl ConditionalPrefillPolicy for TokenCapConditionalPrefillPolicy {
     }
 
     async fn should_bypass_remote_prefill(&self, input: ConditionalPrefillDecisionInput) -> bool {
-        self.enabled && input.net_new_tokens() <= self.max_new_tokens
+        self.enabled && input.net_new_tokens() <= self.bypass_below_tokens
     }
 }
 
@@ -402,12 +438,14 @@ impl ConditionalPrefillPolicy for RandomBypassConditionalPrefillPolicy {
 /// ```text
 /// fast path:
 ///   eff_isl = prompt_tokens - decode_chosen_overlap_blocks * block_size
-///   if roomy(p) or eff_isl > large_prompt_threshold_tokens → DISAGG
-///   else if roomy(d) → AGG
+///   if roomy(p) or eff_isl > disagg_above_tokens → DISAGG
+///   else if roomy(d) or eff_isl ≤ bypass_below_tokens → AGG
 /// slow path:
 ///   resp = evaluator.evaluate(features).await
 ///   if !resp.agg_warm or !resp.disagg_warm → DISAGG  (conservative fallback)
-///   else → AGG iff resp.agg_ttft_ms < resp.disagg_ttft_ms
+///   else if both total_cost_ms surfaced → AGG iff agg_total_cost_ms < disagg_total_cost_ms
+///                                         (total_cost = ttft + itl * avg_decode_length)
+///   else → AGG iff resp.agg_ttft_ms < resp.disagg_ttft_ms  (TTFT-only fallback)
 /// ```
 ///
 /// `roomy(w)` is true when both `(max-active)/max ≥ roomy_available_ratio_threshold`
@@ -424,7 +462,11 @@ pub struct RegressionConditionalPrefillPolicy {
     enable_slow_path: bool,
     /// Effective ISL (post device-cache) above this triggers DISAGG on the
     /// fast path — too much prefill to commit to the decode worker.
-    large_prompt_threshold_tokens: usize,
+    disagg_above_tokens: usize,
+    /// Effective ISL (post device-cache) at or below this triggers AGG on the
+    /// fast path — small prompts are cheap to bypass and AGG saves the
+    /// prefill→decode KV transfer cost.
+    bypass_below_tokens: usize,
     /// `(max - active) / max` must be at least this for the worker to count
     /// as roomy. Range `[0, 1]`.
     roomy_available_ratio_threshold: f64,
@@ -463,8 +505,8 @@ impl RegressionConditionalPrefillPolicy {
                 enabled: cfg.conditional_prefill_enabled,
                 enable_fast_path,
                 enable_slow_path,
-                large_prompt_threshold_tokens: cfg
-                    .conditional_prefill_regression_large_prompt_threshold_tokens,
+                disagg_above_tokens: cfg.conditional_prefill_disagg_above_tokens,
+                bypass_below_tokens: cfg.conditional_prefill_bypass_below_tokens,
                 roomy_available_ratio_threshold: cfg
                     .conditional_prefill_regression_roomy_available_ratio,
                 roomy_queued_blocks_threshold: cfg
@@ -491,7 +533,8 @@ impl RegressionConditionalPrefillPolicy {
             enabled: false,
             enable_fast_path: true,
             enable_slow_path: true,
-            large_prompt_threshold_tokens: DEFAULT_REGRESSION_LARGE_PROMPT_THRESHOLD_TOKENS,
+            disagg_above_tokens: DEFAULT_CONDITIONAL_PREFILL_DISAGG_ABOVE_TOKENS,
+            bypass_below_tokens: DEFAULT_CONDITIONAL_PREFILL_BYPASS_BELOW_TOKENS,
             roomy_available_ratio_threshold: DEFAULT_REGRESSION_ROOMY_AVAILABLE_RATIO,
             roomy_queued_blocks_threshold: DEFAULT_REGRESSION_ROOMY_QUEUED_BLOCKS,
             evaluator: OnceLock::new(),
@@ -515,20 +558,29 @@ impl RegressionConditionalPrefillPolicy {
             prompt_tokens: input.prompt_tokens,
             agg_kv_hit_rate: (agg_overlap_tokens / denom).clamp(0.0, 1.0),
             disagg_kv_hit_rate: (disagg_overlap_tokens / denom).clamp(0.0, 1.0),
+            decode_chosen_worker_id: input.decode_chosen_worker_id,
+            decode_chosen_dp_rank: input.decode_chosen_dp_rank,
+            prefill_chosen_worker_id: input.prefill_chosen_worker_id,
+            prefill_chosen_dp_rank: input.prefill_chosen_dp_rank,
         })
     }
 }
 
 /// Default for the `roomy(w)` fraction-available threshold. Hand-picked
 /// starting point; tune from mocker data.
-pub const DEFAULT_REGRESSION_ROOMY_AVAILABLE_RATIO: f64 = 0.5;
+pub const DEFAULT_REGRESSION_ROOMY_AVAILABLE_RATIO: f64 = 0.8;
 /// Default for the `roomy(w)` queued-blocks threshold. `0` = no queued work
 /// allowed.
 pub const DEFAULT_REGRESSION_ROOMY_QUEUED_BLOCKS: u32 = 0;
 /// Default effective-ISL ceiling above which fast path forces DISAGG.
 /// Roughly 16k tokens — keeps very long prompts on the disagg path even when
 /// decode has headroom.
-pub const DEFAULT_REGRESSION_LARGE_PROMPT_THRESHOLD_TOKENS: usize = 16_384;
+pub const DEFAULT_CONDITIONAL_PREFILL_DISAGG_ABOVE_TOKENS: usize = 16_384;
+
+/// Effective ISL (net new tokens) at or below which the conditional-prefill
+/// policy fast-paths to AGG. Shared by TokenCap (sole bypass criterion) and
+/// Regression (small-prompt fast path before falling through to slow path).
+pub const DEFAULT_CONDITIONAL_PREFILL_BYPASS_BELOW_TOKENS: usize = 1024;
 
 /// True when worker `w` has both KV-capacity headroom and a small pending-
 /// prefill backlog, per the configured thresholds. Missing capacity/queue
@@ -558,13 +610,8 @@ pub const DEFAULT_REGRESSION_LARGE_PROMPT_THRESHOLD_TOKENS: usize = 16_384;
 ///   - `(max - load) / max ≥ ratio` → "enough free KV memory"
 ///   - `queued ≤ threshold`         → "small pending prefill compute backlog"
 ///
-/// TODO (Phase 4 review — see `docs/regressionpolicy_implementation.md`):
+/// TODO:
 /// before pushing on real-engine E2E, revisit with mocker data already in hand:
-///   - Threshold defaults (`available/max ≥ 0.5`, `queued ≤ 0`).
-///   - Whether `load_blocks` and `queued_blocks` give independent signal or
-///     are correlated enough that we could drop one (the currently-running
-///     prefill contributes to both — its KV holds blocks, its remaining work
-///     decays into `queued`).
 ///   - Whether the snapshot semantic (this function's current shape) gives
 ///     materially different decisions vs a request-projected view at the
 ///     workloads of interest.
@@ -618,10 +665,12 @@ impl ConditionalPrefillPolicy for RegressionConditionalPrefillPolicy {
             let overlap_tokens =
                 (input.decode_chosen_overlap_blocks as usize).saturating_mul(input.block_size);
             let eff_isl_tokens = input.prompt_tokens.saturating_sub(overlap_tokens);
-            if p_roomy || eff_isl_tokens > self.large_prompt_threshold_tokens {
+            if p_roomy || eff_isl_tokens > self.disagg_above_tokens {
                 return false;
             }
 
+            // AGG when either the decode worker has headroom or the prompt
+            // is small enough that bypass is cheap.
             let d_roomy = worker_is_roomy(
                 input.decode_chosen_load_blocks,
                 input.decode_chosen_max_blocks,
@@ -629,7 +678,7 @@ impl ConditionalPrefillPolicy for RegressionConditionalPrefillPolicy {
                 self.roomy_available_ratio_threshold,
                 self.roomy_queued_blocks_threshold,
             );
-            if d_roomy {
+            if d_roomy || eff_isl_tokens <= self.bypass_below_tokens {
                 return true;
             }
         }
@@ -652,10 +701,19 @@ impl ConditionalPrefillPolicy for RegressionConditionalPrefillPolicy {
             return false;
         };
         let resp = evaluator.evaluate(request).await;
+        if !(resp.agg_warm && resp.disagg_warm) {
+            return false;
+        }
+        // Prefer the total-cost comparison (TTFT + ITL * avg_decode_length)
+        // when the sidecar surfaced it on both sides; fall back to TTFT-only
+        // when total_cost is missing (cold ITL estimate or no avg_decode_length
+        // yet). Either way, both sides must be Some — otherwise conservative
+        // DISAGG.
+        if let (Some(agg), Some(disagg)) = (resp.agg_total_cost_ms, resp.disagg_total_cost_ms) {
+            return agg < disagg;
+        }
         match (resp.agg_ttft_ms, resp.disagg_ttft_ms) {
-            (Some(agg_ms), Some(disagg_ms)) if resp.agg_warm && resp.disagg_warm => {
-                agg_ms < disagg_ms
-            }
+            (Some(agg_ms), Some(disagg_ms)) => agg_ms < disagg_ms,
             _ => false,
         }
     }
@@ -664,10 +722,16 @@ impl ConditionalPrefillPolicy for RegressionConditionalPrefillPolicy {
         let request = self.cost_eval_request(input)?;
         let evaluator = self.evaluator.get()?;
         let resp = evaluator.evaluate(request).await;
+        if !(resp.agg_warm && resp.disagg_warm) {
+            return None;
+        }
+        // Same priority order as `should_bypass_remote_prefill`: total_cost
+        // when available, fall back to TTFT-only.
+        if let (Some(agg), Some(disagg)) = (resp.agg_total_cost_ms, resp.disagg_total_cost_ms) {
+            return Some((agg, disagg));
+        }
         match (resp.agg_ttft_ms, resp.disagg_ttft_ms) {
-            (Some(agg_ms), Some(disagg_ms)) if resp.agg_warm && resp.disagg_warm => {
-                Some((agg_ms, disagg_ms))
-            }
+            (Some(agg_ms), Some(disagg_ms)) => Some((agg_ms, disagg_ms)),
             _ => None,
         }
     }
@@ -699,6 +763,10 @@ mod tests {
             prefill_chosen_max_blocks: None,
             decode_chosen_queued_blocks: None,
             prefill_chosen_queued_blocks: None,
+            decode_chosen_worker_id: 0,
+            decode_chosen_dp_rank: 0,
+            prefill_chosen_worker_id: None,
+            prefill_chosen_dp_rank: None,
         }
     }
 
@@ -708,8 +776,8 @@ mod tests {
 
         assert!(!policy.is_enabled());
         assert_eq!(
-            policy.max_new_tokens,
-            DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS
+            policy.bypass_below_tokens,
+            DEFAULT_CONDITIONAL_PREFILL_BYPASS_BELOW_TOKENS
         );
         assert!(
             !policy
@@ -722,7 +790,7 @@ mod tests {
     async fn token_cap_policy_bypasses_at_or_below_cap() {
         let policy = TokenCapConditionalPrefillPolicy {
             enabled: true,
-            max_new_tokens: 160,
+            bypass_below_tokens: 160,
         };
 
         // block_size=16, so overlap_blocks=5 → 80 overlap tokens.
@@ -744,7 +812,7 @@ mod tests {
     async fn token_cap_policy_allows_no_overlap() {
         let policy = TokenCapConditionalPrefillPolicy {
             enabled: true,
-            max_new_tokens: 160,
+            bypass_below_tokens: 160,
         };
 
         assert!(
@@ -815,6 +883,10 @@ mod tests {
             prefill_chosen_max_blocks: Some(1000),
             decode_chosen_queued_blocks: Some(10),
             prefill_chosen_queued_blocks: Some(10),
+            decode_chosen_worker_id: 42,
+            decode_chosen_dp_rank: 0,
+            prefill_chosen_worker_id: Some(7),
+            prefill_chosen_dp_rank: Some(0),
         }
     }
 
@@ -823,7 +895,8 @@ mod tests {
             enabled: true,
             enable_fast_path: true,
             enable_slow_path: true,
-            large_prompt_threshold_tokens: 16_384,
+            disagg_above_tokens: 16_384,
+            bypass_below_tokens: 0,
             roomy_available_ratio_threshold: 0.5,
             roomy_queued_blocks_threshold: 0,
             evaluator: OnceLock::new(),
@@ -839,7 +912,8 @@ mod tests {
             enabled: true,
             enable_fast_path: true,
             enable_slow_path: true,
-            large_prompt_threshold_tokens: 16_384,
+            disagg_above_tokens: 16_384,
+            bypass_below_tokens: 0,
             roomy_available_ratio_threshold: 0.5,
             roomy_queued_blocks_threshold: 0,
             evaluator: OnceLock::new(),
@@ -851,6 +925,8 @@ mod tests {
         let mut policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: Some(1.0),
             disagg_ttft_ms: Some(100.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: true,
             disagg_warm: true,
         });
@@ -869,6 +945,8 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: Some(1.0),
             disagg_ttft_ms: Some(100.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: true,
             disagg_warm: true,
         });
@@ -884,6 +962,8 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: Some(1.0),
             disagg_ttft_ms: Some(100.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: true,
             disagg_warm: true,
         });
@@ -900,6 +980,8 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: Some(999.0),
             disagg_ttft_ms: Some(1.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: true,
             disagg_warm: true,
         });
@@ -914,6 +996,8 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: Some(10.0),
             disagg_ttft_ms: Some(100.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: true,
             disagg_warm: true,
         });
@@ -929,6 +1013,8 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: Some(100.0),
             disagg_ttft_ms: Some(10.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: true,
             disagg_warm: true,
         });
@@ -945,6 +1031,8 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: None,
             disagg_ttft_ms: Some(100.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: false,
             disagg_warm: true,
         });
@@ -992,6 +1080,8 @@ mod tests {
             response: CostEvalResponse {
                 agg_ttft_ms: Some(10.0),
                 disagg_ttft_ms: Some(100.0),
+                agg_total_cost_ms: None,
+                disagg_total_cost_ms: None,
                 agg_warm: true,
                 disagg_warm: true,
             },
@@ -1012,6 +1102,8 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: Some(1.0),
             disagg_ttft_ms: Some(100.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: true,
             disagg_warm: true,
         });
@@ -1025,6 +1117,8 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: Some(10.0),
             disagg_ttft_ms: Some(100.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: true,
             disagg_warm: true,
         });
@@ -1039,6 +1133,8 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse {
             agg_ttft_ms: Some(10.0),
             disagg_ttft_ms: Some(100.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: false,
             disagg_warm: true,
         });

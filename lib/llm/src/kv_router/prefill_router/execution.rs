@@ -144,6 +144,8 @@ impl PrefillRouter {
             prefill_chosen_load_blocks,
             prefill_chosen_max_blocks,
             prefill_chosen_queued_blocks,
+            prefill_chosen_worker_id,
+            prefill_chosen_dp_rank,
         ) = if self.conditional_prefill_policy.needs_cost_terms() {
             self.query_prefill_chosen_components(
                 routing_token_ids,
@@ -156,7 +158,7 @@ impl PrefillRouter {
             )
             .await
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None, None)
         };
 
         let input = ConditionalPrefillDecisionInput {
@@ -171,6 +173,10 @@ impl PrefillRouter {
             prefill_chosen_max_blocks,
             decode_chosen_queued_blocks,
             prefill_chosen_queued_blocks,
+            decode_chosen_worker_id: worker.worker_id,
+            decode_chosen_dp_rank: worker.dp_rank,
+            prefill_chosen_worker_id,
+            prefill_chosen_dp_rank,
         };
         let net_new_tokens = input.net_new_tokens();
         let overlap_tokens = (overlap_blocks as usize) * block_size;
@@ -220,6 +226,13 @@ impl PrefillRouter {
     /// Returns all-`None` if the prefill router isn't KV-mode, isn't
     /// activated, or the call fails.
     #[allow(clippy::too_many_arguments)]
+    /// Peek the prefill router for the cost-equation-chosen prefill worker
+    /// and return its load signals plus identity. The identity (worker_id +
+    /// dp_rank) is surfaced so the slow-path `CostEvalRequest` can carry it
+    /// to the sidecar, which uses it to look up the candidate's live FPM —
+    /// see planner's per-worker `estimate_next_ttft` call at
+    /// `load_scaling.py:440-444`.
+    #[allow(clippy::type_complexity)]
     async fn query_prefill_chosen_components(
         &self,
         token_ids: &[u32],
@@ -229,13 +242,20 @@ impl PrefillRouter {
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> (Option<f64>, Option<usize>, Option<usize>, Option<u32>) {
+    ) -> (
+        Option<f64>,
+        Option<usize>,
+        Option<usize>,
+        Option<u32>,
+        Option<u64>,
+        Option<u32>,
+    ) {
         let Some(inner) = self.prefill_router.get() else {
-            return (None, None, None, None);
+            return (None, None, None, None, None, None);
         };
         let kv = match inner {
             InnerPrefillRouter::KvRouter(r) => r,
-            InnerPrefillRouter::SimpleRouter(_) => return (None, None, None, None),
+            InnerPrefillRouter::SimpleRouter(_) => return (None, None, None, None, None, None),
         };
         let Ok(details) = kv
             .chooser
@@ -254,7 +274,7 @@ impl PrefillRouter {
             )
             .await
         else {
-            return (None, None, None, None);
+            return (None, None, None, None, None, None);
         };
         let block_size = kv.chooser.block_size() as usize;
         let tier_credit = Some(details.cache_hit.effective_overlap_blocks);
@@ -267,7 +287,14 @@ impl PrefillRouter {
             .chooser
             .pending_prefill_tokens_for(details.worker)
             .map(|t| t.div_ceil(block_size.max(1)) as u32);
-        (tier_credit, load, max_blocks, queued)
+        (
+            tier_credit,
+            load,
+            max_blocks,
+            queued,
+            Some(details.worker.worker_id),
+            Some(details.worker.dp_rank),
+        )
     }
 
     /// Select a prefill worker and resolve its bootstrap connection info.

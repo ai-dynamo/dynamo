@@ -120,6 +120,10 @@ mod tests {
             prompt_tokens: 1024,
             agg_kv_hit_rate: 0.3,
             disagg_kv_hit_rate: 0.1,
+            decode_chosen_worker_id: 1,
+            decode_chosen_dp_rank: 0,
+            prefill_chosen_worker_id: Some(2),
+            prefill_chosen_dp_rank: Some(0),
         }
     }
 
@@ -127,6 +131,8 @@ mod tests {
         CostEvalResponse {
             agg_ttft_ms: Some(12.5),
             disagg_ttft_ms: Some(80.0),
+            agg_total_cost_ms: None,
+            disagg_total_cost_ms: None,
             agg_warm: true,
             disagg_warm: true,
         }

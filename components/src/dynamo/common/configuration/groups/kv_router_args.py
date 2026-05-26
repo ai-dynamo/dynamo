@@ -44,7 +44,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "shared_cache_multiplier",
     "shared_cache_type",
     "conditional_prefill_enabled",
-    "conditional_prefill_max_new_tokens",
+    "conditional_prefill_bypass_below_tokens",
     "conditional_prefill_policy",
     "router_predicted_ttl_secs",
 )
@@ -141,7 +141,7 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     conditional_prefill_enabled: bool = False
-    conditional_prefill_max_new_tokens: int = 5000
+    conditional_prefill_bypass_below_tokens: int = 5000
     conditional_prefill_policy: str = "token_cap"
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
@@ -409,15 +409,15 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--router-conditional-prefill-max-new-tokens",
-            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_MAX_NEW_TOKENS",
+            flag_name="--router-conditional-prefill-bypass-below-tokens",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_BYPASS_BELOW_TOKENS",
             default=5000,
             help=(
                 "KV Router: Maximum net-new prompt tokens allowed for conditional "
                 "local prefill on a decode worker. Used by the 'token_cap' policy."
             ),
             arg_type=int,
-            dest="conditional_prefill_max_new_tokens",
+            dest="conditional_prefill_bypass_below_tokens",
         )
         add_argument(
             g,
@@ -427,7 +427,7 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Which conditional-prefill bypass policy to use. "
                 "'token_cap' (default): bypass when net-new prompt tokens are below "
-                "--router-conditional-prefill-max-new-tokens. Load-agnostic. "
+                "--router-conditional-prefill-bypass-below-tokens. Load-agnostic. "
                 "'threshold_regression' (production): two-phase fast-path + regression "
                 "slow-path; consults the cost_eval sidecar when the fast path is ambiguous. "
                 "'threshold_only' (diagnostic): fast path only, no cost_eval RPC. Useful "

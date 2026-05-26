@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # ``components/src/dynamo/planner/config/defaults.py:97`` (max_num_fpm_samples=64).
 DEFAULT_MIN_OBSERVATIONS = 5
 DEFAULT_MAX_NUM_FPM_SAMPLES = 64
-DEFAULT_FPM_POLL_INTERVAL_S = 0.1
+DEFAULT_FPM_POLL_INTERVAL_S = 1.0
 
 
 class CostEvalConfig(BaseModel):

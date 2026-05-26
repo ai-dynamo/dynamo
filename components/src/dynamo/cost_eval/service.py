@@ -162,87 +162,187 @@ class CostEvalService:
         if self._prefill_sub is not None:
             for raw in self._prefill_sub.get_recent_stats().values():
                 fpm = decode_fpm(raw)
-                if fpm is not None:
-                    # Log up to 5 *active* (wall_time>0) FPMs from the prefill
-                    # side so we can audit what the regression is actually
-                    # learning from (vs the initial idle heartbeat at wall_time=0).
-                    if fpm.wall_time > 0.0 and self._active_prefill_logged < 5:
-                        logger.info(
-                            "active prefill FPM #%d: counter_id=%d wall_time=%.6fs "
-                            "sched_prefill_tokens=%d sched_num_prefill=%d "
-                            "queued_prefill_tokens=%d",
-                            self._active_prefill_logged,
-                            fpm.counter_id,
-                            fpm.wall_time,
-                            fpm.scheduled_requests.sum_prefill_tokens,
-                            fpm.scheduled_requests.num_prefill_requests,
-                            fpm.queued_requests.sum_prefill_tokens,
-                        )
-                        self._active_prefill_logged += 1
-                    self._prefill_regression.add_observation(fpm)
-                    prefill_added += 1
+                # Skip idle heartbeats (wall_time=0) BEFORE add_observation —
+                # planner's `_update_moving_averages` runs *before* its own
+                # wall_time=0 filter, so a heartbeat would drift `_avg_isl`
+                # toward 0 even without becoming a counted observation. With
+                # snapshot-semantics drains re-feeding the same heartbeat
+                # ~10×/sec, that drift is fast enough to corrupt predictions
+                # mid-test. We filter at our drain boundary instead.
+                if fpm is None or fpm.wall_time <= 0.0:
+                    continue
+                if self._active_prefill_logged < 5:
+                    logger.info(
+                        "active prefill FPM #%d: counter_id=%d wall_time=%.6fs "
+                        "sched_prefill_tokens=%d sched_num_prefill=%d "
+                        "queued_prefill_tokens=%d",
+                        self._active_prefill_logged,
+                        fpm.counter_id,
+                        fpm.wall_time,
+                        fpm.scheduled_requests.sum_prefill_tokens,
+                        fpm.scheduled_requests.num_prefill_requests,
+                        fpm.queued_requests.sum_prefill_tokens,
+                    )
+                    self._active_prefill_logged += 1
+                self._prefill_regression.add_observation(fpm)
+                prefill_added += 1
         if self._decode_sub is not None:
             for raw in self._decode_sub.get_recent_stats().values():
                 fpm = decode_fpm(raw)
-                if fpm is not None:
-                    if fpm.wall_time > 0.0 and self._active_decode_logged < 5:
-                        logger.info(
-                            "active decode FPM #%d: counter_id=%d wall_time=%.6fs "
-                            "sched_decode_kv_tokens=%d sched_num_decode=%d",
-                            self._active_decode_logged,
-                            fpm.counter_id,
-                            fpm.wall_time,
-                            fpm.scheduled_requests.sum_decode_kv_tokens,
-                            fpm.scheduled_requests.num_decode_requests,
-                        )
-                        self._active_decode_logged += 1
-                    self._agg_regression.add_observation(fpm)
-                    decode_added += 1
+                if fpm is None or fpm.wall_time <= 0.0:
+                    continue
+                if self._active_decode_logged < 5:
+                    logger.info(
+                        "active decode FPM #%d: counter_id=%d wall_time=%.6fs "
+                        "sched_decode_kv_tokens=%d sched_num_decode=%d",
+                        self._active_decode_logged,
+                        fpm.counter_id,
+                        fpm.wall_time,
+                        fpm.scheduled_requests.sum_decode_kv_tokens,
+                        fpm.scheduled_requests.num_decode_requests,
+                    )
+                    self._active_decode_logged += 1
+                self._agg_regression.add_observation(fpm)
+                decode_added += 1
         return prefill_added, decode_added
 
     # ------------------------------------------------------------------
     # Slow-path RPC
     # ------------------------------------------------------------------
 
+    def _fpm_load_signals(
+        self,
+        sub: Optional["FpmEventSubscriber"],
+        worker_id: int,
+        dp_rank: int,
+    ) -> tuple[int, int]:
+        """Look up the (worker_id, dp_rank) entry in the subscriber's latest
+        FPM snapshot and return ``(queued_prefill_tokens, sched_decode_kv_tokens)``.
+        Missing entry → ``(0, 0)`` and the regression's warmth gate handles
+        the cold case. FpmEventSubscriber.get_recent_stats() returns the latest
+        FPM per worker indexed by ``(worker_id_str, dp_rank)``.
+        """
+        if sub is None:
+            return 0, 0
+        raw = sub.get_recent_stats().get((str(worker_id), dp_rank))
+        if raw is None:
+            return 0, 0
+        fpm = decode_fpm(raw)
+        if fpm is None:
+            return 0, 0
+        return (
+            fpm.queued_requests.sum_prefill_tokens,
+            fpm.scheduled_requests.sum_decode_kv_tokens,
+        )
+
     def evaluate(self, request: CostEvalRequest) -> CostEvalResponse:
         """Pure-Python core of the slow-path RPC. Side-effect free; safe to
         call from anywhere (tests pass synthetic requests directly).
+
+        Load signals (``queued_prefill_tokens``, ``current_decode_kv``) are
+        sourced from each candidate worker's latest FPM snapshot — same
+        per-worker pattern planner uses at
+        ``components/src/dynamo/planner/core/load_scaling.py:440-444``. If a
+        candidate's FPM isn't in the snapshot yet (just registered, no
+        observations published), we fall back to 0 for that signal — the
+        regression's own warmth gate (``has_sufficient_data``) handles the
+        "no data yet" case, and conservative DISAGG fires upstream.
         """
         max_batched = self._config.max_num_batched_tokens
 
+        # AGG candidate = the cache-hot decode worker (same worker runs prefill
+        # locally under bypass). Look up its FPM on the decode subscriber.
+        agg_queued, agg_decode_kv = self._fpm_load_signals(
+            self._decode_sub,
+            request.decode_chosen_worker_id,
+            request.decode_chosen_dp_rank,
+        )
         agg_ttft_s = self._agg_regression.estimate_next_ttft(
-            queued_prefill_tokens=0,  # tracked sidecar-side from FPM; TODO: derive
+            queued_prefill_tokens=agg_queued,
             max_num_batched_tokens=max_batched,
-            current_decode_kv=0,  # tracked sidecar-side from FPM; TODO: derive
+            current_decode_kv=agg_decode_kv,
             kv_hit_rate=request.agg_kv_hit_rate,
         )
+
+        # DISAGG candidate = the chosen prefill worker. Look up its FPM on the
+        # prefill subscriber. Missing identity → no peek ran → conservative
+        # DISAGG signal anyway.
+        if (
+            request.prefill_chosen_worker_id is not None
+            and request.prefill_chosen_dp_rank is not None
+        ):
+            disagg_queued, _ = self._fpm_load_signals(
+                self._prefill_sub,
+                request.prefill_chosen_worker_id,
+                request.prefill_chosen_dp_rank,
+            )
+        else:
+            disagg_queued = 0
         disagg_ttft_s = self._prefill_regression.estimate_next_ttft(
-            queued_prefill_tokens=0,  # tracked sidecar-side from FPM; TODO: derive
+            queued_prefill_tokens=disagg_queued,
             max_num_batched_tokens=max_batched,
             kv_hit_rate=request.disagg_kv_hit_rate,
         )
+
+        # ITL predictions — both come from the same 2D _agg_regression, queried
+        # at different feature points. AGG-mode iters are chunked-prefill+decode,
+        # so the AGG ITL prediction lives at the (prefill>0, decode_kv) point.
+        # DISAGG-mode iters on the same decode worker are pure-decode (no
+        # concurrent prefill compute), so the DISAGG ITL prediction lives at
+        # the (0, decode_kv) slice of the same regression. See the
+        # "Cost equation (current)" section of regressionpolicy_implementation.md
+        # for why one 2D regression covering both regimes is more robust than
+        # planner's three-regression design here.
+        agg_itl_s = self._agg_regression.estimate_next_itl(
+            scheduled_decode_kv=agg_decode_kv,
+            queued_decode_kv=0,
+        )
+        # Pure-decode slice: predict at prefill_tokens=0 using the same agg
+        # regression's fitted 2D surface. Reuses planner's internal `_predict_2d`
+        # (gated on `_ensure_fitted` for warmth correctness).
+        if self._agg_regression._ensure_fitted():
+            disagg_itl_s = self._agg_regression._predict_2d(
+                0.0,
+                float(agg_decode_kv) + self._agg_regression.avg_decode_length,
+            )
+        else:
+            disagg_itl_s = None
+
+        avg_decode_length = self._agg_regression.avg_decode_length
+
+        def total_ms(ttft_s, itl_s):
+            if ttft_s is None or itl_s is None or avg_decode_length <= 0:
+                return None
+            return (ttft_s + itl_s * avg_decode_length) * _S_TO_MS
 
         response = CostEvalResponse(
             agg_ttft_ms=(agg_ttft_s * _S_TO_MS if agg_ttft_s is not None else None),
             disagg_ttft_ms=(
                 disagg_ttft_s * _S_TO_MS if disagg_ttft_s is not None else None
             ),
+            agg_total_cost_ms=total_ms(agg_ttft_s, agg_itl_s),
+            disagg_total_cost_ms=total_ms(disagg_ttft_s, disagg_itl_s),
             agg_warm=self._agg_regression.has_sufficient_data(),
             disagg_warm=self._prefill_regression.has_sufficient_data(),
         )
+
+        def _fmt(x):
+            return f"{x:.2f}ms" if x is not None else "None"
+
         logger.info(
-            "evaluate request_id=%r prompt_tokens=%d agg_kvh=%.3f disagg_kvh=%.3f "
-            "→ agg_ttft=%s disagg_ttft=%s agg_warm=%s disagg_warm=%s",
+            "evaluate request_id=%r prompt_tokens=%d "
+            "agg_kvh=%.3f disagg_kvh=%.3f avg_decode_len=%.1f "
+            "→ agg_ttft=%s agg_total=%s disagg_ttft=%s disagg_total=%s "
+            "agg_warm=%s disagg_warm=%s",
             request.request_id,
             request.prompt_tokens,
             request.agg_kv_hit_rate,
             request.disagg_kv_hit_rate,
-            f"{response.agg_ttft_ms:.2f}ms"
-            if response.agg_ttft_ms is not None
-            else "None",
-            f"{response.disagg_ttft_ms:.2f}ms"
-            if response.disagg_ttft_ms is not None
-            else "None",
+            avg_decode_length,
+            _fmt(response.agg_ttft_ms),
+            _fmt(response.agg_total_cost_ms),
+            _fmt(response.disagg_ttft_ms),
+            _fmt(response.disagg_total_cost_ms),
             response.agg_warm,
             response.disagg_warm,
         )

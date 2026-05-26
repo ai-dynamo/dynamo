@@ -51,6 +51,8 @@ async def _start(runtime: DistributedRuntime, config: CostEvalConfig) -> None:
         prompt_tokens=1,
         agg_kv_hit_rate=0.0,
         disagg_kv_hit_rate=0.0,
+        decode_chosen_worker_id=0,
+        decode_chosen_dp_rank=0,
     ).model_dump()
 
     # serve_endpoint registers the health check and flips HealthStatus::Ready

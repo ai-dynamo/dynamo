@@ -552,6 +552,14 @@ impl DisaggRuntime {
             prefill_chosen_max_blocks: None,
             decode_chosen_queued_blocks: None,
             prefill_chosen_queued_blocks: None,
+            // Mocker doesn't carry dynamo-runtime worker identities (Phase 6).
+            // The slow-path RPC is live-router-only today, so feeding a stable
+            // synthetic ID here is safe: mocker policies that go through the
+            // slow path would short-circuit on missing FPM lookups anyway.
+            decode_chosen_worker_id: lhs.worker_idx as u64,
+            decode_chosen_dp_rank: 0,
+            prefill_chosen_worker_id: None,
+            prefill_chosen_dp_rank: None,
         };
 
         // The trait method is async to support policies that consult an

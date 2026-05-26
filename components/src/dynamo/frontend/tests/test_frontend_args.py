@@ -28,9 +28,9 @@ def test_conditional_prefill_defaults_to_disabled() -> None:
     config = parse_frontend_config()
 
     assert config.conditional_prefill_enabled is False
-    assert config.conditional_prefill_max_new_tokens == 5000
+    assert config.conditional_prefill_bypass_below_tokens == 5000
     assert config.kv_router_kwargs()["conditional_prefill_enabled"] is False
-    assert config.kv_router_kwargs()["conditional_prefill_max_new_tokens"] == 5000
+    assert config.kv_router_kwargs()["conditional_prefill_bypass_below_tokens"] == 5000
 
 
 def test_conditional_prefill_requires_kv_router_mode() -> None:
@@ -43,11 +43,11 @@ def test_conditional_prefill_accepts_token_cap_in_kv_mode() -> None:
         "--router-mode",
         "kv",
         "--router-conditional-prefill",
-        "--router-conditional-prefill-max-new-tokens",
+        "--router-conditional-prefill-bypass-below-tokens",
         "1234",
     )
 
     assert config.conditional_prefill_enabled is True
-    assert config.conditional_prefill_max_new_tokens == 1234
+    assert config.conditional_prefill_bypass_below_tokens == 1234
     assert config.kv_router_kwargs()["conditional_prefill_enabled"] is True
-    assert config.kv_router_kwargs()["conditional_prefill_max_new_tokens"] == 1234
+    assert config.kv_router_kwargs()["conditional_prefill_bypass_below_tokens"] == 1234

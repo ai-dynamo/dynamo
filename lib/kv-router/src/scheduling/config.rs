@@ -20,7 +20,6 @@ const fn default_track_prefill_tokens() -> bool {
 }
 
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
-pub const DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS: usize = 5000;
 
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
@@ -313,9 +312,9 @@ struct KvRouterConfigSerde {
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     conditional_prefill_enabled: bool,
-    conditional_prefill_max_new_tokens: usize,
+    conditional_prefill_bypass_below_tokens: usize,
     conditional_prefill_policy: ConditionalPrefillPolicyKind,
-    conditional_prefill_regression_large_prompt_threshold_tokens: usize,
+    conditional_prefill_disagg_above_tokens: usize,
     conditional_prefill_regression_roomy_available_ratio: f64,
     conditional_prefill_regression_roomy_queued_blocks: u32,
     cost_eval_subject: Option<String>,
@@ -352,10 +351,9 @@ impl Default for KvRouterConfigSerde {
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             conditional_prefill_enabled: config.conditional_prefill_enabled,
-            conditional_prefill_max_new_tokens: config.conditional_prefill_max_new_tokens,
+            conditional_prefill_bypass_below_tokens: config.conditional_prefill_bypass_below_tokens,
             conditional_prefill_policy: config.conditional_prefill_policy,
-            conditional_prefill_regression_large_prompt_threshold_tokens: config
-                .conditional_prefill_regression_large_prompt_threshold_tokens,
+            conditional_prefill_disagg_above_tokens: config.conditional_prefill_disagg_above_tokens,
             conditional_prefill_regression_roomy_available_ratio: config
                 .conditional_prefill_regression_roomy_available_ratio,
             conditional_prefill_regression_roomy_queued_blocks: config
@@ -480,8 +478,13 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub conditional_prefill_enabled: bool,
 
-    /// Maximum net-new prompt tokens allowed for conditional local prefill on a decode worker.
-    pub conditional_prefill_max_new_tokens: usize,
+    /// Effective ISL (post device-cache, in tokens) at or below which the
+    /// conditional-prefill policy bypasses to AGG. Shared by TokenCap (which
+    /// makes it the sole bypass criterion) and Regression (where it is the
+    /// fast-path small-prompt cutoff before falling through to roomy() / the
+    /// slow path). Default 5000.
+    #[serde(default = "default_conditional_prefill_bypass_below_tokens")]
+    pub conditional_prefill_bypass_below_tokens: usize,
 
     /// Which conditional-prefill policy to use when `conditional_prefill_enabled` is true.
     /// Default: `TokenCap` (preserves prior behavior).
@@ -491,8 +494,8 @@ pub struct KvRouterConfig {
     /// Regression policy: effective ISL (post device-cache, in tokens) above
     /// which the fast path forces DISAGG regardless of decode-worker headroom.
     /// Default 16384.
-    #[serde(default = "default_regression_large_prompt_threshold_tokens")]
-    pub conditional_prefill_regression_large_prompt_threshold_tokens: usize,
+    #[serde(default = "default_conditional_prefill_disagg_above_tokens")]
+    pub conditional_prefill_disagg_above_tokens: usize,
 
     /// Regression policy: minimum `(max_blocks - load_blocks) / max_blocks`
     /// for a worker to count as roomy. In `[0, 1]`. Default 0.5.
@@ -523,8 +526,12 @@ pub struct KvRouterConfig {
     pub router_predicted_ttl_secs: Option<f64>,
 }
 
-fn default_regression_large_prompt_threshold_tokens() -> usize {
-    crate::conditional_prefill::DEFAULT_REGRESSION_LARGE_PROMPT_THRESHOLD_TOKENS
+fn default_conditional_prefill_disagg_above_tokens() -> usize {
+    crate::conditional_prefill::DEFAULT_CONDITIONAL_PREFILL_DISAGG_ABOVE_TOKENS
+}
+
+fn default_conditional_prefill_bypass_below_tokens() -> usize {
+    crate::conditional_prefill::DEFAULT_CONDITIONAL_PREFILL_BYPASS_BELOW_TOKENS
 }
 
 fn default_regression_roomy_available_ratio() -> f64 {
@@ -538,7 +545,7 @@ fn default_cost_eval_subject() -> Option<String> {
 /// Identifies which `ConditionalPrefillPolicy` to instantiate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConditionalPrefillPolicyKind {
-    /// Bypass when `net_new_tokens <= max_new_tokens`. Ignores load.
+    /// Bypass when `net_new_tokens <= bypass_below_tokens`. Ignores load.
     #[default]
     #[serde(rename = "token_cap")]
     TokenCap,
@@ -638,10 +645,11 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             conditional_prefill_enabled: false,
-            conditional_prefill_max_new_tokens: DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS,
+            conditional_prefill_bypass_below_tokens:
+                default_conditional_prefill_bypass_below_tokens(),
             conditional_prefill_policy: ConditionalPrefillPolicyKind::default(),
-            conditional_prefill_regression_large_prompt_threshold_tokens:
-                default_regression_large_prompt_threshold_tokens(),
+            conditional_prefill_disagg_above_tokens:
+                default_conditional_prefill_disagg_above_tokens(),
             conditional_prefill_regression_roomy_available_ratio:
                 default_regression_roomy_available_ratio(),
             conditional_prefill_regression_roomy_queued_blocks:
@@ -693,10 +701,9 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             conditional_prefill_enabled: compat.conditional_prefill_enabled,
-            conditional_prefill_max_new_tokens: compat.conditional_prefill_max_new_tokens,
+            conditional_prefill_bypass_below_tokens: compat.conditional_prefill_bypass_below_tokens,
             conditional_prefill_policy: compat.conditional_prefill_policy,
-            conditional_prefill_regression_large_prompt_threshold_tokens: compat
-                .conditional_prefill_regression_large_prompt_threshold_tokens,
+            conditional_prefill_disagg_above_tokens: compat.conditional_prefill_disagg_above_tokens,
             conditional_prefill_regression_roomy_available_ratio: compat
                 .conditional_prefill_regression_roomy_available_ratio,
             conditional_prefill_regression_roomy_queued_blocks: compat
@@ -1159,8 +1166,8 @@ mod tests {
 
         assert!(!config.conditional_prefill_enabled);
         assert_eq!(
-            config.conditional_prefill_max_new_tokens,
-            DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS
+            config.conditional_prefill_bypass_below_tokens,
+            crate::conditional_prefill::DEFAULT_CONDITIONAL_PREFILL_BYPASS_BELOW_TOKENS
         );
     }
 }

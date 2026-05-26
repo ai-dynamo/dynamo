@@ -40,6 +40,10 @@ class CostEvalRequest(BaseModel):
     prompt_tokens: int
     agg_kv_hit_rate: float
     disagg_kv_hit_rate: float
+    decode_chosen_worker_id: int
+    decode_chosen_dp_rank: int
+    prefill_chosen_worker_id: Optional[int] = None
+    prefill_chosen_dp_rank: Optional[int] = None
 
 
 class CostEvalResponse(BaseModel):
@@ -55,6 +59,14 @@ class CostEvalResponse(BaseModel):
 
     agg_ttft_ms: Optional[float] = None
     disagg_ttft_ms: Optional[float] = None
+    # Total predicted cost per side: ``ttft_ms + itl_ms * avg_decode_length``.
+    # AGG-side ITL is the 2D agg regression queried at the chunked point;
+    # DISAGG-side ITL is the *same* 2D regression queried at the pure-decode
+    # slice (prefill_tokens=0). They generally differ. ``None`` when any
+    # component (TTFT, ITL, or avg_decode_length) couldn't be computed; the
+    # router falls back to TTFT-only comparison when total_cost is missing.
+    agg_total_cost_ms: Optional[float] = None
+    disagg_total_cost_ms: Optional[float] = None
     agg_warm: bool = False
     disagg_warm: bool = False
 
@@ -66,6 +78,8 @@ class CostEvalResponse(BaseModel):
         return cls(
             agg_ttft_ms=None,
             disagg_ttft_ms=None,
+            agg_total_cost_ms=None,
+            disagg_total_cost_ms=None,
             agg_warm=False,
             disagg_warm=False,
         )
