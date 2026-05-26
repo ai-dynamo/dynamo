@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# MNNVL ComputeDomain + ResourceClaimTemplate for the kvbm-cd DGD.
+# Apply this in the same namespace as kvbm-cd.yaml before deploying the DGD.
+#
+# Pattern matches recipes/deepseek-v4/deepseek-v4-pro/sglang/disagg-gb200/deploy.yaml.
+# The ResourceClaimTemplate name (`kvbm-cd-compute-domain-channel`) is referenced
+# by both KvbmPrefill and VllmWorker in kvbm-cd.yaml.
+#
+# numNodes: set to the maximum number of GB200 nodes any single CD topology
+# will ever span. On GKE GB200, each node carries 4 GPUs, so a TEP4 pod
+# occupies one node. For 1 prefill + 1 decode replica that's 2 nodes; bump as
+# you scale the prefill/decode pools.
+
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kvbm-cd-compute-domain
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kvbm-cd-compute-domain-channel
+  numNodes: 2   # 1 prefill + 1 decode; raise as replicas grow
+
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: kvbm-cd-compute-domain-channel
+spec:
+  spec:
+    devices:
+      config:
+        - opaque:
+            driver: compute-domain.nvidia.com
+            parameters:
+              allocationMode: Single
+              apiVersion: resource.nvidia.com/v1beta1
+              kind: ComputeDomainChannelConfig
+          requests:
+            - channel
+      requests:
+        - exactly:
+            allocationMode: ExactCount
+            count: 1
+            deviceClassName: compute-domain-default-channel.nvidia.com
+          name: channel

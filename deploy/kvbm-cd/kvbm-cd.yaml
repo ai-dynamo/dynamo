@@ -1,0 +1,557 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# KVBM Conditional Disaggregation on GKE GB200 (GCP).
+#
+# Four services in one DGD + a ConfigMap holding the base KvbmConfig + an
+# explicit k8s Service for the hub's HTTP/ZMQ ports.
+#
+#   KvbmHub      — generic pod, kvbm-hub binary, HTTP/ZMQ-only (no RDMA, no GPU).
+#                  Serves /v1/config for handshake (indexer ZMQ endpoint, feature
+#                  negotiation). No longer renders the base KvbmConfig — that
+#                  lives in the ConfigMap below.
+#   KvbmPrefill  — generic pod running `python -m kvbm.vllm.prefill`. Invisible
+#                  to the dyn Frontend; hub's prefill-router is the only caller.
+#                  TEP4 / 4 GPUs / 480 GiB G2 host cache / full RDMA wiring.
+#                  Loads KvbmConfig via figment: ConfigMap base.toml (system
+#                  layer) + role-prefill.toml (KVBM_CONFIG_PATH layer).
+#   Frontend     — vanilla agg frontend with --router-mode kv.
+#   VllmWorker   — vanilla agg worker (no --disaggregation-mode); decode side of
+#                  CD. Same RDMA + ConfigMap wiring as KvbmPrefill, but with
+#                  role-decode.toml as the per-role layer.
+#
+# The combined DGD is intentionally shaped so the operator never treats the
+# deployment as classic prefill/decode:
+#   * KvbmHub and KvbmPrefill use componentType: default, so no worker defaults
+#     (system port 9100, NIXL ports, NIXL telemetry env, worker probes) get
+#     injected and no subComponentType promotion to v1beta1 prefill/decode.
+#   * KvbmPrefill runs the kvbm.vllm.prefill wrapper, which does NOT register a
+#     dyn runtime `generate` endpoint — Frontend can never route to it.
+#   * The CD coupling between agg and sidecar is the ConfigMap's
+#     `[hub] url = "http://kvbm-hub:1337"` plus the hub Service.
+#
+# Prerequisites in-cluster (NOT authored here):
+#   * ResourceClaimTemplate for the MNNVL ComputeDomain channel
+#     (see compute-domain-channel.yaml in this directory).
+#   * vLLM+KVBM arm64 image with NIXL/UCX backend (sibling of Karen's
+#     TRT-LLM image; substitute below).
+#   * Secrets: nvcr-imagepullsecret, hf-token-secret.
+#   * PVC: shared-model-cache pre-warmed with Qwen3-235B-A22B weights.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: kvbm-cd
+spec:
+  # Cluster-wide NCCL bits for GB200 MNNVL collectives.
+  envs:
+    - name: NCCL_MNNVL_ENABLE
+      value: "1"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+
+  services:
+
+    # -----------------------------------------------------------------
+    # KvbmHub — coordination plane. HTTP/TCP only, no RDMA, no GPU.
+    # -----------------------------------------------------------------
+    KvbmHub:
+      componentType: default
+      replicas: 1
+      resources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        # Hub doesn't need to share the workers' NVLink clique, but pinning to
+        # the same nodepool keeps it close enough for low-latency control RPCs.
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: cloud.google.com/gke-nodepool
+                      operator: In
+                      values: [customer-gpu-w0e]
+        tolerations:
+          - { key: dedicated,          operator: Equal, value: user-workload, effect: NoSchedule }
+          - { key: dedicated,          operator: Equal, value: user-workload, effect: NoExecute  }
+          - { key: nvidia.com/gpu,     operator: Exists,                       effect: NoSchedule }
+          - { key: kubernetes.io/arch, operator: Exists,                       effect: NoSchedule }
+        imagePullSecrets:
+          - name: nvcr-imagepullsecret
+        volumes:
+          # Same ConfigMap the workers mount. The hub reads base.toml via
+          # --kvbm-config-file so /v1/config serves the operator's source-of-
+          # truth and the primary g2 sizing gate is satisfied without
+          # duplicating cache.host on the CLI.
+          - name: kvbm-config
+            configMap: { name: kvbm-cd-config }
+        mainContainer:
+          # TODO: replace with the published vllm+kvbm arm64 image once built.
+          image: nvcr.io/nvidian/dynamo-dev/REPLACE-ME:vllm-kvbm-arm64
+          name: ""
+          # Binary name is `kvbm_hub` (underscore) — Cargo's auto-discovered
+          # bin from `lib/kvbm-hub/src/bin/kvbm_hub.rs`. The package is
+          # `kvbm-hub` but the executable on PATH is `kvbm_hub`.
+          command: [kvbm_hub]
+          args:
+            # `disagg` brings in p2p (dep); `indexer` enables the ZMQ ingress
+            # the decode-side hub publisher targets so cross-replica block events
+            # flow into the hub's radix tree. Both are required for CD on k8s.
+            - --features
+            - disagg,indexer
+            - --prefill-router
+            - --prefill-worker-concurrency
+            - "4"
+            - --block-size
+            - "32"
+            - --max-seq-len
+            - "32768"
+            - --layout
+            - operational
+            # Pin the indexer ZMQ ingress to a known port (default is OS-assigned)
+            # and advertise the in-cluster DNS name so decode pods that fetch
+            # /v1/config receive a cluster-reachable endpoint, not 127.0.0.1.
+            - --kv-index-zmq-bind
+            - tcp://0.0.0.0:5557
+            - --kv-index-advertise-host
+            - kvbm-hub
+            # Bind a velo TCP transport so kvbm.vllm.prefill workers can register
+            # as PrefillRouter velo backends (the auto-attach in kvbm.hub posts a
+            # Velo target to the hub; the hub rejects velo registrations unless a
+            # transport is bound).
+            - --velo-port
+            - "9337"
+            # Load the same base KvbmConfig the workers mount, so the hub serves
+            # it verbatim via /v1/config and bridges cache.host sizes into its
+            # own primary gate (g2-memory / g2-block).
+            - --kvbm-config-file
+            - /opt/dynamo/etc/kvbm.toml
+          volumeMounts:
+            - { name: kvbm-config, mountPath: /opt/dynamo/etc/kvbm.toml, subPath: base.toml, readOnly: true }
+          ports:
+            - { name: discovery,   containerPort: 1337, protocol: TCP }
+            - { name: control,     containerPort: 8337, protocol: TCP }
+            - { name: velo,        containerPort: 9337, protocol: TCP }
+            - { name: indexer-zmq, containerPort: 5557, protocol: TCP }
+
+    # -----------------------------------------------------------------
+    # KvbmPrefill — prefill worker pool. TEP4 / 4 GPUs per replica.
+    # Invisible to the dyn Frontend; only reachable from the hub.
+    # -----------------------------------------------------------------
+    KvbmPrefill:
+      componentType: default
+      envFromSecret: hf-token-secret
+      replicas: 1   # bump to size the pool
+      resources:
+        requests:
+          gpu: "4"
+          memory: "560Gi"   # 480 GiB pinned G2 + ~80 for vLLM/Python/staging
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
+        limits:
+          gpu: "4"
+          memory: "560Gi"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
+        claims:
+          - name: compute-domain-channel
+      extraPodMetadata:
+        annotations:
+          networking.gke.io/default-interface: eth0
+          networking.gke.io/interfaces: |
+            [{"interfaceName":"eth0","network":"default"},
+             {"interfaceName":"rdma0","network":"rdma-0"},
+             {"interfaceName":"rdma1","network":"rdma-1"},
+             {"interfaceName":"rdma2","network":"rdma-2"},
+             {"interfaceName":"rdma3","network":"rdma-3"}]
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: cloud.google.com/gke-nodepool
+                      operator: In
+                      values: [customer-gpu-w0e]
+          podAffinity:
+            # Keep all CD workers on the same NVLink clique.
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                    - key: nvidia.com/dynamo-graph-deployment-name
+                      operator: In
+                      values: [kvbm-cd]
+                topologyKey: nvidia.com/gpu.clique
+        tolerations:
+          - { key: dedicated,          operator: Equal, value: user-workload, effect: NoSchedule }
+          - { key: dedicated,          operator: Equal, value: user-workload, effect: NoExecute  }
+          - { key: nvidia.com/gpu,     operator: Exists,                       effect: NoSchedule }
+          - { key: kubernetes.io/arch, operator: Exists,                       effect: NoSchedule }
+        imagePullSecrets:
+          - name: nvcr-imagepullsecret
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: kvbm-cd-compute-domain-channel
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+          - name: dshm
+            emptyDir: { medium: Memory, sizeLimit: 64Gi }
+          - name: triton-cache
+            emptyDir: {}
+          # Base KvbmConfig + per-role override. The kvbm-config figment chain
+          # picks up base.toml at /opt/dynamo/etc/kvbm.toml (system layer) and
+          # the role file at $KVBM_CONFIG_PATH (user layer); the role file's
+          # [disagg] table adds `role`, while [hub] (with url + features) lives
+          # in the base.
+          - name: kvbm-config
+            configMap: { name: kvbm-cd-config }
+        mainContainer:
+          # TODO: replace with the published vllm+kvbm arm64 image once built.
+          image: nvcr.io/nvidian/dynamo-dev/REPLACE-ME:vllm-kvbm-arm64
+          name: ""
+          workingDir: /workspace/
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK]   # required to pin 480 GiB host memory for G2
+          # NOTE: no startupProbe. `python3 -m kvbm.vllm.prefill` wraps vLLM's
+          # OpenAI API server (not the Dynamo runtime system server), so it
+          # neither listens on port 9090 nor serves `/live`. A custom probe
+          # would need to target vLLM's `/health` on whatever port vLLM is
+          # configured to use; left off until that wiring is finalized.
+          volumeMounts:
+            - { name: model-cache,  mountPath: /model-cache }
+            - { name: dshm,         mountPath: /dev/shm }
+            - { name: triton-cache, mountPath: /tmp/.triton-cache }
+            # Layer 3 of the figment chain (system TOML, hardcoded path).
+            - { name: kvbm-config, mountPath: /opt/dynamo/etc/kvbm.toml, subPath: base.toml,         readOnly: true }
+            # Layer 4 of the figment chain (KVBM_CONFIG_PATH); prefill role.
+            - { name: kvbm-config, mountPath: /etc/kvbm/role.toml,        subPath: role-prefill.toml, readOnly: true }
+          env:
+            # Points figment layer 4 at the per-role TOML mounted above.
+            - { name: KVBM_CONFIG_PATH, value: /etc/kvbm/role.toml }
+            # UCX (RDMA via rc transport over RoCE on this cluster).
+            - { name: UCX_TLS,                value: "cuda_ipc,cuda_copy,rc" }
+            - { name: UCX_IB_GID_INDEX,       value: "3" }
+            - { name: UCX_RC_TIMEOUT,         value: "600s" }
+            - { name: UCX_KEEPALIVE_INTERVAL, value: "300s" }
+            # NCCL (per-worker; cluster-wide MNNVL/CUMEM are in spec.envs).
+            - { name: NCCL_NVLS_ENABLE,          value: "1" }
+            - { name: NCCL_GRAPH_MIXING_SUPPORT, value: "0" }
+            - { name: NCCL_SOCKET_IFNAME,        value: "eth0" }
+            - { name: GLOO_SOCKET_IFNAME,        value: "eth0" }
+            # Pull weights from the warmed PVC.
+            - { name: HF_HOME,           value: /model-cache }
+            - { name: HF_HUB_OFFLINE,    value: "1" }
+            - { name: HF_MODULES_CACHE,  value: /tmp/hf_modules }
+            - { name: TRITON_CACHE_DIR,  value: /tmp/.triton-cache }
+            - { name: PYTHONUNBUFFERED,  value: "1" }
+          command: [python3]
+          # vLLM --kv-transfer-config is the minimum needed for vLLM to load the
+          # kvbm connector. cache/nixl/disagg/hub_url all come from figment.
+          args:
+            - -m
+            - kvbm.vllm.prefill
+            - --model
+            - Qwen/Qwen3-235B-A22B
+            - --served-model-name
+            - Qwen/Qwen3-235B-A22B
+            - --tensor-parallel-size
+            - "4"
+            - --enable-expert-parallel
+            - --enforce-eager
+            - --gpu-memory-utilization
+            - "0.85"
+            - --max-model-len
+            - "32768"
+            - --block-size
+            - "32"
+            # The kvbm.vllm.prefill auto-wire (kvbm.hub.detect.try_wrap_engine)
+            # reads `leader.hub.url` and `leader.disagg.role` from
+            # vllm_config.kv_transfer_config.kv_connector_extra_config — NOT
+            # from the figment chain, and NOT from the JSON top level. The two
+            # fields must therefore live inside kv_connector_extra_config below;
+            # values match the ConfigMap's [hub] and the role file's [disagg].
+            - --kv-transfer-config
+            - '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.v2.vllm.connector","kv_role":"kv_both","kv_connector_extra_config":{"leader":{"hub":{"url":"http://kvbm-hub:1337"},"disagg":{"role":"prefill"}}}}'
+
+    # -----------------------------------------------------------------
+    # Frontend — vanilla aggregated frontend with KV-aware routing.
+    # -----------------------------------------------------------------
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+          - { key: dedicated,          operator: Equal, value: user-workload, effect: NoSchedule }
+          - { key: dedicated,          operator: Equal, value: user-workload, effect: NoExecute  }
+          - { key: kubernetes.io/arch, operator: Exists,                       effect: NoSchedule }
+        imagePullSecrets:
+          - name: nvcr-imagepullsecret
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/REPLACE-ME:vllm-kvbm-arm64
+          name: ""
+          command: [python3]
+          args:
+            - -m
+            - dynamo.frontend
+            - --router-mode
+            - kv
+            - --request-plane
+            - nats
+
+    # -----------------------------------------------------------------
+    # VllmWorker — vanilla aggregated worker; decode side of CD.
+    # TEP4 / 4 GPUs per replica. Same RDMA wiring as KvbmPrefill.
+    # -----------------------------------------------------------------
+    VllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1   # bump to size the pool
+      resources:
+        requests:
+          gpu: "4"
+          memory: "560Gi"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
+        limits:
+          gpu: "4"
+          memory: "560Gi"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
+        claims:
+          - name: compute-domain-channel
+      extraPodMetadata:
+        annotations:
+          networking.gke.io/default-interface: eth0
+          networking.gke.io/interfaces: |
+            [{"interfaceName":"eth0","network":"default"},
+             {"interfaceName":"rdma0","network":"rdma-0"},
+             {"interfaceName":"rdma1","network":"rdma-1"},
+             {"interfaceName":"rdma2","network":"rdma-2"},
+             {"interfaceName":"rdma3","network":"rdma-3"}]
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: cloud.google.com/gke-nodepool
+                      operator: In
+                      values: [customer-gpu-w0e]
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                    - key: nvidia.com/dynamo-graph-deployment-name
+                      operator: In
+                      values: [kvbm-cd]
+                topologyKey: nvidia.com/gpu.clique
+        tolerations:
+          - { key: dedicated,          operator: Equal, value: user-workload, effect: NoSchedule }
+          - { key: dedicated,          operator: Equal, value: user-workload, effect: NoExecute  }
+          - { key: nvidia.com/gpu,     operator: Exists,                       effect: NoSchedule }
+          - { key: kubernetes.io/arch, operator: Exists,                       effect: NoSchedule }
+        imagePullSecrets:
+          - name: nvcr-imagepullsecret
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: kvbm-cd-compute-domain-channel
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+          - name: dshm
+            emptyDir: { medium: Memory, sizeLimit: 64Gi }
+          - name: triton-cache
+            emptyDir: {}
+          - name: kvbm-config
+            configMap: { name: kvbm-cd-config }
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/REPLACE-ME:vllm-kvbm-arm64
+          name: ""
+          workingDir: /workspace/
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK]
+          startupProbe:
+            failureThreshold: 60
+            httpGet: { path: /live, port: 9090 }
+            periodSeconds: 60
+            timeoutSeconds: 20
+          volumeMounts:
+            - { name: model-cache,  mountPath: /model-cache }
+            - { name: dshm,         mountPath: /dev/shm }
+            - { name: triton-cache, mountPath: /tmp/.triton-cache }
+            - { name: kvbm-config, mountPath: /opt/dynamo/etc/kvbm.toml, subPath: base.toml,        readOnly: true }
+            - { name: kvbm-config, mountPath: /etc/kvbm/role.toml,        subPath: role-decode.toml, readOnly: true }
+          env:
+            - { name: KVBM_CONFIG_PATH, value: /etc/kvbm/role.toml }
+            - { name: UCX_TLS,                value: "cuda_ipc,cuda_copy,rc" }
+            - { name: UCX_IB_GID_INDEX,       value: "3" }
+            - { name: UCX_RC_TIMEOUT,         value: "600s" }
+            - { name: UCX_KEEPALIVE_INTERVAL, value: "300s" }
+            - { name: NCCL_NVLS_ENABLE,          value: "1" }
+            - { name: NCCL_GRAPH_MIXING_SUPPORT, value: "0" }
+            - { name: NCCL_SOCKET_IFNAME,        value: "eth0" }
+            - { name: GLOO_SOCKET_IFNAME,        value: "eth0" }
+            - { name: HF_HOME,           value: /model-cache }
+            - { name: HF_HUB_OFFLINE,    value: "1" }
+            - { name: HF_MODULES_CACHE,  value: /tmp/hf_modules }
+            - { name: TRITON_CACHE_DIR,  value: /tmp/.triton-cache }
+            - { name: PYTHONUNBUFFERED,  value: "1" }
+          command: [python3]
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-235B-A22B
+            - --served-model-name
+            - Qwen/Qwen3-235B-A22B
+            - --tensor-parallel-size
+            - "4"
+            - --enable-expert-parallel
+            - --enforce-eager
+            - --gpu-memory-utilization
+            - "0.85"
+            - --max-model-len
+            - "32768"
+            - --block-size
+            - "32"
+            - --enable-prefix-caching
+            - --publish-events-and-metrics
+            - --request-plane
+            - nats
+            # `enable_kv_cache_events: true` is required — dynamo.vllm skips
+            # setup_kv_event_publisher unless the operator opts in explicitly,
+            # and the KV router needs live block-events to route prefix-cache
+            # hits.
+            - --kv-events-config
+            - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://127.0.0.1:20080","topic":"kv@vllm-decode"}'
+            - --kv-transfer-config
+            - '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.v2.vllm.connector","kv_role":"kv_both"}'
+
+# Explicit k8s Service for the hub: the operator's auto-generated Service for a
+# componentType: default pod uses port 9090 (DynamoSystemPort), which is wrong
+# for kvbm-hub. We expose the hub's two HTTP ports under their standard names.
+# Selector matches the labels the operator stamps on the KvbmHub pod.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kvbm-hub
+  labels:
+    app.kubernetes.io/name: kvbm-hub
+    app.kubernetes.io/part-of: kvbm-cd
+spec:
+  type: ClusterIP
+  selector:
+    nvidia.com/dynamo-graph-deployment-name: kvbm-cd
+    nvidia.com/dynamo-component: KvbmHub
+  ports:
+    - { name: discovery,   port: 1337, targetPort: 1337, protocol: TCP }
+    - { name: control,     port: 8337, targetPort: 8337, protocol: TCP }
+    - { name: velo,        port: 9337, targetPort: 9337, protocol: TCP }
+    - { name: indexer-zmq, port: 5557, targetPort: 5557, protocol: TCP }
+
+# Base KvbmConfig, read by the worker pods' kvbm-config figment chain.
+# - base.toml  → mounted at /opt/dynamo/etc/kvbm.toml (figment layer 3)
+# - role-prefill.toml → mounted at /etc/kvbm/role.toml in KvbmPrefill pods
+#                       (figment layer 4 via KVBM_CONFIG_PATH)
+# - role-decode.toml  → mounted at /etc/kvbm/role.toml in VllmWorker pods
+#                       (figment layer 4 via KVBM_CONFIG_PATH)
+# Figment merges layers deeply: base provides [disagg] hub_url, role file adds
+# [disagg] role, both flow into the same DisaggConfig.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kvbm-cd-config
+  labels:
+    app.kubernetes.io/part-of: kvbm-cd
+data:
+  base.toml: |
+    # Common KvbmConfig for every CD worker.
+    # Schema mirrors `KvbmConfig` in lib/kvbm-config/src/lib.rs — top-level
+    # tables map directly to struct fields (no `leader` profile in TOML; that
+    # profile-keyed shape is only used by the Python JSON override path).
+
+    [tokio]
+    worker_threads = 2
+
+    # Enable the UCX NIXL backend (empty table = backend on with default params).
+    [nixl.backends.UCX]
+
+    [cache]
+    parallelism = "tensor_parallel"
+
+    # G2 (host pinned) cache size — matches the per-pod memory floor of 560 GiB.
+    [cache.host]
+    cache_size_gb = 480.0
+
+    # CD decode publishes block events to the hub indexer via the existing
+    # KvbmCacheEventsPublisher path; events.enabled must be true so the
+    # EventsManager actually emits.
+    [events]
+    enabled = true
+
+    # Hub handshake target. The connector pulls `GET {url}/v1/config` at
+    # startup; with `disagg` + `indexer` in features, the handshake returns the
+    # indexer ZMQ endpoint (advertised as `tcp://kvbm-hub:5557` by the hub) and
+    # gates CD on the disagg feature. `[disagg]` only carries the per-instance
+    # role — `hub.url` is the only place the hub address lives.
+    [hub]
+    url      = "http://kvbm-hub:1337"
+    features = ["disagg", "indexer"]
+
+  role-prefill.toml: |
+    [disagg]
+    role = "prefill"
+
+  role-decode.toml: |
+    [disagg]
+    role = "decode"

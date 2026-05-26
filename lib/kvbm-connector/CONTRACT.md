@@ -200,6 +200,40 @@ These shapes ARE encouraged in tests:
 4. **Peer-failure injection** via `MockSession`'s paired-mode: detach, Frame::Error, watchdog. Asserts the lifecycle watcher fires and `cleanup_failed_request` runs without leaks or double-notifications.
 5. **`KVConnectorOutput` injection**: simulate the worker emitting finished_recving / finished_sending / failed-block-ids; assert `update_connector_output` routes them correctly.
 
+## Disagg-Internal Invariants (Stage 0)
+
+These two invariants govern how the disagg path turns a vLLM GNMT call into a CD dispatch. They are not vLLM-facing — vLLM does not see them — but the connector code MUST hold them, and future refactors that weaken them will silently corrupt the protocol. The Primary Gap §Stage 1+ (G1→G2 promotion) widens the matched commit set; Stage 0 pins what the commit set means **today** so the widening is a deliberate change of contract, not an accidental drift.
+
+### Invariant A — All-or-nothing prefix G2 advertisement
+
+**Statement.** For the prefix window `[0, num_computed_tokens / block_size)`, decode advertises EITHER the full Vec of G2 blocks OR an empty Vec. Partial advertisement is forbidden.
+
+**Enforced by.** `ConnectorLeader::find_prefix_g2_blocks` (`lib/kvbm-connector/src/connector/leader/mod.rs:551+`). On any miss (returned len `< num_prefix_blocks`), the function drops the partial hits (RAII returns them to G2's inactive pool) and returns `Ok(Vec::new())`. Emits the `prefix_g2_incomplete_skip` audit event.
+
+**Consumed by.** `DecodeDisaggLeader::commit_gnmt_remote` (`decode_leader.rs:702-718`). Treats an empty result as "no prefix advertised" — `commit_gnmt_remote` continues with local-match only, never errors. Empties are NOT propagated as failures.
+
+**Why partial is forbidden.** Publishing `[0..M)` (the leading-contiguous G2-resident portion) to the session tells prefill "decode has prefix `[0..M)` available, not `[M..P)`." But decode's G1 holds the FULL prefix `[0..P)` — the "missing" `[M..P)` is a hole only in G2, not in the conversation state. Advertising the partial set creates an inconsistent view (prefill treats `[M..P)` as cache misses while decode actually has them in G1).
+
+**Intended recovery for the miss case.** G1→G2 backfill in `update_state_after_alloc`. Not wired today; until it is, "advertise empty" gives pre-merge functional parity (prefill recomputes the whole prefix itself).
+
+**Stage 1 widens this**: when the G1→G2 backfill arm lands, the commit set will include prefix blocks promoted from G1 alongside the G2-resident ones. The all-or-nothing rule on `find_prefix_g2_blocks`'s return value stays; the recovery path on its miss arm changes.
+
+### Invariant B — Sequential-left-to-right match terminating at first miss
+
+**Statement.** The match for both prefix and external (local-match) windows is computed by walking the request's canonical PLH chain in absolute-position order (`all_sequence_hashes[i]` for ascending `i`) and stopping at the first hash that is not present in G2. The returned matched window is therefore a contiguous prefix of the requested range. Partial matches that skip a hole in the middle are never produced.
+
+**Enforced by.** `BlockManager::match_blocks` (in kvbm-logical) walks ordered slices and returns hits in input order, terminating at the first miss. `OnboardingState.shards` (`connector/leader/slot.rs:348+`) and `matched_span()` (`slot.rs:190+`) walk shards contiguously, mask-prefix by `num_computed_tokens / block_size`, and stop at the first gap.
+
+**Consumed by.** `commit_gnmt_remote` (decode-side, builds `RemotePrefillRequest` from a CONTIGUOUS local-match window) and `ensure_started` (prefill-side, walks the same PLH chain from `[0, DNPT/BS)`). Both rely on the contiguity to align the `decode_offset_blocks + i` placement contract.
+
+**Why sequential-only.** The placement contract on remote pull is positional: prefill places block i at absolute index `decode_offset_blocks + i`. If decode's matched set had a hole at position k, decode would advertise positions `{0, 1, ..., k-1, k+1, ...}` — but prefill's positional placement assumes contiguity from `decode_offset_blocks`. A hole at k would map prefill's i=k to decode's position k+1, mis-placing every subsequent block.
+
+**Defense-in-depth.** The DNPT digest (`expected_hash_digest` on `RemotePrefillRequest`) covers the FULL `[0, DNPT/BS)` slice and is verified by prefill in `ensure_started` (`driver.rs:1651+`). A hash-chain divergence — including one introduced by a contiguity-violation refactor — fails loud at GNMT-handshake time rather than producing a wrong-block RDMA pull. Pinned by `cd_prefill_dnpt_digest_mismatch_rejected`.
+
+### Stage 0 status (no behavior change)
+
+These invariants are already enforced and tested in the current chain (through `ab6de74852b`). Stage 0 is the documentation pin — surfacing them in this CONTRACT so Stage 1/2 widening (G1→G2 / G3→G2 promotion in `update_state_after_alloc`) is a deliberate change of contract rather than an accidental drift from the current narrow-but-correct behavior.
+
 ## Maintenance
 
 This document tracks the vLLM V1 connector API as of the version pinned by the dynamo workspace (see `lib/bindings/kvbm` Cargo / requirements). When vLLM's scheduler.py changes the call pattern, this file must be updated **before** the connector code is changed to match the new shape. Pull-request reviewers should reject scheduler-side hardening that does not cite the specific behavior in this contract that motivates it.
