@@ -149,6 +149,10 @@ You also need:
 
 ## Setup
 
+<Warning>
+**Known limitation in 1.2.0.** With both `--enable-metrics` and `--disable-piecewise-cuda-graph` set on the SGLang worker, the process can crash on the first KV-cache write due to a race in the upstream `mooncake-transfer-engine` thread pool. The recipe below omits these flags; per-process metrics scraping via the `dynamo.frontend` is unaffected. The mooncake-side fix is being tracked upstream.
+</Warning>
+
 **SGLang worker** — HiCache with Mooncake storage:
 
 ```bash
