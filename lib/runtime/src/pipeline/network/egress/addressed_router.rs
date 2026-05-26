@@ -26,6 +26,7 @@ use crate::pipeline::network::RequestControlMessage;
 use crate::pipeline::network::RequestType;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::StreamProvider;
 use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
 use crate::pipeline::network::TwoPartCodec;
@@ -196,6 +197,84 @@ where
     let codec = TwoPartCodec::default();
     let buffer = codec.encode_message(msg)?;
     Ok(buffer)
+}
+
+/// Await the optional bidirectional request-stream dial-back and, on
+/// success, spawn a detached task that pumps every `T` from `input_stream`
+/// onto the worker's request-stream send half. `request_stream_provider`
+/// being `None` is a no-op — the caller didn't ask for a request stream
+/// (unary dispatch path).
+///
+/// The spawned forwarder exits on stream end, context kill/stop, send
+/// error (worker dropped its receiver), or local serialize failure.
+/// Dropping `request_sender` on exit closes the upstream mpsc → server-
+/// side handler sends `Sentinel` → wire closes cleanly.
+async fn spawn_request_stream_forwarder<T>(
+    request_stream_provider: Option<StreamProvider<StreamSender>>,
+    mut input_stream: crate::engine::DataStream<T>,
+    engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+) -> Result<(), Error>
+where
+    T: serde::Serialize + Send + 'static,
+{
+    let Some(provider) = request_stream_provider else {
+        return Ok(());
+    };
+
+    let request_sender = match provider.await {
+        Ok(Ok(sender)) => sender,
+        Ok(Err(e)) => {
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!("Worker dial-in failed for request stream: {e}"))
+                    .build()
+            ));
+        }
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::Disconnected)
+                    .message("Worker disconnected before request stream was established")
+                    .build()
+            ));
+        }
+    };
+
+    tokio::spawn(async move {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = engine_ctx.killed() => break,
+                _ = engine_ctx.stopped() => break,
+                item = input_stream.next() => match item {
+                    Some(item) => item,
+                    None => break,
+                },
+            };
+            let bytes = match serde_json::to_vec(&item) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Stream-side framing failure: the engine sees a
+                    // partial input, so kill the context to abort both
+                    // directions consistently rather than silently
+                    // dropping frames.
+                    tracing::error!(
+                        error = %e,
+                        "failed to serialize bidirectional request frame; killing context"
+                    );
+                    engine_ctx.kill();
+                    break;
+                }
+            };
+            if request_sender.send(bytes.into()).await.is_err() {
+                tracing::debug!("worker request-stream receiver dropped; forwarder exiting");
+                break;
+            }
+        }
+    });
+
+    Ok(())
 }
 
 /// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
@@ -407,7 +486,7 @@ impl AddressedPushRouter {
         let engine_ctx = input.context();
         let engine_ctx_for_forwarder = engine_ctx.clone();
         let (request_stream, ctx_unit) = input.into_parts();
-        let mut input_stream = request_stream
+        let input_stream = request_stream
             .take()
             .expect("RequestStream::take called twice on bidirectional dispatch input");
 
@@ -463,67 +542,12 @@ impl AddressedPushRouter {
         // carries the engine prologue and only resolves after
         // `engine.generate()` returns — awaiting it second avoids stalling
         // the request-side handshake on engine setup latency.
-        if let Some(request_stream_provider) = request_stream_provider {
-            let request_sender = match request_stream_provider.await {
-                Ok(Ok(sender)) => sender,
-                Ok(Err(e)) => {
-                    return Err(anyhow::anyhow!(
-                        DynamoError::builder()
-                            .error_type(ErrorType::CannotConnect)
-                            .message(format!("Worker dial-in failed for request stream: {e}"))
-                            .build()
-                    ));
-                }
-                Err(_) => {
-                    return Err(anyhow::anyhow!(
-                        DynamoError::builder()
-                            .error_type(ErrorType::Disconnected)
-                            .message("Worker disconnected before request stream was established")
-                            .build()
-                    ));
-                }
-            };
-
-            // Forwarder: pump every frame in `input` to the worker via the
-            // request-stream send half. Exit on stream end, context kill/stop,
-            // send error (worker dropped its receiver), or local serialize
-            // failure. Dropping `request_sender` on exit closes the upstream
-            // mpsc → server-side handler sends Sentinel → wire closes cleanly.
-            tokio::spawn(async move {
-                loop {
-                    let item = tokio::select! {
-                        biased;
-                        _ = engine_ctx_for_forwarder.killed() => break,
-                        _ = engine_ctx_for_forwarder.stopped() => break,
-                        item = input_stream.next() => match item {
-                            Some(item) => item,
-                            None => break,
-                        },
-                    };
-                    let bytes = match serde_json::to_vec(&item) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            // Stream-side framing failure: the engine sees a
-                            // partial input, so kill the context to abort both
-                            // directions consistently rather than silently
-                            // dropping frames.
-                            tracing::error!(
-                                error = %e,
-                                "failed to serialize bidirectional request frame; killing context"
-                            );
-                            engine_ctx_for_forwarder.kill();
-                            break;
-                        }
-                    };
-                    if request_sender.send(bytes.into()).await.is_err() {
-                        tracing::debug!(
-                            "worker request-stream receiver dropped; forwarder exiting"
-                        );
-                        break;
-                    }
-                }
-            });
-        }
+        spawn_request_stream_forwarder(
+            request_stream_provider,
+            input_stream,
+            engine_ctx_for_forwarder,
+        )
+        .await?;
 
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
