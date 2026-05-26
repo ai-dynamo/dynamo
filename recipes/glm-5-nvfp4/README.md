@@ -162,3 +162,7 @@ concurrent users.
 | ITL avg | 23.31ms/token |
 | Tokens/user/sec avg | 43.39 |
 | Request errors | 0 |
+
+## Notes
+
+- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers. Disable this variable on nodes with less than 64 GB of available memory.

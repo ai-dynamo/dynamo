@@ -199,3 +199,4 @@ kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
 - The vllm command in `deploy.yaml` uses `--mm-processor-cache-gb 30`
   and `--max-model-len 32768` to handle the 5-image multimodal context
   (mirrors the 397B sweep yaml's settings adapted for 1 GPU).
+- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers. Disable this variable on nodes with less than 64 GB of available memory.

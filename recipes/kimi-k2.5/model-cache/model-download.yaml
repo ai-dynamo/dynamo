@@ -40,7 +40,7 @@ spec:
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             - name: HF_XET_RECONSTRUCTION_DOWNLOAD_BUFFER_LIMIT
-              value: "16GB"
+              value: "64GB"
           args:
             - |
               set -eux

@@ -183,3 +183,7 @@ recipes/nemotron-3-nano-omni/
     agg/
       deploy.yaml
 ```
+
+## Notes
+
+- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers. Disable this variable on nodes with less than 64 GB of available memory.

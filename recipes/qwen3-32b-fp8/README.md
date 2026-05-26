@@ -75,3 +75,4 @@ curl http://localhost:8000/v1/chat/completions \
 - KV cache uses FP8 dtype for memory efficiency
 - The `vllm/disagg` config splits 8 GPUs as 2× prefill (TP=2) + 1× decode (TP=4) using NixlConnector KV transfer; all workers must be co-located on one node
 - `--max-model-len 8192` is set in `vllm/disagg/deploy.yaml` for A100 40 GB compatibility; remove or increase this flag on H100/H200
+- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers. Disable this variable on nodes with less than 64 GB of available memory.

@@ -35,7 +35,7 @@ spec:
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             - name: HF_XET_RECONSTRUCTION_DOWNLOAD_BUFFER_LIMIT
-              value: "16GB"
+              value: "64GB"
           args:
             - |
               set -eux
@@ -44,10 +44,10 @@ spec:
           resources:
             requests:
               cpu: "2"
-              memory: "48Gi"
+              memory: "64Gi"
             limits:
               cpu: "8"
-              memory: "48Gi"
+              memory: "64Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /model-store

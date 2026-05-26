@@ -29,7 +29,7 @@ spec:
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             - name: HF_XET_RECONSTRUCTION_DOWNLOAD_BUFFER_LIMIT
-              value: "16GB"
+              value: "64GB"
             - name: MODEL_REVISION
               value: 9216db5781bf21249d130ec9da846c4624c16137
           args:
@@ -40,10 +40,10 @@ spec:
           resources:
             requests:
               cpu: "2"
-              memory: "32Gi"
+              memory: "64Gi"
             limits:
               cpu: "8"
-              memory: "32Gi"
+              memory: "64Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /home/dynamo/.cache/huggingface

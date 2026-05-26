@@ -23,7 +23,7 @@ spec:
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             - name: HF_XET_RECONSTRUCTION_DOWNLOAD_BUFFER_LIMIT
-              value: "16GB"
+              value: "64GB"
             # Optional: create with: kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<token> -n <namespace>
             - name: HF_TOKEN
               valueFrom:

@@ -65,3 +65,4 @@ curl http://localhost:8000/v1/chat/completions \
 - Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluster before deploying
 - Model download takes approximately 15-30 minutes depending on network speed
 - For GAIE (Gateway API Inference Extension) integration, `kubectl apply` the files from the corresponding subfolder i.e. [vllm/agg/gaie/](vllm/agg/gaie/)
+- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers. Disable this variable on nodes with less than 64 GB of available memory.

@@ -29,7 +29,7 @@ spec:
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             - name: HF_XET_RECONSTRUCTION_DOWNLOAD_BUFFER_LIMIT
-              value: "16GB"
+              value: "64GB"
             - name: MODEL_REVISION
               value: ddb4128556dfcff99e0c41aee159ea6c3e655dcd
           args:

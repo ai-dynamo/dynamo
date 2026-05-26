@@ -130,3 +130,7 @@ kubectl delete dynamographdeployment \
 - [Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving](https://github.com/kvcache-ai/Mooncake) — FAST25 paper and trace.
 - [Kimi-K2.5 model card](https://huggingface.co/nvidia/Kimi-K2.5-NVFP4)
 - [Eagle3 speculative-decoding head model card](https://huggingface.co/nvidia/Kimi-K2.5-Thinking-Eagle3)
+
+## Notes
+
+- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers. Disable this variable on nodes with less than 64 GB of available memory.
