@@ -237,7 +237,7 @@ The full set is constructed from two sources:
 **Enforced by.**
 
 - `ConnectorLeader::find_prefix_g2_blocks` (`lib/kvbm-connector/src/connector/leader/mod.rs`). On any G2 miss the function drops the partial hits (RAII returns them to G2's inactive pool) and returns `Ok(Vec::new())`. Emits `prefix_g2_incomplete_skip`.
-- `DecodeDisaggLeader::commit_gnmt_remote` (`decode_leader.rs`). When `find_prefix_g2_blocks` returns empty AND `num_computed_tokens > 0`, builds a `PendingG1Promotion { prefix_block_count, prefix_hashes }`. Plumbs the planned hashes to `begin_remote_prefill` and stashes the plan on `CdRequestState`.
+- `DecodeDisaggLeader::commit_gnmt_remote` (`decode_leader.rs`). When `find_prefix_g2_blocks` returns empty AND `num_computed_tokens > 0`, builds a `PendingTierPromotion { source_tier, prefix_block_count, prefix_hashes }`. Plumbs the planned hashes to `begin_remote_prefill` and stashes the plan on `CdRequestState`. `source_tier` selects which lower tier the promotion will dispatch through at USAA (Stage 1 = `G1`; Stage 2 = `G3`).
 - `DecodeDisaggLeader::commit_usaa1` (`decode_leader.rs`). Pairs `block_ids[..prefix_block_count]` with the GNMT-time `prefix_hashes` to build `Vec<ExternalBlock<G1>>`, calls `inner.promote_g1_to_g2(source_blocks)`, spawns a task that awaits the future and drives `session.make_available` + `session.finish_availability` on the promoted G2 blocks.
 - `ConditionalDisaggCoordinator::begin_remote_prefill` (`coordinator/driver.rs`). Includes `pending_promotion_hashes` in the up-front `session.commit` (positionally first, ahead of `local_match`); calls `session.finish_commits` unconditionally; skips `session.finish_availability` when promotion is pending.
 

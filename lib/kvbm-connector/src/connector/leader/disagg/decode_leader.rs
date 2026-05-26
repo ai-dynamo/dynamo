@@ -176,10 +176,37 @@ impl Drop for CdRequestStatePayload {
     }
 }
 
+/// Source tier for a pending prefix promotion. Selected at decode
+/// GNMT based on which lower tier (G1 or G3) actually backs the
+/// requested prefix window. Drives dispatch in `commit_usaa1`'s
+/// promotion-spawn block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceTier {
+    /// Prefix lives in vLLM's G1 (HBM). Source blocks are built
+    /// at USAA from the `block_ids` vLLM hands the wrapper, paired
+    /// with the GNMT-time `prefix_hashes`. Promotion runs through
+    /// the offload pipeline's `enqueue_g1_to_g2`.
+    G1,
+    /// Prefix lives in decode's G3 (NVMe/SSD). Source blocks are
+    /// resolved by the production shim by querying the G3 manager
+    /// for `prefix_hashes` at promotion time. Promotion runs
+    /// through `kvbm_engine::leader::staging::stage_g3_to_g2`.
+    ///
+    /// Producer wiring lands in Stage 2c (extend
+    /// `commit_gnmt_remote`'s empty-prefix arm to try G3 first);
+    /// dispatch wiring lands in Stage 2d (match on `source_tier`
+    /// in `commit_usaa1`'s promotion-spawn block). Until then,
+    /// `commit_usaa1` bails on any G3 plan that reaches it.
+    #[allow(dead_code)] // wired in Stage 2c/2d
+    G3,
+}
+
 /// Decision recorded at decode GNMT when the slot's prefix range is
-/// known to vLLM (G1) but not yet backed by decode's G2 cache. The
-/// promotion fires at USAA — when vLLM has handed the wrapper the
-/// actual G1 `block_ids` — and runs as an uncancellable task that
+/// known to vLLM (G1) but not yet backed by decode's G2 cache, OR
+/// when decode's G3 holds the prefix and a G3→G2 stage is required.
+/// The promotion fires at USAA — when vLLM has handed the wrapper
+/// the actual G1 `block_ids` (G1 source) or simply at the admission
+/// boundary (G3 source) — and runs as an uncancellable task that
 /// completes the alloc + transfer + register flow then publishes the
 /// resulting G2 blocks on the open CD session.
 ///
@@ -194,7 +221,9 @@ impl Drop for CdRequestStatePayload {
 /// **deferred** at GNMT — it only fires once the promotion task
 /// reaches `session.make_available(promoted_g2)`.
 #[derive(Debug, Clone)]
-struct PendingG1Promotion {
+struct PendingTierPromotion {
+    /// Which lower tier the source blocks live in.
+    source_tier: SourceTier,
     /// Width of the prefix slice — `num_computed_tokens / block_size`.
     prefix_block_count: usize,
     /// Canonical sequence hashes for blocks `[0..prefix_block_count)`,
@@ -274,10 +303,13 @@ struct CdRequestState {
     /// the prefill-side guard on `CdRequest.cleanup_claimed`.
     cleanup_claimed: std::sync::atomic::AtomicBool,
 
-    /// Stage 1 G1→G2 prefix promotion plan, captured at GNMT when
-    /// vLLM reports `num_computed_tokens > 0` but decode's G2 has
-    /// no record of the prefix. Consumed at USAA, where the actual
-    /// G1 `block_ids` arrive and the promotion task is spawned.
+    /// Stage 1/2 prefix promotion plan, captured at GNMT when
+    /// `num_computed_tokens > 0` but decode's G2 has no record of
+    /// the prefix. The plan's `source_tier` indicates whether the
+    /// backing comes from vLLM's G1 (Stage 1) or decode's G3 (Stage
+    /// 2). Consumed at USAA, where the promotion task is spawned;
+    /// the G1 path needs the actual G1 `block_ids` from vLLM, the
+    /// G3 path resolves source blocks internally from the hashes.
     /// `None` outside this path (the common case).
     ///
     /// The actual `JoinHandle` for the spawned task lives on the
@@ -286,7 +318,7 @@ struct CdRequestState {
     /// calling `session.finalize` (finalize would otherwise emit
     /// `CommitsClosed + Drained` per session CONTRACT §2.13 and
     /// pre-empt the task's `make_available`).
-    pending_g1_promotion: Option<PendingG1Promotion>,
+    pending_promotion: Option<PendingTierPromotion>,
 }
 
 /// Opaque test handle wrapping an `Arc<CdRequestState>` snapshot,
@@ -830,7 +862,12 @@ impl DecodeDisaggLeader {
         // promotion to fire at USAA. The slot's full sequence is
         // the source of truth for the prefix hashes; vLLM will
         // hand us the corresponding G1 `block_ids` at USAA.
-        let pending_g1_promotion = if prefix_g2.is_empty() && num_prefix_blocks > 0 {
+        //
+        // Stage 2 will extend this arm to first try G3 (decode's
+        // NVMe tier); on G3 hit, the plan's `source_tier` flips to
+        // G3 and the promotion task at USAA dispatches through
+        // `promote_g3_to_g2` instead.
+        let pending_promotion = if prefix_g2.is_empty() && num_prefix_blocks > 0 {
             let prefix_hashes: Vec<SequenceHash> =
                 split.all_sequence_hashes[..num_prefix_blocks].to_vec();
             crate::audit!(
@@ -839,7 +876,8 @@ impl DecodeDisaggLeader {
                 request_id,
                 prefix_block_count = num_prefix_blocks
             );
-            Some(PendingG1Promotion {
+            Some(PendingTierPromotion {
+                source_tier: SourceTier::G1,
                 prefix_block_count: num_prefix_blocks,
                 prefix_hashes,
             })
@@ -910,7 +948,7 @@ impl DecodeDisaggLeader {
             session: Mutex::new(None),
             pending_failure: Mutex::new(None),
             cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
-            pending_g1_promotion: pending_g1_promotion.clone(),
+            pending_promotion: pending_promotion.clone(),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&new_state));
@@ -959,7 +997,7 @@ impl DecodeDisaggLeader {
         let salt = self.inner.slot_salt(request_id).inspect_err(|_| {
             self.release_request(request_id);
         })?;
-        let pending_promotion_hashes_for_session = pending_g1_promotion
+        let pending_promotion_hashes_for_session = pending_promotion
             .as_ref()
             .map(|p| p.prefix_hashes.clone())
             .unwrap_or_default();
@@ -1364,7 +1402,7 @@ impl DecodeDisaggLeader {
             // re-check). Threading it through `updated` keeps cleanup
             // paths observing a single source of truth via the latest
             // per-request Arc.
-            pending_g1_promotion: existing.pending_g1_promotion.clone(),
+            pending_promotion: existing.pending_promotion.clone(),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&updated));
@@ -1587,7 +1625,21 @@ impl DecodeDisaggLeader {
         // Even if the session has been closed by the time it
         // completes, the resulting G2 blocks remain registered in
         // the cache and benefit future requests.
-        if let Some(plan) = updated.pending_g1_promotion.clone() {
+        if let Some(plan) = updated.pending_promotion.clone() {
+            // Stage 2 dispatch lands in 2d. Until then, the only
+            // tier that can flow through `commit_gnmt_remote`'s
+            // empty-prefix arm is `G1`; any other variant is a
+            // programmer error (a producer was added that this
+            // arm doesn't yet know how to dispatch).
+            match plan.source_tier {
+                SourceTier::G1 => {}
+                SourceTier::G3 => {
+                    anyhow::bail!(
+                        "commit_usaa1: G3 promotion dispatch not yet wired \
+                         (Stage 2d); rid={request_id}"
+                    );
+                }
+            }
             // Lookup the coordinator-side state FIRST so we can
             // skip the spawn entirely when cleanup has already
             // evicted state — a non-gated promotion task would
