@@ -446,6 +446,78 @@ async fn pull_ack_drops_holder_pins() -> Result<()> {
 }
 
 // ============================================================================
+// Case: cooperative finalize does NOT disturb in-flight pulls
+// ============================================================================
+//
+// P0 #8 from the streamed-shamir hardening plan. CONTRACT.md §2.13:
+// `finalize` sends terminators + `Frame::Finished` but does NOT
+// preempt the pull cycle. A holder that has authorized a Pull but
+// not yet received the PullAck still holds its pin; calling
+// `finalize` must NOT release that pin and must NOT abort the
+// outstanding pull. The pin is dropped iff `PullAck` arrives.
+// `Detached` only fires after both sides have called `finalize`
+// (cooperative rendezvous, already covered by
+// `finalize_rendezvous_triggers_both_side_velo_finalize`).
+//
+// This test forges the inbound pull cycle on the holder side, calls
+// `finalize` between `Frame::Pull` (authorize) and `Frame::PullAck`
+// (settle), and asserts the pin remains alive across the finalize.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn finalize_does_not_disturb_in_flight_pulls() -> Result<()> {
+    let h = build_side().await;
+
+    let session_id = uuid::Uuid::new_v4();
+    let h_session = h.factory.open_concrete(session_id)?;
+
+    let blocks = make_blocks(&h.g2_manager, 1, 300);
+    let hashes: Vec<_> = blocks.iter().map(|b| b.sequence_hash()).collect();
+    h_session.commit(hashes.clone())?;
+    h_session.make_available(blocks)?;
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        1,
+        "make_available should pin the block"
+    );
+
+    // Forge inbound Frame::Pull: holder records the pull_id and
+    // emits Frame::PullComplete on the outbound. The puller's
+    // RDMA pull is now logically in flight; PullAck has NOT
+    // arrived yet, so the holder's pin is still held.
+    let pull_id: u64 = 7;
+    h_session.test_inject_inbound_frame(Frame::Pull {
+        pull_id,
+        hashes: hashes.clone(),
+    });
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        1,
+        "pin must remain after Frame::Pull authorizes but PullAck has not arrived"
+    );
+
+    // Call finalize mid-pull. CONTRACT.md §2.13 promises this
+    // sends terminators + Frame::Finished and (since the puller
+    // has not also finalized) does NOT trigger Detached. The pin
+    // must remain — finalize does NOT cancel the outstanding pull.
+    h_session.finalize(Some("publish_done_mid_pull".to_string()));
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        1,
+        "finalize must NOT drop pins for outstanding pulls — the pull cycle is not yet acked"
+    );
+
+    // PullAck arrives. NOW the pin drops.
+    h_session.test_inject_inbound_frame(Frame::PullAck { pull_id });
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        0,
+        "PullAck after finalize must still drop the pin (pull cycle completes normally)"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
 // Case: pull() with hash not in peer_available errors synchronously
 // ============================================================================
 
