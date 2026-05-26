@@ -176,6 +176,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
     m.add_class::<AsyncResponseStream>()?;
+    m.add_class::<PyAsyncRequestStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
@@ -1456,6 +1457,54 @@ impl AsyncResponseStream {
                     }
                     None => return Err(PyStopAsyncIteration::new_err("Stream exhausted")),
                 }
+            }
+        })
+    }
+}
+
+/// Python-visible inbound iterator for bidirectional engines. Wraps an
+/// mpsc receiver of pre-pythonized request frames; `__anext__` is a thin
+/// `.recv()` that returns the next `PyObject` directly, with no per-frame
+/// GIL acquisition on the consumer side. The producer (the forwarder
+/// spawned by `PythonBidirectionalEngine::generate`) acquires the GIL
+/// once per frame and pushes the converted `PyObject` onto the channel.
+///
+/// Termination follows the same shape as `AsyncResponseStream`: when the
+/// channel returns `None`, `__anext__` raises `PyStopAsyncIteration` and
+/// the iterator is exhausted. Note that input-stream end is *not* a
+/// cancellation signal — engines must keep yielding response chunks until
+/// they decide to return or observe `context.is_stopped()`.
+#[pyclass]
+pub(crate) struct PyAsyncRequestStream {
+    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PyObject>>>,
+}
+
+impl PyAsyncRequestStream {
+    pub(crate) fn new(rx: tokio::sync::mpsc::Receiver<PyObject>) -> Self {
+        Self {
+            rx: Arc::new(Mutex::new(rx)),
+        }
+    }
+}
+
+#[pymethods]
+impl PyAsyncRequestStream {
+    /// Required by the `AsyncIterator` protocol.
+    #[pyo3(name = "__aiter__")]
+    fn aiter(slf: PyRef<Self>, py: Python) -> PyResult<Py<PyAny>> {
+        slf.into_py_any(py)
+    }
+
+    /// Required by the `AsyncIterator` protocol. Returns an awaitable
+    /// resolving to the next pre-pythonized frame, or raises
+    /// `StopAsyncIteration` when the inbound channel is closed.
+    #[pyo3(name = "__anext__")]
+    fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let rx = self.rx.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            match rx.lock().await.recv().await {
+                Some(pyobj) => Ok(pyobj),
+                None => Err(PyStopAsyncIteration::new_err("Request stream exhausted")),
             }
         })
     }
