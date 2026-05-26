@@ -48,6 +48,7 @@ from dynamo.common.backend.publisher import (
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+from dynamo.common.utils.drain import prefill_drain_context
 from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
@@ -60,9 +61,11 @@ from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisio
 
 logger = logging.getLogger(__name__)
 
-# Match legacy `trtllm/main.py` so prefill drain behaves the same.
-_DRAIN_TIMEOUT_S = 30.0
 _DRAIN_POLL_INTERVAL_S = 0.5
+# `get_stats_async` raises TimeoutError when no stats are fresh and
+# StopAsyncIteration when the iterator is exhausted; both are benign
+# "try again" signals. RuntimeError covers the test stub.
+_BENIGN_POLL_EXC = (asyncio.TimeoutError, StopAsyncIteration, RuntimeError)
 
 # 1021 is the largest 10-bit prime — spreads machine_ids more evenly
 # under modulo than 1024 would. Matches legacy
@@ -638,50 +641,32 @@ class TrtllmLLMEngine(LLMEngine):
                 logger.debug("Aborted request %s", request_id)
 
     async def drain(self) -> None:
-        """Prefill-only: poll until in-flight requests finish so a
-        decode peer's NIXL pull doesn't see freed GPU memory (#7319).
-        Mirrors legacy `_make_drain_callback`."""
+        """Prefill-only: poll until in-flight requests reach 0 so a
+        decode peer's NIXL pull doesn't see freed GPU memory."""
         if (
             self._engine is None
             or self.disaggregation_mode != DisaggregationMode.PREFILL
         ):
             return
-
-        deadline = asyncio.get_running_loop().time() + _DRAIN_TIMEOUT_S
-        logger.info(
-            "Draining in-flight requests on prefill worker (timeout=%.1fs)",
-            _DRAIN_TIMEOUT_S,
-        )
-        # The stats stream can raise asyncio.TimeoutError when the engine
-        # has nothing fresh to report, or StopAsyncIteration when the
-        # underlying iterator is exhausted — both are benign and just mean
-        # "no signal this tick, try again". A wider `Exception` would
-        # swallow code bugs introduced later; the test stub raises
-        # RuntimeError to exercise the retry path.
-        _BENIGN_POLL = (asyncio.TimeoutError, StopAsyncIteration, RuntimeError)
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                stats_iter = self._engine.llm.get_stats_async(timeout=2)
-                stat = await anext(stats_iter)
-                active = stat.get("numActiveRequests", 0)
-                queued = stat.get("numQueuedRequests", 0)
-                if active + queued == 0:
-                    logger.info("All in-flight requests drained")
-                    return
-                logger.info(
-                    "Waiting for %d in-flight request(s) (active=%d, queued=%d)",
-                    active + queued,
-                    active,
-                    queued,
-                )
-            except _BENIGN_POLL as e:
-                logger.debug("Stats poll failed during drain: %s", e)
-            await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
-        logger.warning(
-            "Drain timeout (%.1fs) reached; proceeding with shutdown — "
-            "some NIXL transfers may still be in flight",
-            _DRAIN_TIMEOUT_S,
-        )
+        async with prefill_drain_context(logger) as ctx:
+            while not ctx.expired():
+                poll_timeout_s = min(2.0, ctx.remaining_s())
+                try:
+                    stats_iter = self._engine.llm.get_stats_async(
+                        timeout=poll_timeout_s
+                    )
+                    stat = await asyncio.wait_for(
+                        anext(stats_iter), timeout=poll_timeout_s
+                    )
+                    active = stat.get("numActiveRequests", 0)
+                    queued = stat.get("numQueuedRequests", 0)
+                    ctx.heartbeat(active=active, queued=queued)
+                    if active + queued == 0:
+                        return
+                except _BENIGN_POLL_EXC as e:
+                    logger.debug("Stats poll failed during drain: %s", e)
+                    ctx.heartbeat()
+                await asyncio.sleep(min(_DRAIN_POLL_INTERVAL_S, ctx.remaining_s()))
 
     async def cleanup(self) -> None:
         # Stop the publisher threads BEFORE engine shutdown so they don't

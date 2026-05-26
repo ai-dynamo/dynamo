@@ -21,6 +21,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.utils.drain import prefill_drain_context
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -52,6 +53,14 @@ from .snapshot import prepare_snapshot_engine
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
+
+
+async def _prefill_drain_callback() -> None:
+    """Legacy-path drain matching :meth:`VllmLLMEngine.drain`."""
+    async with prefill_drain_context(logger) as ctx:
+        while not ctx.expired():
+            ctx.heartbeat()
+            await asyncio.sleep(min(ctx.heartbeat_s, ctx.remaining_s()))
 
 
 def build_headless_namespace(config: Config) -> argparse.Namespace:
@@ -155,7 +164,16 @@ async def worker() -> None:
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
-    install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
+    drain_callback = None
+    if config.disaggregation_mode == DisaggregationMode.PREFILL:
+        drain_callback = _prefill_drain_callback
+    install_signal_handlers(
+        loop,
+        runtime,
+        shutdown_endpoints,
+        shutdown_event,
+        drain_callback=drain_callback,
+    )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
     factory = WorkerFactory(

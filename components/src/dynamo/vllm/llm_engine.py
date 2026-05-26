@@ -9,6 +9,7 @@ and feature gap details.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -40,6 +41,7 @@ from dynamo.common.backend.publisher import (
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.drain import prefill_drain_context
 from dynamo.llm import ModelInput
 from dynamo.vllm.args import parse_args
 from dynamo.vllm.cache_info import (
@@ -389,6 +391,21 @@ class VllmLLMEngine(LLMEngine):
         if self.engine_client is not None and request_id is not None:
             await self.engine_client.abort(request_id)
             logger.debug("Aborted request %s", request_id)
+
+    async def drain(self) -> None:
+        """Prefill-only: bounded wait so in-flight NIXL KV pulls settle
+        before ``AsyncLLM.shutdown()`` frees GPU memory. vLLM exposes
+        no connector-aware idle signal, so the body is a
+        heartbeat-paced sleep."""
+        if (
+            self.engine_client is None
+            or self.disaggregation_mode != DisaggregationMode.PREFILL
+        ):
+            return
+        async with prefill_drain_context(logger) as ctx:
+            while not ctx.expired():
+                ctx.heartbeat()
+                await asyncio.sleep(min(ctx.heartbeat_s, ctx.remaining_s()))
 
     async def cleanup(self) -> None:
         try:

@@ -40,6 +40,7 @@ from dynamo.common.backend.publisher import (
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.drain import prefill_drain_context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
@@ -53,10 +54,6 @@ from dynamo.sglang.args import parse_args
 from dynamo.sglang.publisher import format_zmq_endpoint
 
 logger = logging.getLogger(__name__)
-
-# Bound on prefill drain during graceful shutdown. After this, force-cancel
-# any still-running consume tasks. Matches TRT-LLM's drain timeout.
-_PREFILL_DRAIN_TIMEOUT_S = 30.0
 
 # Operators can opt out of the prefill warmup for fast-iteration / smoke
 # environments where the warmup adds avoidable startup latency. The default
@@ -368,27 +365,22 @@ class SglangLLMEngine(LLMEngine):
             logger.debug("Aborted request %s", rid)
 
     async def drain(self) -> None:
-        """Await background prefill consume tasks before cleanup (#7319)."""
+        """Prefill-only: gather background consume tasks so a decode
+        peer's NIXL pull finishes before cleanup. SGLang's
+        ``engine.async_generate`` stream stays alive through the KV
+        transfer, so awaiting the spawned tasks is the in-flight
+        signal."""
         pending = [t for t in self._prefill_consume_tasks if not t.done()]
         if not pending:
             return
-        logger.info(
-            "Draining %d background prefill consume task(s) (timeout=%.1fs)",
-            len(pending),
-            _PREFILL_DRAIN_TIMEOUT_S,
-        )
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*pending, return_exceptions=True),
-                timeout=_PREFILL_DRAIN_TIMEOUT_S,
-            )
-            logger.info("All prefill consume tasks drained")
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Drain timeout (%.1fs) reached; cleanup() will cancel "
-                "remaining tasks — some NIXL transfers may not complete",
-                _PREFILL_DRAIN_TIMEOUT_S,
-            )
+        async with prefill_drain_context(logger) as ctx:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=ctx.remaining_s(),
+                )
+            except asyncio.TimeoutError:
+                pass
 
     async def cleanup(self) -> None:
         # Anything still running here either timed out in drain() or was

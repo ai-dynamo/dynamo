@@ -70,6 +70,7 @@ python3 -m dynamo.frontend &
 # Use DYN_SYSTEM_PORT1/2 instead of *_PREFILL/*_DECODE env names so test
 # harnesses can set one simple pair for disaggregated deployments.
 OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
 python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
