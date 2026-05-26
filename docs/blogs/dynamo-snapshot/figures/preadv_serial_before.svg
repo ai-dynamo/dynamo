@@ -16,8 +16,6 @@
 </style>
 <text class="title" x="40" y="58">Serial preadv restores one region at a time</text>
 <text class="subtitle" x="40" y="88">Blocking preadv loop — one read in flight leaves storage idle between jobs.</text>
-<text class="panel-label" x="60" y="140" fill="#cdcdcd">BEFORE</text>
-<text class="panel-sub" x="60" y="160">Serial preadv() calls block one at a time</text>
 <text class="section-label" x="110.0" y="178">JOB LIST &#183; iocbs</text>
 <text class="section-label" x="380.0" y="178">KERNEL</text>
 <text class="section-label" x="890.0" y="178">PROCESS ADDRESS SPACE</text>
