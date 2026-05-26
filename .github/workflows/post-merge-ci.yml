@@ -707,7 +707,7 @@ jobs:
   # ============================================================================
   deploy-test-gaie:
     name: GAIE Deploy Test
-    runs-on: prod-default-small-v2
+    runs-on: prod-deploy-tester-v1
     needs: [deploy-operator, frontend-copy-to-acr, vllm-copy-to-acr]
     timeout-minutes: 30
     permissions:
