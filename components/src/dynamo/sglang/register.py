@@ -23,10 +23,10 @@ from dynamo.llm import (
     ModelType,
     register_model,
 )
-from dynamo.sglang._capacity import local_dp_rank_bounds, runtime_capacity
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig
+from dynamo.sglang.capacity import local_dp_rank_bounds, runtime_capacity
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 
@@ -274,9 +274,10 @@ async def _get_runtime_config(
     )
 
     start_dp_rank, end_dp_rank = local_dp_rank_bounds(server_args)
+    local_dp_size = end_dp_rank - start_dp_rank
     runtime_config.data_parallel_start_rank = start_dp_rank
-    runtime_config.data_parallel_size = end_dp_rank - start_dp_rank
-    if runtime_config.data_parallel_size > 1:
+    runtime_config.data_parallel_size = local_dp_size
+    if local_dp_size > 1:
         logging.info(
             "Registering with local data_parallel rank range [%s, %s)",
             start_dp_rank,
@@ -349,16 +350,14 @@ async def _get_runtime_config(
                     f"(max_total_tokens={max_total_tokens}, page_size={server_args.page_size})"
                 )
 
-            # When max_prefill_tokens is not explicitly set by the user, fall back
-            # to max_total_num_tokens from the scheduler. This ensures the planner
-            # always has a prefill load signal for aggregated scaling decisions.
-            if getattr(server_args, "max_prefill_tokens", None) is None:
+            if capacity.max_num_batched_tokens is not None:
                 runtime_config.max_num_batched_tokens = capacity.max_num_batched_tokens
-                logging.info(
-                    f"max_prefill_tokens not set, using max_total_num_tokens "
-                    f"from scheduler as max_num_batched_tokens: "
-                    f"{capacity.max_num_batched_tokens}"
-                )
+                if getattr(server_args, "max_prefill_tokens", None) is None:
+                    logging.info(
+                        f"max_prefill_tokens not set, using max_total_num_tokens "
+                        f"from scheduler as max_num_batched_tokens: "
+                        f"{capacity.max_num_batched_tokens}"
+                    )
         else:
             unpublished = "total_kv_blocks"
             if getattr(server_args, "max_prefill_tokens", None) is None:

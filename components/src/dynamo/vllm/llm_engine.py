@@ -213,7 +213,8 @@ class VllmLLMEngine(LLMEngine):
         )
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
         per_rank_num_gpu_blocks = per_rank_kv_blocks(num_gpu_blocks, self._dp_range[1])
-        assert per_rank_num_gpu_blocks is not None
+        if per_rank_num_gpu_blocks is None:
+            raise RuntimeError("per-rank KV block count is not set")
         self._stat_logger_factory.num_gpu_blocks = per_rank_num_gpu_blocks
         self._model_max_len = getattr(
             getattr(vllm_config, "model_config", None), "max_model_len", None
@@ -243,8 +244,10 @@ class VllmLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        assert self.engine_client is not None, "Engine not initialized"
-        assert self._default_sampling_params is not None, "Engine not initialized"
+        if self.engine_client is None:
+            raise RuntimeError("Engine not initialized")
+        if self._default_sampling_params is None:
+            raise RuntimeError("Engine not initialized")
 
         request_id = context.id()
 
@@ -379,8 +382,10 @@ class VllmLLMEngine(LLMEngine):
     async def kv_event_sources(self) -> list[KvEventSource]:
         if not self._kv_routing_enabled():
             return []
-        assert self._vllm_config is not None
-        assert self._dp_range is not None
+        if self._vllm_config is None:
+            raise RuntimeError("Engine not initialized")
+        if self._dp_range is None:
+            raise RuntimeError("Engine not initialized")
         kv_events_config = self.engine_args.kv_events_config
         dp_start, dp_size = self._dp_range
         return [

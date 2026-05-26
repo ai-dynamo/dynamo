@@ -24,9 +24,9 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
-from dynamo.sglang._capacity import kv_metrics_block_values, local_dp_rank_bounds
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
+from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
 
 
 def get_local_dp_rank_range(server_args) -> range:

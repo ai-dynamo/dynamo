@@ -44,11 +44,6 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
-from dynamo.sglang._capacity import (
-    kv_metrics_block_values,
-    local_dp_rank_bounds,
-    runtime_capacity,
-)
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
@@ -57,6 +52,11 @@ from dynamo.sglang._disagg import (
     warmup_prefill_engine,
 )
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.capacity import (
+    kv_metrics_block_values,
+    local_dp_rank_bounds,
+    runtime_capacity,
+)
 from dynamo.sglang.publisher import format_zmq_endpoint
 
 if TYPE_CHECKING:
