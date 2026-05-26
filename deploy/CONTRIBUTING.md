@@ -16,8 +16,8 @@ The deploy directory contains several key components:
 ```
 ├── helm
 │   └── charts
-│       ├── crds # Dynamo CRD helm chart
 │       ├── platform # Dynamo platform helm chart
+│       └── snapshot # Dynamo snapshot helm chart
 ├── inference-gateway # Dynamo integration with inference gateway
 ├── observability # Observability tools for Dynamo k8s
 ├── operator # Source code for the Dynamo operator
