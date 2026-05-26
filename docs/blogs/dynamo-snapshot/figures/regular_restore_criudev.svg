@@ -29,7 +29,7 @@
 <text class="axis" x="975.4" y="648" text-anchor="middle">120s</text>
 <line x1="1094.7" y1="160" x2="1094.7" y2="630" stroke="#1a1a1a" stroke-width="1"/>
 <text class="axis" x="1094.7" y="648" text-anchor="middle">140s</text>
-<text class="model" x="40" y="182">Qwen3 0.6B</text>
+<text class="model" x="40" y="182">Qwen3-0.6B</text>
 <text class="lane-label" x="245" y="224.0" text-anchor="end">Cold Start</text>
 <text class="lane-label" x="245" y="272.0" text-anchor="end">Snapshot Restore</text>
 <rect x="260.0" y="206" width="314.1" height="28" fill="#7a5030"/>
@@ -40,7 +40,7 @@
 <rect x="300.9" y="254" width="12.0" height="28" fill="#005a40"/>
 <rect x="312.9" y="254" width="1.5" height="28" fill="#3a1050"/>
 <text class="total" x="322.4" y="273.0">8.0s</text>
-<text class="model" x="40" y="352">Qwen3 8B</text>
+<text class="model" x="40" y="352">Qwen3-8B</text>
 <text class="lane-label" x="245" y="394.0" text-anchor="end">Cold Start</text>
 <text class="lane-label" x="245" y="442.0" text-anchor="end">Snapshot Restore</text>
 <rect x="260.0" y="376" width="349.8" height="28" fill="#7a5030"/>

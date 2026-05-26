@@ -28,7 +28,7 @@
 <text class="axis" x="998.9" y="608" text-anchor="middle">75s</text>
 <line x1="1164.7" y1="160" x2="1164.7" y2="590" stroke="#1a1a1a" stroke-width="1"/>
 <text class="axis" x="1164.7" y="608" text-anchor="middle">90s</text>
-<text class="model" x="40" y="210.0">Qwen3 0.6B</text>
+<text class="model" x="40" y="210.0">Qwen3-0.6B</text>
 <rect x="170" y="160" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <rect x="170.0" y="181.0" width="110.8" height="48" fill="#7a5030"/>
 <text class="num" x="225.4" y="209.0" text-anchor="middle">10.0s</text>
@@ -45,7 +45,7 @@
 <rect x="720.3" y="181.0" width="32.0" height="48" fill="#4a7500"/>
 <text class="num" x="736.3" y="209.0" text-anchor="middle">2.9s</text>
 <text class="total" x="764.3" y="210.0">52.7s</text>
-<text class="model" x="40" y="365.0">Qwen3 8B</text>
+<text class="model" x="40" y="365.0">Qwen3-8B</text>
 <rect x="170" y="315.0" width="1050" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <rect x="170.0" y="336.0" width="110.7" height="48" fill="#7a5030"/>
 <text class="num" x="225.3" y="364.0" text-anchor="middle">10.0s</text>
