@@ -13,25 +13,25 @@
 </style>
 <text class="title" x="40" y="58">Snapshot restore vs cold start (unoptimized)</text>
 <text class="subtitle" x="40" y="88">Single-GPU (1xB200)</text>
-<line x1="260.0" y1="160" x2="260.0" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="260.0" y="668" text-anchor="middle">0s</text>
-<line x1="379.2" y1="160" x2="379.2" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="379.2" y="668" text-anchor="middle">20s</text>
-<line x1="498.5" y1="160" x2="498.5" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="498.5" y="668" text-anchor="middle">40s</text>
-<line x1="617.7" y1="160" x2="617.7" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="617.7" y="668" text-anchor="middle">60s</text>
-<line x1="737.0" y1="160" x2="737.0" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="737.0" y="668" text-anchor="middle">80s</text>
-<line x1="856.2" y1="160" x2="856.2" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="856.2" y="668" text-anchor="middle">100s</text>
-<line x1="975.4" y1="160" x2="975.4" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="975.4" y="668" text-anchor="middle">120s</text>
-<line x1="1094.7" y1="160" x2="1094.7" y2="650" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="1094.7" y="668" text-anchor="middle">140s</text>
+<line x1="260.0" y1="160" x2="260.0" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="260.0" y="648" text-anchor="middle">0s</text>
+<line x1="379.2" y1="160" x2="379.2" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="379.2" y="648" text-anchor="middle">20s</text>
+<line x1="498.5" y1="160" x2="498.5" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="498.5" y="648" text-anchor="middle">40s</text>
+<line x1="617.7" y1="160" x2="617.7" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="617.7" y="648" text-anchor="middle">60s</text>
+<line x1="737.0" y1="160" x2="737.0" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="737.0" y="648" text-anchor="middle">80s</text>
+<line x1="856.2" y1="160" x2="856.2" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="856.2" y="648" text-anchor="middle">100s</text>
+<line x1="975.4" y1="160" x2="975.4" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="975.4" y="648" text-anchor="middle">120s</text>
+<line x1="1094.7" y1="160" x2="1094.7" y2="630" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="1094.7" y="648" text-anchor="middle">140s</text>
 <text class="model" x="40" y="182">Qwen3 0.6B</text>
-<text class="lane-label" x="245" y="224.0" text-anchor="end">cold start</text>
-<text class="lane-label" x="245" y="272.0" text-anchor="end">snapshot restore</text>
+<text class="lane-label" x="245" y="224.0" text-anchor="end">Cold Start</text>
+<text class="lane-label" x="245" y="272.0" text-anchor="end">Snapshot Restore</text>
 <rect x="260.0" y="206" width="314.1" height="28" fill="#7a5030"/>
 <text class="num" x="417.1" y="224.0" text-anchor="middle">52.7s</text>
 <text class="total" x="586.1" y="225.0">52.7s</text>
@@ -41,8 +41,8 @@
 <rect x="312.9" y="254" width="1.5" height="28" fill="#3a1050"/>
 <text class="total" x="322.4" y="273.0">8.0s</text>
 <text class="model" x="40" y="352">Qwen3 8B</text>
-<text class="lane-label" x="245" y="394.0" text-anchor="end">cold start</text>
-<text class="lane-label" x="245" y="442.0" text-anchor="end">snapshot restore</text>
+<text class="lane-label" x="245" y="394.0" text-anchor="end">Cold Start</text>
+<text class="lane-label" x="245" y="442.0" text-anchor="end">Snapshot Restore</text>
 <rect x="260.0" y="376" width="349.8" height="28" fill="#7a5030"/>
 <text class="num" x="434.9" y="394.0" text-anchor="middle">58.7s</text>
 <text class="total" x="621.8" y="395.0">58.7s</text>
@@ -52,8 +52,8 @@
 <rect x="423.9" y="424" width="2.7" height="28" fill="#3a1050"/>
 <text class="total" x="439.0" y="443.0">28.0s</text>
 <text class="model" x="40" y="522">gpt-oss-120b</text>
-<text class="lane-label" x="245" y="564.0" text-anchor="end">cold start</text>
-<text class="lane-label" x="245" y="612.0" text-anchor="end">snapshot restore</text>
+<text class="lane-label" x="245" y="564.0" text-anchor="end">Cold Start</text>
+<text class="lane-label" x="245" y="612.0" text-anchor="end">Snapshot Restore</text>
 <rect x="260.0" y="546" width="509.6" height="28" fill="#7a5030"/>
 <text class="num" x="514.8" y="564.0" text-anchor="middle">85.5s</text>
 <text class="total" x="781.6" y="565.0">85.5s</text>
@@ -63,10 +63,10 @@
 <text class="num" x="1014.1" y="612.0" text-anchor="middle">14.2s</text>
 <rect x="1056.3" y="594" width="9.6" height="28" fill="#3a1050"/>
 <text class="total" x="1078.0" y="613.0">135.2s</text>
-<rect x="470.5" y="676" width="12" height="12" fill="#0a4a80"/>
-<text class="legend" x="488.5" y="687">CRIU restore</text>
-<rect x="598.5" y="676" width="12" height="12" fill="#005a40"/>
-<text class="legend" x="616.5" y="687">CUDA restore</text>
-<rect x="735.5" y="676" width="12" height="12" fill="#3a1050"/>
-<text class="legend" x="753.5" y="687">wake / remap</text>
+<rect x="470.5" y="696" width="12" height="12" fill="#0a4a80"/>
+<text class="legend" x="488.5" y="707">CRIU restore</text>
+<rect x="598.5" y="696" width="12" height="12" fill="#005a40"/>
+<text class="legend" x="616.5" y="707">CUDA restore</text>
+<rect x="735.5" y="696" width="12" height="12" fill="#3a1050"/>
+<text class="legend" x="753.5" y="707">wake / remap</text>
 </svg>
