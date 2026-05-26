@@ -281,10 +281,21 @@ impl ConditionalDisaggCoordinator {
     /// `run_setup` drains the buffer atomically when it sets
     /// `state.session = Some(...)`.
     ///
-    /// Lock order: acquire `state.session` first, then nest
-    /// `bits.pending_output_commits` inside it. Same order used in
-    /// `run_setup` so observer + attach can't interleave with the
-    /// buffer in an inconsistent state.
+    /// Lock discipline: hold `state.session` across BOTH the
+    /// buffer-or-commit decision AND the dispatch itself (or buffer
+    /// append). Two races this closes:
+    ///
+    /// 1. snapshot=None → attach lands → we then append to the buffer
+    ///    that attach already drained: blocks orphaned.
+    /// 2. snapshot=Some → on_request_finished snapshots session,
+    ///    observes has_pending=false (observer residual already
+    ///    drained), finalizes → our session.commit lands AFTER
+    ///    finalize on the wire.
+    ///
+    /// Holding the guard across dispatch serializes against
+    /// `run_setup`'s attach drain and against `on_request_finished`'s
+    /// short snapshot acquire. Lock order session→pending matches
+    /// `run_setup`.
     pub fn commit_output_blocks(
         &self,
         request_id: &str,
@@ -301,12 +312,8 @@ impl ConditionalDisaggCoordinator {
             )
         })?;
 
-        // Lock the session FIRST; buffer-or-commit decision happens
-        // inside this critical section so a concurrent `run_setup`
-        // attach can't transition session=None → Some between our
-        // check and the buffer append.
-        let session_opt = state.session.lock().clone();
-        match session_opt {
+        let session_guard = state.session.lock();
+        match session_guard.as_ref() {
             None => {
                 let buffered = blocks.len();
                 bits.pending_output_commits.lock().extend(blocks);
@@ -345,6 +352,31 @@ impl ConditionalDisaggCoordinator {
                 return;
             }
         };
+
+        // CAS-guard against parallel cleanup: both the lifecycle
+        // watcher (on Detached/Failed/Watchdog) and the spawn-catch
+        // path (run_setup returns Err) can call this for the same
+        // request. Whichever wins false → true runs the cleanup;
+        // losers early-return so we don't double-call
+        // `mark_failed_onboarding` (would double-notify vLLM of the
+        // failed G1 window) or clobber a pre-USAA stash someone is
+        // mid-installing. Dies with the CdRequest Arc.
+        if state
+            .cleanup_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            tracing::debug!(
+                request_id,
+                "cleanup_failed_request: cleanup already claimed; no-op"
+            );
+            return;
+        }
 
         let g1_ids = state.failed_g1_block_ids();
         let num_g1 = g1_ids.len();
@@ -478,43 +510,61 @@ impl ConditionalDisaggCoordinator {
             .session_factory
             .attach(params.session_id, params.initiator_instance_id, endpoint)
             .await?;
-        // Store in the top-level shared session field AND atomically
-        // drain any output blocks the observer buffered while session
-        // was None. The two operations must happen in the same
-        // critical section so a concurrent `commit_output_blocks`
-        // can't see session=Some and still try to append to the
-        // buffer (which would silently lose blocks).
-        let buffered_outputs: Vec<ImmutableBlock<G2>> = {
+        // Store in the top-level shared session field, drain any
+        // output blocks the observer buffered while session was None,
+        // AND dispatch those drained blocks — all under the same
+        // `state.session` guard. Holding the guard across the
+        // dispatch closes two races:
+        //   1. A concurrent `commit_output_blocks` snapshot=Some
+        //      that tries to append to a buffer attach already drained
+        //      (blocks orphaned past the drain).
+        //   2. `on_request_finished` snapshotting session=Some,
+        //      observing has_pending=false (observer residual already
+        //      drained pre-attach), and calling `session.finalize`
+        //      between our take-buffer and our dispatch — finalize
+        //      would land on the wire BEFORE the drained commits.
+        // `session.commit` / `make_available` are sync velo channel
+        // sends, so holding parking_lot guards across them is
+        // bounded. All other `state.session.lock()` callers do
+        // brief snapshot-and-release.
+        {
             let mut session_slot = state.session.lock();
             *session_slot = Some(Arc::clone(&session));
             let mut pending = bits.pending_output_commits.lock();
-            std::mem::take(&mut *pending)
-        };
-        if !buffered_outputs.is_empty() {
-            crate::audit!(
-                "commit_output_blocks_drained",
-                role = "prefill",
-                request_id = %request_id,
-                drained = buffered_outputs.len()
-            );
-            let hashes: Vec<SequenceHash> =
-                buffered_outputs.iter().map(|b| b.sequence_hash()).collect();
-            session
-                .commit(hashes)
-                .context("draining buffered output commits after attach")?;
-            session
-                .make_available(buffered_outputs)
-                .context("draining buffered output availability after attach")?;
+            let buffered_outputs: Vec<ImmutableBlock<G2>> = std::mem::take(&mut *pending);
+            if !buffered_outputs.is_empty() {
+                crate::audit!(
+                    "commit_output_blocks_drained",
+                    role = "prefill",
+                    request_id = %request_id,
+                    drained = buffered_outputs.len()
+                );
+                let hashes: Vec<SequenceHash> =
+                    buffered_outputs.iter().map(|b| b.sequence_hash()).collect();
+                session
+                    .commit(hashes)
+                    .context("draining buffered output commits after attach")?;
+                session
+                    .make_available(buffered_outputs)
+                    .context("draining buffered output availability after attach")?;
+            }
         }
 
         // Spawn lifecycle watcher.
         //
-        // On any terminal lifecycle outcome (Detached / Failed / watchdog),
-        // cancel the per-request token BEFORE removing the state from
-        // `coord.states`. The cancel unblocks any `run_setup` task still
-        // blocked on commits/availability streams (which never return
-        // None on their own while run_setup holds an Arc<dyn Session>).
-        // The eviction itself is unchanged.
+        // Two paths:
+        //   - Cooperative terminal (Detached / StreamEnded): the
+        //     request completed normally and the session is finalizing.
+        //     Cancel the token (no-op if `run_setup` already finished)
+        //     and remove the state. on_request_finished may have
+        //     already evicted; if so the remove is a no-op.
+        //   - Failure terminal (Failed / WatchdogTimeout): route
+        //     through `cleanup_failed_request` so vLLM gets
+        //     `mark_failed_onboarding` and pre-USAA stashes survive
+        //     for `on_usaa` replay. The CAS guard on `cleanup_claimed`
+        //     makes this safe against parallel cleanup from the
+        //     spawn-catch path (where `run_setup` returned Err from
+        //     the cancel-induced bail).
         let watcher_coord = self.weak_self.clone();
         let watcher_request_id = request_id.clone();
         spawn_lifecycle_watcher(
@@ -524,12 +574,41 @@ impl ConditionalDisaggCoordinator {
             request_id.clone(),
             params.session_id.to_string(),
             self.lifecycle_watchdog,
-            move |_outcome| async move {
+            move |outcome| async move {
+                let failure_reason = Self::lifecycle_failure_reason(&outcome);
                 if let Some(coord) = watcher_coord.upgrade() {
                     if let Some(state) = coord.state_for(&watcher_request_id) {
                         state.cancel.cancel();
                     }
-                    coord.states.remove(&watcher_request_id);
+                    match failure_reason {
+                        Some(reason) => {
+                            coord
+                                .cleanup_failed_request(&watcher_request_id, reason)
+                                .await;
+                        }
+                        None => {
+                            // Cooperative terminal (normal completion).
+                            // Skip the direct eviction if
+                            // `cleanup_failed_request` already ran — its
+                            // pre-USAA branch retains state on purpose
+                            // so `on_usaa` can read `pending_failure`
+                            // and emit `mark_failed_onboarding` with
+                            // the real G1 ids; a direct
+                            // `states.remove` here would evict the
+                            // stash and silently lose the replay. The
+                            // post-USAA branch already removes state,
+                            // so this guard is a no-op there.
+                            let already_claimed = coord
+                                .state_for(&watcher_request_id)
+                                .map(|s| {
+                                    s.cleanup_claimed.load(std::sync::atomic::Ordering::Acquire)
+                                })
+                                .unwrap_or(false);
+                            if !already_claimed {
+                                coord.states.remove(&watcher_request_id);
+                            }
+                        }
+                    }
                 }
             },
         );
@@ -1007,14 +1086,19 @@ impl ConditionalDisaggCoordinator {
         self.states.remove(request_id);
     }
 
-    /// Map a [`LifecycleOutcome`] to a failure reason for the decode-side watcher,
-    /// or `None` for cooperative paths (Detached / StreamEnded).
-    fn decode_failure_reason(outcome: &LifecycleOutcome) -> Option<String> {
+    /// Map a [`LifecycleOutcome`] to a failure reason, or `None` for
+    /// cooperative paths (Detached / StreamEnded). Shared by both
+    /// prefill and decode lifecycle-watcher callbacks: cooperative
+    /// outcomes ride the normal eviction path (on_request_finished /
+    /// states.remove); failure outcomes trigger `cleanup_failed_request`
+    /// so vLLM gets `mark_failed_onboarding` and pre-USAA failures
+    /// stash for replay.
+    fn lifecycle_failure_reason(outcome: &LifecycleOutcome) -> Option<String> {
         match outcome {
             LifecycleOutcome::Detached { .. } | LifecycleOutcome::StreamEnded => None,
             LifecycleOutcome::Failed { reason } => Some(reason.clone()),
             LifecycleOutcome::WatchdogTimeout { watchdog } => Some(format!(
-                "decode lifecycle watchdog fired ({}s) without Detached or Failed",
+                "lifecycle watchdog fired ({}s) without Detached or Failed",
                 watchdog.as_secs()
             )),
         }
@@ -1286,7 +1370,7 @@ impl ConditionalDisaggCoordinator {
             session_id.to_string(),
             self.lifecycle_watchdog,
             move |outcome| async move {
-                let failure_reason = Self::decode_failure_reason(&outcome);
+                let failure_reason = Self::lifecycle_failure_reason(&outcome);
                 if let Some(coord) = watcher_coord.upgrade() {
                     if let Some(state) = coord.state_for(&watcher_request_id) {
                         state.cancel.cancel();
@@ -1815,11 +1899,35 @@ impl ConditionalDisaggCoordinator {
 
         bits.request_finished_seen.store(true, Ordering::Release);
 
-        // Defer finalize until observer residual drains (invariant #16).
+        // Mark the coarse status Released; per-side PrefillStatus is
+        // also set to Released for consistency.
+        *bits.status.lock() = PrefillStatus::Released;
+
+        // Defer finalize + state eviction until observer residual
+        // drains (invariant #16). Critical: the spawn task must hold
+        // a strong `Arc<CdRequest>` for the duration. The state's
+        // `ObserverHandle` RAII-evicts the observer's pending entry
+        // when CdRequest's last Arc drops — if we let `states.remove`
+        // (here or from a concurrent path) drop the last strong
+        // reference, `has_pending(rid)` would short-circuit to false
+        // and the wait loop would exit before forward-pass output
+        // actually drained, dropping the chunked-prefill stream.
+        // Holding the state across the wait keeps the entry live;
+        // we explicitly remove from `coord.states` ONLY after
+        // session.finalize and then drop the state Arc.
+        //
+        // `request_finished` is vLLM's canonical teardown signal —
+        // the remove is unconditional so it closes the prior TOCTOU
+        // race between `cleanup_claimed.load` and
+        // `cleanup_failed_request`'s CAS (concurrent failure +
+        // request_finished could otherwise leak state). DashMap.remove
+        // is idempotent against the other eviction paths.
         let session_opt = state.session.lock().clone();
         let observer = Arc::clone(&self.observer);
         let request_id_owned = request_id.to_string();
         let runtime = self.runtime.clone();
+        let coord_weak = self.weak_self.clone();
+        let state_for_spawn = Arc::clone(&state);
         runtime.spawn(async move {
             const FINALIZE_WAIT: Duration = Duration::from_secs(10);
             const POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -1855,13 +1963,14 @@ impl ConditionalDisaggCoordinator {
             if let Some(session) = session_opt {
                 session.finalize(Some("request_finished".to_string()));
             }
+            if let Some(coord) = coord_weak.upgrade() {
+                coord.states.remove(&request_id_owned);
+            }
+            // Explicit drop after `states.remove` so the ObserverHandle
+            // RAII eviction runs deterministically here, not as a side
+            // effect of a different code path racing the same `state`.
+            drop(state_for_spawn);
         });
-
-        // Mark the coarse status Released; per-side PrefillStatus is
-        // also set to Released for consistency.
-        *bits.status.lock() = PrefillStatus::Released;
-        // Note: do NOT remove RequestState here — the lifecycle watcher
-        // removes it on Detach or watchdog.
     }
 }
 

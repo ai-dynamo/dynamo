@@ -529,11 +529,10 @@ impl DecodeDisaggLeader {
         //   - Post-insert failures (begin_remote_prefill Err arm) route
         //     through `release_request`, which is state-guarded and
         //     idempotent against the payload-Drop path.
-        let release_pre_insert_budget =
-            |e: anyhow::Error| -> anyhow::Error {
-                self.inflight_budget.release(full_block_external_tokens);
-                e
-            };
+        let release_pre_insert_budget = |e: anyhow::Error| -> anyhow::Error {
+            self.inflight_budget.release(full_block_external_tokens);
+            e
+        };
 
         let split = self
             .inner
@@ -751,18 +750,12 @@ impl DecodeDisaggLeader {
         // release_request (removes state + releases budget; idempotent
         // against the payload-Drop path that runs inside
         // begin_remote_prefill on install failure).
-        let lora_name = self
-            .inner
-            .slot_lora_name(request_id)
-            .inspect_err(|_| {
-                self.release_request(request_id);
-            })?;
-        let salt = self
-            .inner
-            .slot_salt(request_id)
-            .inspect_err(|_| {
-                self.release_request(request_id);
-            })?;
+        let lora_name = self.inner.slot_lora_name(request_id).inspect_err(|_| {
+            self.release_request(request_id);
+        })?;
+        let salt = self.inner.slot_salt(request_id).inspect_err(|_| {
+            self.release_request(request_id);
+        })?;
         match self.coordinator.begin_remote_prefill(
             RemotePrefillStart {
                 request_id,

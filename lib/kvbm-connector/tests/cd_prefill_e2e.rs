@@ -1471,15 +1471,32 @@ async fn cd_prefill_run_setup_bails_on_cancel() -> Result<()> {
     }
 
     // run_setup's tokio::select! sees the cancel arm fire, bails with
-    // Err, and the spawn-site catches it into cleanup_failed_request
-    // which removes the state. If the cancel arm were missing,
-    // active_count would stay at 1 forever (the original bug).
+    // Err, and the spawn-site catches it into cleanup_failed_request.
+    // Because no USAA has run yet, cleanup_failed_request takes the
+    // pre-USAA path: stash the failure on `pending_failure`, close
+    // the session, RETAIN state (so a later `on_usaa` can replay the
+    // failure with the real G1 ids). State eviction happens in
+    // `on_usaa`, not here.
+    let state = h
+        .coordinator
+        .state_for_test("req-1")
+        .expect("state retained for pre-USAA replay");
     tokio::time::timeout(
         Duration::from_secs(5),
-        wait_until(|| h.coordinator.active_count() == 0),
+        wait_until(|| {
+            state
+                .as_prefill()
+                .and_then(|bits| bits.pending_failure.lock().clone())
+                .is_some()
+        }),
     )
     .await
-    .expect("cancel must unblock run_setup and drain coordinator state within 5s");
+    .expect("cancel must unblock run_setup and stash pending_failure within 5s");
+    assert_eq!(
+        h.coordinator.active_count(),
+        1,
+        "pre-USAA cancel must retain state for on_usaa replay"
+    );
 
     Ok(())
 }

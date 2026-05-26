@@ -82,6 +82,17 @@ pub struct CdRequest {
     /// while run_setup still holds an Arc<dyn Session>, so the
     /// lifecycle stream is the only viable abort signal.
     pub cancel: tokio_util::sync::CancellationToken,
+    /// CAS-guard for `cleanup_failed_request`. Both the lifecycle
+    /// watcher and the spawn-catch path can race to clean up the
+    /// same request; the winner of the CAS (false → true) runs the
+    /// role-aware cleanup (mark_failed_onboarding, session.close,
+    /// pre-USAA failure stash, state eviction). Losers early-return.
+    /// Without this guard, two concurrent calls could both invoke
+    /// `mark_failed_onboarding` on vLLM (double-notify the failed
+    /// G1 window) or — worse — race the pre-USAA stash so vLLM's
+    /// `on_usaa` replay never sees the failure reason. Dies with
+    /// the `CdRequest` Arc.
+    pub cleanup_claimed: std::sync::atomic::AtomicBool,
     /// Per-role state.
     pub role: CdRequestRole,
 }
@@ -227,6 +238,7 @@ impl CdRequest {
             session: Mutex::new(None),
             status: Mutex::new(CdRequestStatus::Active),
             cancel: tokio_util::sync::CancellationToken::new(),
+            cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
             role: CdRequestRole::Decode(bits),
         })
     }
@@ -245,6 +257,7 @@ impl CdRequest {
             session: Mutex::new(None),
             status: Mutex::new(CdRequestStatus::Active),
             cancel: tokio_util::sync::CancellationToken::new(),
+            cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
             role: CdRequestRole::Prefill(bits),
         })
     }
