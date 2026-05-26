@@ -179,6 +179,56 @@ impl<S> Drop for InflightDecStream<S> {
     }
 }
 
+/// RAII guard that cancels the recv and (optionally) send halves of a
+/// registration on drop unless [`Self::disarm`] is called first. Drop is
+/// sync; the async `cancel_*_stream` calls fire as a detached
+/// `tokio::spawn` task. Cancellation is idempotent so the detached
+/// completion order does not need to be observed by the caller.
+struct CancelGuard {
+    armed: bool,
+    transport: Arc<tcp::server::TcpStreamServer>,
+    recv_subject: Option<String>,
+    send_subject: Option<String>,
+}
+
+impl CancelGuard {
+    fn arm(
+        transport: Arc<tcp::server::TcpStreamServer>,
+        recv_subject: Option<String>,
+        send_subject: Option<String>,
+    ) -> Self {
+        Self {
+            armed: true,
+            transport,
+            recv_subject,
+            send_subject,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let transport = self.transport.clone();
+        let recv = self.recv_subject.take();
+        let send = self.send_subject.take();
+        tokio::spawn(async move {
+            if let Some(s) = recv {
+                transport.cancel_recv_stream(&s).await;
+            }
+            if let Some(s) = send {
+                transport.cancel_send_stream(&s).await;
+            }
+        });
+    }
+}
+
 pub struct AddressedRequest<T> {
     request: T,
     address: String,
@@ -321,6 +371,8 @@ impl AddressedPushRouter {
                 Some(&instance),
             )
             .await?;
+        let cancel_guard =
+            CancelGuard::arm(self.resp_transport.clone(), recv_subject, send_subject);
 
         let control_message = RequestControlMessage {
             id: engine_ctx.id().to_string(),
@@ -348,8 +400,6 @@ impl AddressedPushRouter {
                 None,
                 &request_id,
                 queue_start,
-                &recv_subject,
-                &send_subject,
             )
             .await?;
 
@@ -359,7 +409,6 @@ impl AddressedPushRouter {
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                self.cancel_both(&recv_subject, &send_subject).await;
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::CannotConnect)
@@ -370,7 +419,6 @@ impl AddressedPushRouter {
                 ));
             }
             Err(_) => {
-                self.cancel_both(&recv_subject, &send_subject).await;
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::Disconnected)
@@ -384,7 +432,6 @@ impl AddressedPushRouter {
             let request_sender = match request_stream_provider.await {
                 Ok(Ok(sender)) => sender,
                 Ok(Err(e)) => {
-                    self.cancel_both(&recv_subject, &send_subject).await;
                     return Err(anyhow::anyhow!(
                         DynamoError::builder()
                             .error_type(ErrorType::CannotConnect)
@@ -393,7 +440,6 @@ impl AddressedPushRouter {
                     ));
                 }
                 Err(_) => {
-                    self.cancel_both(&recv_subject, &send_subject).await;
                     return Err(anyhow::anyhow!(
                         DynamoError::builder()
                             .error_type(ErrorType::Disconnected)
@@ -444,6 +490,7 @@ impl AddressedPushRouter {
             });
         }
 
+        cancel_guard.disarm();
         Ok(finalize_response_stream(
             response_stream.rx,
             engine_ctx,
@@ -453,9 +500,10 @@ impl AddressedPushRouter {
         ))
     }
 
-    /// Cancel both halves of a bidirectional registration on the data plane.
-    /// Mirrors the single-`cancel_recv_stream` call the unary path makes on
-    /// every error exit, extended to also clear the `tx_subjects` entry.
+    /// Cancel both halves of a registration on the data plane. Used by
+    /// [`Self::resolve_subjects`] on the tombstone-detected branch where
+    /// the per-call [`CancelGuard`] hasn't been armed yet; all other
+    /// cleanup paths go through that guard's `Drop`.
     async fn cancel_both(&self, recv_subject: &Option<String>, send_subject: &Option<String>) {
         if let Some(s) = recv_subject {
             self.resp_transport.cancel_recv_stream(s).await;
@@ -564,7 +612,8 @@ impl AddressedPushRouter {
     ///
     /// Returns the `Instant` captured immediately before the wire write so
     /// callers can compute downstream phase metrics (e.g. transport TTFT).
-    #[allow(clippy::too_many_arguments)]
+    /// On any failure the caller's `CancelGuard` handles cleanup; this
+    /// helper just propagates the error via `?`.
     async fn dispatch_request_envelope<T>(
         &self,
         address: String,
@@ -572,28 +621,13 @@ impl AddressedPushRouter {
         request: Option<&T>,
         request_id: &str,
         queue_start: Instant,
-        recv_subject: &Option<String>,
-        send_subject: &Option<String>,
     ) -> Result<Instant, Error>
     where
         T: Serialize + ?Sized,
     {
-        let ctrl = match serialize_control_message(control_message) {
-            Ok(v) => v,
-            Err(e) => {
-                self.cancel_both(recv_subject, send_subject).await;
-                return Err(e);
-            }
-        };
-
+        let ctrl = serialize_control_message(control_message)?;
         let data: Option<Vec<u8>> = match request {
-            Some(req) => match serde_json::to_vec(req) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    self.cancel_both(recv_subject, send_subject).await;
-                    return Err(e.into());
-                }
-            },
+            Some(req) => Some(serde_json::to_vec(req)?),
             None => None,
         };
 
@@ -624,13 +658,7 @@ impl AddressedPushRouter {
         };
 
         let codec = TwoPartCodec::default();
-        let buffer = match codec.encode_message(msg) {
-            Ok(v) => v,
-            Err(e) => {
-                self.cancel_both(recv_subject, send_subject).await;
-                return Err(e.into());
-            }
-        };
+        let buffer = codec.encode_message(msg)?;
 
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
         let tx_start = Instant::now();
@@ -645,13 +673,10 @@ impl AddressedPushRouter {
         headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
 
         let _nvtx_send = dynamo_nvtx_range!(nvtx_label);
-        let send_result = self.req_client.send_request(address, buffer, headers).await;
+        self.req_client
+            .send_request(address, buffer, headers)
+            .await?;
         drop(_nvtx_send);
-
-        if let Err(e) = send_result {
-            self.cancel_both(recv_subject, send_subject).await;
-            return Err(e);
-        }
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         Ok(tx_start)
@@ -691,9 +716,11 @@ where
         let (connection_info, response_stream_provider) =
             pending_response_stream.unwrap().into_parts();
 
-        let (recv_subject, _send_subject) = self
+        let (recv_subject, send_subject) = self
             .resolve_subjects(&connection_info, None, instance_info.as_ref())
             .await?;
+        let cancel_guard =
+            CancelGuard::arm(self.resp_transport.clone(), recv_subject, send_subject);
 
         // package up the connection info as part of the "header" component of the two part message
         // used to issue the request on the
@@ -716,8 +743,6 @@ where
                 Some(&request),
                 &request_id,
                 queue_start,
-                &recv_subject,
-                &None,
             )
             .await?;
 
@@ -735,9 +760,6 @@ where
                 // opaque string today, so app-level rejections also retry
                 // -- safe because no side effects are visible yet. Follow-up:
                 // structured prologue error type for finer routing.
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::CannotConnect)
@@ -750,9 +772,6 @@ where
             Err(_recv_err) => {
                 // oneshot dropped: either the discovery watcher cancelled
                 // this subject or the worker died mid-handshake.
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::Disconnected)
@@ -763,6 +782,7 @@ where
         };
         drop(_nvtx_wait);
 
+        cancel_guard.disarm();
         Ok(finalize_response_stream(
             response_stream.rx,
             engine_ctx,
