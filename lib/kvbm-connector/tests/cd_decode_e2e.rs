@@ -1090,14 +1090,23 @@ async fn cd_decode_commit_usaa1_post_insert_replays_late_stash() -> Result<()> {
 ///    `coordinator.release` removes coord state + finalizes the
 ///    session.
 ///
-/// Discriminating: this test runs a happy-path setup through USAA,
-/// then injects `LifecycleEvent::Failed` on the decode-side session
-/// AND a concurrent direct `on_session_failure` call (mirroring the
-/// race between the lifecycle watcher path and any other path that
-/// could surface a failure). Asserts EXACTLY ONE
-/// `mark_failed_onboarding` call (CAS guard), budget fully released,
-/// and coord/wrapper state evicted. Peer-failure injection: in scope
-/// per CONTRACT.md.
+/// The test gates the lifecycle path in two stages:
+///
+/// - Stage 1: inject ONE `LifecycleEvent::Failed` and wait for
+///   `mark_failed_onboarding`. No other test code touches cleanup yet.
+///   Asserts the outcome contract (peer failure → cleanup) holds.
+///   *Caveat:* on the decode side this outcome is reachable via two
+///   internal paths — (a) the lifecycle-failure-sink route, and
+///   (b) the watcher's cooperative-branch `state.cancel.cancel()`
+///   propagating through `run_remote_pipeline`'s `tokio::select!` →
+///   spawn-catch → `wrapper.cleanup_failed_request`. This test gates
+///   the outcome regardless of which path won. The lifecycle wire
+///   itself (`Self::lifecycle_failure_reason`) is shared with the
+///   prefill watcher and is independently gated by the prefill-side
+///   peer-failure test in `cd_prefill_e2e.rs`.
+/// - Stage 2: fire a second `on_session_failure` after the lifecycle
+///   path already claimed the CAS. The duplicate must be a no-op
+///   (CAS short-circuits OR wrapper state already absent).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cd_decode_peer_failure_mid_output_cleans_up() -> Result<()> {
     use kvbm_connector::connector::leader::disagg::CdFailureSink;
@@ -1121,41 +1130,29 @@ async fn cd_decode_peer_failure_mid_output_cleans_up() -> Result<()> {
     )?;
     h.transport.wait_onboard_count(1).await;
 
-    // Inject Failed via the decode session AND fire a concurrent
-    // failure-sink call. Either path independently triggers the
-    // wrapper's cleanup; the CAS collapses both to a single
-    // mark_failed_onboarding emission.
+    // Stage 1 — lifecycle path is the ONLY trigger.
+    assert!(h.workers.failed_for("req-1").is_none());
     session.inject_lifecycle(LifecycleEvent::Failed {
         reason: "induced prefill peer crash mid-pull".to_string(),
     });
-    let sink: Arc<dyn CdFailureSink> = Arc::clone(&h.wrapper) as Arc<dyn CdFailureSink>;
-    let direct = tokio::spawn(async move {
-        sink.on_session_failure("req-1".to_string(), "induced via direct sink".to_string())
-            .await
-    });
-    let _ = direct.await;
-
     wait_until(|| h.workers.failed_for("req-1").is_some()).await;
-
-    // Exactly one mark_failed_onboarding call (CAS guard).
-    let failed_calls: Vec<_> = h
+    let after_lifecycle: Vec<_> = h
         .workers
         .failed()
         .into_iter()
         .filter(|c| c.request_id == "req-1")
         .collect();
     assert_eq!(
-        failed_calls.len(),
+        after_lifecycle.len(),
         1,
-        "Failed-lifecycle + direct sink call must collapse to ONE mark_failed_onboarding \
-         (got {} calls); the wrapper's cleanup_claimed CAS is the gate",
-        failed_calls.len(),
+        "lifecycle Failed event alone must produce ONE mark_failed_onboarding (got {})",
+        after_lifecycle.len(),
     );
 
     // The unfilled set covers the full external G1 slice (local-match
     // + remote) because neither local-kick nor remote-pipeline has
     // completed.
-    let mut got = failed_calls[0].block_ids.clone();
+    let mut got = after_lifecycle[0].block_ids.clone();
     got.sort();
     let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS..].to_vec();
     want.sort();
@@ -1165,6 +1162,25 @@ async fn cd_decode_peer_failure_mid_output_cleans_up() -> Result<()> {
     wait_until(|| !h.wrapper.has_active_cd_request("req-1")).await;
     assert_eq!(h.wrapper.inflight_available(), usize::MAX);
     wait_until(|| h.coordinator.active_count() == 0).await;
+
+    // Stage 2 — duplicate cleanup via the failure-sink is a no-op.
+    // After Stage 1, the wrapper's cd_request_state is empty so the
+    // CAS check at the top of cleanup_failed_request short-circuits;
+    // a duplicate call must NOT re-emit mark_failed_onboarding.
+    let sink: Arc<dyn CdFailureSink> = Arc::clone(&h.wrapper) as Arc<dyn CdFailureSink>;
+    sink.on_session_failure("req-1".to_string(), "duplicate via direct sink".to_string())
+        .await;
+    let after_dup = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .count();
+    assert_eq!(
+        after_dup, 1,
+        "duplicate on_session_failure must be a no-op (got {})",
+        after_dup,
+    );
 
     // mark_onboarding_complete must NOT fire.
     assert!(
