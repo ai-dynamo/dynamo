@@ -999,6 +999,79 @@ async fn cd_decode_commit_usaa1_replays_late_pending_failure() -> Result<()> {
     Ok(())
 }
 
+/// `commit_usaa1` must check `existing.pending_failure` AFTER the
+/// insert of the rebuilt state, not just before. A
+/// `cleanup_failed_request` that fires between the outer
+/// pending_failure re-check and the insert stashes a failure on
+/// EXISTING (OLD state, still reachable via `cd_request_state.get`
+/// pre-insert, takes the pre-USAA branch because OLD has empty
+/// remote_slots). After commit_usaa1's insert, OLD is unreachable
+/// via DashMap but commit_usaa1 still holds the OLD Arc via
+/// `existing`. Without the post-insert re-check, that stash is
+/// orphaned, the pipelines spawn against NEW state, may complete
+/// successfully, fire `mark_onboarding_complete`, and vLLM sees
+/// SUCCESS for a failed request.
+///
+/// Test injects the stash via a hook on
+/// `MockInnerLeaderShim::apply_block_assignments`, which is called
+/// inside `commit_usaa1` AFTER the outer re-check and BEFORE the
+/// insert — the exact race window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_commit_usaa1_post_insert_replays_late_stash() -> Result<()> {
+    let h = build_harness();
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    // Install hook: when commit_usaa1 calls
+    // self.inner.apply_block_assignments (between the outer
+    // pending_failure re-check and the rebuild's insert), force a
+    // stash on the wrapper's cd_request_state entry. Models a
+    // cleanup_failed_request landing in that race window.
+    let wrapper_weak = Arc::downgrade(&h.wrapper);
+    h.inner.set_apply_block_assignments_hook(Arc::new(move || {
+        if let Some(wrapper) = wrapper_weak.upgrade() {
+            wrapper.force_pending_failure_for_test(
+                "req-1",
+                Some("race in apply_block_assignments window".to_string()),
+            );
+        }
+    }));
+
+    // Drive commit_usaa1 directly so the outer pending_failure check
+    // sees None (matches the production race semantics — the stash
+    // lands AFTER decode_usaa's outer check).
+    h.wrapper.commit_usaa1_for_test(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Post-insert replay must have surfaced the stash to vLLM.
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").expect("failure surfaced");
+    let mut got = failed.block_ids.clone();
+    got.sort();
+    let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS..].to_vec();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "post-insert replay must report the full external G1 slice as failed"
+    );
+
+    // Critical: mark_onboarding_complete must NOT fire. Pre-fix
+    // the pipelines would spawn against the freshly-inserted NEW
+    // state and could race to completion, reporting SUCCESS.
+    assert!(
+        !h.workers.completed_contains("req-1"),
+        "mark_onboarding_complete must NOT fire for a stashed-failure request"
+    );
+
+    assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_inner_used(h: &TestHarness) {
     let _ = h.inner.local_id();

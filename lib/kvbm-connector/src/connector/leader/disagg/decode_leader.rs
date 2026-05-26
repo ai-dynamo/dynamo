@@ -1166,44 +1166,101 @@ impl DecodeDisaggLeader {
             // coordinator. Closes the CD USAA-1 race; see the
             // doc-comment on `CdRequestState::session`.
             session: Mutex::new(existing.session.lock().clone()),
-            // Carry over any pre-USAA stash from the gnmt-time state;
-            // commit_usaa1 replaces the Arc entry so we must thread it.
+            // The new state ALWAYS starts with `pending_failure=None`
+            // and `cleanup_claimed=false`. Threading either field
+            // forward from `existing` re-opens the rebuild race:
             //
-            // RACE: `decode_usaa` reads `pending_failure` once and, if
-            // None, calls `commit_usaa1` which reads it AGAIN here. A
-            // concurrent `cleanup_failed_request` firing between those
-            // two reads stashes `Some(reason)` on the existing state,
-            // which we then thread into the new state. The replay
-            // path in `decode_usaa` was already bypassed, so nothing
-            // surfaces this stash to vLLM UNLESS a future
-            // `cleanup_failed_request` re-runs and claims the CAS
-            // fresh. That requires `cleanup_claimed` to be `false` on
-            // the new state — see the field initializer below.
-            pending_failure: Mutex::new(existing.pending_failure.lock().clone()),
-            // ALWAYS start the new state with `cleanup_claimed=false`.
-            // Threading the flag forward looks attractive (a cleanup
-            // already claimed against the gnmt-time state should not
-            // re-claim), but it loses pre-USAA failure stashes during
-            // the rebuild race documented on `pending_failure` above:
-            // if the new state inherits `cleanup_claimed=true` while
-            // also carrying a freshly-stashed `pending_failure=Some`,
-            // no future `cleanup_failed_request` can pass the CAS to
-            // emit `mark_failed_onboarding` with the now-known G1
-            // ids — vLLM is never notified.
+            // - If the new state inherits `pending_failure=Some` from
+            //   a stash captured during rebuild, no downstream code
+            //   surfaces it. The outer pending_failure re-check has
+            //   already passed (it ran against `existing` before the
+            //   rebuild started); any stash that lands during rebuild
+            //   is missed unless the post-insert check below catches
+            //   it on `existing`.
+            // - If the new state inherits `cleanup_claimed=true`, no
+            //   future `cleanup_failed_request` can pass the CAS to
+            //   emit `mark_failed_onboarding` with the now-known G1
+            //   ids — vLLM is never notified.
+            //
+            // The post-insert re-check (below `cd_request_state.insert`)
+            // is the canonical surface for late-arriving stashes; it
+            // queries `existing.pending_failure` (the OLD Arc which
+            // commit_usaa1 still holds) so any cleanup that stashed
+            // between the outer re-check and the insert is caught.
             //
             // Starting fresh is safe: a fully-completed cleanup would
             // have called `release_request`, removing the
             // `cd_request_state` entry; then commit_usaa1's `get` of
-            // `existing` would fail and we wouldn't reach here. So
-            // reaching this point with `existing.cleanup_claimed=true`
-            // means the cleanup is mid-flight (stashed pre-USAA, did
-            // not release) — and the correct downstream behavior is
-            // for the next cleanup to surface that stash via the CAS
-            // on the new state.
+            // `existing` would fail and we wouldn't reach here.
+            pending_failure: Mutex::new(None),
             cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&updated));
+
+        // Post-insert pending_failure re-check. A
+        // `cleanup_failed_request` that fired between the outer
+        // pending_failure re-check (above the rebuild) and here would
+        // have:
+        //   - Seen `existing` (OLD state) in `cd_request_state.get`
+        //     because the insert above had not yet replaced the entry.
+        //   - CAS-claimed `existing.cleanup_claimed` (no contention
+        //     since we don't claim it ourselves).
+        //   - Computed `unfilled_g1_block_ids` from OLD state — empty,
+        //     since OLD has empty `local_match_g1_block_ids` and
+        //     empty `remote_slots`.
+        //   - Taken the pre-USAA branch: stashed `pending_failure` on
+        //     OLD state and returned without releasing.
+        //
+        // OLD state is now unreachable via `cd_request_state.get`
+        // (replaced by `updated`), but commit_usaa1 still holds the
+        // OLD Arc via `existing`. Reading `existing.pending_failure`
+        // here observes the stash and lets us replay before spawning
+        // the local-kick + remote-pipeline, which would otherwise be
+        // able to complete successfully and report SUCCESS to vLLM
+        // for a request that was supposed to be failed.
+        //
+        // Cleanups that fire AFTER the insert see `updated` (NEW
+        // state) which has populated `remote_slots`, so they take
+        // the post-USAA branch and emit `mark_failed_onboarding`
+        // directly — no stash, no race.
+        let late_stash = existing.pending_failure.lock().clone();
+        if let Some(reason) = late_stash {
+            let external_g1_ids = updated.unfilled_g1_block_ids();
+            crate::audit!(
+                "commit_usaa1_post_insert_replay",
+                role = "decode",
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len()
+            );
+            tracing::warn!(
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len(),
+                "commit_usaa1: replaying stash that landed between outer re-check and insert"
+            );
+            let weak_self = self.weak_self.clone();
+            let request_id_owned = request_id.to_string();
+            self.tokio_handle.spawn(async move {
+                if let Some(this) = weak_self.upgrade() {
+                    if let Err(err) = this
+                        .worker_hook
+                        .mark_failed_onboarding(request_id_owned.clone(), external_g1_ids)
+                        .await
+                    {
+                        tracing::error!(
+                            request_id = request_id_owned,
+                            error = %err,
+                            "mark_failed_onboarding failed during post-insert replay"
+                        );
+                    }
+                    this.release_request(&request_id_owned);
+                    this.coordinator.release(&request_id_owned);
+                }
+            });
+            return Ok(());
+        }
 
         crate::audit!(
             "commit_usaa1_state_built",

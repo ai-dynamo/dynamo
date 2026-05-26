@@ -277,6 +277,13 @@ pub struct MockInnerLeaderShim {
     /// Used by idempotency tests to assert the wrapper short-circuits
     /// repeat gnmt calls without re-invoking inner.
     gnmt_call_counts: Mutex<std::collections::HashMap<String, usize>>,
+    /// Test-only hook fired inside `apply_block_assignments`. Lets a
+    /// test inject side effects (e.g., stashing `pending_failure` on
+    /// the wrapper's cd_request_state) at a specific point in
+    /// `commit_usaa1`'s execution — between the outer
+    /// pending_failure re-check and the post-insert re-check. Used
+    /// by the commit_usaa1 post-insert replay reproducer.
+    apply_block_assignments_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl MockInnerLeaderShim {
@@ -287,7 +294,17 @@ impl MockInnerLeaderShim {
             g2_manager,
             slots: Mutex::new(std::collections::HashMap::new()),
             gnmt_call_counts: Mutex::new(std::collections::HashMap::new()),
+            apply_block_assignments_hook: Mutex::new(None),
         })
+    }
+
+    /// Install a one-shot side-effect hook that fires synchronously
+    /// inside `apply_block_assignments` after the slot's block_ids
+    /// are recorded but before the function returns. Used by tests
+    /// to inject state mutations at a precise point in
+    /// `commit_usaa1`'s execution.
+    pub fn set_apply_block_assignments_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.apply_block_assignments_hook.lock() = Some(hook);
     }
 
     /// How many times `get_num_new_matched_tokens` was called for
@@ -422,6 +439,13 @@ impl InnerLeaderShim for MockInnerLeaderShim {
     ) -> Result<()> {
         let slot = self.require_slot(request_id)?;
         *slot.assigned_block_ids.lock() = Some(block_ids);
+        // Fire the test hook (if installed) AFTER the slot mutation
+        // but before returning. This is the deterministic injection
+        // point used by the commit_usaa1 post-insert replay test.
+        let hook = self.apply_block_assignments_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(())
     }
 
