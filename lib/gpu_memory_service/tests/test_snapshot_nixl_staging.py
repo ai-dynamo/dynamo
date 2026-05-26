@@ -3,6 +3,8 @@
 
 """Unit tests for NIXL/POSIX staging restore planning."""
 
+import threading
+
 import pytest
 
 try:
@@ -168,9 +170,18 @@ def test_posix_backend_params_are_forwarded_to_nixl_agent(monkeypatch):
         "restore_file_groups_with_nixl_staging",
         fake_restore_file_groups_with_nixl_staging,
     )
+    monkeypatch.setattr(
+        nixl_staging,
+        "load_nixl_api",
+        lambda: FakeApi(),
+    )
+    monkeypatch.setattr(
+        nixl_staging,
+        "make_pinned_copy_slots",
+        lambda _count: [],
+    )
 
     session = _NixlPosixStagingTransferSession(
-        api=FakeApi(),
         backend_name="test-backend",
         device=0,
         max_workers=1,
@@ -191,3 +202,61 @@ def test_posix_backend_params_are_forwarded_to_nixl_agent(monkeypatch):
     }
     assert captured["restore_agent_name"] == captured["agent_name"]
     assert captured["restore_file_groups"] == [(source.file_path, [source])]
+
+
+def test_staging_prep_starts_before_restore(monkeypatch):
+    from gpu_memory_service.snapshot.backends import nixl_staging
+
+    source = FileTransferSource(
+        allocation_id="alloc-0",
+        file_path="/checkpoint/shard.bin",
+        file_offset=0,
+        byte_count=4096,
+    )
+    prep_started = threading.Event()
+    allow_finish = threading.Event()
+
+    class FakeApi:
+        @staticmethod
+        def agent_config_type(*, backends):
+            return {"backends": backends}
+
+        @staticmethod
+        def agent_type(_agent_name, _config):
+            return FakeAgent()
+
+    class FakeAgent:
+        def create_backend(self, _backend_name, backend_params=None):
+            self.backend_params = backend_params
+
+    def group_sources(_sources):
+        return {"file": [(source.file_path, [source])]}
+
+    def fake_load_nixl_api():
+        prep_started.set()
+        assert allow_finish.wait(timeout=1.0)
+        return FakeApi()
+
+    monkeypatch.setattr(
+        nixl_staging.cuda_utils,
+        "cuda_runtime_set_device",
+        lambda _device: None,
+    )
+    monkeypatch.setattr(nixl_staging, "load_nixl_api", fake_load_nixl_api)
+    monkeypatch.setattr(nixl_staging, "make_pinned_copy_slots", lambda _count: [])
+
+    session = _NixlPosixStagingTransferSession(
+        backend_name="test-backend",
+        device=0,
+        max_workers=1,
+        group_sources=group_sources,
+        group_kind="file",
+        warn_under_parallelized=False,
+        posix_backend_params={"ios_pool_size": "64", "kernel_queue_size": "16"},
+        sources=[source],
+    )
+    try:
+        assert prep_started.wait(timeout=1.0)
+    finally:
+        allow_finish.set()
+        session.close()

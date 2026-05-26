@@ -262,6 +262,7 @@ class GMSStorageClient:
         mm: Any,
         manifest: SaveManifest,
     ) -> Tuple[Dict[str, str], Dict[str, GMSTransferTarget]]:
+        t0 = time.monotonic()
         id_map: Dict[str, str] = {}
         targets: Dict[str, GMSTransferTarget] = {}
         for entry in manifest.allocations:
@@ -275,8 +276,9 @@ class GMSStorageClient:
                 byte_count=entry.aligned_size,
             )
         logger.info(
-            "Phase A complete: allocated %d GMS VAs",
+            "Phase A complete: allocated %d GMS VAs in %.3fs",
             len(targets),
+            time.monotonic() - t0,
         )
         return id_map, targets
 
@@ -291,8 +293,6 @@ class GMSStorageClient:
         backend_name = transfer_backend or self._transfer_backend
         self._validate_load_request()
 
-        manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
-        sources = build_file_transfer_sources(input_dir, manifest.allocations)
         backend = create_transfer_backend(
             backend_name,
             GMSSnapshotConfig(
@@ -310,6 +310,8 @@ class GMSStorageClient:
         id_map: Dict[str, str] = {}
 
         try:
+            manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
+            sources = build_file_transfer_sources(input_dir, manifest.allocations)
             session = backend.start_restore(sources)
             with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
                 mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
