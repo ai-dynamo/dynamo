@@ -52,6 +52,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_metrics.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 3.9 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
@@ -89,6 +90,7 @@ trtllm_configs = {
         script_name="agg.sh",
         script_args=["--unified"],
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.profiled_vram_gib(3.9),
@@ -109,7 +111,12 @@ trtllm_configs = {
         name="disaggregated",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.pre_merge,
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -122,6 +129,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="disagg_same_gpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.skip(
                 reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450"
             ),
@@ -154,6 +162,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 3.8 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
@@ -178,6 +187,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="disagg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
@@ -196,6 +206,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_router.sh",
         marks=[
+            pytest.mark.router,
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
@@ -215,7 +226,12 @@ trtllm_configs = {
         name="disaggregated_router",
         directory=trtllm_dir,
         script_name="disagg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.nightly],
+        marks=[
+            pytest.mark.router,
+            pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.nightly,
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -389,6 +405,7 @@ trtllm_configs = {
             "17",
         ],
         marks=[
+            pytest.mark.multimodal,
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 17.1 GiB
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
@@ -448,6 +465,7 @@ trtllm_configs = {
             "1",
         ],
         marks=[
+            pytest.mark.multimodal,
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 20.0 GiB
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
@@ -526,6 +544,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.post_merge,
@@ -591,6 +610,7 @@ def test_deployment(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.core
 @pytest.mark.pre_merge
 @pytest.mark.timeout(660)  # 3x measured time (159.68s) + download time (180s)
 def test_chat_only_aggregated_with_test_logits_processor(
@@ -637,6 +657,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.core
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(3.9)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
