@@ -5,6 +5,7 @@ inputs:
   kubeconfig_base64:
     description: 'Base64-encoded kubeconfig for host cluster access'
     required: false
+    default: ''
   vcluster_name:
     description: 'Name for the vCluster instance (auto-generated from github.run_id if empty)'
     required: false
@@ -78,7 +79,6 @@ runs:
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
 
     - name: Setup host kubeconfig
-      id: setup-host-kubeconfig
       if: inputs.kubeconfig_base64 != ''
       shell: bash
       run: |
@@ -142,6 +142,7 @@ runs:
       id: connect-vcluster
       uses: ./.github/actions/connect-vcluster
       with:
+        host_kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
         vcluster_name: ${{ steps.resolve-names.outputs.vcluster_name }}
         vcluster_namespace: ${{ steps.resolve-names.outputs.namespace }}
 
