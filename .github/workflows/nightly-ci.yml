@@ -9,7 +9,7 @@ on:
   workflow_dispatch:  # Allow manual triggering for testing
     inputs:
       release:
-        description: 'Stage NGC images, Artifactory wheels, and trigger the GitLab release pipeline. Schedule always sets release=true; manual dispatch defaults to false (opt-in).'
+        description: 'Stage NGC images, Artifactory wheels, and trigger the GitLab release pipeline. Schedule always sets release=true.'
         required: false
         type: boolean
         default: false
@@ -472,11 +472,9 @@ jobs:
       - trtllm-multi-gpu-test
       - dynamo-pipeline
       - rust-tests
-    # Framework (vllm/sglang/trtllm) and rust tests do not block publishing, but
-    # the dynamo-runtime build (dynamo-pipeline) must succeed: stage-wheels-artifactory
-    # in release.yml extracts wheels from the dynamo-runtime image it produces.
-    # The manual-release-approval gate is `skipped` on cron and `success` after
-    # reviewer approval on workflow_dispatch — both are accepted here.
+    # !cancelled() lets framework/rust failures fall through; dynamo-pipeline
+    # is gated strictly because stage-wheels-artifactory extracts wheels from
+    # its image. manual-release-approval is `skipped` on cron, `success` on dispatch.
     if: ${{ !cancelled()
         && needs.compute-release-mode.outputs.release == 'true'
         && needs.dynamo-pipeline.result == 'success'

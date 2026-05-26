@@ -581,6 +581,48 @@ jobs:
 
           echo "upload_dir=${OUT}" >> $GITHUB_OUTPUT
 
+      - name: Verify wheel versions match prepare-release expected tag
+        env:
+          EXPECTED_WHEEL_VERSION: ${{ needs.prepare-release.outputs.wheel_version }}
+          UPLOAD_DIR: ${{ steps.extract.outputs.upload_dir }}
+        run: |
+          set -euo pipefail
+
+          # Catches UTC-midnight drift between the build-time version stamp and
+          # prepare-release's wheel_version; ai_dynamo and ai_dynamo_runtime must agree.
+          shopt -s nullglob
+          AI_DYNAMO_WHEELS=("${UPLOAD_DIR}"/ai_dynamo-*-py3-none-any.whl)
+          AI_DYNAMO_RUNTIME_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_runtime-*.whl)
+          shopt -u nullglob
+
+          if [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ]; then
+            echo "::error::Missing ai_dynamo or ai_dynamo_runtime wheel in ${UPLOAD_DIR}"
+            exit 1
+          fi
+
+          echo "Expected wheel version: ${EXPECTED_WHEEL_VERSION}"
+
+          mismatch=0
+          for path in "${AI_DYNAMO_WHEELS[@]}" "${AI_DYNAMO_RUNTIME_WHEELS[@]}"; do
+            file="$(basename "${path}")"
+            # PEP 427: <dist>-<version>-<tags>.whl; version sits between the 1st and 2nd hyphen.
+            rest="${file#*-}"
+            version="${rest%%-*}"
+            if [ -z "${version}" ]; then
+              echo "::error::Empty version parsed from ${file}"
+              exit 1
+            fi
+            echo "  ${file} -> ${version}"
+            if [ "${version}" != "${EXPECTED_WHEEL_VERSION}" ]; then
+              mismatch=1
+            fi
+          done
+
+          if [ "${mismatch}" -ne 0 ]; then
+            echo "::error::Wheel version mismatch — expected '${EXPECTED_WHEEL_VERSION}' for all wheels above. dynamo-pipeline and prepare-release likely computed dev_suffix on different UTC days."
+            exit 1
+          fi
+
       - name: Upload wheels to Artifactory
         env:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
