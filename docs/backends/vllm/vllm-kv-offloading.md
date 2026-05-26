@@ -40,7 +40,7 @@ For configuration details, see the [KVBM Guide](../../components/kvbm/kvbm-guide
 
 | Deployment    | Launch Script                                                                                                       |
 | ------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Aggregated    | [`agg_lmcache_mp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_mp.sh) |
+| Aggregated    | [`agg_lmcache_mp.sh`](/examples/backends/vllm/launch/agg_lmcache_mp.sh) |
 | Disaggregated | [`disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh) |
 
 
