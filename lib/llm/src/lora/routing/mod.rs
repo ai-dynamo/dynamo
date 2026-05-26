@@ -68,15 +68,23 @@ impl FromStr for AllocationAlgorithmType {
 
 /// Create a LoRA allocation algorithm instance.
 ///
-/// For `MinCostFlow`, returns the HRW allocator as a fallback (the MCF path
-/// is handled separately in the controller via `McfPlacementSolver`).
+/// `MinCostFlow` does not yet have a production call site wired through this
+/// factory — `McfPlacementSolver` operates as a standalone global solver and
+/// has no adapter implementing `LoraAllocator`. Until that integration is
+/// complete, requesting `MinCostFlow` here falls back to HRW and emits a
+/// warning so operators are not misled by a silent no-op.
 pub fn create_lora_allocator(algo_type: AllocationAlgorithmType) -> Box<dyn LoraAllocator> {
     match algo_type {
         AllocationAlgorithmType::Hrw => Box::new(RendezvousHasher),
         AllocationAlgorithmType::Random => Box::new(RandomAllocation),
-        // MCF uses its own global solver; the per-LoRA allocator is only used
-        // as a fallback for cold-start pinning if needed.
-        AllocationAlgorithmType::MinCostFlow => Box::new(RendezvousHasher),
+        AllocationAlgorithmType::MinCostFlow => {
+            tracing::warn!(
+                "DYN_LORA_ALLOCATION_ALGORITHM=mcf is not yet wired into the per-LoRA \
+                 allocator path; falling back to HRW. Use McfPlacementSolver directly \
+                 for global MCF placement."
+            );
+            Box::new(RendezvousHasher)
+        }
     }
 }
 

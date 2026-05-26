@@ -122,12 +122,18 @@ impl LoraStateTracker {
 
     /// Handle an MDC removal event: a worker unregistered a LoRA adapter.
     pub fn handle_mdc_removal(&self, worker: WorkerWithDpRank, lora_name: &str) {
-        if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
+        let became_empty = if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
             workers.remove(&worker);
-            if workers.is_empty() {
-                drop(workers);
-                self.loaded_locations.remove(lora_name);
-            }
+            workers.is_empty()
+        } else {
+            false
+        };
+        if became_empty {
+            // remove_if re-checks the predicate under the shard lock, so a
+            // concurrent handle_mdc_addition that races between the is_empty
+            // check above and this call cannot have its entry silently deleted.
+            self.loaded_locations
+                .remove_if(lora_name, |_, v| v.is_empty());
         }
 
         self.lora_info.remove(&(lora_name.to_string(), worker));
@@ -157,12 +163,16 @@ impl LoraStateTracker {
     pub fn handle_worker_removal(&self, worker: WorkerWithDpRank) {
         if let Some((_, loras)) = self.worker_to_loras.remove(&worker) {
             for lora_name in &loras {
-                if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
-                    workers.remove(&worker);
-                    if workers.is_empty() {
-                        drop(workers);
-                        self.loaded_locations.remove(lora_name);
-                    }
+                let became_empty =
+                    if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
+                        workers.remove(&worker);
+                        workers.is_empty()
+                    } else {
+                        false
+                    };
+                if became_empty {
+                    self.loaded_locations
+                        .remove_if(lora_name, |_, v| v.is_empty());
                 }
                 self.lora_info.remove(&(lora_name.clone(), worker));
             }

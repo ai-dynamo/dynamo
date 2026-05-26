@@ -211,36 +211,32 @@ impl McfPlacementSolver {
             })
             .sum();
 
-        let total_cap: usize = active_workers
-            .iter()
-            .map(|w| rem_cap.get(&w.worker).copied().unwrap_or(0))
-            .sum();
-
         // ── Candidate pre-computation ────────────────────────────────────────
         // Build candidate sets for all active LoRAs before constructing the
-        // MCF graph. The overflow node must be sized to cover not only the
-        // global capacity gap (total_demand > total_cap) but also any per-LoRA
-        // reach gap: a LoRA whose candidate set touches fewer active workers
-        // than its rem_rep has no path to excess capacity elsewhere and would
-        // cause InsufficientFlow without an overflow escape hatch.
+        // MCF graph. The HRW window is expanded to max(candidate_m, rem_rep)
+        // so that every LoRA always has enough outgoing edges to place all its
+        // replicas on real workers when the global capacity allows it.
+        //
+        // Note: we do NOT try to pre-compute per-LoRA reach deficits here.
+        // Candidate-graph matching conflicts (two LoRAs competing for the same
+        // top-ranked worker) are invisible to a per-LoRA reachability check
+        // but can still leave the MCF infeasible. The robust solution is to
+        // always attach an overflow escape when allow_overflow=true (see Step 3).
         let all_workers_sorted: Vec<WorkerWithDpRank> = {
             let mut ws: Vec<WorkerWithDpRank> = workers.iter().map(|w| w.worker).collect();
             ws.sort();
             ws
         };
 
-        let active_workers_set: HashSet<WorkerWithDpRank> =
-            active_workers.iter().map(|w| w.worker).collect();
+        struct LoraCandInfo {
+            cand: Vec<WorkerWithDpRank>,
+            rank_map: HashMap<WorkerWithDpRank, usize>,
+            prev_hosts: HashSet<WorkerWithDpRank>,
+            rem_rep: usize,
+        }
 
-        // (cand, rank_map, prev_hosts, rem_rep) for each active LoRA,
-        // stored in the same order as `active_loras`.
-        let mut lora_cands: Vec<(
-            Vec<WorkerWithDpRank>,
-            HashMap<WorkerWithDpRank, usize>,
-            HashSet<WorkerWithDpRank>,
-            usize,
-        )> = Vec::with_capacity(active_loras.len());
-        let mut reach_deficit: usize = 0;
+        // One entry per active LoRA, stored in the same order as `active_loras`.
+        let mut lora_cands: Vec<LoraCandInfo> = Vec::with_capacity(active_loras.len());
 
         for l in &active_loras {
             let frozen_count = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
@@ -274,17 +270,12 @@ impl McfPlacementSolver {
                 .map(|(i, (w, _))| (*w, i))
                 .collect();
 
-            // Count active workers reachable from this LoRA's candidate set.
-            // Any shortfall contributes to the overflow budget even when
-            // total_cap >= total_demand (the excess capacity is on workers
-            // outside the candidate window and is structurally unreachable).
-            let reachable = cand
-                .iter()
-                .filter(|w| active_workers_set.contains(*w))
-                .count();
-            reach_deficit += rem_rep.saturating_sub(reachable);
-
-            lora_cands.push((cand, rank_map, prev_hosts, rem_rep));
+            lora_cands.push(LoraCandInfo {
+                cand,
+                rank_map,
+                prev_hosts,
+                rem_rep,
+            });
         }
 
         // ── Step 3: Build MCF graph ──────────────────────────────────────────
@@ -304,12 +295,14 @@ impl McfPlacementSolver {
             next_id += 1;
         }
 
-        // Create the overflow node when aggregate capacity is short OR when
-        // any LoRA cannot reach enough workers in its (expanded) candidate
-        // set. Even if total_cap >= total_demand, an unreachable LoRA has
-        // no path to the surplus capacity and would cause InsufficientFlow.
-        let overflow_needed = total_demand.saturating_sub(total_cap).max(reach_deficit);
-        let overflow_node = if self.params.allow_overflow && overflow_needed > 0 {
+        // Always attach an overflow escape when allow_overflow=true.
+        // A conditional check (total_demand > total_cap, or per-LoRA reach
+        // deficit) is insufficient: candidate-graph matching conflicts — two
+        // LoRAs competing for the same sparsified top-ranked worker — are
+        // invisible to any per-LoRA reachability heuristic. Providing the
+        // escape unconditionally makes overflow the last resort in every
+        // topology, while the high overflow_cost keeps it truly last-resort.
+        let overflow_node = if self.params.allow_overflow && total_demand > 0 {
             let id = next_id;
             next_id += 1;
             Some(id)
@@ -339,9 +332,10 @@ impl McfPlacementSolver {
             }
         }
 
-        // Overflow -> SNK
+        // Overflow -> SNK: capacity = total_demand is a safe upper bound
+        // (at most all demand can overflow).
         if let Some(ov) = overflow_node {
-            mcf.add_edge(ov, snk, overflow_needed as i64, 0);
+            mcf.add_edge(ov, snk, total_demand as i64, 0);
         }
 
         // ── Step 4: LoRA -> Worker edges (sparsified) ────────────────────────
@@ -349,17 +343,16 @@ impl McfPlacementSolver {
         // re-running the HRW ranking.
         let mut lora_edge_info: HashMap<&str, Vec<(usize, WorkerWithDpRank)>> = HashMap::new();
 
-        for (l, (cand, rank_map, prev_hosts, rem_rep)) in active_loras.iter().zip(lora_cands.iter())
-        {
+        for (l, lc) in active_loras.iter().zip(lora_cands.iter()) {
             let lora_node_id = lora_node[l.name.as_str()];
             let mut edges = Vec::new();
 
-            for (rnk, w) in cand.iter().enumerate() {
+            for (rnk, w) in lc.cand.iter().enumerate() {
                 if let Some(&w_node) = worker_node.get(w) {
                     let cost = self.build_edge_cost(
                         l.churn_weight,
-                        *rank_map.get(w).unwrap_or(&rnk),
-                        prev_hosts.contains(w),
+                        *lc.rank_map.get(w).unwrap_or(&rnk),
+                        lc.prev_hosts.contains(w),
                     );
                     let edge_idx = mcf.edge_count(lora_node_id);
                     mcf.add_edge(lora_node_id, w_node, 1, cost);
@@ -373,7 +366,12 @@ impl McfPlacementSolver {
             // InsufficientFlow even when an overflow path exists).
             if let Some(ov) = overflow_node {
                 let edge_idx = mcf.edge_count(lora_node_id);
-                mcf.add_edge(lora_node_id, ov, *rem_rep as i64, self.params.overflow_cost);
+                mcf.add_edge(
+                    lora_node_id,
+                    ov,
+                    lc.rem_rep as i64,
+                    self.params.overflow_cost,
+                );
                 edges.push((edge_idx, WorkerWithDpRank::new(u64::MAX, 0))); // sentinel
             }
 
@@ -710,6 +708,39 @@ mod tests {
             result.assignment.get("A").map(|s| s.len()).unwrap_or(0),
             3,
             "all 3 replicas of LoRA A must be assigned"
+        );
+    }
+
+    #[test]
+    fn test_candidate_conflict_with_surplus_cap_does_not_hard_fail() {
+        // Regression: candidate_m=1, two LoRAs needing 1 replica each, two
+        // workers with capacity 1 each. total_cap (2) == total_demand (2) so
+        // a valid placement exists globally, but if both LoRAs' HRW top-1 is
+        // the same worker the old reach-deficit heuristic gave overflow_needed=0
+        // and omitted the overflow node, causing InsufficientFlow.
+        //
+        // With allow_overflow=true the overflow node is always present, so the
+        // solver can route one LoRA to the contested worker and overflow the
+        // other — no hard failure regardless of HRW tiebreaking.
+        let solver = McfPlacementSolver::new(McfSolveParams {
+            candidate_m: 1,
+            ..Default::default()
+        });
+        // Three workers give total_cap=3 > total_demand=2 (clear global surplus)
+        // so the old global-deficit guard definitely would not have created overflow.
+        let workers = make_workers(3, 1);
+        let loras = vec![make_lora("A", 1), make_lora("B", 1)];
+        let prev = HashMap::new();
+
+        let result = solver
+            .solve(&workers, &loras, &prev, None, None)
+            .expect("solver must not hard-fail with allow_overflow=true");
+
+        let total_placed: usize = result.assignment.values().map(|s| s.len()).sum();
+        assert_eq!(
+            total_placed + result.overflow_count,
+            2,
+            "placed + overflow must equal total demand"
         );
     }
 
