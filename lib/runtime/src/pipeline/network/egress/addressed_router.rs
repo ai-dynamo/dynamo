@@ -278,7 +278,7 @@ impl AddressedPushRouter {
         &self,
         instance: Instance,
         address: String,
-        mut input: ManyIn<T>,
+        input: ManyIn<T>,
     ) -> Result<ManyOut<U>, Error>
     where
         T: Data + Serialize,
@@ -288,13 +288,18 @@ impl AddressedPushRouter {
         REQUEST_PLANE_INFLIGHT.inc();
         let inflight_guard = InflightGuard::new();
 
+        // Extract the data channel and retain the typed sidecar:
+        //   input: Context<RequestStream<T>>
+        //   ├─ request_stream: RequestStream<T>  (Sync wrapper around DataStream<T>)
+        //   └─ ctx: Context<()>                  (controller + metadata + registry + stages)
         let engine_ctx = input.context();
         let request_id = engine_ctx.id().to_string();
         let engine_ctx_for_forwarder = engine_ctx.clone();
-        // Pull the caller-side metadata off the `Context<()>` carried by
-        // `ManyIn<T>` so it survives the wire hop; without this the worker
-        // would receive an empty map even when the caller had populated it.
-        let metadata = input.context_ref().metadata().clone();
+        let metadata = input.metadata().clone();
+        let (request_stream, _ctx_unit) = input.into_parts();
+        let mut input_stream = request_stream
+            .take()
+            .expect("RequestStream::take called twice on bidirectional dispatch input");
 
         // Register both halves on the response transport: a `send_stream`
         // (upstream → worker, carrying subsequent request frames) and a
@@ -459,7 +464,7 @@ impl AddressedPushRouter {
                     biased;
                     _ = engine_ctx_for_forwarder.killed() => break,
                     _ = engine_ctx_for_forwarder.stopped() => break,
-                    item = input.next() => match item {
+                    item = input_stream.next() => match item {
                         Some(item) => item,
                         None => break,
                     },

@@ -26,7 +26,9 @@ use dynamo_runtime::{
     distributed::DistributedConfig,
     engine::{AsyncEngine, AsyncEngineContextProvider, DataStream},
     error::DynamoError,
-    pipeline::{ManyIn, ManyOut, ResponseStream, context::Context, network::Ingress},
+    pipeline::{
+        ManyIn, ManyOut, RequestStream, ResponseStream, context::Context, network::Ingress,
+    },
     protocols::maybe_error::MaybeError,
 };
 
@@ -60,7 +62,11 @@ struct EchoEngine;
 impl AsyncEngine<ManyIn<u64>, ManyOut<EchoResponse>, Error> for EchoEngine {
     async fn generate(&self, input: ManyIn<u64>) -> Result<ManyOut<EchoResponse>, Error> {
         let ctx = input.context();
-        let mapped = futures::StreamExt::map(input, |v| EchoResponse {
+        let (request_stream, _ctx_unit) = input.into_parts();
+        let inner = request_stream
+            .take()
+            .expect("RequestStream::take called twice on EchoEngine input");
+        let mapped = futures::StreamExt::map(inner, |v| EchoResponse {
             value: Some(v),
             error: None,
         });
@@ -96,10 +102,9 @@ async fn bidirectional_end_to_end_echo() {
         .await
         .unwrap();
 
-    let input: ManyIn<u64> = ManyIn::new(
-        Box::pin(tokio_stream::iter(vec![1u64, 2, 3])),
-        Context::new(()),
-    );
+    let input: ManyIn<u64> = Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
+        1u64, 2, 3,
+    ]))));
     let response_stream = router.generate(input).await.unwrap();
     let responses: Vec<EchoResponse> = futures::StreamExt::collect(response_stream).await;
 

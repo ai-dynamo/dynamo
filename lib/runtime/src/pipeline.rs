@@ -30,81 +30,71 @@ pub use error::{PipelineError, PipelineErrorExt, TwoPartCodecError};
 /// about the request. This information propagates through the stages, both local and distributed.
 pub type SingleIn<T> = Context<T>;
 
-/// Concrete request-side stream wrapper, symmetric to [`ResponseStream<R>`] on
-/// the response side and to [`SingleIn<T>`] (= `Context<T>`) on the unary
-/// request side. Carries a typed payload stream alongside the full pipeline
-/// `Context` sidecar (metadata, registry, stages, controller) so engines can
-/// reach the caller's metadata, not just the dyn-safe cancellation slice.
+/// Sync ownership cell for a [`DataStream<T>`].
 ///
-/// Earlier definitions wrapped the stream inside `Context<DataStream<T>>`;
-/// that shape was uninstantiable because `DataStream<T>` is `!Sync` while
-/// `Context<T: Data>` requires `Sync`. Sibling-field composition sidesteps
-/// the bound: `Context<()>` is fine and the stream sits next to it.
+/// `DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>` is `Send` but
+/// **not** `Sync`, which prevents it from satisfying the `Data` bound used
+/// throughout the pipeline framework (`Data: Send + Sync + 'static`).
+/// `RequestStream<T>` wraps a `DataStream<T>` behind a `Mutex<Option<…>>` so
+/// the wrapper itself is `Sync` while still letting the eventual consumer
+/// move the stream out for iteration.
 ///
-/// Implements [`Stream<Item = T>`] (delegating to the inner stream) and
-/// [`AsyncEngineContextProvider`] (delegating to the inner `Context`), so
-/// engines that only need the cancellation slice keep their existing usage
-/// (`input.context()`, `.next().await`) without change. Engines that want
-/// the full typed sidecar reach for [`Self::context_ref`].
+/// **Lifecycle**: construct with a stream, hand the wrapper across threads
+/// freely (`Arc<RequestStream<T>>` is the typical shape), then call
+/// [`Self::take`] on exactly one consumer. The mutex serialises concurrent
+/// `take()` calls; the first observer of `Some(stream)` owns the stream and
+/// may iterate it, all subsequent callers see `None`.
+///
+/// `RequestStream<T>` does not implement [`Stream`] itself. Iteration is the
+/// consumer's responsibility, performed on the [`DataStream<T>`] returned
+/// from [`Self::take`].
 pub struct RequestStream<T: Data> {
-    stream: DataStream<T>,
-    context: Context<()>,
+    inner: std::sync::Mutex<Option<DataStream<T>>>,
 }
 
 impl<T: Data> RequestStream<T> {
-    /// Wrap a stream + context into a streaming input. The stream is the
-    /// per-frame payload; the context carries lifecycle + metadata + registry.
-    pub fn new(stream: DataStream<T>, context: Context<()>) -> Self {
-        Self { stream, context }
+    /// Wrap a [`DataStream<T>`] in a `Sync` ownership cell.
+    pub fn new(stream: DataStream<T>) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(Some(stream)),
+        }
     }
 
-    /// Consume `self`, returning the inner stream and context. Useful when an
-    /// engine wants to spawn the stream into a forwarder while keeping
-    /// access to metadata separately.
-    pub fn into_parts(self) -> (DataStream<T>, Context<()>) {
-        (self.stream, self.context)
-    }
-
-    /// Borrow the inner `Context<()>` for access to metadata / registry /
-    /// stages. The dyn-safe cancellation handle is also available via the
-    /// [`AsyncEngineContextProvider`] impl as `self.context()`.
-    pub fn context_ref(&self) -> &Context<()> {
-        &self.context
+    /// Atomically move the inner stream out. Returns `Some(stream)` exactly
+    /// once across all threads racing on the same `RequestStream`; every
+    /// subsequent call (on any thread) returns `None`. The returned stream
+    /// is the unique owner; the wrapper retains nothing.
+    pub fn take(&self) -> Option<DataStream<T>> {
+        self.inner.lock().unwrap().take()
     }
 }
-
-impl<T: Data> futures::Stream for RequestStream<T> {
-    type Item = T;
-
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        self.get_mut().stream.as_mut().poll_next(cx)
-    }
-}
-
-impl<T: Data> AsyncEngineContextProvider for RequestStream<T> {
-    fn context(&self) -> std::sync::Arc<dyn AsyncEngineContext> {
-        self.context.context()
-    }
-}
-
-impl<T: Data> AsyncEngineStream<T> for RequestStream<T> {}
 
 impl<T: Data> std::fmt::Debug for RequestStream<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let taken = self.inner.lock().map(|g| g.is_none()).unwrap_or(true);
         f.debug_struct("RequestStream")
-            .field("context", &self.context)
-            .finish_non_exhaustive()
+            .field("taken", &taken)
+            .finish()
     }
 }
 
-/// Documentary alias for [`RequestStream<T>`] used at engine call sites to
-/// match the `SingleIn` / `ManyIn` / `SingleOut` / `ManyOut` family. Prefer
-/// `RequestStream<T>` when naming a concrete type in code; prefer `ManyIn<T>`
-/// when discussing the engine-IO role.
-pub type ManyIn<T> = RequestStream<T>;
+/// Pipeline input for streaming-request engines.
+///
+/// Symmetric to [`SingleIn<T>`] (= `Context<T>`): the unary input wraps a
+/// single typed value in a [`Context`], the streaming input wraps a
+/// [`RequestStream<T>`] in a [`Context`]. Both inputs carry the full
+/// pipeline sidecar (controller, metadata, registry, stages) alongside their
+/// payload.
+///
+/// `Context<RequestStream<T>>` is instantiable today because
+/// `RequestStream<T>: Send + Sync + 'static` (the Mutex<Option<…>>
+/// hides the inner stream's `!Sync` nature); earlier attempts at
+/// `Context<DataStream<T>>` were rejected because `DataStream<T>: !Sync`.
+///
+/// Engines pull the data channel out via the standard Context APIs:
+/// `let (req_stream, ctx) = input.into_parts();
+///  let mut stream = req_stream.take().expect("stream not yet taken");`
+pub type ManyIn<T> = Context<RequestStream<T>>;
 
 /// Type alias for the output of pipeline that returns a single value
 pub type SingleOut<T> = EngineUnary<T>;
@@ -155,9 +145,6 @@ mod sealed {
     impl<T: Data> Connectable for EngineStream<T> {
         type DataType = T;
     }
-    impl<T: Data> Connectable for RequestStream<T> {
-        type DataType = T;
-    }
 }
 
 pub trait PipelineIO: sealed::Connectable + AsyncEngineContextProvider + 'static {
@@ -177,11 +164,6 @@ impl<T: Data> PipelineIO for EngineUnary<T> {
 impl<T: Data> PipelineIO for EngineStream<T> {
     fn id(&self) -> String {
         self.context().id().to_string()
-    }
-}
-impl<T: Data> PipelineIO for RequestStream<T> {
-    fn id(&self) -> String {
-        self.context.id().to_string()
     }
 }
 

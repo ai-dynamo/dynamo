@@ -1143,7 +1143,7 @@ mod tests {
         distributed::DistributedConfig,
         error::DynamoError,
         pipeline::{
-            ResponseStream,
+            RequestStream, ResponseStream,
             context::{Context, Controller},
         },
     };
@@ -1313,10 +1313,10 @@ mod tests {
             .await
             .unwrap();
 
-        let input: ManyIn<u64> = ManyIn::new(
-            Box::pin(tokio_stream::iter(vec![1u64, 2u64])),
-            Context::new(()),
-        );
+        let input: ManyIn<u64> =
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
+                1u64, 2u64,
+            ]))));
         let result = router.generate(input).await;
         assert!(
             result.is_err(),
@@ -1342,7 +1342,7 @@ mod tests {
             .unwrap();
 
         let input: ManyIn<u64> =
-            ManyIn::new(Box::pin(tokio_stream::iter(vec![1u64])), Context::new(()));
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![1u64]))));
         let result = router.generate(input).await;
         assert!(
             result.is_err(),
@@ -1373,7 +1373,7 @@ mod tests {
             .unwrap();
 
         let input: ManyIn<u64> =
-            ManyIn::new(Box::pin(tokio_stream::iter(vec![1u64])), Context::new(()));
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![1u64]))));
         let result = router.generate(input).await;
         assert!(
             result.is_err(),
