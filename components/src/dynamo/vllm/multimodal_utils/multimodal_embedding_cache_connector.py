@@ -72,9 +72,9 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 _vllm_version,
             )
         super().__init__(vllm_config=vllm_config, role=role)
-            self._vllm_config = vllm_config
+        self._vllm_config = vllm_config
 
-            transfer_config = vllm_config.ec_transfer_config
+        transfer_config = vllm_config.ec_transfer_config
         if transfer_config is None:
             raise ValueError(
                 "ec_transfer_config must be set for DynamoMultimodalEmbeddingCacheConnector"
