@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    future::Future,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use super::*;
 use crate::SystemHealth;
@@ -43,6 +47,7 @@ impl PushEndpoint {
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
         let mut endpoint = endpoint;
+        let mut stop_service_after_drain = false;
 
         let inflight = Arc::new(AtomicU64::new(0));
         let notify = Arc::new(Notify::new());
@@ -65,10 +70,10 @@ impl PushEndpoint {
 
                 // process shutdown
                 _ = self.cancellation_token.cancelled() => {
-                    tracing::info!("PushEndpoint received cancellation signal, shutting down service");
-                    if let Err(e) = endpoint.stop().await {
-                        tracing::warn!("Failed to stop NATS service: {:?}", e);
-                    }
+                    tracing::info!(
+                        "PushEndpoint received cancellation signal, stopping service after inflight requests drain"
+                    );
+                    stop_service_after_drain = true;
                     break;
                 }
             };
@@ -146,23 +151,22 @@ impl PushEndpoint {
             .lock()
             .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
 
-        // await for all inflight requests to complete if graceful shutdown
-        if self.graceful_shutdown {
-            let inflight_count = inflight.load(Ordering::SeqCst);
-            if inflight_count > 0 {
-                tracing::info!(
-                    endpoint_name = endpoint_name_local.as_str(),
-                    inflight_count = inflight_count,
-                    "Waiting for inflight NATS requests to complete"
-                );
-                while inflight.load(Ordering::SeqCst) > 0 {
-                    notify.notified().await;
-                }
-                tracing::info!(
-                    endpoint_name = endpoint_name_local.as_str(),
-                    "All inflight NATS requests completed"
-                );
+        if stop_service_after_drain {
+            if self.graceful_shutdown {
+                let timeout = crate::runtime::runtime_graceful_shutdown_timeout();
+                finish_shutdown_after_inflight_drain(
+                    &inflight,
+                    &notify,
+                    Some(timeout),
+                    move || async move { endpoint.stop().await.map_err(anyhow::Error::from) },
+                )
+                .await;
+            } else if let Err(e) = endpoint.stop().await {
+                tracing::warn!("Failed to stop NATS service: {:?}", e);
             }
+        } else if self.graceful_shutdown {
+            let timeout = crate::runtime::runtime_graceful_shutdown_timeout();
+            wait_for_inflight_requests(&inflight, &notify, Some(timeout)).await;
         } else {
             tracing::info!(
                 endpoint_name = endpoint_name_local.as_str(),
@@ -171,5 +175,144 @@ impl PushEndpoint {
         }
 
         Ok(())
+    }
+}
+
+pub(crate) async fn wait_for_inflight_requests(
+    inflight: &AtomicU64,
+    notify: &Notify,
+    timeout: Option<Duration>,
+) {
+    let inflight_count = inflight.load(Ordering::SeqCst);
+    if inflight_count > 0 {
+        tracing::info!(
+            inflight_count = inflight_count,
+            timeout_secs = timeout.map(|d| d.as_secs()),
+            "Waiting for inflight NATS requests to complete"
+        );
+    }
+
+    let wait = async {
+        loop {
+            let notified = notify.notified();
+            if inflight.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            notified.await;
+        }
+    };
+
+    match timeout {
+        Some(timeout) => {
+            if tokio::time::timeout(timeout, wait).await.is_err() {
+                tracing::warn!(
+                    inflight_count = inflight.load(Ordering::SeqCst),
+                    timeout_secs = timeout.as_secs(),
+                    "Timed out waiting for inflight NATS requests; continuing shutdown"
+                );
+            }
+        }
+        None => wait.await,
+    }
+
+    if inflight_count > 0 && inflight.load(Ordering::SeqCst) == 0 {
+        tracing::info!("All inflight NATS requests completed");
+    }
+}
+
+async fn finish_shutdown_after_inflight_drain<StopService, StopServiceFuture>(
+    inflight: &AtomicU64,
+    notify: &Notify,
+    timeout: Option<Duration>,
+    stop_service: StopService,
+) where
+    StopService: FnOnce() -> StopServiceFuture,
+    StopServiceFuture: Future<Output = Result<()>>,
+{
+    wait_for_inflight_requests(inflight, notify, timeout).await;
+    if let Err(e) = stop_service().await {
+        tracing::warn!("Failed to stop NATS service: {:?}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn graceful_shutdown_stops_service_after_inflight_requests_drain() {
+        let inflight = Arc::new(AtomicU64::new(1));
+        let notify = Arc::new(Notify::new());
+        let stop_called = Arc::new(AtomicBool::new(false));
+
+        let inflight_for_shutdown = inflight.clone();
+        let inflight_for_stop = inflight.clone();
+        let notify_for_shutdown = notify.clone();
+        let stop_called_for_shutdown = stop_called.clone();
+
+        let shutdown_task = tokio::spawn(async move {
+            finish_shutdown_after_inflight_drain(
+                inflight_for_shutdown.as_ref(),
+                notify_for_shutdown.as_ref(),
+                None,
+                move || {
+                    let inflight_for_stop = inflight_for_stop.clone();
+                    let stop_called_for_shutdown = stop_called_for_shutdown.clone();
+                    async move {
+                        assert_eq!(
+                            inflight_for_stop.load(Ordering::SeqCst),
+                            0,
+                            "service stop should happen only after inflight requests drain"
+                        );
+                        stop_called_for_shutdown.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !stop_called.load(Ordering::SeqCst),
+            "service stop should not happen while requests are still inflight"
+        );
+
+        inflight.fetch_sub(1, Ordering::SeqCst);
+        notify.notify_one();
+
+        shutdown_task.await.unwrap();
+
+        assert!(
+            stop_called.load(Ordering::SeqCst),
+            "service stop should run after inflight requests are drained"
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_stop_runs_after_inflight_timeout() {
+        let inflight = Arc::new(AtomicU64::new(1));
+        let notify = Arc::new(Notify::new());
+        let stop_called = Arc::new(AtomicBool::new(false));
+        let stop_called_for_shutdown = stop_called.clone();
+
+        finish_shutdown_after_inflight_drain(
+            inflight.as_ref(),
+            notify.as_ref(),
+            Some(Duration::from_millis(20)),
+            move || async move {
+                stop_called_for_shutdown.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(
+            stop_called.load(Ordering::SeqCst),
+            "service stop should run once the inflight drain timeout expires"
+        );
     }
 }

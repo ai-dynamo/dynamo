@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
 use derive_builder::Builder;
@@ -250,21 +250,152 @@ impl EndpointConfigBuilder {
             device_type: endpoint_device_type(),
         };
 
-        if let Err(e) = discovery.register(discovery_spec).await {
-            tracing::error!(
+        let registered_instance = match discovery.register(discovery_spec).await {
+            Ok(instance) => instance,
+            Err(e) => {
+                tracing::error!(
+                    %endpoint_id,
+                    error = %e,
+                    "Unable to register service for discovery"
+                );
+                endpoint_shutdown_token.cancel();
+                anyhow::bail!(
+                    "Unable to register service for discovery. Check discovery service status"
+                );
+            }
+        };
+
+        let discovery_cleanup_task = {
+            let endpoint_shutdown_token = endpoint_shutdown_token.clone();
+            let discovery = discovery.clone();
+            let registered_instance = registered_instance.clone();
+            let endpoint_id = endpoint_id.clone();
+
+            tokio::spawn(async move {
+                wait_for_endpoint_shutdown_and_cleanup(
+                    endpoint_shutdown_token,
+                    move || async move {
+                        discovery
+                            .unregister(registered_instance)
+                            .await
+                            .map_err(anyhow::Error::from)
+                    },
+                )
+                .await;
+
+                tracing::debug!(
+                    %endpoint_id,
+                    "Endpoint discovery cleanup task completed"
+                );
+            })
+        };
+
+        let result = task.await;
+
+        if !discovery_cleanup_task.is_finished() {
+            discovery_cleanup_task.abort();
+        }
+        let _ = discovery_cleanup_task.await;
+
+        if let Err(e) = discovery.unregister(registered_instance).await {
+            tracing::warn!(
                 %endpoint_id,
                 error = %e,
-                "Unable to register service for discovery"
-            );
-            endpoint_shutdown_token.cancel();
-            anyhow::bail!(
-                "Unable to register service for discovery. Check discovery service status"
+                "Failed to remove endpoint discovery entry during shutdown"
             );
         }
 
-        task.await??;
+        result??;
 
         Ok(())
+    }
+}
+
+async fn wait_for_endpoint_shutdown_and_cleanup<CleanupFn, CleanupFuture>(
+    endpoint_shutdown_token: CancellationToken,
+    cleanup: CleanupFn,
+) where
+    CleanupFn: FnOnce() -> CleanupFuture,
+    CleanupFuture: Future<Output = Result<()>>,
+{
+    endpoint_shutdown_token.cancelled().await;
+
+    if let Err(e) = cleanup().await {
+        tracing::warn!(error = %e, "Failed to remove endpoint discovery entry on shutdown");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::discovery::{
+        Discovery, DiscoveryQuery, DiscoverySpec, MockDiscovery, SharedMockRegistry,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn endpoint_discovery_cleanup_waits_for_shutdown_token() {
+        let shutdown_token = CancellationToken::new();
+        let cleanup_called = Arc::new(AtomicBool::new(false));
+        let cleanup_called_for_task = cleanup_called.clone();
+
+        let task = tokio::spawn(wait_for_endpoint_shutdown_and_cleanup(
+            shutdown_token.clone(),
+            move || async move {
+                cleanup_called_for_task.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        ));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !cleanup_called.load(Ordering::SeqCst),
+            "discovery cleanup should not run before shutdown is requested"
+        );
+
+        shutdown_token.cancel();
+        task.await.unwrap();
+
+        assert!(
+            cleanup_called.load(Ordering::SeqCst),
+            "discovery cleanup should run after shutdown is requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_discovery_cleanup_unregisters_endpoint() {
+        let discovery = Arc::new(MockDiscovery::new(Some(42), SharedMockRegistry::new()));
+        let spec = DiscoverySpec::Endpoint {
+            namespace: "test_namespace".to_string(),
+            component: "test_component".to_string(),
+            endpoint: "test_endpoint".to_string(),
+            transport: TransportType::Nats("test_subject".to_string()),
+            device_type: None,
+        };
+        let instance = discovery.register(spec).await.unwrap();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: "test_namespace".to_string(),
+            component: "test_component".to_string(),
+            endpoint: "test_endpoint".to_string(),
+        };
+
+        assert_eq!(discovery.list(query.clone()).await.unwrap().len(), 1);
+
+        let shutdown_token = CancellationToken::new();
+        let discovery_for_cleanup = discovery.clone();
+        let task = tokio::spawn(wait_for_endpoint_shutdown_and_cleanup(
+            shutdown_token.clone(),
+            move || async move { discovery_for_cleanup.unregister(instance).await },
+        ));
+
+        shutdown_token.cancel();
+        task.await.unwrap();
+
+        assert!(
+            discovery.list(query).await.unwrap().is_empty(),
+            "discovery cleanup should unregister the endpoint instance"
+        );
     }
 }
 

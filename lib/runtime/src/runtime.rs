@@ -19,15 +19,11 @@ use crate::{
     config::{self, RuntimeConfig},
 };
 
-use futures::Future;
-use once_cell::sync::OnceCell;
-use std::{
-    mem::ManuallyDrop,
-    sync::{Arc, atomic::Ordering},
-};
-use tokio::{signal, sync::Mutex, task::JoinHandle};
+use std::{mem::ManuallyDrop, sync::Arc, time::Duration};
 
 pub use tokio_util::sync::CancellationToken;
+
+const DEFAULT_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 870;
 
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone, Debug)]
@@ -315,30 +311,96 @@ impl Runtime {
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
         let endpoint_token = self.endpoint_shutdown_token.clone();
+        let timeout = runtime_graceful_shutdown_timeout();
 
         // Use the runtime handle to spawn the task
         let handle = self.primary();
-        handle.spawn(async move {
-            // Phase 1: Cancel endpoint shutdown token to stop accepting new requests
-            tracing::info!("Phase 1: Cancelling endpoint shutdown token");
-            endpoint_token.cancel();
+        handle.spawn(run_shutdown_phases(
+            endpoint_token,
+            main_token,
+            tracker,
+            timeout,
+        ));
+    }
+}
 
-            // Phase 2: Wait for all graceful endpoints to complete
-            tracing::info!("Phase 2: Waiting for graceful endpoints to complete");
+pub(crate) fn runtime_graceful_shutdown_timeout() -> Duration {
+    let secs = std::env::var(
+        crate::config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    )
+    .ok()
+    .and_then(|s| s.parse::<u64>().ok())
+    .unwrap_or(DEFAULT_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
 
-            let count = tracker.get_count();
-            tracing::info!("Active graceful endpoints: {count}");
+    Duration::from_secs(secs)
+}
 
-            if count != 0 {
-                tracker.wait_for_completion().await;
+async fn run_shutdown_phases(
+    endpoint_token: CancellationToken,
+    main_token: CancellationToken,
+    tracker: Arc<GracefulShutdownTracker>,
+    timeout: Duration,
+) {
+    // Phase 1: Cancel endpoint shutdown token to stop accepting new requests
+    tracing::info!("Phase 1: Cancelling endpoint shutdown token");
+    endpoint_token.cancel();
+
+    // Phase 2: Wait for all graceful endpoints to complete
+    tracing::info!(
+        timeout_secs = timeout.as_secs(),
+        "Phase 2: Waiting for graceful endpoints to complete"
+    );
+
+    let count = tracker.get_count();
+    tracing::info!("Active graceful endpoints: {count}");
+
+    if count != 0 {
+        match tokio::time::timeout(timeout, tracker.wait_for_completion()).await {
+            Ok(()) => {}
+            Err(_) => {
+                tracing::warn!(
+                    active_endpoints = tracker.get_count(),
+                    timeout_secs = timeout.as_secs(),
+                    "Graceful shutdown timeout expired; proceeding to transport teardown"
+                );
             }
+        }
+    }
 
-            // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
-            tracing::info!(
-                "Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected"
-            );
-            main_token.cancel();
-        });
+    // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
+    tracing::info!(
+        "Phase 3: All endpoints ended gracefully or timeout expired. Connections to backend services will now be disconnected"
+    );
+    main_token.cancel();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_phases_timeout_cancels_main_token() {
+        let endpoint_token = CancellationToken::new();
+        let main_token = CancellationToken::new();
+        let tracker = Arc::new(GracefulShutdownTracker::new());
+        tracker.register_endpoint();
+
+        run_shutdown_phases(
+            endpoint_token.clone(),
+            main_token.clone(),
+            tracker,
+            Duration::from_millis(20),
+        )
+        .await;
+
+        assert!(
+            endpoint_token.is_cancelled(),
+            "endpoint shutdown token should be cancelled first"
+        );
+        assert!(
+            main_token.is_cancelled(),
+            "main token should be cancelled after graceful timeout"
+        );
     }
 }
 
