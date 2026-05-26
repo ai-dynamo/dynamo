@@ -127,7 +127,11 @@ jobs:
           echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" >> "$GITHUB_ENV"
 
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
-        working-directory: /workspace/lib/llm
+        # Run from the checked-out source (owned by the runner uid) rather than
+        # /workspace (baked as dynamo:0 mode 0775). The ARC pod runs as uid 1001
+        # with non-zero gid, so it falls into "other" perms on the baked tree and
+        # cargo cannot rewrite Cargo.lock when resolve mutates it.
+        working-directory: lib/llm
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
