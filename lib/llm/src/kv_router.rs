@@ -667,6 +667,7 @@ where
 
         // Only retain a copy of the block hashes when this scheduler can actually use
         // them for dequeue-time overlap refresh.
+        // TODO: Optimize this by adding a borrowed indexer lookup path to avoid cloning hashes for immediate admissions.
         let block_hashes_for_refresh = self
             .scheduler
             .supports_overlap_refresh()
