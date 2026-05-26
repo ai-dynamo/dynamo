@@ -594,7 +594,7 @@ jobs:
        needs.changed-files.outputs.deploy == 'true') &&
       (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
-    runs-on: stg-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1
     outputs:
       namespace: ${{ steps.setup.outputs.namespace }}
       vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
@@ -662,7 +662,7 @@ jobs:
   deploy-cleanup:
     if: always()
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    runs-on: stg-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Teardown vCluster
