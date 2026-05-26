@@ -88,8 +88,6 @@ impl AdmissionQueue {
                         request,
                         arrival_time_ms,
                         replay_hashes: None,
-                        session_id: None,
-                        turn_index: None,
                     });
                 }
                 Ok(ready)
@@ -101,8 +99,6 @@ impl AdmissionQueue {
                     request: ready.request,
                     arrival_time_ms: ready.scheduled_ready_at_ms,
                     replay_hashes: ready.replay_hashes,
-                    session_id: Some(ready.session_id),
-                    turn_index: Some(ready.turn_index),
                 })
                 .collect()),
             (ReplayMode::Concurrency { max_in_flight }, AdmissionSource::Requests(pending)) => {
@@ -116,8 +112,6 @@ impl AdmissionQueue {
                         request,
                         arrival_time_ms: now_ms,
                         replay_hashes: None,
-                        session_id: None,
-                        turn_index: None,
                     });
                     simulated_in_flight += 1;
                 }
@@ -135,8 +129,6 @@ impl AdmissionQueue {
                         request: ready.request,
                         arrival_time_ms: now_ms,
                         replay_hashes: ready.replay_hashes,
-                        session_id: Some(ready.session_id),
-                        turn_index: Some(ready.turn_index),
                     })
                     .collect())
             }

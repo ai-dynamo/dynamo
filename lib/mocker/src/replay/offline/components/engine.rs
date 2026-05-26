@@ -248,7 +248,9 @@ impl EngineComponent {
             };
 
             if executed.end_ms == now_ms {
-                effects.immediate_completions.push(payload);
+                if payload.has_completion_effects() {
+                    effects.immediate_completions.push(payload);
+                }
                 return Ok(effects);
             }
 

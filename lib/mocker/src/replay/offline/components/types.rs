@@ -70,12 +70,6 @@ pub(in crate::replay::offline) struct ReadyArrival {
     pub(in crate::replay::offline) request: DirectRequest,
     pub(in crate::replay::offline) arrival_time_ms: f64,
     pub(in crate::replay::offline) replay_hashes: Option<ReplayRequestHashes>,
-    /// Session identifier and turn index, when the trace source carries them
-    /// (Mooncake workload, applied-compute-agentic). `None` for raw request
-    /// lists (`Requests` admission source) and for any path that doesn't
-    /// preserve session structure.
-    pub(in crate::replay::offline) session_id: Option<String>,
-    pub(in crate::replay::offline) turn_index: Option<usize>,
 }
 
 /// Accumulated traffic statistics returned by [`TrafficAccumulator::drain`].

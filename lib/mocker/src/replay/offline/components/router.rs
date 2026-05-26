@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
@@ -45,15 +45,6 @@ struct AdmitOutcome {
     worker_idx: usize,
     overlap_blocks: u32,
     isl_blocks: u32,
-}
-
-/// Outcome of a read-only ``peek_request`` call. Used by the conditional-
-/// prefill probe (offline disagg) to inspect what the selector would pick
-/// without enqueueing the request or mutating slot state.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PeekResult {
-    pub worker_idx: usize,
-    pub overlap_blocks: u32,
 }
 
 #[cfg(test)]
@@ -356,10 +347,6 @@ impl OfflineReplayRouter {
         self.pending.len()
     }
 
-    pub(crate) fn block_size(&self) -> u32 {
-        self.block_size
-    }
-
     /// Register a new worker with the router without disturbing existing slot state.
     pub(crate) fn add_worker(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
@@ -530,138 +517,36 @@ impl OfflineReplayRouter {
         request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
-        self.admit_request_inner(request, decay_now, None)
-    }
-
-    /// Read-only selector evaluation for a request — what worker would be
-    /// chosen, plus overlap and projected load on that worker, **without**
-    /// enqueueing or mutating slot state.
-    ///
-    /// `router_config_override` lets callers run the same selector with
-    /// alternative cost-equation weights (e.g. `overlap_score_credit=0.0` to
-    /// find the least-loaded worker for the cost-policy RHS term).
-    ///
-    /// Used by the conditional-prefill probe in offline disagg replay.
-    pub(crate) fn peek_request(
-        &mut self,
-        request: &DirectRequest,
-        replay_hashes: Option<ReplayRequestHashes>,
-        router_config_override: Option<RouterConfigOverride>,
-        now_ms: f64,
-    ) -> Result<PeekResult> {
-        let pending = self.build_pending_request(request, replay_hashes)?;
-        let decay_now = self.decay_now(now_ms);
-        let scheduling_request = self.build_scheduling_request_with_load(
-            &pending,
-            decay_now,
-            router_config_override,
-            None,
-        );
-        let eligibility = scheduling_request.eligibility();
-        let selection = self.selector.select_worker(
-            &self.workers_with_configs,
-            &scheduling_request,
-            eligibility,
-            self.block_size,
-        )?;
-        let worker_idx = usize::try_from(selection.worker.worker_id)
-            .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
-        let overlap_blocks = selection.effective_overlap_blocks.floor() as u32;
-        Ok(PeekResult {
-            worker_idx,
-            overlap_blocks,
-        })
-    }
-
-    /// Admit a request bypassing both the queue and selector worker choice,
-    /// pinning it to the given worker. Used by the conditional-prefill probe
-    /// after a bypass decision: the probe already picked the decode worker,
-    /// so we just need to register the request with that worker and book
-    /// the slot.
-    pub(crate) fn admit_pinned(
-        &mut self,
-        request: &DirectRequest,
-        replay_hashes: Option<ReplayRequestHashes>,
-        pinned_worker_idx: usize,
-        now_ms: f64,
-    ) -> Result<RouterEffects> {
-        let pending = self.build_pending_request(request, replay_hashes)?;
-        let decay_now = self.decay_now(now_ms);
-        let uuid = request
-            .uuid
-            .expect("offline replay requests must have UUIDs before router submission");
-        let outcome = self.admit_request_inner(pending, decay_now, Some(pinned_worker_idx))?;
-        Ok(RouterEffects {
-            admissions: vec![WorkerAdmission {
-                uuid,
-                worker_idx: outcome.worker_idx,
-                overlap_blocks: outcome.overlap_blocks,
-                isl_blocks: outcome.isl_blocks,
-            }],
-        })
-    }
-
-    /// Shared selection-prep used by both `admit_request` and `peek_request`.
-    /// Computes prefill_token_deltas, projects per-worker load, and assembles
-    /// a `SchedulingRequest` with the supplied override and optional pin.
-    fn build_scheduling_request_with_load(
-        &self,
-        pending: &PendingRequest,
-        decay_now: Instant,
-        router_config_override: Option<RouterConfigOverride>,
-        pinned_worker_idx: Option<usize>,
-    ) -> SchedulingRequest {
-        let prefill_token_deltas = if pending.track_prefill_tokens {
-            let by_worker = pending
+        let prefill_token_deltas =
+            if request.track_prefill_tokens {
+                let by_worker = request
                 .overlaps
                 .scores
                 .iter()
                 .map(|(worker, overlap)| {
                     let cached_tokens = *overlap as usize * self.block_size as usize;
-                    let delta = pending
-                        .isl_tokens
-                        .checked_sub(cached_tokens)
-                        .unwrap_or_else(|| {
-                            tracing::error!(
-                                "prefill_tokens < 0 with ISL {} < cached_tokens {}, returning 0",
-                                pending.isl_tokens,
-                                cached_tokens,
-                            );
-                            0
-                        });
+                    let delta = request.isl_tokens.checked_sub(cached_tokens).unwrap_or_else(|| {
+                        tracing::error!(
+                            "prefill_tokens < 0 with ISL {} < cached_tokens {}, returning 0",
+                            request.isl_tokens,
+                            cached_tokens,
+                        );
+                        0
+                    });
                     (*worker, delta)
                 })
                 .collect::<FxHashMap<_, _>>();
-            PrefillTokenDeltas::new(pending.isl_tokens, by_worker)
-        } else {
-            PrefillTokenDeltas::none()
-        };
+                PrefillTokenDeltas::new(request.isl_tokens, by_worker)
+            } else {
+                PrefillTokenDeltas::none()
+            };
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
-            pending.token_seq.as_deref(),
+            request.token_seq.as_deref(),
             &prefill_token_deltas,
             decay_now,
         );
-        let mut scheduling_request =
-            pending.scheduling_request(self.block_size as usize, decode_blocks, prefill_tokens);
-        scheduling_request.router_config_override = router_config_override;
-        if let Some(worker_idx) = pinned_worker_idx {
-            scheduling_request.pinned_worker =
-                Some(WorkerWithDpRank::new(worker_idx as WorkerId, 0));
-        }
-        scheduling_request
-    }
-
-    /// Internal admit path shared between `admit_request` (selector picks) and
-    /// `admit_pinned` (caller specifies worker). `pinned_worker_idx=Some(_)`
-    /// forces the selector to use that worker.
-    fn admit_request_inner(
-        &mut self,
-        request: PendingRequest,
-        decay_now: Instant,
-        pinned_worker_idx: Option<usize>,
-    ) -> Result<AdmitOutcome> {
         let scheduling_request =
-            self.build_scheduling_request_with_load(&request, decay_now, None, pinned_worker_idx);
+            request.scheduling_request(self.block_size as usize, decode_blocks, prefill_tokens);
         let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
@@ -677,9 +562,11 @@ impl OfflineReplayRouter {
             selection.cached_tokens,
             request.track_prefill_tokens,
         );
+
         let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
             .unwrap_or(u32::MAX);
         let overlap_blocks = selection.effective_overlap_blocks.floor() as u32;
+
         self.slots
             .add_request(
                 SequenceRequest {
@@ -694,6 +581,7 @@ impl OfflineReplayRouter {
                 decay_now,
             )
             .map_err(anyhow::Error::from)?;
+
         Ok(AdmitOutcome {
             worker_idx,
             overlap_blocks,

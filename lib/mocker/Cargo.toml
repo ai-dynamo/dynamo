@@ -16,7 +16,7 @@ readme = "README.md"
 default = []
 profile = []
 # Enables G1↔G2 offload simulation via kvbm-engine.
-kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo"]
+kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo", "dep:futures"]
 
 [dependencies]
 # repo
@@ -30,15 +30,11 @@ kvbm-engine = { workspace = true, optional = true }
 kvbm-physical = { workspace = true, optional = true }
 kvbm-common = { workspace = true, optional = true }
 velo = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 # workspace
 anyhow = { workspace = true }
 dashmap = { workspace = true }
-# `futures` is used by the offline-replay disagg path to block on the
-# (necessarily async) ConditionalPrefillPolicy trait method from a sync
-# runtime — the mocker has no tokio reactor, so the call is wrapped in a
-# minimal executor. Required across all features, not just kvbm-offload.
-futures = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 indicatif = "0.18"

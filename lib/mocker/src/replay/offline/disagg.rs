@@ -4,17 +4,14 @@
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use anyhow::{Result, anyhow, bail};
-use dynamo_kv_router::conditional_prefill::{
-    ConditionalPrefillDecisionInput, ConditionalPrefillPolicy, make_conditional_prefill_policy,
-};
-use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
 pub(super) use super::components::ReplayMode;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-    ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
+    ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
@@ -73,10 +70,6 @@ pub(in crate::replay) struct DisaggRuntime {
     decode_engine: EngineComponent,
     prefill_router: Option<OfflineReplayRouter>,
     decode_router: Option<OfflineReplayRouter>,
-    /// Conditional-prefill bypass policy. When `is_enabled()` returns false
-    /// (default), the probe in `on_external_arrival` is skipped and the
-    /// pipeline runs as a hardcoded prefill→decode flow.
-    conditional_prefill_policy: Box<dyn ConditionalPrefillPolicy>,
     requests: HashMap<Uuid, DisaggRequestState>,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
@@ -139,13 +132,6 @@ impl DisaggRuntime {
         router_mode: ReplayRouterMode,
     ) -> Result<Self> {
         let progress = ReplayProgress::new(admission.total_requests(), "offline disagg replay");
-        // Mocker doesn't wire an evaluator yet; the Regression policy isn't
-        // exercised offline until Phase 5 (mocker integration). Pass `None`
-        // and the factory installs an `UnavailableCostEvaluator` if the
-        // config happens to select Regression — slow-path then falls back to
-        // conservative DISAGG every time.
-        let conditional_prefill_policy =
-            make_conditional_prefill_policy(router_config.as_ref(), None);
         let (prefill_router, decode_router) = match router_mode {
             ReplayRouterMode::RoundRobin => (None, None),
             ReplayRouterMode::KvRouter => {
@@ -210,7 +196,6 @@ impl DisaggRuntime {
             decode_engine,
             prefill_router,
             decode_router,
-            conditional_prefill_policy,
             requests: HashMap::new(),
             collector: TraceCollector::default(),
             events: BinaryHeap::new(),
@@ -224,14 +209,6 @@ impl DisaggRuntime {
             traffic: TrafficAccumulator::new(),
             max_sim_time_ms: None,
         })
-    }
-
-    /// Toggle per-request record capture on the underlying collector. When
-    /// `true`, the final `TraceSimulationReport` returned from `run()` will
-    /// have `per_request` populated. Default `false` (cheap).
-    pub(in crate::replay) fn with_per_request_records(mut self, capture: bool) -> Self {
-        self.collector.set_capture_per_request(capture);
-        self
     }
 
     /// Cap the simulated wall-clock duration. After construction, call this to
@@ -329,7 +306,6 @@ impl DisaggRuntime {
         let request = self.state(uuid)?.build_prefill_request()?;
         self.prefill_engine.dispatch(worker_idx, request)?;
         self.state_mut(uuid)?.start_prefill(worker_idx);
-        self.collector.on_prefill_assigned(uuid, worker_idx);
         #[cfg(test)]
         {
             self.stats.prefill_assignments.insert(uuid, worker_idx);
@@ -342,7 +318,6 @@ impl DisaggRuntime {
         let request = self.state(uuid)?.original_request()?.clone();
         self.decode_engine.dispatch(worker_idx, request)?;
         self.state_mut(uuid)?.start_decode(worker_idx);
-        self.collector.on_decode_assigned(uuid, worker_idx);
         #[cfg(test)]
         {
             self.stats.decode_assignments.insert(uuid, worker_idx);
@@ -446,24 +421,6 @@ impl DisaggRuntime {
             self.dispatch_prefill(uuid, worker_idx)?;
             return Ok(uuid);
         }
-
-        // Conditional-prefill probe: ask the policy whether to bypass remote
-        // prefill and route the request directly to a decode worker. Active
-        // only when `conditional_prefill_enabled=true` in the router config.
-        if self.conditional_prefill_policy.is_enabled()
-            && self.decode_router.is_some()
-            && let Some(bypass_worker_idx) =
-                self.try_conditional_prefill_bypass(&queued_request, &replay_hashes)?
-        {
-            self.handle_conditional_prefill_bypass(
-                uuid,
-                bypass_worker_idx,
-                &queued_request,
-                replay_hashes,
-            )?;
-            return Ok(uuid);
-        }
-
         let admissions = self
             .prefill_router
             .as_mut()
@@ -473,154 +430,6 @@ impl DisaggRuntime {
         self.record_router_pending();
         self.dispatch_prefill_admissions(admissions)?;
         Ok(uuid)
-    }
-
-    /// Run the conditional-prefill probe. Peeks the decode router (and, for
-    /// the cost policy, also the prefill router + a load-only decode peek)
-    /// without mutating state, builds the policy input, and asks the policy
-    /// whether to bypass remote prefill.
-    ///
-    /// Returns `Some(decode_worker_idx)` if the policy votes to bypass, in
-    /// which case the request should be routed directly to that decode worker.
-    /// Returns `Ok(None)` otherwise (fall through to the standard prefill →
-    /// decode flow).
-    ///
-    /// Override semantics differ from the live system because the offline
-    /// decode router bakes in `overlap_score_credit=0.0` as its baseline
-    /// (see `derive_decode_router_config`). The LHS peek therefore needs an
-    /// explicit `Some(1.0)` override to recover the agg-equation behavior
-    /// that the live probe gets implicitly from the decode router's `1.0`
-    /// default.
-    fn try_conditional_prefill_bypass(
-        &mut self,
-        request: &DirectRequest,
-        replay_hashes: &Option<ReplayRequestHashes>,
-    ) -> Result<Option<usize>> {
-        let block_size = self
-            .decode_router
-            .as_ref()
-            .map(|r| r.block_size() as usize)
-            .unwrap_or(0)
-            .max(1);
-        let prompt_tokens = request.tokens.len();
-
-        // LHS peek: agg-equation against decode pool to find the hottest-cache
-        // decode worker plus its projected load.
-        let lhs_override = RouterConfigOverride {
-            overlap_score_credit: Some(1.0),
-            assume_kv_reuse: Some(true),
-            track_prefill_tokens: Some(true),
-            ..Default::default()
-        };
-        let lhs = self
-            .decode_router
-            .as_mut()
-            .expect("decode router presence checked")
-            .peek_request(
-                request,
-                replay_hashes.clone(),
-                Some(lhs_override),
-                self.now_ms,
-            )?;
-
-        let needs_cost_terms = self.conditional_prefill_policy.needs_cost_terms();
-        let (prefill_chosen_tier_overlap_credit_blocks, prefill_chosen_load_blocks) =
-            if needs_cost_terms {
-                self.peek_prefill_chosen_components(request, replay_hashes)?
-            } else {
-                (None, None)
-            };
-
-        // Offline router only models the device tier (no host-pinned / disk
-        // overlap), so the tier-weighted credit collapses to device overlap.
-        // The live router computes `device + host*0.75 + disk*0.25 + shared`
-        // (see `cache_hit_estimates_from_tiered_matches` in kv_router.rs).
-        let input = ConditionalPrefillDecisionInput {
-            prompt_tokens,
-            block_size,
-            decode_chosen_overlap_blocks: lhs.overlap_blocks,
-            decode_chosen_tier_overlap_credit_blocks: Some(lhs.overlap_blocks as f64),
-            // Mocker doesn't yet plumb router-state snapshots into the input
-            // (Phase 5 — mocker integration). Slow path runs without load info;
-            // Regression fast-path roomy() returns false → falls through to
-            // slow-path conservative DISAGG.
-            decode_chosen_load_blocks: None,
-            prefill_chosen_tier_overlap_credit_blocks,
-            prefill_chosen_load_blocks,
-            // Same as above — Phase 5 work.
-            decode_chosen_max_blocks: None,
-            prefill_chosen_max_blocks: None,
-            decode_chosen_queued_blocks: None,
-            prefill_chosen_queued_blocks: None,
-            // Mocker doesn't carry dynamo-runtime worker identities (Phase 6).
-            // The slow-path RPC is live-router-only today, so feeding a stable
-            // synthetic ID here is safe: mocker policies that go through the
-            // slow path would short-circuit on missing FPM lookups anyway.
-            decode_chosen_worker_id: lhs.worker_idx as u64,
-            decode_chosen_dp_rank: 0,
-            prefill_chosen_worker_id: None,
-            prefill_chosen_dp_rank: None,
-        };
-
-        // The trait method is async to support policies that consult an
-        // external service (e.g. Regression's NATS round-trip in the live
-        // router). The mocker has no tokio reactor and current policies
-        // available here (TokenCap, future Regression mocker-side via PyO3)
-        // produce a ready future, so the wrapping cost is negligible.
-        if futures::executor::block_on(
-            self.conditional_prefill_policy
-                .should_bypass_remote_prefill(input),
-        ) {
-            Ok(Some(lhs.worker_idx))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Peek the prefill router and return the chosen-worker
-    /// `(tier_overlap_credit_blocks, decode_blocks)` components. Returns
-    /// `(None, None)` if the prefill router is absent.
-    ///
-    /// Offline only models the device tier, so the tier credit collapses to
-    /// `device_overlap_blocks` as `f64`.
-    fn peek_prefill_chosen_components(
-        &mut self,
-        request: &DirectRequest,
-        replay_hashes: &Option<ReplayRequestHashes>,
-    ) -> Result<(Option<f64>, Option<usize>)> {
-        let Some(prefill_router) = self.prefill_router.as_mut() else {
-            return Ok((None, None));
-        };
-        let peek =
-            prefill_router.peek_request(request, replay_hashes.clone(), None, self.now_ms)?;
-        // Mocker doesn't yet plumb per-worker load snapshots into the input
-        // (Phase 5 — mocker integration). Return None for the load component
-        // so the policy's slow path proceeds with conservative-DISAGG fallback
-        // when load info is required.
-        Ok((Some(peek.overlap_blocks as f64), None))
-    }
-
-    /// Bypass remote prefill: pin the request to the probe-chosen decode
-    /// worker, admit through the decode router for slot tracking, and
-    /// dispatch directly to the decode engine.
-    fn handle_conditional_prefill_bypass(
-        &mut self,
-        uuid: Uuid,
-        worker_idx: usize,
-        request: &DirectRequest,
-        replay_hashes: Option<ReplayRequestHashes>,
-    ) -> Result<()> {
-        self.decode_router
-            .as_mut()
-            .expect("decode router presence checked")
-            .admit_pinned(request, replay_hashes, worker_idx, self.now_ms)?;
-        self.record_router_pending();
-        self.collector.on_conditional_prefill_bypass();
-        // dispatch_decode transitions state to RunningDecode without
-        // requiring a prior QueuedDecode phase, since `start_decode` is an
-        // unconditional setter.
-        self.dispatch_decode(uuid, worker_idx)?;
-        Ok(())
     }
 
     /// Return true once both stages, both routers, and all admissions are fully drained.
@@ -889,19 +698,7 @@ impl DisaggRuntime {
             .admission
             .drain_ready(self.now_ms, self.cluster_in_flight())?
         {
-            let ReadyArrival {
-                request,
-                arrival_time_ms,
-                replay_hashes,
-                session_id,
-                turn_index,
-            } = ready;
-            let session_metadata = session_id.zip(turn_index);
-            let uuid = self.on_external_arrival(request, arrival_time_ms, replay_hashes)?;
-            if let Some((session_id, turn_index)) = session_metadata {
-                self.collector
-                    .on_session_metadata(uuid, session_id, turn_index);
-            }
+            self.on_external_arrival(ready.request, ready.arrival_time_ms, ready.replay_hashes)?;
             released_any = true;
         }
         Ok(released_any)

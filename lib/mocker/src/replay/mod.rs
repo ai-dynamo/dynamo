@@ -23,8 +23,8 @@ pub(crate) use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
 pub use collector::{
-    PerRequestRecord, TraceDistributionStats, TraceInterTokenLatencyStats, TraceLatencyStats,
-    TraceRequestCounts, TraceSimulationReport, TraceThroughputStats,
+    TraceDistributionStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
+    TraceSimulationReport, TraceThroughputStats,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
