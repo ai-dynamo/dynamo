@@ -320,6 +320,7 @@ impl PrefillRouter {
                         block_mm_infos,
                         None,
                         update_states,
+                        false,
                         lora_name,
                         priority_jump,
                         None,

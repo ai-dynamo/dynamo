@@ -503,7 +503,7 @@ mod tests {
         );
     }
 
-    // ----- Explicit N/A coverage notes (per lib/parsers/PARSER_CASES.md) -----
+    // ----- Explicit N/A coverage notes (per lib/parsers/TOOLCALLING_CASES.md) -----
     //
     // REASONING.batch.1.a/c/d — empty, whitespace-only, and null/missing
     //          input variants are not Gemma-specific.
@@ -512,6 +512,6 @@ mod tests {
     //          see notes in `tool_calling/gemma4/parser.rs`.)
     // REASONING.batch.6.* — Multi-span reasoning is covered by
     //          `streaming_multiple_reasoning_spans`.
-    // PARSER.xml.1 / PARSER.xml.2 — XML-family only. N/A.
-    // PARSER.harmony.1 / PARSER.harmony.2 — Harmony only. N/A.
+    // TOOLCALLING.xml.1 / TOOLCALLING.xml.2 — XML-family only. N/A.
+    // TOOLCALLING.harmony.1 / TOOLCALLING.harmony.2 — Harmony only. N/A.
 }

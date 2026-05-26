@@ -54,7 +54,6 @@ kubectl apply -f data-gen/generate-datasets-job.yaml -n ${NAMESPACE}
    - `storageClassName: "your-storage-class-name"` in `model-cache/model-cache.yaml`
    - `image: <your-dynamo-image>` in all `vllm/*/deploy.yaml` files
    - `NAMESPACE=your-namespace` and `HF_TOKEN="your-token"` in the setup commands
-
 ## Directory setup
 
 This recipe has three top-level components: `model-cache/` for PVC/model prep, `data-gen/` for dataset creation, and `vllm/agg-embedding-cache/` for deployment and benchmarking with [AIPerf](https://github.com/ai-dynamo/aiperf).

@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v4
+model_label: DeepSeek V4
+mode: stream
+cases:
+  TOOLCALLING.stream.2:
+    description: Multiple tool calls split across multiple content chunks
+    ref: derived from TOOLCALLING.batch.2.a
+    chunks:
+    - delta_text: <｜DSML｜to
+    - delta_text: ol_call
+    - delta_text: |-
+        s>
+        <｜DSML｜inv
+    - delta_text: oke n
+    - delta_text: ame="get_weather"
+    - delta_text: |-
+        >
+        <
+    - delta_text: ｜DSML｜par
+    - delta_text: 'ameter '
+    - delta_text: name="locatio
+    - delta_text: n" st
+    - delta_text: ring="true">NYC</
+    - delta_text: ｜DS
+    - delta_text: ML｜parame
+    - delta_text: |-
+        ter>
+        </
+    - delta_text: ｜DSML｜invoke>
+    - delta_text: |2-
+
+        <｜DS
+    - delta_text: ML｜invoke name="g
+    - delta_text: et_
+    - delta_text: |-
+        time">
+        <｜
+    - delta_text: DSML｜pa
+    - delta_text: rameter name=
+    - delta_text: '"time'
+    - delta_text: zone" string="tru
+    - delta_text: e">
+    - delta_text: EST</｜DSM
+    - delta_text: L｜param
+    - delta_text: |-
+        eter>
+        </｜DSML
+    - delta_text: ｜invo
+    - delta_text: |-
+        ke>
+        </｜DSML｜tool_
+    - delta_text: cal
+    - delta_text: ls>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+      vllm: *id001
