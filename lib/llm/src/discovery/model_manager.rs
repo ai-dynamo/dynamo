@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{
@@ -26,7 +29,7 @@ use crate::{
         KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
         shared_cache::HicacheSharedKvCache,
     },
-    local_model::runtime_config::{DisaggregatedEndpoint, topology_taint},
+    local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -1091,13 +1094,7 @@ impl ModelManager {
             return false;
         };
         let configs = rx.borrow();
-        configs.values().any(|config| {
-            config.kv_transfer_domain.is_some()
-                && matches!(
-                    config.kv_transfer_enforcement,
-                    Some(KvTransferEnforcement::Required)
-                )
-        })
+        has_required_kv_transfer_policy(&configs)
     }
 
     /// Build topology routing constraints from a selected prefill worker's metadata.
@@ -1119,6 +1116,12 @@ impl ModelManager {
                 worker_ids = ?configs.keys().collect::<Vec<_>>(),
                 "selected prefill worker missing from runtime configs for topology routing"
             );
+            if has_required_kv_transfer_policy(&configs) {
+                anyhow::bail!(
+                    "selected prefill worker {worker_id} missing from runtime configs for endpoint {endpoint_id}; \
+                     cannot derive KV transfer topology constraints for required policy"
+                );
+            }
             return Ok(None);
         };
         let Some(domain) = config.kv_transfer_domain.as_deref() else {
@@ -1162,6 +1165,15 @@ impl ModelManager {
 
         Ok(Some(constraints))
     }
+}
+
+fn has_required_kv_transfer_policy(configs: &HashMap<WorkerId, ModelRuntimeConfig>) -> bool {
+    configs.values().any(|config| {
+        matches!(
+            config.kv_transfer_enforcement,
+            Some(KvTransferEnforcement::Required)
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1272,6 +1284,42 @@ mod tests {
             )]),
         );
         assert!(mm.has_kv_transfer_required_routing_policy(&endpoint_id));
+    }
+
+    #[test]
+    fn kv_transfer_constraints_missing_selected_worker_fails_closed_for_required_policy() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let missing_worker_id = 99;
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Preferred, Some(0.85)),
+            )]),
+        );
+        assert!(
+            mm.get_kv_transfer_routing_constraints(&endpoint_id, missing_worker_id)
+                .unwrap()
+                .is_none()
+        );
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Required, None),
+            )]),
+        );
+        let err = mm
+            .get_kv_transfer_routing_constraints(&endpoint_id, missing_worker_id)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("selected prefill worker 99 missing from runtime configs"));
+        assert!(err.contains("required policy"));
     }
 
     // -- CRUD delegation tests --
