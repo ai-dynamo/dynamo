@@ -60,7 +60,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg": TopologyConfig(
                 marks=[pytest.mark.post_merge, pytest.mark.xpu_1],
                 # TODO: re-enable XPU-parallel scheduling with
-                # profiled_vram_gib=9.6 once this has a bounded --kv-bytes profile.                
+                # profiled_vram_gib=9.6 once this has a bounded --kv-bytes profile.
                 timeout_s=300,
                 tests=[
                     # Vanilla / baseline single-XPU multimodal smoke
@@ -318,7 +318,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # workers, one per GPU on the gpu_2 runner (no SINGLE_GPU
             # packing — 7B × 2 would exceed 24 GiB on a single card). Each
             # worker peaks ~19 GiB; the 24 GiB L4 tier has headroom.
-            
             # Skipped: LLaVA-1.5 on vLLM 0.20 is flaky — the model
             # degenerates into "No." / newline-padded output even at
             # temperature=0 (see PR #9336 for the e_pd manifestation
