@@ -296,6 +296,7 @@ impl KvPushRouter {
         request: &PreprocessedRequest,
         phase: RequestPhase,
         is_query_only: bool,
+        sticky_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
@@ -307,7 +308,10 @@ impl KvPushRouter {
             .and_then(|r| r.routing_constraints.clone())
             .unwrap_or_default();
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
-        let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
+        let sticky_pin = sticky_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let Some((pinned_worker_id, requested_dp_rank)) =
+            pinned_worker_hint(phase, routing).or(sticky_pin)
+        else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .chooser
@@ -363,7 +367,7 @@ impl KvPushRouter {
             .or_else(|| self.chooser.unique_dp_rank_for_worker(pinned_worker_id))
             .map(|dp_rank| WorkerWithDpRank::new(pinned_worker_id, dp_rank));
 
-        if !is_query_only && let Some(pinned_worker) = resolved_pinned_worker {
+        if let Some(pinned_worker) = resolved_pinned_worker {
             let selection = self
                 .chooser
                 .find_best_match_details(
@@ -371,7 +375,7 @@ impl KvPushRouter {
                     routing_token_ids,
                     block_mm_infos,
                     request.router_config_override.as_ref(),
-                    true,
+                    !is_query_only,
                     lora_name.clone(),
                     priority_jump,
                     expected_output_tokens,
@@ -391,7 +395,7 @@ impl KvPushRouter {
                 overlap_amount,
                 effective_overlap_blocks,
                 cached_tokens,
-                scheduler_tracked: true,
+                scheduler_tracked: !is_query_only,
             });
         }
 
@@ -502,15 +506,25 @@ impl KvPushRouter {
             return None;
         }
 
-        // Open/close lifecycle actions only peek so failed opens or closes do not
-        // renew stale affinity. Action-less session turns refresh TTL as active use.
-        match sc.action.as_ref() {
-            Some(crate::protocols::openai::nvext::SessionAction::Open)
-            | Some(crate::protocols::openai::nvext::SessionAction::Close) => {
-                self.sticky_sessions.peek_session(&sc.session_id)
-            }
-            None => self.sticky_sessions.resolve_session(&sc.session_id),
+        self.sticky_sessions.peek_session(&sc.session_id)
+    }
+
+    pub(crate) fn refresh_sticky_worker_for_phase(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+    ) {
+        let Some(routing) = request.routing.as_ref() else {
+            return;
+        };
+        let Some(sc) = routing.session_control.as_ref() else {
+            return;
+        };
+        if sc.action.is_some() || !sticky_allowed_for_phase(phase, Some(routing)) {
+            return;
         }
+
+        self.sticky_sessions.resolve_session(&sc.session_id);
     }
 
     pub(crate) async fn validate_sticky_worker_for_phase(
@@ -520,10 +534,8 @@ impl KvPushRouter {
         phase: RequestPhase,
         worker: WorkerWithDpRank,
     ) -> Result<WorkerWithDpRank, Error> {
-        let mut validation_request = request.clone();
-        write_sticky_backend_pin(&mut validation_request, worker);
         let selection = self
-            .select_worker(context_id, &validation_request, phase, true)
+            .select_worker(context_id, request, phase, true, Some(worker))
             .await?;
         Ok(WorkerWithDpRank::new(
             selection.instance_id,
@@ -557,7 +569,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
-        mut request: SingleIn<PreprocessedRequest>,
+        request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
@@ -572,23 +584,41 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .map(|t| t.phase())
             .unwrap_or(RequestPhase::Aggregated);
 
-        // Pin a bound session to its (worker, dp_rank) before selection so it
-        // stays on the rank where its prefix is warm. Pinning dp_rank (not just
-        // the worker) is what stops a multi-rank engine from drifting the
-        // conversation across ranks. All sticky work is gated on session_control
-        // so ordinary requests stay on the existing path.
-        if let Some(worker) = self.sticky_worker_for_phase(&request, phase) {
-            write_sticky_backend_pin(&mut request, worker);
-        }
-
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
 
         let block_size = self.chooser.block_size() as usize;
-        let selection = self
-            .select_worker(&context_id, &request, phase, is_query_only)
+        // Treat sticky affinity as a best-effort candidate. The scheduler still
+        // validates the candidate against current worker eligibility before it
+        // becomes the route; if validation fails, fall back to normal routing.
+        let sticky_worker = self.sticky_worker_for_phase(&request, phase);
+        let selection = match self
+            .select_worker(&context_id, &request, phase, is_query_only, sticky_worker)
             .instrument(tracing::info_span!("kv_router.select_worker"))
-            .await?;
+            .await
+        {
+            Ok(selection) => {
+                if sticky_worker.is_some() && !is_query_only {
+                    self.refresh_sticky_worker_for_phase(&request, phase);
+                }
+                selection
+            }
+            Err(error) if sticky_worker.is_some() => {
+                if let Some(worker) = sticky_worker {
+                    tracing::warn!(
+                        request_id = %context_id,
+                        worker_id = worker.worker_id,
+                        dp_rank = worker.dp_rank,
+                        error = %error,
+                        "Sticky worker failed validation; falling back to normal routing"
+                    );
+                }
+                self.select_worker(&context_id, &request, phase, is_query_only, None)
+                    .instrument(tracing::info_span!("kv_router.select_worker_fallback"))
+                    .await?
+            }
+            Err(error) => return Err(error),
+        };
         let WorkerSelection {
             instance_id,
             dp_rank,
@@ -871,6 +901,7 @@ fn sticky_allowed_for_phase(phase: RequestPhase, routing: Option<&RoutingHints>)
     }
 }
 
+#[cfg(test)]
 fn write_sticky_backend_pin(request: &mut PreprocessedRequest, worker: WorkerWithDpRank) {
     let routing = request.routing_mut();
     routing.backend_instance_id = Some(worker.worker_id);

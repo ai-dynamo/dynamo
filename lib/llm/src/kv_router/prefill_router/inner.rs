@@ -87,4 +87,10 @@ impl InnerPrefillRouter {
             InnerPrefillRouter::SimpleRouter(_) => Ok(worker),
         }
     }
+
+    pub(super) fn refresh_sticky_prefill_worker(&self, request: &PreprocessedRequest) {
+        if let InnerPrefillRouter::KvRouter(router) = self {
+            router.refresh_sticky_worker_for_phase(request, RequestPhase::Prefill);
+        }
+    }
 }

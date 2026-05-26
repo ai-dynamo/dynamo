@@ -2259,6 +2259,18 @@ def _test_disagg_background_prefill_sticky_routing(
                 timeout=120,
             )
 
+            runtime = get_runtime(
+                store_backend=store_backend, request_plane=request_plane
+            )
+            prefill_endpoint = runtime.endpoint(
+                f"{prefill_workers.namespace}.prefill.generate"
+            )
+            await poll_for_worker_instances(
+                prefill_endpoint,
+                prefill_workers.num_workers,
+                max_wait_time=120,
+            )
+
             suffix = random.randint(100_000, 999_999)
             session_a = f"sticky-a-{suffix}"
             session_b = f"sticky-b-{suffix}"

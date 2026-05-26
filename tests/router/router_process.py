@@ -103,7 +103,7 @@ class FrontendRouterProcess(ManagedProcess):
         env["DYN_REQUEST_PLANE"] = request_plane
         if event_plane is not None:
             env["DYN_EVENT_PLANE"] = event_plane
-        if event_plane == "zmq":
+        if event_plane == "zmq" and request_plane != "nats":
             env.pop("NATS_SERVER", None)
         if min_initial_workers is not None:
             env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = str(min_initial_workers)
