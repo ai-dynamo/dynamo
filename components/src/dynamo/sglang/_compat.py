@@ -17,7 +17,7 @@ fallback and any associated polyfills.
 Runtime data-contract notes (not code-level shims):
 
 * ``meta_info["routed_experts"]`` is a base64 UTF-8 string from sglang
-  >= 0.5.11 (sgl-project/sglang#21634). Pass through; do not re-encode.
+  >= 0.5.11. Pass through; do not re-encode.
 """
 
 import inspect
