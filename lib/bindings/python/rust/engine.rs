@@ -375,7 +375,8 @@ const BIDIRECTIONAL_INPUT_CHANNEL_DEPTH: usize = 8;
 
 /// Rust-side adapter that bridges a Python `async def generate(request_stream, context)`
 /// callable into an [`AsyncEngine`] of the streaming-input / streaming-output
-/// shape (`ManyIn<serde_json::Value>` → `ManyOut<serde_json::Value>`).
+/// shape (`ManyIn<serde_json::Value>` →
+/// `ManyOut<Annotated<serde_json::Value>>`).
 ///
 /// The adapter:
 ///
@@ -391,11 +392,16 @@ const BIDIRECTIONAL_INPUT_CHANNEL_DEPTH: usize = 8;
 ///    wraps the returned async generator with
 ///    [`pyo3_async_runtimes::tokio::into_stream_with_locals_v1`] to obtain
 ///    a Rust `Stream<Item = PyResult<PyObject>>`.
-/// 3. Depythonizes each item into a `serde_json::Value` and forwards it on
-///    the response stream.
+/// 3. Depythonizes each item into a `serde_json::Value`, wraps it as
+///    `Annotated::from_data(value)`, and forwards it on the response
+///    stream. The `Annotated` envelope satisfies the `MaybeError` bound
+///    on the response side; the Python user still writes engines that
+///    yield plain dicts.
 ///
-/// Wire types are fixed to `serde_json::Value` — the Python user works
-/// with dicts on both sides and any schema enforcement lives in Python.
+/// Wire types are fixed to `serde_json::Value` on the request side and
+/// `Annotated<serde_json::Value>` on the response side — the Python user
+/// works with dicts on both sides and any schema enforcement lives in
+/// Python.
 pub struct PythonBidirectionalEngine {
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
@@ -421,13 +427,13 @@ impl PythonBidirectionalEngine {
 }
 
 #[async_trait::async_trait]
-impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<serde_json::Value>, Error>
+impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
     for PythonBidirectionalEngine
 {
     async fn generate(
         &self,
         input: ManyIn<serde_json::Value>,
-    ) -> Result<ManyOut<serde_json::Value>, Error> {
+    ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
         let request_id = input.context().id().to_string();
         let ctx = input.context();
         let metadata = input.metadata().clone();
@@ -510,7 +516,7 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<serde_json::Value>, Error>
 
         let stream = Box::pin(stream);
 
-        let (resp_tx, resp_rx) = mpsc::channel::<serde_json::Value>(128);
+        let (resp_tx, resp_rx) = mpsc::channel::<Annotated<serde_json::Value>>(128);
         let response_request_id = request_id.clone();
         let response_ctx = ctx.clone();
         tokio::spawn(async move {
@@ -559,7 +565,7 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<serde_json::Value>, Error>
                     }
                 };
 
-                if resp_tx.send(value).await.is_err() {
+                if resp_tx.send(Annotated::from_data(value)).await.is_err() {
                     tracing::debug!(
                         request_id = %response_request_id,
                         "bidirectional response channel closed; exiting response task"

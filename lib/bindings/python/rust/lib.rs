@@ -85,6 +85,9 @@ mod prometheus_metrics;
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
 
+type JsonBidirectionalIngress =
+    Ingress<rs::pipeline::ManyIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+
 static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
@@ -1029,6 +1032,53 @@ impl Endpoint {
 
         // Register the engine in the local endpoint registry for in-process calls
         builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+
+        let graceful_shutdown = graceful_shutdown.unwrap_or(true);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            builder
+                .graceful_shutdown(graceful_shutdown)
+                .start()
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    /// Serve a bidirectional (streaming-input, streaming-output) endpoint.
+    ///
+    /// The handler is a Python `async def generate(request_stream)` or
+    /// `async def generate(request_stream, context)` coroutine that
+    /// returns an async generator. `request_stream` is a
+    /// [`PyAsyncRequestStream`] yielding inbound frames as plain Python
+    /// objects (dicts/lists/etc., the depythonization of
+    /// `serde_json::Value`). The generator yields response frames as
+    /// plain Python objects that are then pythonized back to JSON values
+    /// on the wire.
+    ///
+    /// Request-stream end (when `__anext__` raises `StopAsyncIteration`)
+    /// is *not* a cancellation signal: the caller has merely stopped
+    /// sending input. The engine must keep yielding response chunks until
+    /// it chooses to return or observes `context.is_stopped()`.
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
+    fn serve_bidirectional_endpoint<'p>(
+        &self,
+        py: Python<'p>,
+        generator: PyObject,
+        graceful_shutdown: Option<bool>,
+        metrics_labels: Option<Vec<(String, String)>>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let engine = Arc::new(engine::PythonBidirectionalEngine::new(
+            generator,
+            self.event_loop.clone(),
+        )?);
+        let ingress: Arc<JsonBidirectionalIngress> =
+            Ingress::for_engine(engine).map_err(to_pyerr)?;
+
+        let builder = self
+            .inner
+            .endpoint_builder()
+            .metrics_labels(metrics_labels)
+            .handler(ingress);
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
