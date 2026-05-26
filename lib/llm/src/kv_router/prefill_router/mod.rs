@@ -139,7 +139,12 @@ impl
                 bootstrap_info,
             } => {
                 // Bootstrap optimization path: spawn prefill in background
-                self.commit_selected_prefill_worker(&mut prefill_req, worker_id, dp_rank);
+                self.commit_selected_prefill_worker(
+                    &mut prefill_req,
+                    worker_id,
+                    dp_rank,
+                    preselected_worker,
+                );
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 // NVBugs 5969206: Do NOT link prefill as child of engine context.
@@ -203,6 +208,7 @@ impl
                     &mut prefill_req,
                     resolved_wid,
                     resolved_dp_rank,
+                    preselected_worker,
                 );
 
                 drop(prefill_phase_barrier);
@@ -373,10 +379,14 @@ impl PrefillRouter {
         prefill_req: &mut PreprocessedRequest,
         worker_id: u64,
         dp_rank: Option<u32>,
+        preselected_worker: Option<u64>,
     ) {
-        // SimpleRouter selection was peeked during resolve_prefill_worker, so
-        // advance once before direct routing to preserve router state semantics.
-        if !self.router_mode.is_kv_routing()
+        // SimpleRouter workers selected by resolve_prefill_worker are peeked first,
+        // so advance once when committing that router-selected worker. Externally
+        // preselected workers did not come from the router cursor and must not
+        // advance round-robin state.
+        if preselected_worker.is_none()
+            && !self.router_mode.is_kv_routing()
             && let Some(router) = self.prefill_router.get()
         {
             router.select_next_worker();
