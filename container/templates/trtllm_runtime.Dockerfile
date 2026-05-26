@@ -77,8 +77,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ldconfig && \
     rm -f /usr/local/bin/etcd && \
     mkdir -p /opt/dynamo && \
-    test -f "/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6" && \
-    ln -sf "/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6" /opt/dynamo/libstdc++.so.6
+    LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
+    test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
@@ -104,17 +104,15 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:${PATH}
 {% endif %}
 
+# Place wheels in /opt/dynamo/wheelhouse unconditionally — dev/local-dev images
+# install from source and skip the pip install RUN below, but they still need
+# the wheels on disk because tests/dependencies/test_kvbm_imports.py greps
+# this path and runs in dev-derived test images.
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+
 {% if target not in ("dev", "local-dev") %}
-# Persist wheels in /opt/dynamo/wheelhouse (tests/dependencies/test_kvbm_imports.py
-# greps for them) while installing them in the same RUN — saves the standalone
-# COPY layer for *.whl.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
-    --mount=type=bind,from=wheel_builder,source=/opt/dynamo/dist,target=/tmp/wheels \
-    mkdir -p /opt/dynamo/wheelhouse && \
-    cp /tmp/wheels/*.whl /opt/dynamo/wheelhouse/ && \
-    chown -R dynamo:0 /opt/dynamo/wheelhouse && \
-    chmod -R 775 /opt/dynamo/wheelhouse && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     \
     # Dynamo's own wheels — --no-deps preserves upstream's solve.
