@@ -12,7 +12,7 @@
   .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 400; fill: #cdcdcd; }
 </style>
 <text class="title" x="40" y="58">Snapshot restore vs cold start (unoptimized)</text>
-<text class="subtitle" x="40" y="88">Single-GPU (1xB200)</text>
+<text class="subtitle" x="40" y="88">Single-GPU (1xB200) | Checkpoint stored on NFS</text>
 <line x1="260.0" y1="160" x2="260.0" y2="630" stroke="#1a1a1a" stroke-width="1"/>
 <text class="axis" x="260.0" y="648" text-anchor="middle">0s</text>
 <line x1="379.2" y1="160" x2="379.2" y2="630" stroke="#1a1a1a" stroke-width="1"/>
