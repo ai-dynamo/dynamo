@@ -1,0 +1,220 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3-32B BF16 disagg, 1 prefill + 1 decode, cross-node over Nscale NDR InfiniBand.
+# Purpose: measure NIXL KV-transfer bandwidth over UCX/IB backend on Blackwell (B200).
+# Topology: TP=8 prefill on node A, TP=8 decode on node B (pod anti-affinity).
+# Each worker requests rdma/ib: "1" which (per NVIDIA Network Operator shared-device
+# plugin convention) grants access to all 8 NDR HCAs via /dev/infiniband/*.
+#
+# Hardware: Nscale dynamo-nscale-dev-cluster, 8x B200 (192 GB HBM) + 8x NDR IB per node.
+# Image: standard vllm-runtime:1.1.1 (vLLM v0.19.0, CUDA 12.9) — covers SM 10.0 (B200).
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-nscale-ib
+spec:
+  pvcs:
+  - create: false
+    name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /shared-models
+      extraPodSpec:
+        mainContainer:
+          # The vllm-runtime:1.1.1 image has a built-in ENTRYPOINT for the frontend
+          # role. Explicit `python -m dynamo.frontend` makes the Rust binary parse
+          # those as args and crash with "Unknown arguments specified".
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests: { cpu: "4" }
+        limits:   { cpu: "8" }
+      subComponentType: null
+      volumeMounts:
+      - name: shared-model-cache
+        mountPoint: /shared-models
+
+    VllmPrefillWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+      extraPodSpec:
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [worker]
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}'
+          - --tensor-parallel-size
+          - '4'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.70'
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          # --- NIXL telemetry + UCX defaults (no explicit backend toggle: UCX is the default) ---
+          - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
+          # --- UCX over NDR IB (8 HCAs) ---
+          - { name: UCX_TLS,         value: "rc,cuda_copy,cuda_ipc" }
+          - { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }
+          - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
+          - { name: UCX_LOG_LEVEL,   value: "trace" }
+          - { name: UCX_PROTO_INFO,  value: "y" }
+          - { name: NCCL_IB_HCA,     value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
+          - { name: NCCL_DEBUG,      value: "INFO" }
+          # --- Dynamo / vLLM ---
+          - { name: DYN_HEALTH_CHECK_ENABLED,  value: "false" }
+          - { name: HF_HOME,                   value: /shared-models }
+          - { name: VLLM_LOGGING_LEVEL,        value: "INFO" }
+          volumeMounts:
+          - { name: ib,  mountPath: /dev/infiniband }
+          - { name: shm, mountPath: /dev/shm }
+        volumes:
+        - name: ib
+          hostPath: { path: /dev/infiniband }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 64Gi }
+      replicas: 1
+      resources:
+        limits:
+          gpu: '4'
+          custom:
+            rdma/ib: "1"
+        requests:
+          gpu: '4'
+          custom:
+            rdma/ib: "1"
+            ephemeral-storage: "2Gi"
+      subComponentType: prefill
+      volumeMounts:
+      - name: shared-model-cache
+        mountPoint: /shared-models
+
+    VllmDecodeWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+      extraPodSpec:
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [worker]
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}'
+          - --tensor-parallel-size
+          - '4'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.70'
+          - --no-enable-prefix-caching
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
+          - { name: UCX_TLS,         value: "rc,cuda_copy,cuda_ipc" }
+          - { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }
+          - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
+          - { name: UCX_LOG_LEVEL,   value: "trace" }
+          - { name: UCX_PROTO_INFO,  value: "y" }
+          - { name: NCCL_IB_HCA,     value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
+          - { name: NCCL_DEBUG,      value: "INFO" }
+          - { name: DYN_HEALTH_CHECK_ENABLED,  value: "false" }
+          - { name: HF_HOME,                   value: /shared-models }
+          - { name: VLLM_LOGGING_LEVEL,        value: "INFO" }
+          volumeMounts:
+          - { name: ib,  mountPath: /dev/infiniband }
+          - { name: shm, mountPath: /dev/shm }
+        volumes:
+        - name: ib
+          hostPath: { path: /dev/infiniband }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 64Gi }
+      replicas: 1
+      resources:
+        limits:
+          gpu: '4'
+          custom:
+            rdma/ib: "1"
+        requests:
+          gpu: '4'
+          custom:
+            rdma/ib: "1"
+            ephemeral-storage: "2Gi"
+      subComponentType: decode
+      volumeMounts:
+      - name: shared-model-cache
+        mountPoint: /shared-models

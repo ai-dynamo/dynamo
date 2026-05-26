@@ -1,0 +1,219 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3-32B BF16 disagg, 1 prefill + 1 decode, cross-node over GCP A4X (GB200 NVL72) RoCEv2.
+# Purpose: measure NIXL KV-transfer bandwidth over UCX/RoCE backend on GKE.
+# Topology: TP=4 prefill on node A, TP=4 decode on node B (pod anti-affinity).
+# A4X nodes expose 4 GPUs and 4 ConnectX-7 RDMA NICs per node (not 8 like A3 Ultra / A4).
+#
+# Critical GKE-A4X specifics (vs. AWS EFA template):
+#   - RDMA NICs are attached via pod-level Multus annotation
+#     `networking.gke.io/interfaces`, NOT a `resources.limits.custom` key.
+#   - NCCL/RDMA libs come from host hostPaths (`/home/kubernetes/bin/gib`,
+#     `/home/kubernetes/bin/nvidia`) mounted into the pod and pulled in via
+#     LD_LIBRARY_PATH. GIB DaemonSet must be installed cluster-side.
+#   - UCX is the NIXL backend (no libfabric/EFA env). UCX_NET_DEVICES lists
+#     mlx5_0..mlx5_3 (4 NICs).
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-gke-roce
+spec:
+  pvcs:
+  - create: false
+    name: model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /shared-models
+      extraPodSpec:
+        mainContainer:
+          command: [python, -m, dynamo.frontend]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests: { cpu: "4" }
+        limits:   { cpu: "8" }
+      subComponentType: null
+
+    VllmPrefillWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+          networking.gke.io/default-interface: "eth0"
+          networking.gke.io/interfaces: |
+            [{"interfaceName":"eth0","network":"default"},
+             {"interfaceName":"eth2","network":"rdma-0"},
+             {"interfaceName":"eth3","network":"rdma-1"},
+             {"interfaceName":"eth4","network":"rdma-2"},
+             {"interfaceName":"eth5","network":"rdma-3"}]
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [worker]
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - --tensor-parallel-size
+          - '4'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          # --- NIXL telemetry (transport-neutral) ---
+          - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+          # --- UCX backend over RoCE (NIXL default; no DYN_KVBM_NIXL_BACKEND_* needed) ---
+          - { name: UCX_TLS,            value: "rc,cuda_copy,cuda_ipc" }
+          - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
+          - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
+          - { name: NCCL_CROSS_NIC,     value: "0" }
+          # --- GKE NCCL/GIB plugin + driver libs (mounted from host) ---
+          - { name: LD_LIBRARY_PATH,    value: "/usr/local/gib/lib64:/usr/local/nvidia/lib64" }
+          - { name: NCCL_DEBUG,         value: "WARN" }
+          # --- Dynamo / vLLM ---
+          - { name: DYN_HEALTH_CHECK_ENABLED, value: "false" }
+          - { name: HF_HOME,                  value: /shared-models }
+          - { name: VLLM_LOGGING_LEVEL,       value: "INFO" }
+          volumeMounts:
+          - { name: gib,    mountPath: /usr/local/gib }
+          - { name: nvidia, mountPath: /usr/local/nvidia }
+      replicas: 1
+      resources:
+        limits:
+          gpu: '4'
+        requests:
+          gpu: '4'
+          custom:
+            ephemeral-storage: "2Gi"
+      subComponentType: prefill
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /shared-models
+      volumes:
+      - name: gib
+        hostPath: { path: /home/kubernetes/bin/gib }
+      - name: nvidia
+        hostPath: { path: /home/kubernetes/bin/nvidia }
+
+    VllmDecodeWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+          networking.gke.io/default-interface: "eth0"
+          networking.gke.io/interfaces: |
+            [{"interfaceName":"eth0","network":"default"},
+             {"interfaceName":"eth2","network":"rdma-0"},
+             {"interfaceName":"eth3","network":"rdma-1"},
+             {"interfaceName":"eth4","network":"rdma-2"},
+             {"interfaceName":"eth5","network":"rdma-3"}]
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [worker]
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - --tensor-parallel-size
+          - '4'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --no-enable-prefix-caching
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+          - { name: UCX_TLS,            value: "rc,cuda_copy,cuda_ipc" }
+          - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
+          - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
+          - { name: NCCL_CROSS_NIC,     value: "0" }
+          - { name: LD_LIBRARY_PATH,    value: "/usr/local/gib/lib64:/usr/local/nvidia/lib64" }
+          - { name: NCCL_DEBUG,         value: "WARN" }
+          - { name: DYN_HEALTH_CHECK_ENABLED, value: "false" }
+          - { name: HF_HOME,                  value: /shared-models }
+          - { name: VLLM_LOGGING_LEVEL,       value: "INFO" }
+          volumeMounts:
+          - { name: gib,    mountPath: /usr/local/gib }
+          - { name: nvidia, mountPath: /usr/local/nvidia }
+      replicas: 1
+      resources:
+        limits:
+          gpu: '4'
+        requests:
+          gpu: '4'
+          custom:
+            ephemeral-storage: "2Gi"
+      subComponentType: decode
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /shared-models
+      volumes:
+      - name: gib
+        hostPath: { path: /home/kubernetes/bin/gib }
+      - name: nvidia
+        hostPath: { path: /home/kubernetes/bin/nvidia }

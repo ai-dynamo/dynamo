@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Benchmark for q32b-1p1d-nscale-ib. Uses the Mooncake conversation trace
+# (the same workload the other qwen3-32b recipes use) so cross-recipe
+# comparison is apples-to-apples. Drives high client concurrency to keep
+# the NDR-IB NIXL KV transfer pipeline saturated.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: q32b-1p1d-nscale-ib-benchmark
+  labels:
+    app: benchmark
+spec:
+  restartPolicy: Never
+  containers:
+  - name: python
+    image: python:3.11
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        set -euo pipefail
+        ulimit -n 1048576 || true
+        ulimit -u 65536  || true
+        apt-get update -y && apt-get install -y --no-install-recommends tmux wget curl jq
+
+        pip install --no-cache-dir aiperf==0.6.0
+
+        echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
+        until curl -s "http://${FRONTEND}:8000/v1/models" | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+          echo "[$(date '+%H:%M:%S')] Model not ready, retrying in 5s..."
+          sleep 5
+        done
+        echo "Model ready."
+
+        mkdir -p "${BASE_DIR}/traces" "${BASE_DIR}/artifacts"
+        if [ ! -f "${BASE_DIR}/traces/conversation_trace.jsonl" ]; then
+          wget -qO "${BASE_DIR}/traces/conversation_trace.jsonl" \
+            https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/conversation_trace.jsonl
+        fi
+
+        export INPUT_FILE="${BASE_DIR}/traces/conversation_trace.jsonl"
+        export MODEL_BASE_NAME="${MODEL_NAME##*/}"
+        export ARTIFACT_DIR="${BASE_DIR}/artifacts/${MODEL_BASE_NAME}_${VARIANT_SLUG}_$(date +%Y%m%d-%H%M)"
+        mkdir -p "${ARTIFACT_DIR}"
+
+        tmux new-session -d -s benchmark -c "${ARTIFACT_DIR}"
+        tmux send-keys -t benchmark "aiperf profile \
+            -m ${MODEL_NAME} \
+            --input-file ${INPUT_FILE} \
+            --custom-dataset-type mooncake_trace \
+            --fixed-schedule \
+            --url http://${FRONTEND}:8000 \
+            --streaming \
+            --artifact-dir ${ARTIFACT_DIR} \
+            --goodput 'time_to_first_token:2000 inter_token_latency:25' 2>&1 | tee ${ARTIFACT_DIR}/aiperf.log" C-m
+
+        sleep 7200
+    env:
+    - { name: MODEL_NAME,    value: Qwen/Qwen3-32B }
+    - { name: FRONTEND,      value: q32b-1p1d-nscale-ib-frontend }
+    - { name: BASE_DIR,      value: /perf-cache }
+    - { name: VARIANT_SLUG,  value: nscale-ib }
+    resources:
+      requests: { cpu: "8",  memory: 16Gi }
+      limits:   { cpu: "16", memory: 32Gi }
+    volumeMounts:
+    - { name: perf-cache,  mountPath: /perf-cache }
+    - { name: shared-model-cache, mountPath: /shared-models }
+    workingDir: /workspace
+  volumes:
+  - name: perf-cache
+    persistentVolumeClaim: { claimName: perf-cache }
+  - name: shared-model-cache
+    persistentVolumeClaim: { claimName: shared-model-cache }

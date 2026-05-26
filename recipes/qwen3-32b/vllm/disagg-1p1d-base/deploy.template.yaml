@@ -1,0 +1,216 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Transport-neutral template for the Qwen3-32B 1P1D cross-node benchmark family.
+# Do NOT kubectl-apply this file as-is — it has REPLACE markers for the
+# provider-specific bits. Copy into a sibling directory (e.g.
+# ../disagg-1p1d-<provider>-<transport>/deploy.yaml) and fill in the markers.
+#
+# What's transport-neutral here:
+#   - Topology: 1 prefill (TP=8) on node A, 1 decode (TP=8) on node B,
+#     enforced by pod anti-affinity (topologyKey kubernetes.io/hostname).
+#   - vLLM args: NixlConnector kv_both, max-model-len 131072 with YaRN rope,
+#     gpu-memory-utilization 0.90, block-size 64, async-scheduling.
+#   - privileged + IPC_LOCK (required for VRAM mem-register on any RDMA path).
+#   - NIXL_TELEMETRY_ENABLE=y + Prometheus exporter on :19090.
+#   - Prometheus annotations on worker pods.
+#
+# What each variant fills in (search for "# REPLACE"):
+#   1. Container image (base vs -efa-amd64)
+#   2. RDMA resource (vpc.amazonaws.com/efa | rdma/ib | rdma/shared_ib | none-for-GKE-A4X)
+#   3. Pod-level RDMA annotations (only GKE A4X uses these; Multus interfaces)
+#   4. NIXL backend selection env (LIBFABRIC for AWS, UCX/default for everyone else)
+#   5. Transport provider env (FI_* for AWS EFA; UCX_TLS + UCX_NET_DEVICES for IB/RoCE)
+#   6. Model PVC name + mount path
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-REPLACE-VARIANT     # e.g. q32b-1p1d-efa, q32b-1p1d-aks-ib
+spec:
+  pvcs:
+  - create: false
+    name: REPLACE-MODEL-PVC-NAME       # e.g. shared-model-cache (AWS dev-02) or model-cache (others)
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - { name: HF_HOME, value: REPLACE-MODEL-MOUNT-PATH }   # e.g. /shared-models or /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        mainContainer:
+          command: [python, -m, dynamo.frontend]
+          image: REPLACE-CONTAINER-IMAGE                       # e.g. nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1 (or 1.1.1-efa-amd64 for AWS)
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests: { cpu: "4" }
+        limits:   { cpu: "8" }
+      subComponentType: null
+
+    VllmPrefillWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+          # REPLACE block 3 (GKE A4X ONLY — Multus interfaces; omit on every other variant):
+          # networking.gke.io/default-interface: "eth0"
+          # networking.gke.io/interfaces: |
+          #   [{"interfaceName":"eth0","network":"default"},
+          #    {"interfaceName":"eth2","network":"rdma-0"}, ... ]
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [worker]
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: REPLACE-CONTAINER-IMAGE
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - --tensor-parallel-size
+          - '8'                                          # if GB200 4-GPU node, change to '4'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true             # required for VRAM mem-register on any RDMA transport
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          # --- transport-neutral env (every variant keeps these) ---
+          - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+          - { name: DYN_HEALTH_CHECK_ENABLED,       value: "false" }
+          - { name: HF_HOME,                        value: REPLACE-MODEL-MOUNT-PATH }
+          - { name: NCCL_DEBUG,                     value: "WARN" }
+          - { name: VLLM_LOGGING_LEVEL,             value: "INFO" }
+          # --- REPLACE block 4: NIXL backend selection ---
+          # AWS EFA needs LIBFABRIC; everyone else uses default (UCX). Example for AWS:
+          # - { name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC, value: "true" }
+          # - { name: DYN_KVBM_NIXL_BACKEND_UCX,       value: "false" }
+          # --- REPLACE block 5: transport provider env ---
+          # AWS EFA example:
+          # - { name: FI_PROVIDER,                value: "efa" }
+          # - { name: FI_EFA_USE_DEVICE_RDMA,     value: "1" }
+          # - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }       # MUST be 0 — silent VRAM corruption otherwise
+          # - { name: FI_LOG_LEVEL,               value: "warn" }
+          # - { name: LD_LIBRARY_PATH,            value: "/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/local/lib" }
+          # - { name: PATH,                       value: "/opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
+          # IB / RoCE example (Azure / Nebius / Nscale / GKE-A4X):
+          # - { name: UCX_TLS,         value: "rc,cuda_copy,cuda_ipc" }
+          # - { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }   # adjust port count per provider
+      replicas: 1
+      resources:
+        limits:
+          gpu: '8'                                       # change to '4' on GB200 4-GPU nodes
+          custom:
+            # REPLACE block 2: RDMA resource key + count
+            # AWS EFA:         vpc.amazonaws.com/efa: "32"     (16 on p5en)
+            # Azure shared IB: rdma/shared_ib: "1"             (or rdma/ib: "1" exclusive)
+            # Nebius IB:       rdma/ib: "1"
+            # Nscale IB:       rdma/ib: "1"
+            # GKE A4X:         (no resource; uses Multus annotation at pod-level — see block 3)
+            REPLACE-RDMA-RESOURCE-KEY: "REPLACE-COUNT"
+        requests:
+          gpu: '8'
+          custom:
+            REPLACE-RDMA-RESOURCE-KEY: "REPLACE-COUNT"
+            ephemeral-storage: "2Gi"
+      subComponentType: prefill
+      volumeMounts:
+      - name: REPLACE-MODEL-PVC-NAME
+        mountPoint: REPLACE-MODEL-MOUNT-PATH
+
+    VllmDecodeWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [worker]
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: REPLACE-CONTAINER-IMAGE
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - --tensor-parallel-size
+          - '8'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --no-enable-prefix-caching
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+          - { name: DYN_HEALTH_CHECK_ENABLED,       value: "false" }
+          - { name: HF_HOME,                        value: REPLACE-MODEL-MOUNT-PATH }
+          - { name: NCCL_DEBUG,                     value: "WARN" }
+          - { name: VLLM_LOGGING_LEVEL,             value: "INFO" }
+          # REPLACE blocks 4 + 5 (same as prefill)
+      replicas: 1
+      resources:
+        limits:
+          gpu: '8'
+          custom:
+            REPLACE-RDMA-RESOURCE-KEY: "REPLACE-COUNT"
+        requests:
+          gpu: '8'
+          custom:
+            REPLACE-RDMA-RESOURCE-KEY: "REPLACE-COUNT"
+            ephemeral-storage: "2Gi"
+      subComponentType: decode
+      volumeMounts:
+      - name: REPLACE-MODEL-PVC-NAME
+        mountPoint: REPLACE-MODEL-MOUNT-PATH
