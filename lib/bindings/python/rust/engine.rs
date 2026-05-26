@@ -354,13 +354,33 @@ where
         })
     })?;
     let response = tokio::task::spawn_blocking(move || {
-        Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))
+        Python::with_gil(|py| {
+            let bound = item.into_bound(py);
+            // Python generators normally yield response data and we
+            // wrap it in `Annotated::from_data` below. Generators that
+            // need to emit a sidecar event on the stream (e.g. an
+            // LLMMetricAnnotation from the vllm chat processor so the
+            // HTTP-service metric observer can record TTFT/ITL) can
+            // yield a dict shaped like the wire Annotated<R> protocol
+            // and mark it with `_dynamo_annotated: True`. When the
+            // sentinel is present we deserialize the dict as an
+            // Annotated envelope so the `event` / `comment` / `data`
+            // fields land where downstream code expects them.
+            let is_envelope = bound
+                .downcast::<PyDict>()
+                .ok()
+                .and_then(|d| d.get_item("_dynamo_annotated").ok().flatten())
+                .is_some();
+            if is_envelope {
+                depythonize::<Annotated<Resp>>(&bound)
+            } else {
+                depythonize::<Resp>(&bound).map(Annotated::from_data)
+            }
+        })
     })
     .await
     .map_err(|e| ResponseProcessingError::Offload(e.to_string()))?
     .map_err(|e| ResponseProcessingError::Deserialize(e.to_string()))?;
-
-    let response = Annotated::from_data(response);
 
     Ok(response)
 }
