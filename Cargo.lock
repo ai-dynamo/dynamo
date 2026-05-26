@@ -2737,6 +2737,7 @@ dependencies = [
  "url",
  "uuid",
  "validator",
+ "velo",
  "xxhash-rust",
 ]
 

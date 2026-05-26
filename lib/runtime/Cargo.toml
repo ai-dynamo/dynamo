@@ -89,6 +89,7 @@ rayon = { version = "1.10" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
 tokio-rayon = { version = "2.1" }
+velo = { workspace = true }
 
 # Kubernetes discovery backend
 kube = { version = "2.0.1", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "aws-lc-rs"] }

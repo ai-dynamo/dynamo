@@ -13,6 +13,7 @@ pub mod egress;
 pub mod ingress;
 pub mod manager;
 pub mod tcp;
+pub mod velo;
 
 use crate::SystemHealth;
 use std::sync::{Arc, OnceLock};
