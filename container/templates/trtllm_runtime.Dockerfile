@@ -143,7 +143,6 @@ RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/wor
     --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     cp -a /tmp/workspace_src/. /workspace/ && \
     chown -R dynamo:0 /workspace && \
-    chmod -R g+w /workspace && \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
