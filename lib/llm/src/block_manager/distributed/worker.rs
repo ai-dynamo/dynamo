@@ -33,6 +33,39 @@ use tokio_util::sync::CancellationToken;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
+const DYN_KVBM_NIXL_BACKEND_GDS_MT_THREAD_COUNT: &str = "DYN_KVBM_NIXL_BACKEND_GDS_MT_THREAD_COUNT";
+
+fn gds_mt_thread_count_override() -> anyhow::Result<Option<usize>> {
+    let value = match std::env::var(DYN_KVBM_NIXL_BACKEND_GDS_MT_THREAD_COUNT) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    let thread_count = value.parse::<usize>().map_err(|err| {
+        anyhow::anyhow!(
+            "Invalid {}='{}': {}",
+            DYN_KVBM_NIXL_BACKEND_GDS_MT_THREAD_COUNT,
+            value,
+            err
+        )
+    })?;
+
+    if thread_count == 0 {
+        anyhow::bail!(
+            "Invalid {}='0': thread count must be greater than 0",
+            DYN_KVBM_NIXL_BACKEND_GDS_MT_THREAD_COUNT
+        );
+    }
+
+    Ok(Some(thread_count))
+}
+
 struct WorkerState {
     ready_for_ping: AtomicBool,
 }
@@ -94,7 +127,14 @@ pub fn load_and_validate_tensors(
 fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
     let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
     if use_gds {
-        let (_, gds_params) = agent.get_plugin_params("GDS_MT")?;
+        let (_, mut gds_params) = agent.get_plugin_params("GDS_MT")?;
+        if let Some(thread_count) = gds_mt_thread_count_override()? {
+            gds_params.set("thread_count", &thread_count.to_string())?;
+            tracing::info!(
+                "Creating NIXL GDS_MT backend with thread_count={}",
+                thread_count
+            );
+        }
         agent.create_backend("GDS_MT", &gds_params)?;
     }
     let (_, posix_params) = agent.get_plugin_params("POSIX")?;

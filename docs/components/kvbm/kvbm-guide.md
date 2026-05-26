@@ -271,6 +271,16 @@ You can also specify exact block counts instead of GB:
 > [!NOTE] KVBM is a write-through cache and it is possible to misconfigure. Each of the capacities should increase as you enable more tiers. As an example, if you configure your GPU device to have 100GB of memory dedicated for KV cache storage, then configure
 `DYN_KVBM_CPU_CACHE_GB >= 100`. The same goes for configuring the disk cache; `DYN_KVBM_DISK_CACHE_GB >= DYN_KVBM_CPU_CACHE_GB`. If the cpu cache is configured to be less than the device cache, then _there will be no benefit from KVBM_. In many cases you will see performance degradation as KVBM will churn by offloading blocks from the GPU to CPU after every forward pass. To know what your minimum value for `DYN_KVBM_CPU_CACHE_GB` should be for your setup, consult your llm engine's kv cache configuration.
 
+### GDS_MT Thread Count
+
+When using disk cache with the older KVBM v1/raw worker path and NIXL `GDS_MT`, KVBM uses the NIXL plugin's default `thread_count` unless you override it:
+
+```bash
+export DYN_KVBM_NIXL_BACKEND_GDS_MT_THREAD_COUNT=8
+```
+
+The value must be greater than 0. This setting is passed to NIXL as the `GDS_MT` backend's `thread_count` parameter when the worker creates the GDS backend.
+
 ### SSD Lifespan Protection
 
 When disk offloading is enabled, disk offload filtering is enabled by default to extend SSD lifespan. The current policy only offloads KV blocks from CPU to disk if the blocks have frequency ≥ 2. Frequency doubles on cache hit (initialized at 1) and decrements by 1 on each time decay step.
