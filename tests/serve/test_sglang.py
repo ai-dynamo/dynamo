@@ -28,9 +28,11 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     guided_decoding_chat_payload_default,
+    kv_events_metrics_payload,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
+    router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
     ImageGenerationPayload,
@@ -154,7 +156,9 @@ sglang_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),  # actual profiled peak with kv-tokens
+            pytest.mark.profiled_vram_gib(
+                13.0
+            ),  # observed ~12.1 GiB with kv-tokens; rounded up
             pytest.mark.requested_sglang_kv_tokens(
                 37472
             ),  # KV cache cap (2x safety over min=18736)
@@ -198,7 +202,7 @@ sglang_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.profiled_vram_gib(13.0),
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(420),
             pytest.mark.post_merge,
@@ -224,7 +228,7 @@ sglang_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.profiled_vram_gib(13.0),
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(420),
             pytest.mark.post_merge,
@@ -257,18 +261,11 @@ sglang_configs = {
             pytest.mark.pre_merge,
         ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
         model="Qwen/Qwen3-0.6B",
-        env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            chat_payload_default(
-                expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(engine_seq=\d+(?:, [^)]*)?\)",
-                    r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                ]
-            )
+            router_selection_chat_payload_default(),
+            kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],
     ),
     "template_verification": SGLangConfig(
@@ -606,6 +603,15 @@ sglang_configs = {
                 repeat_count=1,
                 expected_response=["Generated 3 embeddings with dimension"],
             ),
+            # Test `dimensions` truncation (Matryoshka). Qwen3-Embedding-4B
+            # has a hidden dim well above 128, so the truncated vector should
+            # be exactly 128 floats long.
+            embedding_payload(
+                input_text="Hello, world!",
+                repeat_count=1,
+                expected_response=["Generated 1 embeddings with dimension 128"],
+                extra_body={"dimensions": 128},
+            ),
         ],
     ),
     "completions_only": SGLangConfig(
@@ -615,11 +621,14 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(
-                14.7
-            ),  # actual peak at recommended token count
+                15.7
+            ),  # ~14.7 weights + ~1 GiB for 2048-token KV cache on deepseek-llm-7b
             pytest.mark.requested_sglang_kv_tokens(
-                64
-            ),  # KV cache cap (2x safety over min=32)
+                2048
+            ),  # >= prompt(~16) + max_tokens(1000) + scheduler reserve;
+            # SGLang 0.5.11 silently hangs when prompt+max_tokens nears
+            # max_total_tokens (bisected ~1040 for these payloads). Matches
+            # the "aggregated" config above.
             pytest.mark.timeout(341),  # profiled 57s on RTX 6000 Ada
             pytest.mark.post_merge,
         ],

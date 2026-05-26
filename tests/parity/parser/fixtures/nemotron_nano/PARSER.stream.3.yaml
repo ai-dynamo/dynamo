@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_nano
+model_label: Nemotron Nano
+mode: stream
+cases:
+  PARSER.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from PARSER.batch.1
+    chunks:
+    - delta_text: <t
+    - delta_text: ool
+    - delta_text: _call
+    - delta_text: |-
+        >
+        <function
+    - delta_text: |-
+        =get_weather>
+        <para
+    - delta_text: me
+    - delta_text: ter
+    - delta_text: =loca
+    - delta_text: |-
+        tion>
+        NYC
+        <
+    - delta_text: |-
+        /parameter>
+        </funct
+    - delta_text: io
+    - delta_text: |
+        n>
+    - delta_text: </too
+    - delta_text: l_call>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'

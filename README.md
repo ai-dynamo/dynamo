@@ -240,7 +240,7 @@ For Slurm or other distributed deployments (and KV-aware routing):
 - [etcd](https://etcd.io/) can be run directly as `./etcd`.
 - [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.
 
-To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
+To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 
 ## More News
 

@@ -85,6 +85,66 @@ fn test_from_mooncake_defaults_missing_input_length_from_hash_capacity() {
 }
 
 #[test]
+fn test_from_agentic_mooncake_preserves_dependencies_and_tool_wait() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "request_id": "r1",
+            "session_id": "root",
+            "timestamp": 0.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1],
+            "prefix_reset": true
+        }),
+        serde_json::json!({
+            "request_id": "r2",
+            "session_id": "root",
+            "timestamp": 100.0,
+            "delay": 5.0,
+            "tool_wait_ms": 7.0,
+            "wait_for": ["r1"],
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1]
+        }),
+    ]);
+
+    let trace = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap();
+    assert_eq!(trace.turns.len(), 2);
+    assert_eq!(trace.turns[0].request_id, "r1");
+    assert!(trace.turns[0].prefix_reset);
+    assert_eq!(trace.turns[1].wait_for, vec!["r1"]);
+    assert_eq!(trace.turns[1].delay_after_dependencies_ms, 12.0);
+}
+
+#[test]
+fn test_from_agentic_mooncake_rejects_unknown_dependency() {
+    let file = write_trace(&[serde_json::json!({
+        "request_id": "r1",
+        "wait_for": ["missing"],
+        "input_length": 4,
+        "output_length": 1,
+        "hash_ids": [1]
+    })]);
+
+    let err = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap_err();
+    assert!(err.to_string().contains("unknown request_id"));
+}
+
+#[test]
+fn test_from_agentic_mooncake_rejects_input_length_above_hash_capacity() {
+    let file = write_trace(&[serde_json::json!({
+        "request_id": "r1",
+        "input_length": 9,
+        "output_length": 1,
+        "hash_ids": [1, 2]
+    })]);
+
+    let err = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap_err();
+    assert!(err.to_string().contains("input_length 9"));
+}
+
+#[test]
 fn test_from_applied_compute_agentic_expands_rows_into_num_turns_plus_final_request() {
     let file = write_trace(&[serde_json::json!({
         "num_turns": 2,

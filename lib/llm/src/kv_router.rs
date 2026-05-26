@@ -9,23 +9,24 @@ use std::{
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    PrefillLoadEstimator, SharedKvCache,
+    KvSchedulerError, PrefillLoadEstimator, SharedKvCache,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, TokensWithHashes, WorkerConfigLike, WorkerId,
-        WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint,
+        RouterBackpressureReason, RouterEvent, RouterRequest, RouterResponse, RoutingConstraints,
+        TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
-    scheduling::TierOverlapBlocks,
+    scheduling::{OverloadedWorkerProvider, TierOverlapBlocks},
 };
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
+    error::{DynamoError, ErrorType},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
-        async_trait,
+        async_trait, error::PipelineError,
     },
     protocols::EndpointId,
     protocols::annotated::Annotated,
@@ -68,6 +69,20 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
 };
 
+pub enum FindBestMatchOutcome {
+    Routed {
+        worker: WorkerWithDpRank,
+        overlap_blocks: u32,
+        effective_overlap_blocks: f64,
+        cached_tokens: usize,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
+}
+
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 
@@ -104,12 +119,6 @@ impl WorkerCacheHitEstimate {
 struct CacheHitEstimates {
     effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
     cached_tokens: HashMap<WorkerWithDpRank, usize>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BestMatchDetails {
-    pub worker: WorkerWithDpRank,
-    pub cache_hit: WorkerCacheHitEstimate,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -290,10 +299,33 @@ fn shared_cache_overlap_score(
     }
 }
 
+fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
+    if !error.is_overload() {
+        return error.into();
+    }
+
+    let message = error.to_string();
+    let cause = PipelineError::ServiceOverloaded(message.clone());
+    DynamoError::builder()
+        .error_type(ErrorType::ResourceExhausted)
+        .message(message)
+        .cause(cause)
+        .build()
+        .into()
+}
+
 /// Generates a dp_rank-specific endpoint name for the worker KV indexer query service.
 /// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
 pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
     format!("worker_kv_indexer_query_dp{dp_rank}")
+}
+
+/// Generates a query endpoint name for a dp_rank whose events are attributed to `worker_id`.
+pub fn worker_kv_indexer_query_endpoint_for_worker(worker_id: WorkerId, dp_rank: DpRank) -> String {
+    format!(
+        "{}_worker{worker_id}",
+        worker_kv_indexer_query_endpoint(dp_rank)
+    )
 }
 
 fn log_routing_input_hashes(
@@ -405,6 +437,10 @@ where
                 })?;
         }
 
+        let client_for_overload = client.clone();
+        let overloaded_worker_provider: OverloadedWorkerProvider =
+            Arc::new(move || client_for_overload.overloaded_instance_ids());
+
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
@@ -412,6 +448,7 @@ where
             selector,
             &kv_router_config,
             prefill_load_estimator.clone(),
+            Some(overloaded_worker_provider),
             worker_type,
         )
         .await?;
@@ -517,7 +554,7 @@ where
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn find_best_match_details(
+    pub async fn find_best_match_details(
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
@@ -529,7 +566,8 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> anyhow::Result<BestMatchDetails> {
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
@@ -617,7 +655,7 @@ where
         let num_blocks = isl_tokens / self.block_size as usize;
         let sc_hits_for_metrics = shared_cache_hits.clone();
 
-        let response = self
+        let response = match self
             .scheduler
             .schedule(
                 context_id.map(|s| s.to_string()),
@@ -633,10 +671,26 @@ where
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
+                routing_constraints,
                 shared_cache_hits,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(KvSchedulerError::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            }) => {
+                return Ok(FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                });
+            }
+            Err(error) => return Err(map_scheduler_error(error)),
+        };
         let total_elapsed = start.elapsed();
 
         if let Some(m) = metrics::RoutingOverheadMetrics::get() {
@@ -673,12 +727,11 @@ where
             "find_best_match completed"
         );
 
-        Ok(BestMatchDetails {
+        Ok(FindBestMatchOutcome::Routed {
             worker: response.best_worker,
-            cache_hit: WorkerCacheHitEstimate {
-                effective_overlap_blocks: response.effective_overlap_blocks,
-                cached_tokens: response.cached_tokens,
-            },
+            overlap_blocks: response.effective_overlap_blocks.round() as u32,
+            effective_overlap_blocks: response.effective_overlap_blocks,
+            cached_tokens: response.cached_tokens,
         })
     }
 
@@ -696,6 +749,7 @@ where
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let result = self
             .find_best_match_details(
@@ -709,9 +763,23 @@ where
                 expected_output_tokens,
                 None,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await?;
-        Ok((result.worker, result.cache_hit.rounded_overlap_blocks()))
+        match result {
+            FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => Ok((worker, overlap_blocks)),
+            FindBestMatchOutcome::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            } => Err(anyhow::anyhow!(
+                "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+            )),
+        }
     }
 
     /// Register externally-provided workers in the slot tracker.
@@ -1072,9 +1140,10 @@ where
             RouterRequest::New {
                 tokens,
                 block_mm_infos,
+                routing_constraints,
             } => {
-                let (best_worker, overlap_blocks) = self
-                    .find_best_match(
+                match self
+                    .find_best_match_details(
                         Some(&context_id),
                         &tokens,
                         block_mm_infos.as_deref(),
@@ -1084,13 +1153,30 @@ where
                         0.0,
                         None,
                         None,
+                        None,
+                        routing_constraints,
                     )
-                    .await?;
-
-                RouterResponse::New {
-                    worker_id: best_worker.worker_id,
-                    dp_rank: best_worker.dp_rank,
-                    overlap_blocks,
+                    .await
+                {
+                    Ok(FindBestMatchOutcome::Routed {
+                        worker,
+                        overlap_blocks,
+                        ..
+                    }) => RouterResponse::New {
+                        worker_id: worker.worker_id,
+                        dp_rank: worker.dp_rank,
+                        overlap_blocks,
+                    },
+                    Ok(FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    }) => RouterResponse::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    },
+                    Err(error) => return Err(error),
                 }
             }
             RouterRequest::MarkPrefill => RouterResponse::PrefillMarked {
@@ -1210,6 +1296,7 @@ mod tests {
             &self,
             _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
             request: &dynamo_kv_router::scheduling::SchedulingRequest,
+            _eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
             block_size: u32,
         ) -> Result<dynamo_kv_router::protocols::WorkerSelectionResult, KvSchedulerError> {
             let observed_hits = request
@@ -1224,6 +1311,20 @@ mod tests {
                 effective_overlap_blocks: 0.0,
                 cached_tokens: 0,
             })
+        }
+    }
+
+    struct OverloadedSelector;
+
+    impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> for OverloadedSelector {
+        fn select_worker(
+            &self,
+            _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
+            _request: &dynamo_kv_router::scheduling::SchedulingRequest,
+            _eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
+            _block_size: u32,
+        ) -> Result<dynamo_kv_router::protocols::WorkerSelectionResult, KvSchedulerError> {
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
         }
     }
 
@@ -1311,6 +1412,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                RoutingConstraints::default(),
             )
             .await
             .unwrap();
@@ -1344,12 +1446,44 @@ mod tests {
                 0.0,
                 None,
                 None,
+                RoutingConstraints::default(),
             )
             .await
             .unwrap();
 
         assert_eq!(worker, WorkerWithDpRank::from_worker_id(0));
         assert_eq!(overlap, 0);
+    }
+
+    #[tokio::test]
+    async fn test_find_best_match_maps_overload_to_resource_exhausted() {
+        let router = make_test_router(OverloadedSelector, None).await;
+
+        let err = router
+            .find_best_match(
+                None,
+                &[11, 12],
+                None,
+                None,
+                false,
+                None,
+                0.0,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(dynamo_runtime::error::match_error_chain(
+            err.as_ref(),
+            &[dynamo_runtime::error::ErrorType::ResourceExhausted],
+            &[]
+        ));
+        assert!(
+            err.to_string()
+                .contains("all eligible workers are overloaded")
+        );
     }
 
     #[tokio::test]

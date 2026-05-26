@@ -4,8 +4,8 @@
 #
 # Prerequisites:
 #   - dynamo-platform HelmRelease applied
-#   - Model weights at /models/nvidia-GLM-5-NVFP4 on shared NFS PVC
-#   - Container built from recipes/glm-5-nvfp4/Dockerfile
+#   - Model weights cached in a model-cache PVC mounted at /model-store
+#   - Dynamo SGLang runtime image nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13
 #   - HF_TOKEN secret created: kubectl create secret generic hf-token-secret \
 #       --from-literal=HF_TOKEN=<your-token> -n <namespace>
 #
@@ -33,6 +33,16 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+          - key: "kubernetes.io/arch"
+            operator: "Equal"
+            value: "arm64"
+            effect: "NoSchedule"
         mainContainer:
           command:
             - python3
@@ -45,7 +55,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-          image: <your-registry>/sglang-dynamo-glm5:latest
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13
           name: ""
           resources: {}
           volumeMounts:
@@ -68,6 +78,16 @@ spec:
         claims:
           - name: compute-domain-channel
       extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+          - key: "kubernetes.io/arch"
+            operator: "Equal"
+            value: "arm64"
+            effect: "NoSchedule"
         mainContainer:
           command:
             - bash
@@ -116,6 +136,8 @@ spec:
                   fieldPath: metadata.uid
             - name: FLASHINFER_DISABLE_VERSION_CHECK
               value: "1"
+            - name: FLASHINFER_WORKSPACE_BASE
+              value: /model-store
             - name: SGLANG_ENABLE_JIT_DEEPGEMM
               value: "1"
             - name: SGLANG_ENABLE_SPEC_V2
@@ -136,27 +158,30 @@ spec:
               value: "7200"
             - name: NCCL_GRAPH_MIXING_SUPPORT
               value: "0"
+            # NIXL's UCX control plane requires an active-message transport.
+            # CUDA IPC/copy handle GPU memory movement; TCP carries control traffic.
+            - name: UCX_MEMTYPE_CACHE
+              value: "n"
             - name: UCX_TLS
-              value: "cuda_ipc,cuda_copy,rc"
-            - name: UCX_IB_GID_INDEX
-              value: "3"
-            - name: UCX_RC_TIMEOUT
-              value: "600s"
-            - name: UCX_KEEPALIVE_INTERVAL
-              value: "300s"
+              value: "cuda_copy,cuda_ipc,tcp"
+            - name: UCX_CUDA_IPC_ENABLE_MNNVL
+              value: "y"
             - name: UCX_LOG_LEVEL
               value: error
             - name: NIXL_LOG_LEVEL
               value: ERROR
-          image: <your-registry>/sglang-dynamo-glm5:latest
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13
           name: ""
           resources: {}
           securityContext:
+            # FlashInfer's packaged cubins create package-local symlinks during
+            # TRTLLM MoE startup.
+            runAsUser: 0
             capabilities:
               add:
               - IPC_LOCK
           startupProbe:
-            failureThreshold: 60
+            failureThreshold: 120
             httpGet:
               path: /live
               port: 9090
@@ -182,6 +207,16 @@ spec:
         limits:
           gpu: "4"
       extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+          - key: "kubernetes.io/arch"
+            operator: "Equal"
+            value: "arm64"
+            effect: "NoSchedule"
         mainContainer:
           command:
             - bash
@@ -225,6 +260,8 @@ spec:
                   fieldPath: metadata.uid
             - name: FLASHINFER_DISABLE_VERSION_CHECK
               value: "1"
+            - name: FLASHINFER_WORKSPACE_BASE
+              value: /model-store
             - name: SGLANG_ENABLE_JIT_DEEPGEMM
               value: "1"
             - name: SGLANG_ENABLE_SPEC_V2
@@ -243,27 +280,30 @@ spec:
               value: "1"
             - name: NCCL_STORE_TIMEOUT
               value: "7200"
+            # NIXL's UCX control plane requires an active-message transport.
+            # CUDA IPC/copy handle GPU memory movement; TCP carries control traffic.
+            - name: UCX_MEMTYPE_CACHE
+              value: "n"
             - name: UCX_TLS
-              value: "cuda_ipc,cuda_copy,rc"
-            - name: UCX_IB_GID_INDEX
-              value: "3"
-            - name: UCX_RC_TIMEOUT
-              value: "600s"
-            - name: UCX_KEEPALIVE_INTERVAL
-              value: "300s"
+              value: "cuda_copy,cuda_ipc,tcp"
+            - name: UCX_CUDA_IPC_ENABLE_MNNVL
+              value: "y"
             - name: UCX_LOG_LEVEL
               value: error
             - name: NIXL_LOG_LEVEL
               value: ERROR
-          image: <your-registry>/sglang-dynamo-glm5:latest
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13
           name: ""
           resources: {}
           securityContext:
+            # FlashInfer's packaged cubins create package-local symlinks during
+            # TRTLLM MoE startup.
+            runAsUser: 0
             capabilities:
               add:
               - IPC_LOCK
           startupProbe:
-            failureThreshold: 60
+            failureThreshold: 120
             httpGet:
               path: /live
               port: 9090
@@ -290,27 +330,3 @@ spec:
     resourceClaimTemplate:
       name: glm5-compute-domain-channel
   numNodes: 5
----
-apiVersion: resource.k8s.io/v1
-kind: ResourceClaimTemplate
-metadata:
-  name: glm5-compute-domain-channel
-  namespace: <your-namespace>
-spec:
-  spec:
-    devices:
-      config:
-      - opaque:
-          driver: compute-domain.nvidia.com
-          parameters:
-            allocationMode: Single
-            apiVersion: resource.nvidia.com/v1beta1
-            kind: ComputeDomainChannelConfig
-        requests:
-        - channel
-      requests:
-      - exactly:
-          allocationMode: ExactCount
-          count: 1
-          deviceClassName: compute-domain-default-channel.nvidia.com
-        name: channel

@@ -26,6 +26,7 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
 
@@ -450,6 +451,7 @@ impl RouterHandles {
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered.
     /// Returns worker_id on success.
+    #[expect(clippy::too_many_arguments)]
     async fn query_prefill_worker(
         &self,
         tokens: &[u32],
@@ -458,12 +460,14 @@ impl RouterHandles {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(u64, Option<u32>), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
         }
 
-        self.prefill_router
+        let outcome = self
+            .prefill_router
             .query_prefill_worker(
                 tokens,
                 block_mm_infos,
@@ -471,12 +475,29 @@ impl RouterHandles {
                 lora_name,
                 priority_jump,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Prefill query failed");
                 QueryRouterResult::ErrQueryFailed
-            })
+            })?;
+        match outcome {
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
+            PrefillQueryOutcome::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            } => {
+                tracing::warn!(
+                    reason = ?reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens = ?max_queued_isl_tokens,
+                    "Prefill query rejected due to router backpressure"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
     }
 
     /// Query optimal decode worker for a request.
@@ -500,6 +521,7 @@ impl RouterHandles {
         is_disaggregated: bool,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
@@ -518,8 +540,9 @@ impl RouterHandles {
             None
         };
 
-        self.decode_router
-            .find_best_match(
+        let outcome = self
+            .decode_router
+            .find_best_match_details(
                 None,
                 tokens,
                 None,
@@ -528,13 +551,35 @@ impl RouterHandles {
                 None,
                 priority_jump,
                 None,
+                None,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");
                 QueryRouterResult::ErrQueryFailed
-            })
+            })?;
+        match outcome {
+            dynamo_llm::kv_router::FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => Ok((worker, overlap_blocks)),
+            dynamo_llm::kv_router::FindBestMatchOutcome::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            } => {
+                tracing::warn!(
+                    reason = ?reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens = ?max_queued_isl_tokens,
+                    "Decode query rejected due to router backpressure"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
     }
 }
 
@@ -560,7 +605,13 @@ fn extract_priority_jump(
 /// Opaque handle for the router pair
 pub type RouterHandlesPtr = *mut RouterHandles;
 
-/// Result codes for query router C FFI
+/// Result codes for query router C FFI.
+///
+/// Numbering is append-only. Existing variants must keep their integer
+/// values so out-of-tree consumers (notably
+/// `deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer`, which pins
+/// these integers in a Go shim) keep working without recompilation. When
+/// adding a new variant, use the next free integer at the end.
 #[repr(u32)]
 pub enum QueryRouterResult {
     Ok = 0,
@@ -570,6 +621,7 @@ pub enum QueryRouterResult {
     ErrQueryFailed = 4,
     ErrDisaggEnforced = 5,
     ErrTimeout = 6,
+    ErrBackpressure = 7,
 }
 
 /// Build a `KvRouterConfig` from defaults, overridden by optional `DYN_*` environment variables.
@@ -633,7 +685,6 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_f64("DYN_ROUTER_PREDICTED_TTL_SECS") {
         cfg.router_predicted_ttl_secs = Some(v);
     }
-
     tracing::info!(
         overlap_score_credit = cfg.overlap_score_credit,
         prefill_load_scale = cfg.prefill_load_scale,
@@ -645,6 +696,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_track_prefill_tokens = cfg.router_track_prefill_tokens,
         router_queue_threshold = ?cfg.router_queue_threshold,
         router_predicted_ttl_secs = ?cfg.router_predicted_ttl_secs,
+        queue_depth_tiers_unbounded = cfg.router_queue_by_incoming_missing_isl.is_unbounded(),
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 
@@ -1124,7 +1176,7 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 /// Parse a JSON request string, apply the chat template, tokenize, and lift
 /// the router-relevant `priority_jump` out of `nvext.agent_hints.priority`.
 ///
-/// Returns `(token_ids, priority_jump)` on success, or a `QueryRouterResult`
+/// Returns `(token_ids, priority_jump, routing_constraints)` on success, or a `QueryRouterResult`
 /// error code. `priority_jump` is `0.0` when no hint is present. This mirrors
 /// the standalone Dynamo preprocessor lift in `lib/llm/src/preprocessor.rs`
 /// so the GAIE/EPP path produces the same queue ordering as a non-EPP
@@ -1132,7 +1184,7 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 unsafe fn preprocess_request(
     handles: &RouterHandles,
     request_json: *const c_char,
-) -> Result<(Vec<u32>, f64), QueryRouterResult> {
+) -> Result<(Vec<u32>, f64, RoutingConstraints), QueryRouterResult> {
     let preprocessor = match &handles.preprocessor {
         Some(p) => p,
         None => {
@@ -1156,6 +1208,11 @@ unsafe fn preprocess_request(
         };
 
     let priority_jump = extract_priority_jump(&request);
+    let routing_constraints = request
+        .nvext
+        .as_ref()
+        .and_then(|nvext| nvext.routing_constraints.clone())
+        .unwrap_or_default();
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
         Ok(Some(prompt)) => prompt,
@@ -1182,7 +1239,7 @@ unsafe fn preprocess_request(
         "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
     );
 
-    Ok((token_ids, priority_jump))
+    Ok((token_ids, priority_jump, routing_constraints))
 }
 
 /// Parse pods JSON into an optional set of allowed worker IDs.
@@ -1268,10 +1325,11 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump) = match unsafe { preprocess_request(handles, request_json) } {
-        Ok(t) => t,
-        Err(code) => return code,
-    };
+    let (tokens, priority_jump, routing_constraints) =
+        match unsafe { preprocess_request(handles, request_json) } {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
 
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
@@ -1284,6 +1342,7 @@ pub unsafe extern "C" fn route_prefill_request(
                 None,
                 priority_jump,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await?;
 
@@ -1346,16 +1405,23 @@ pub unsafe extern "C" fn route_decode_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump) = match unsafe { preprocess_request(handles, request_json) } {
-        Ok(t) => t,
-        Err(code) => return code,
-    };
+    let (tokens, priority_jump, routing_constraints) =
+        match unsafe { preprocess_request(handles, request_json) } {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
 
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
     let result = handles.runtime.secondary().block_on(async {
         let (decode_worker, _overlap_blocks) = handles
-            .query_decode_worker(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
+            .query_decode_worker(
+                &tokens,
+                is_disaggregated,
+                priority_jump,
+                allowed_worker_ids,
+                routing_constraints,
+            )
             .await?;
 
         tracing::info!(

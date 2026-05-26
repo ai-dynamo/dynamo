@@ -10,7 +10,7 @@ and verifies that expert routing info appears in the response nvext.
 Usage:
     python test_sglang_expert_info.py
 
-Requires etcd and nats running (see deploy/docker-compose.yml).
+Requires etcd and nats running (see dev/docker-compose.yml).
 """
 
 import json
