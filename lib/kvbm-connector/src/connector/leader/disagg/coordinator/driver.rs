@@ -849,8 +849,15 @@ impl ConditionalDisaggCoordinator {
         indexed.sort_by_key(|(idx, _)| *idx);
 
         // Group into maximal contiguous runs; each run is one
-        // pull/register transaction (positional order required by
-        // `MutableBlock::complete`).
+        // pull/register transaction. The contiguity keeps the
+        // `token_blocks_for_range(abs_start..abs_end)` lookup
+        // dense — without it we'd need to slice tokens
+        // per-block and the zip in
+        // `pull_and_register_contiguous_chunk` no longer aligns
+        // by position. `MutableBlock::complete` itself is
+        // position-agnostic (it just reads
+        // `token_block.kvbm_sequence_hash()`); the positional
+        // requirement is in the dense-range token lookup.
         let mut runs: Vec<Vec<(usize, CommittedBlock)>> = Vec::new();
         for entry in indexed {
             match runs.last_mut() {
@@ -973,6 +980,16 @@ impl ConditionalDisaggCoordinator {
         // external suffix beyond the local-prefix blocks vLLM
         // already has cached). Onboard the SUFFIX of registered_g2
         // matching the external_blocks count.
+        //
+        // `registered_g2` is appended in **arrival order** of the
+        // session's `availability()` stream — which may split into
+        // multiple `Available` deltas per CONTRACT §2.7/§2.8 (Stage 1
+        // decode-side G1→G2 prefix promotion is one documented
+        // source: local_match arrives synchronously at GNMT, the
+        // promoted prefix arrives later from the promotion task).
+        // We must sort by absolute position before taking the
+        // suffix so the pairing with `g1_dst_external` (which is
+        // positional, as handed to us by vLLM) stays correct.
         let registered_count = bits.registered_g2.lock().len();
         let external_blocks = g1_dst_external.len();
         if external_blocks > registered_count {
@@ -985,13 +1002,33 @@ impl ConditionalDisaggCoordinator {
                 bits.expected_hashes.len(),
             );
         }
-        let suffix_start = registered_count - external_blocks;
-        let g2_src_block_ids: Vec<BlockId> = bits
+        let positions: HashMap<SequenceHash, usize> = bits
+            .expected_hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (*h, i))
+            .collect();
+        let mut by_position: Vec<(usize, BlockId)> = bits
             .registered_g2
             .lock()
             .iter()
+            .map(|b| {
+                let hash = b.sequence_hash();
+                let pos = *positions.get(&hash).unwrap_or_else(|| {
+                    panic!(
+                        "kick_onboard: registered G2 block hash {hash:?} not in expected_hashes \
+                         — pull_and_register_chunk filters by expected, so this is unreachable",
+                    )
+                });
+                (pos, b.block_id())
+            })
+            .collect();
+        by_position.sort_by_key(|(pos, _)| *pos);
+        let suffix_start = registered_count - external_blocks;
+        let g2_src_block_ids: Vec<BlockId> = by_position
+            .into_iter()
             .skip(suffix_start)
-            .map(|b| b.block_id())
+            .map(|(_, id)| id)
             .collect();
 
         self.transport

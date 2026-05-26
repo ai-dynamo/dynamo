@@ -1681,3 +1681,109 @@ async fn cd_prefill_frame_error_mid_output_triggers_cleanup() -> Result<()> {
 
     Ok(())
 }
+
+/// `kick_onboard` must pair its G2→G1 source block_ids with vLLM's
+/// G1 destinations in **absolute-position order**, regardless of
+/// the order `Available` deltas land on the inbound session
+/// stream.
+///
+/// Why this matters: the session API permits availability to
+/// arrive in multiple deltas (CONTRACT §2.7/§2.8 — deltas appear
+/// in the holder's `make_available` call order). Stage 1's
+/// decode-side G1→G2 prefix promotion makes this a documented
+/// path: decode publishes local-match availability synchronously
+/// at GNMT and the promoted prefix availability later from the
+/// promotion task. Without positional sorting, `kick_onboard`
+/// takes the **arrival-order** suffix of `registered_g2` instead
+/// of the position-order suffix and mis-pairs G2 sources with
+/// vLLM-allocated G1 destinations — corrupting prefill's
+/// K/V cache.
+///
+/// The test forges two `Available` deltas (local_match window
+/// first, prefix window second) and asserts the resulting
+/// `local_g2_to_g1` call's source order matches the pull-call
+/// destinations stitched in absolute-position order
+/// (`pull_calls[1].dst ++ pull_calls[0].dst`).
+///
+/// This must FAIL on the pre-fix codebase (arrival order =
+/// `pull_calls[0].dst ++ pull_calls[1].dst`) and PASS after the
+/// position-sort fix lands in `kick_onboard`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_kick_onboard_robust_to_split_delta_availability() -> Result<()> {
+    // Use the same harness as `cd_prefill_happy_path` — same
+    // 4-block prefill request. The split is purely on the wire
+    // (two `Available` deltas vs. one), not in the slot fixture.
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(count, Some(NUM_EXTERNAL));
+    assert!(async_flag);
+
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+
+    // Split point: positions [0..SPLIT) = "prefix" window,
+    // [SPLIT..TOTAL) = "local_match" window. Local_match arrives
+    // FIRST on the wire (mirrors Stage 1: decode publishes
+    // local_match synchronously at GNMT, promoted prefix later
+    // from the promotion task).
+    const SPLIT: usize = 2;
+    const _: () = assert!(SPLIT < TOTAL_BLOCKS);
+
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+
+    // Delta 1: positions [SPLIT..TOTAL).
+    let local_match_hashes: Vec<_> = h.all_hashes[SPLIT..].to_vec();
+    let local_match_peer_ids: Vec<_> = h.decode_g2_block_ids[SPLIT..].to_vec();
+    session.inject_peer_available(committed_blocks(&local_match_peer_ids, &local_match_hashes));
+    session.wait_pull_count(1).await;
+    session.resolve_pull(0, Ok(()));
+
+    // Delta 2: positions [0..SPLIT).
+    let prefix_hashes: Vec<_> = h.all_hashes[..SPLIT].to_vec();
+    let prefix_peer_ids: Vec<_> = h.decode_g2_block_ids[..SPLIT].to_vec();
+    session.inject_peer_available(committed_blocks(&prefix_peer_ids, &prefix_hashes));
+    session.wait_pull_count(2).await;
+    session.resolve_pull(1, Ok(()));
+
+    session.inject_peer_drained();
+
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // USAA — drives kick_onboard with the full external window.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+
+    h.transport.wait_onboard_count(1).await;
+    let onboard = h.transport.onboard_calls()[0].clone();
+    assert_eq!(onboard.dst_g1_block_ids, h.g1_block_ids);
+    assert_eq!(onboard.src_g2_block_ids.len(), TOTAL_BLOCKS);
+
+    // The dst G2 block_ids prefill allocated for each pull (in
+    // arrival order). With split deltas, `pull_calls[0]` carries
+    // the local-match window's allocations and `pull_calls[1]`
+    // carries the prefix window's allocations.
+    let pull_calls = session.pull_calls();
+    assert_eq!(pull_calls.len(), 2);
+    assert_eq!(pull_calls[0].0, local_match_hashes);
+    assert_eq!(pull_calls[1].0, prefix_hashes);
+    let local_match_dst = &pull_calls[0].1;
+    let prefix_dst = &pull_calls[1].1;
+    assert_eq!(local_match_dst.len(), TOTAL_BLOCKS - SPLIT);
+    assert_eq!(prefix_dst.len(), SPLIT);
+
+    // Position-order pairing: positions [0..SPLIT) (prefix)
+    // followed by [SPLIT..TOTAL) (local_match).
+    let mut expected_src = prefix_dst.clone();
+    expected_src.extend(local_match_dst.iter().copied());
+    assert_eq!(
+        onboard.src_g2_block_ids, expected_src,
+        "kick_onboard must pair G2 sources with G1 destinations in absolute-position order, \
+         not arrival order — splitting availability into [local_match, prefix] deltas \
+         (Stage 1 promotion) must not corrupt the staging order"
+    );
+
+    Ok(())
+}
