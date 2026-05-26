@@ -33,15 +33,15 @@
 <text class="item" x="122.0" y="368.0">offset 384K, 48K -> cow</text>
 <rect x="110.0" y="382" width="220" height="28" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <text class="item" x="122.0" y="400.0">...</text>
-<rect x="380.0" y="190" width="460" height="284" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<text class="card-title" x="610.0" y="230" text-anchor="middle">preadv() blocks per call</text>
-<rect x="545.0" y="317.0" width="130" height="30" fill="#b04040"/>
-<text class="vma-label" x="610.0" y="336.0" text-anchor="middle" fill="#ffffff">read offset 0, 64K</text>
-<text class="arrow-meta" x="610.0" y="369.0" text-anchor="middle" fill="#cdcdcd">caller blocks &#183; remaining jobs stay queued</text>
-<rect x="565.0" y="383.0" width="90" height="3" fill="#3a3a3a"/>
-<rect x="565.0" y="389.0" width="90" height="3" fill="#3a3a3a"/>
-<rect x="565.0" y="395.0" width="90" height="3" fill="#3a3a3a"/>
-<text class="arrow-meta" x="610.0" y="407.0" text-anchor="middle" fill="#5a5a5a">queued</text>
+<rect x="380.0" y="190" width="460" height="224" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="card-title" x="610.0" y="226" text-anchor="middle">preadv() blocks per call</text>
+<rect x="545.0" y="286.0" width="130" height="30" fill="#b04040"/>
+<text class="vma-label" x="610.0" y="305.0" text-anchor="middle" fill="#ffffff">read offset 0, 64K</text>
+<text class="arrow-meta" x="610.0" y="338.0" text-anchor="middle" fill="#cdcdcd">caller blocks &#183; remaining jobs stay queued</text>
+<rect x="565.0" y="352.0" width="90" height="3" fill="#3a3a3a"/>
+<rect x="565.0" y="358.0" width="90" height="3" fill="#3a3a3a"/>
+<rect x="565.0" y="364.0" width="90" height="3" fill="#3a3a3a"/>
+<text class="arrow-meta" x="610.0" y="376.0" text-anchor="middle" fill="#5a5a5a">queued</text>
 <rect x="890.0" y="190.0" width="280" height="40" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <text class="vma-label" x="904.0" y="214.0">heap</text>
 <text class="vma-addr" x="1156.0" y="214.0" text-anchor="end">0x55...000</text>
