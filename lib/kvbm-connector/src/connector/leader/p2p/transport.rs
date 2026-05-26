@@ -15,16 +15,18 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_engine::leader::InstanceLeader;
+use kvbm_engine::offload::ExternalBlock;
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock, MutableBlock};
 use kvbm_physical::TransferOptions;
 use kvbm_protocols::disagg::TransferParams;
 
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request, SlotMatchSplit};
-use crate::{BlockId, G2, InstanceId};
+use crate::{BlockId, G1, G2, InstanceId, SequenceHash};
 
 /// Transport seam used by the disagg wrapper to drive
 /// local G2→G1 transfers (decode's local-match kick at USAA-1, and
@@ -239,6 +241,38 @@ pub trait InnerLeaderShim: Send + Sync {
         request_id: &str,
         cd_payload: Box<dyn crate::connector::leader::slot::CdOnboardingPayload>,
     ) -> Result<()>;
+
+    /// Promote a set of G1-resident blocks into G2 and return the
+    /// registered `ImmutableBlock<G2>`s once the offload pipeline has
+    /// completed the transfer + register step.
+    ///
+    /// The returned future encapsulates the whole alloc + transfer +
+    /// register flow. The caller is expected to spawn it in a task
+    /// whose lifetime is independent of the originating request — if
+    /// the request is torn down mid-promotion the resulting G2
+    /// blocks remain in cache and benefit future requests.
+    ///
+    /// The sequence hashes carried by `source_blocks` are what the
+    /// offload pipeline registers each resulting G2 block with; the
+    /// future re-queries the G2 manager by those same hashes after
+    /// the transfer completes and errors if any hash is missing
+    /// from the registered set (partial promotion). Passing a
+    /// `source_blocks` entry with a mismatched
+    /// `(block_id, sequence_hash)` pair therefore produces either a
+    /// hash-collision register failure or an "expected hash absent
+    /// after transfer" error from this future — both surface as
+    /// `Err` and are caller-recoverable.
+    ///
+    /// Used by Stage 1 conditional-disagg decode-side G1→G2 prefix
+    /// promotion at USAA. The CD `ConditionalDecodeG2Observer`
+    /// installed at init (for the prefill chunked-output path) also
+    /// observes the same G1→G2 register events for these blocks but
+    /// silently ignores them — its per-request `pending` map has no
+    /// residual hash set for decode-role requests.
+    fn promote_g1_to_g2(
+        &self,
+        source_blocks: Vec<ExternalBlock<G1>>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>>;
 }
 
 /// Production [`InnerLeaderShim`] that wraps a concrete `ConnectorLeader`.
@@ -400,5 +434,43 @@ impl InnerLeaderShim for ConnectorLeaderShim {
         let mut slot = shared_slot.lock();
         slot.txn_install_or_attach_cd_payload(cd_payload)
             .map_err(|e| anyhow!("install_cd_onboarding_payload({}): {}", request_id, e))
+    }
+
+    fn promote_g1_to_g2(
+        &self,
+        source_blocks: Vec<ExternalBlock<G1>>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>> {
+        // The offload pipeline registers each destination G2 block
+        // with the `sequence_hash` carried in its `ExternalBlock`.
+        // Capture those hashes here so we can re-query the G2
+        // manager after the transfer completes — the offload
+        // pipeline's register-observer hands blocks to G2 but does
+        // not return them to the caller of `enqueue_g1_to_g2`.
+        let expected_hashes: Vec<SequenceHash> =
+            source_blocks.iter().map(|b| b.sequence_hash).collect();
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let engine = inner
+                .offload_engine()
+                .ok_or_else(|| anyhow!("offload engine not initialized for promote_g1_to_g2"))?;
+            let mut handle = engine.enqueue_g1_to_g2(source_blocks)?;
+            // Drives the transfer to a terminal TransferStatus. The
+            // pipeline's register step puts blocks into the G2
+            // manager before this resolves.
+            let _result = handle.wait().await?;
+            let leader = inner.instance_leader().ok_or_else(|| {
+                anyhow!("InstanceLeader not initialized for promote_g1_to_g2 re-query")
+            })?;
+            let g2_blocks = leader.g2_manager().match_blocks(&expected_hashes);
+            if g2_blocks.len() != expected_hashes.len() {
+                anyhow::bail!(
+                    "promote_g1_to_g2: registered {}/{} expected hashes after transfer",
+                    g2_blocks.len(),
+                    expected_hashes.len(),
+                );
+            }
+            Ok(g2_blocks)
+        }
+        .boxed()
     }
 }

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use futures::{FutureExt, future::BoxFuture};
+use kvbm_engine::offload::ExternalBlock;
 use kvbm_protocols::disagg::{RemotePrefillRequest, TransferParams};
 use tokio::sync::oneshot;
 
@@ -21,7 +22,7 @@ use kvbm_logical::manager::BlockManager;
 use parking_lot::Mutex;
 
 use super::queue::RemotePrefillQueue;
-use crate::{BlockId, G2, SequenceHash};
+use crate::{BlockId, G1, G2, SequenceHash};
 
 pub const TEST_BLOCK_SIZE: usize = 16;
 
@@ -268,6 +269,31 @@ impl Default for MockSlot {
     }
 }
 
+/// Per-call record for `promote_g1_to_g2`, recorded in
+/// [`MockInnerLeaderShim::promotions`]. Tests drive completion
+/// (or failure) via [`MockInnerLeaderShim::resolve_promotion`].
+pub struct PendingPromotion {
+    pub source_blocks: Vec<ExternalBlock<G1>>,
+    /// One-shot resolver consumed by the returned future. Taken on
+    /// first `resolve_promotion`; subsequent calls panic.
+    resolver: Option<oneshot::Sender<Result<Vec<ImmutableBlock<G2>>>>>,
+}
+
+impl PendingPromotion {
+    pub fn source_block_ids(&self) -> Vec<BlockId> {
+        self.source_blocks.iter().map(|b| b.block_id).collect()
+    }
+
+    /// The sequence hashes the production offload pipeline would
+    /// register the resulting G2 blocks with — read directly off
+    /// each `ExternalBlock<G1>`. Tests assert on this to verify
+    /// the caller built source blocks with the correct hashes
+    /// (any mismatch would silently mis-register in production).
+    pub fn source_hashes(&self) -> Vec<SequenceHash> {
+        self.source_blocks.iter().map(|b| b.sequence_hash).collect()
+    }
+}
+
 pub struct MockInnerLeaderShim {
     block_size: usize,
     local_id: crate::InstanceId,
@@ -284,6 +310,11 @@ pub struct MockInnerLeaderShim {
     /// pending_failure re-check and the post-insert re-check. Used
     /// by the commit_usaa1 post-insert replay reproducer.
     apply_block_assignments_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// G1→G2 promotion requests recorded by `promote_g1_to_g2`.
+    /// Tests inspect entries and resolve them manually via
+    /// `resolve_promotion(index, Ok(g2_blocks))` to drive the
+    /// returned futures forward.
+    promotions: Mutex<Vec<PendingPromotion>>,
 }
 
 impl MockInnerLeaderShim {
@@ -295,7 +326,52 @@ impl MockInnerLeaderShim {
             slots: Mutex::new(std::collections::HashMap::new()),
             gnmt_call_counts: Mutex::new(std::collections::HashMap::new()),
             apply_block_assignments_hook: Mutex::new(None),
+            promotions: Mutex::new(Vec::new()),
         })
+    }
+
+    pub fn g2_manager(&self) -> &Arc<BlockManager<G2>> {
+        &self.g2_manager
+    }
+
+    /// Number of `promote_g1_to_g2` calls observed so far.
+    pub fn promotion_count(&self) -> usize {
+        self.promotions.lock().len()
+    }
+
+    /// Snapshot of recorded promotion requests as
+    /// `(source_block_ids, source_sequence_hashes)`. The hashes are
+    /// taken from the `ExternalBlock<G1>` entries themselves — same
+    /// hashes the production offload pipeline registers the
+    /// resulting G2 blocks with.
+    pub fn snapshot_promotion(&self, index: usize) -> Option<(Vec<BlockId>, Vec<SequenceHash>)> {
+        self.promotions
+            .lock()
+            .get(index)
+            .map(|p| (p.source_block_ids(), p.source_hashes()))
+    }
+
+    /// Resolve a recorded promotion request. Drives the returned
+    /// future forward; the caller is responsible for constructing
+    /// the resolved `Vec<ImmutableBlock<G2>>` via
+    /// `register_g2_blocks` against the shim's `g2_manager` (or
+    /// providing an `Err` to simulate transfer failure).
+    pub fn resolve_promotion(&self, index: usize, result: Result<Vec<ImmutableBlock<G2>>>) {
+        let mut promotions = self.promotions.lock();
+        let pending = promotions
+            .get_mut(index)
+            .expect("promote_g1_to_g2 call not yet recorded");
+        let resolver = pending
+            .resolver
+            .take()
+            .expect("promote_g1_to_g2 call already resolved");
+        let _ = resolver.send(result);
+    }
+
+    /// Async sleep-poll wait until at least `n` promotion requests
+    /// have been recorded.
+    pub async fn wait_promotion_count(&self, n: usize) {
+        wait_until(|| self.promotions.lock().len() >= n).await;
     }
 
     /// Install a one-shot side-effect hook that fires synchronously
@@ -528,5 +604,21 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         // `cd_payloads_dropped` to check Drop behavior.
         slot.installed_cd_payload.lock().replace(cd_payload);
         Ok(())
+    }
+
+    fn promote_g1_to_g2(
+        &self,
+        source_blocks: Vec<ExternalBlock<G1>>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>> {
+        let (tx, rx) = oneshot::channel();
+        self.promotions.lock().push(PendingPromotion {
+            source_blocks,
+            resolver: Some(tx),
+        });
+        async move {
+            rx.await
+                .map_err(|err| anyhow!("promote_g1_to_g2 resolver dropped: {err}"))?
+        }
+        .boxed()
     }
 }

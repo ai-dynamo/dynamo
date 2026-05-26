@@ -493,6 +493,14 @@ impl MockSession {
         self.inner.lock().make_available_calls.clone()
     }
 
+    pub fn finish_commits_called(&self) -> bool {
+        self.inner.lock().finish_commits_called
+    }
+
+    pub fn finish_availability_called(&self) -> bool {
+        self.inner.lock().finish_availability_called
+    }
+
     pub fn pull_calls(&self) -> Vec<(Vec<SequenceHash>, Vec<BlockId>)> {
         self.inner.lock().pull_calls.clone()
     }

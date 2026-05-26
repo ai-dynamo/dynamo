@@ -1191,6 +1191,167 @@ async fn cd_decode_peer_failure_mid_output_cleans_up() -> Result<()> {
     Ok(())
 }
 
+fn prefix_hashes(h: &TestHarness) -> Vec<kvbm_logical::SequenceHash> {
+    h.all_hashes[..COMPUTED_BLOCKS].to_vec()
+}
+
+/// Stage 1: at decode GNMT, when vLLM reports a non-zero
+/// `num_computed_tokens` (vLLM holds the prefix in G1) but the G2
+/// cache has no record of the prefix (the all-or-nothing
+/// `find_prefix_g2_blocks` returned empty), the wrapper must
+/// arrange for the prefix blocks to be promoted G1→G2 at USAA and
+/// the session's committed set must widen to include them.
+///
+/// What this test pins:
+///
+///   1. GNMT-time `session.commit` includes BOTH the local-match
+///      hashes AND the planned-promoted prefix hashes. The
+///      promoted hashes are committed up-front because the
+///      `session.finish_commits` seal is taken later in the same
+///      flow — the prefill peer must see the full promised set
+///      before commits is sealed.
+///   2. GNMT-time `session.make_available` exposes ONLY the
+///      currently-G2-resident blocks (local match here). Promoted
+///      prefix blocks are not yet G2-resident.
+///   3. `session.finish_commits` fires at GNMT (commit set is
+///      locked once we know the planned promotion).
+///   4. `session.finish_availability` is DEFERRED — the prefill
+///      peer would stall if it observed `finish_availability`
+///      before the promoted G2 blocks are exposed.
+///   5. At USAA, the wrapper invokes `promote_g1_to_g2` with the
+///      `(block_id, sequence_hash)` pairs covering the prefix
+///      window — these come from `block_ids[..num_prefix_blocks]`
+///      paired with `all_sequence_hashes[..num_prefix_blocks]`.
+///   6. When the promotion task resolves with the registered G2
+///      blocks, the wrapper calls `session.make_available` with
+///      them and then `session.finish_availability`.
+///
+/// This test is part of the Stage 1 reproducer-first scaffold and
+/// MUST FAIL on the pre-Stage-1 codebase (the wrapper today
+/// advertises an empty prefix on `find_prefix_g2_blocks` miss).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_promotes_g1_prefix_to_g2_at_usaa() -> Result<()> {
+    let h = build_harness();
+
+    h.wrapper.create_slot(make_request())?;
+
+    // 1. GNMT — wrapper opens session.
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(count, Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE));
+    assert!(async_flag);
+
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    // The first commit must already carry BOTH the local-match
+    // hashes and the planned-promoted prefix hashes — Stage 1
+    // commits the full planned set up-front so prefill peers can
+    // observe a sealed committed set after `finish_commits`.
+    let mut expected_first_commit = prefix_hashes(&h);
+    expected_first_commit.extend(local_match_hashes(&h));
+    assert_eq!(
+        session.commit_calls(),
+        vec![expected_first_commit],
+        "GNMT must commit planned prefix promotion alongside local match",
+    );
+
+    // make_available at GNMT exposes only the G2-resident set
+    // (local match only — prefix promotion hasn't run yet).
+    assert_eq!(
+        session.make_available_calls(),
+        vec![local_match_hashes(&h)],
+        "GNMT must NOT expose planned-promotion blocks before they land",
+    );
+
+    assert!(
+        session.finish_commits_called(),
+        "GNMT must seal commits once the planned set is committed",
+    );
+    assert!(
+        !session.finish_availability_called(),
+        "GNMT must DEFER finish_availability — promotion has not landed",
+    );
+
+    assert_eq!(
+        h.inner.promotion_count(),
+        0,
+        "promotion is triggered at USAA, not GNMT",
+    );
+
+    // 2. USAA — wrapper kicks the local G2→G1 transfer AND issues
+    //    the G1→G2 prefix promotion request.
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Allow the wrapper's USAA bookkeeping + the promotion-task
+    // spawn to settle.
+    h.inner.wait_promotion_count(1).await;
+
+    let (source_block_ids, expected_hashes) = h
+        .inner
+        .snapshot_promotion(0)
+        .expect("promotion #0 must be recorded");
+    assert_eq!(
+        source_block_ids,
+        h.g1_block_ids[..COMPUTED_BLOCKS].to_vec(),
+        "promotion source block ids must be the prefix slice of vLLM's g1 assignment",
+    );
+    assert_eq!(
+        expected_hashes,
+        prefix_hashes(&h),
+        "promotion expected hashes must be the prefix hash range",
+    );
+
+    // 3. Build genuine G2 ImmutableBlocks for the prefix hashes
+    //    and resolve the promotion. Mirrors what the production
+    //    offload-pipeline's register step would have done.
+    let slot = h.inner.slot("req-1").expect("slot installed");
+    let prefix_token_blocks: Vec<_> = slot.token_blocks[..COMPUTED_BLOCKS].to_vec();
+    let mutables = h
+        .inner
+        .g2_manager()
+        .allocate_blocks(COMPUTED_BLOCKS)
+        .expect("allocate prefix G2");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(prefix_token_blocks.iter())
+        .map(|(m, tb)| m.complete(tb).expect("complete prefix G2"))
+        .collect();
+    let promoted_g2 = h.inner.g2_manager().register_blocks(completes);
+    assert_eq!(promoted_g2.len(), COMPUTED_BLOCKS);
+
+    h.inner.resolve_promotion(0, Ok(promoted_g2));
+
+    // 4. After the promotion task drives session.make_available +
+    //    session.finish_availability, both must be observable.
+    wait_until(|| session.finish_availability_called()).await;
+
+    // The second make_available call covers the promoted prefix.
+    let make_avail = session.make_available_calls();
+    assert_eq!(
+        make_avail.len(),
+        2,
+        "expected GNMT-time + USAA-promotion make_available; got: {:?}",
+        make_avail,
+    );
+    assert_eq!(
+        make_avail[0],
+        local_match_hashes(&h),
+        "first make_available is local match at GNMT",
+    );
+    assert_eq!(
+        make_avail[1],
+        prefix_hashes(&h),
+        "second make_available is the promoted prefix",
+    );
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_inner_used(h: &TestHarness) {
     let _ = h.inner.local_id();
