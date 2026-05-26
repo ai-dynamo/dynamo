@@ -126,10 +126,10 @@ python container/compliance/process_results.py \
 
 | Framework | CUDA | Base image |
 |-----------|------|------------|
-| `vllm` | 12.9 | `vllm/vllm-openai:v0.20.1-cu129` |
-| `vllm` | 13.0 | `vllm/vllm-openai:v0.20.1` |
-| `sglang` | 12.9 | `lmsysorg/sglang:v0.5.11-cu129-runtime` |
-| `sglang` | 13.0 | `lmsysorg/sglang:v0.5.11-cu130-runtime` |
+| `vllm` | 12.9 | `vllm/vllm-openai:v0.21.0-cu129-ubuntu2404` |
+| `vllm` | 13.0 | `vllm/vllm-openai:v0.21.0-ubuntu2404` |
+| `sglang` | 12.9 | `lmsysorg/sglang:v0.5.12.post1-cu129-runtime` |
+| `sglang` | 13.0 | `lmsysorg/sglang:v0.5.12.post1-cu130-runtime` |
 | `trtllm` | 13.1 | `nvcr.io/nvidia/cuda-dl-base:25.12-cuda13.1-runtime-ubuntu24.04` |
 | `dynamo` frontend | — | `nvcr.io/nvidia/base/ubuntu:noble-20250619` |
 

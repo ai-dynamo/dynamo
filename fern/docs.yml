@@ -17,9 +17,11 @@
 
 instances:
   - url: dynamo.docs.buildwithfern.com/dynamo
-    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com]
+    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com/dynamo]
 
 title: NVIDIA Dynamo Documentation
+
+global-theme: nvidia
 
 agents:
   page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/llms.txt. For full content including API reference and SDK examples, see https://docs.nvidia.com/dynamo/llms-full.txt."
@@ -101,16 +103,15 @@ redirects:
     destination: "/dynamo/dev/user-guides/agents"
   - source: "/dynamo/latest/planner/planner_intro.html"
     destination: "/dynamo/components/planner"
-  # SGLang HiCache lives under Integrations; redirect from the older Backends > SGLang URL
-  - source: "/dynamo/dev/backends/sg-lang/hi-cache"
-    destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
-  - source: "/dynamo/backends/sg-lang/hi-cache"
-    destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
-  # Legacy Integrations slug before Fern normalization (sg-lang-hi-cache)
+  # SGLang HiCache doc: canonical URL under Backends > SGLang (see docs/index.yml)
+  - source: "/dynamo/dev/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/backends/sg-lang/hi-cache"
+  - source: "/dynamo/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/backends/sg-lang/hi-cache"
   - source: "/dynamo/dev/integrations/sglang-hicache"
-    destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/backends/sg-lang/hi-cache"
   - source: "/dynamo/integrations/sglang-hicache"
-    destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/backends/sg-lang/hi-cache"
   # Digest moved from /blog to /digest
   - source: "/dynamo/dev/blog/:slug*"
     destination: "/dynamo/dev/digest/:slug*"

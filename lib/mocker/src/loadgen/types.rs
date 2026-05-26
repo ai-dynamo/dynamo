@@ -14,9 +14,25 @@ pub struct Trace {
     pub sessions: Vec<SessionTrace>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AgenticTrace {
+    pub block_size: usize,
+    pub turns: Vec<AgenticTurnTrace>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceFileFormat {
     Mooncake,
+    /// Mooncake-shaped rows where follow-up turns contain input deltas.
+    /// Offline replay accumulates those deltas per session in token space before
+    /// computing engine block hashes. Use this only for delta traces: it expands
+    /// compact session deltas into cumulative prompts and can use much more
+    /// memory than `Mooncake`.
+    MooncakeDelta,
+    /// Mooncake request/cache rows plus explicit request-level workflow
+    /// dependencies. Each row dispatches after `wait_for` completions plus its
+    /// authored delay/tool wait.
+    AgenticMooncake,
     AppliedComputeAgentic,
 }
 
@@ -33,6 +49,19 @@ pub struct TurnTrace {
     pub max_output_tokens: usize,
     pub hash_ids: Vec<u64>,
     pub delay_after_previous_ms: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgenticTurnTrace {
+    pub request_id: String,
+    pub session_id: String,
+    pub input_length: usize,
+    pub max_output_tokens: usize,
+    pub hash_ids: Vec<u64>,
+    pub first_ready_timestamp_ms: Option<f64>,
+    pub delay_after_dependencies_ms: f64,
+    pub wait_for: Vec<String>,
+    pub prefix_reset: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -17,6 +17,7 @@ use super::{KvWorkerMonitor, ModelManagerError};
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
+    RealtimeBidirectionalEngine,
     generic::tensor::TensorStreamingEngine,
     openai::{
         audios::OpenAIAudiosStreamingEngine,
@@ -157,6 +158,121 @@ impl Model {
             .any(|entry| entry.value().has_audios_engine())
     }
 
+    /// Check if any WorkerSet has a realtime engine.
+    pub fn has_realtime_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_realtime_engine())
+    }
+
+    // -- Topology readiness --
+    //
+    // A *topology* is the set of WorkerSets in this Model that share the same
+    // `namespace` string and collectively serve traffic for one deployment.
+    // A worker's `needs` is in DNF: a list of alternative AND-sets of
+    // required peer worker types. The topology is ready when, for every
+    // WorkerSet in it, at least one alternative is fully covered by the
+    // worker types currently present in the topology (workers with
+    // worker_count > 0).
+    //
+    // The design target is that every worker registers an explicit
+    // `worker_type` and `needs`. A temporary shim in [`ws_role_and_needs`]
+    // reads `worker_type = None` as `Aggregated` with no `needs` so that the
+    // frontend can keep serving existing deployments while backends are
+    // being updated. The shim is removed once backend-side registration is
+    // strict; see `docs/proposals/health-disagg-readiness.md` (Phase 3).
+
+    /// Distinct namespaces represented by this model's WorkerSets, sorted.
+    /// Each namespace identifies one topology in the model.
+    pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
+        let mut ns: Vec<String> = self
+            .worker_sets
+            .iter()
+            .map(|entry| entry.value().namespace().to_string())
+            .collect();
+        ns.sort();
+        ns.dedup();
+        ns
+    }
+
+    /// Return `(worker_type, needs)` for this WorkerSet, applying the
+    /// temporary missing-field shim.
+    ///
+    /// TEMPORARY: contains a shim for `worker_type = None`, removed once
+    /// every backend registers explicit values.
+    fn ws_role_and_needs(
+        ws: &WorkerSet,
+    ) -> (
+        crate::worker_type::WorkerType,
+        Vec<Vec<crate::worker_type::WorkerType>>,
+    ) {
+        let card = ws.card();
+        match card.worker_type {
+            Some(wt) => (wt, card.needs.clone()),
+            None => {
+                // TEMPORARY shim: missing worker_type → treat as Aggregated
+                // with no peer needs. Removed when backend-side registration
+                // is strict and missing means "misconfigured".
+                (crate::worker_type::WorkerType::Aggregated, Vec::new())
+            }
+        }
+    }
+
+    /// Whether the workers in the given namespace are ready to serve traffic.
+    ///
+    /// Iterates the WorkerSets sharing this namespace and checks that every
+    /// WorkerSet's `needs` (DNF) has at least one alternative fully covered
+    /// by the present worker types. Returns false for an unknown namespace
+    /// or one with no WorkerSets.
+    pub fn is_workers_ready(&self, namespace: &str) -> bool {
+        let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
+            std::collections::HashSet::new();
+        let mut wsets: Vec<std::sync::Arc<WorkerSet>> = Vec::new();
+        for entry in self.worker_sets.iter() {
+            let ws = entry.value();
+            if ws.namespace() != namespace {
+                continue;
+            }
+            let (wt, _needs) = Self::ws_role_and_needs(ws);
+            if ws.worker_count() > 0 {
+                present.insert(wt);
+            }
+            wsets.push(ws.clone());
+        }
+        if wsets.is_empty() {
+            return false;
+        }
+        // Every WorkerSet's needs (DNF) must have at least one alternative
+        // (AND-set) fully present.
+        for ws in &wsets {
+            let (_wt, needs) = Self::ws_role_and_needs(ws);
+            if needs.is_empty() {
+                continue;
+            }
+            let any_alt_satisfied = needs
+                .iter()
+                .any(|alt| alt.iter().all(|t| present.contains(t)));
+            if !any_alt_satisfied {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Return the namespace identifier of the first ready set of workers (in
+    /// sorted order), or `None` if none are ready.
+    pub fn first_ready_workers(&self) -> Option<String> {
+        self.distinct_namespaces_sorted()
+            .into_iter()
+            .find(|ns| self.is_workers_ready(ns))
+    }
+
+    /// Whether at least one set of workers (one topology) in this model is
+    /// ready to serve traffic.
+    pub fn has_ready_workers(&self) -> bool {
+        self.first_ready_workers().is_some()
+    }
+
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
         let has_serving_engine = |ws: &WorkerSet| {
@@ -167,6 +283,7 @@ impl Model {
                 || ws.has_tensor_engine()
                 || ws.has_videos_engine()
                 || ws.has_audios_engine()
+                || ws.has_realtime_engine()
         };
 
         let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
@@ -224,6 +341,11 @@ impl Model {
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
+    }
+
+    pub fn get_realtime_engine(&self) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.realtime_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -519,6 +641,32 @@ mod tests {
         assert!(model.get_embeddings_engine().is_err());
         assert!(model.get_images_engine().is_err());
         assert!(model.get_tensor_engine().is_err());
+        assert!(model.get_realtime_engine().is_err());
+    }
+
+    fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            "abc".to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn test_realtime_engine_round_trip() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.has_realtime_engine());
+        assert!(model.get_realtime_engine().is_ok());
+    }
+
+    #[test]
+    fn test_realtime_only_model_is_displayable() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.is_displayable());
     }
 
     #[test]
@@ -719,5 +867,239 @@ mod tests {
             !model.is_displayable(),
             "model must be hidden when only the dead prefill set remains"
         );
+    }
+
+    // -- Topology readiness --
+    //
+    // These tests exercise the live-compute readiness methods on `Model`.
+    // They construct WorkerSets with specific `worker_type` / `needs` values
+    // on their cards and verify DNF readiness math, including the encode
+    // worker's two-alternative needs and the temporary missing-field shim
+    // in `ws_role_and_needs`.
+
+    use crate::worker_type::WorkerType;
+
+    /// Build a WorkerSet with an explicit worker_type / needs and a live
+    /// worker count (via a watch channel).
+    fn ws_with_role(
+        namespace: &str,
+        mdcsum: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+        worker_ids: Vec<u64>,
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        let (tx, rx) = watch::channel(worker_ids);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        (Arc::new(ws), tx)
+    }
+
+    #[test]
+    fn readiness_empty_model_not_ready() {
+        let model = Model::new("llama".to_string());
+        assert!(!model.has_ready_workers());
+        assert_eq!(model.first_ready_workers(), None);
+        assert!(!model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_pd_pair_ready() {
+        let model = Model::new("llama".to_string());
+        let (prefill, _tx_p) = ws_with_role(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (decode, _tx_d) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("dynamo:prefill".to_string(), prefill);
+        model.add_worker_set("dynamo".to_string(), decode);
+
+        assert!(model.is_workers_ready("dynamo"));
+        assert_eq!(model.first_ready_workers(), Some("dynamo".to_string()));
+    }
+
+    #[test]
+    fn readiness_pd_missing_prefill_not_ready() {
+        let model = Model::new("llama".to_string());
+        let (decode, _tx) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("dynamo".to_string(), decode);
+
+        assert!(!model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_epd_aggregated_plus_encode_ready() {
+        // E-PD pattern: Aggregated worker (with --route-to-encoder, so it
+        // needs Encode) + Encode worker (whose needs has two alternatives:
+        // P+D pair OR a single Aggregated peer). The second alternative is
+        // satisfied here because Aggregated is present.
+        let model = Model::new("llava".to_string());
+        let (agg, _tx_a) = ws_with_role(
+            "dynamo",
+            "mdc-a",
+            WorkerType::Aggregated,
+            vec![vec![WorkerType::Encode]],
+            vec![1],
+        );
+        let (enc, _tx_e) = ws_with_role(
+            "dynamo",
+            "mdc-e",
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+            vec![2],
+        );
+        model.add_worker_set("dynamo:aggregated".to_string(), agg);
+        model.add_worker_set("dynamo:encode".to_string(), enc);
+
+        assert!(model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_epd_pd_pair_plus_encode_ready() {
+        // E-P-D pattern: separate Prefill + Decode + Encode workers.
+        // Encode's first alternative (Prefill+Decode) is satisfied.
+        let model = Model::new("llava".to_string());
+        let (prefill, _tx_p) = ws_with_role(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode, WorkerType::Encode]],
+            vec![1],
+        );
+        let (decode, _tx_d) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        let (enc, _tx_e) = ws_with_role(
+            "dynamo",
+            "mdc-e",
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+            vec![3],
+        );
+        model.add_worker_set("dynamo:prefill".to_string(), prefill);
+        model.add_worker_set("dynamo".to_string(), decode);
+        model.add_worker_set("dynamo:encode".to_string(), enc);
+
+        assert!(model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_encode_alone_not_ready() {
+        // Encode alone: neither alternative in its needs DNF is satisfied.
+        let model = Model::new("llava".to_string());
+        let (enc, _tx) = ws_with_role(
+            "dynamo",
+            "mdc-e",
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+            vec![1],
+        );
+        model.add_worker_set("dynamo:encode".to_string(), enc);
+
+        assert!(!model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_cross_namespace_isolation() {
+        // Prefill in ns-old, Decode in ns-new: neither namespace is ready.
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = ws_with_role(
+            "ns-old",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (d, _td) = ws_with_role(
+            "ns-new",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("ns-old:prefill".to_string(), p);
+        model.add_worker_set("ns-new".to_string(), d);
+
+        assert!(!model.is_workers_ready("ns-old"));
+        assert!(!model.is_workers_ready("ns-new"));
+        assert!(!model.has_ready_workers());
+    }
+
+    #[test]
+    fn readiness_scale_down_flips_to_not_ready() {
+        // Decode worker_count drops to 0 → topology flips from ready to
+        // not-ready with no clearing hook (the point of live-compute).
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = ws_with_role(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (d, tx_d) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("dynamo:prefill".to_string(), p);
+        model.add_worker_set("dynamo".to_string(), d);
+
+        assert!(model.is_workers_ready("dynamo"));
+
+        // Drop decode workers — no hook, just an update to the watch channel.
+        tx_d.send(vec![]).unwrap();
+        assert!(!model.is_workers_ready("dynamo"));
+
+        // Rejoin a decode worker — topology flips back to ready.
+        tx_d.send(vec![2]).unwrap();
+        assert!(model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_missing_worker_type_field_treated_as_aggregated() {
+        // TEMPORARY: verifies the shim in `ws_role_and_needs` that maps a
+        // missing worker_type (None) to Aggregated with no needs while
+        // backends are being updated to populate the field. This test (and
+        // the shim itself) are removed once every worker registers an
+        // explicit worker_type.
+        let model = Model::new("llama".to_string());
+        // Default card → worker_type is None.
+        let (_ws, _tx) = make_worker_set_with_count("dynamo", "mdc-agg", vec![1]);
+        model.add_worker_set("dynamo".to_string(), _ws);
+
+        assert!(model.is_workers_ready("dynamo"));
     }
 }

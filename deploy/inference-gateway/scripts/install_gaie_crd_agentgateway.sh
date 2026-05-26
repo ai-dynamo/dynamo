@@ -46,6 +46,31 @@ helm upgrade -i --namespace "$AGW_NAMESPACE" --version "$AGW_VERSION" agentgatew
   --set inferenceExtension.enabled=true \
   --wait
 
+# Create an AgentgatewayParameters resource that excludes Istio sidecar injection
+# from the agentgateway-proxy pods. When the deployment namespace has
+# istio-injection=enabled, the Istio sidecar intercepts the ext_proc gRPC
+# connection from agentgateway-proxy to EPP (port 9002), causing all inference
+# requests to return HTTP 500. Setting sidecar.istio.io/inject: "false" on the
+# pod template prevents sidecar injection so that ext_proc traffic reaches EPP
+# directly. This annotation is a no-op on clusters where Istio is not installed.
+#
+# AgentgatewayParameters must live in the same namespace as the Gateway because
+# Gateway API's infrastructure.parametersRef is a LocalParametersReference
+# (no namespace field).
+kubectl apply --server-side -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: inference-gateway-params
+spec:
+  deployment:
+    spec:
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+EOF
+
 kubectl apply -n "$NAMESPACE" -f - <<EOF
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -53,6 +78,11 @@ metadata:
   name: inference-gateway
 spec:
   gatewayClassName: agentgateway
+  infrastructure:
+    parametersRef:
+      group: agentgateway.dev
+      kind: AgentgatewayParameters
+      name: inference-gateway-params
   listeners:
     - name: http
       port: 80

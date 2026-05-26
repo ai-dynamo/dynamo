@@ -15,14 +15,17 @@ from tests.utils.payloads import (
     CompletionPayloadWithLogprobs,
     EmbeddingPayload,
     GuidedDecodingChatPayload,
+    KvEventMetricsPayload,
     LMCacheMetricsPayload,
     MetricsPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
+    RouterNvextChatPayload,
     SGLangMetricsPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
 )
+from tests.utils.router_nvext import RouterNvextExpectation, router_nvext_extra_body
 
 # Common default text prompt used across tests
 TEXT_PROMPT = "Tell me a knock knock joke about AI."
@@ -46,24 +49,38 @@ def chat_payload_default(
     max_tokens: int = 1000,
     temperature: float = 0.0,
     stream: bool = False,
+    extra_body: Optional[Dict[str, Any]] = None,
+    router_nvext_expectation: RouterNvextExpectation | None = None,
 ) -> ChatPayload:
-    return ChatPayload(
-        body={
-            "messages": [
-                {
-                    "role": "user",
-                    "content": TEXT_PROMPT,
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": stream,
-        },
-        repeat_count=repeat_count,
-        expected_log=expected_log or [],
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": TEXT_PROMPT,
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": stream,
+    }
+    if extra_body:
+        body.update(extra_body)
+
+    common_args = {
+        "body": body,
+        "repeat_count": repeat_count,
+        "expected_log": expected_log or [],
         # Accept any of these keywords in the response (case-insensitive)
-        expected_response=expected_response
+        "expected_response": expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    }
+    if router_nvext_expectation:
+        return RouterNvextChatPayload(
+            **common_args,
+            router_nvext_expectation=router_nvext_expectation,
+        )
+    return ChatPayload(
+        **common_args,
     )
 
 
@@ -74,6 +91,8 @@ def cached_tokens_chat_payload(
     max_tokens: int = 100,
     temperature: float = 0.0,
     min_cached_tokens: int = 64,
+    extra_body: Optional[Dict[str, Any]] = None,
+    router_nvext_expectation: RouterNvextExpectation | None = None,
 ) -> CachedTokensChatPayload:
     """Create a chat payload that validates cached tokens in usage field.
 
@@ -95,22 +114,63 @@ def cached_tokens_chat_payload(
     Returns:
         CachedTokensChatPayload configured for testing prefix caching
     """
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": LONG_PROMPT_FOR_CACHING,
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if extra_body:
+        body.update(extra_body)
+
     return CachedTokensChatPayload(
-        body={
-            "messages": [
-                {
-                    "role": "user",
-                    "content": LONG_PROMPT_FOR_CACHING,
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response
         or ["Aeloria", "Eldoria", "explorer", "ancient", "character", "background"],
+        min_cached_tokens=min_cached_tokens,
+        router_nvext_expectation=router_nvext_expectation,
+    )
+
+
+def router_selection_chat_payload_default(
+    repeat_count: int = 3,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 1000,
+    temperature: float = 0.0,
+    stream: bool = False,
+) -> ChatPayload:
+    return chat_payload_default(
+        repeat_count=repeat_count,
+        expected_response=expected_response,
+        expected_log=expected_log,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stream=stream,
+        extra_body=router_nvext_extra_body(["worker_id"]),
+        router_nvext_expectation=RouterNvextExpectation(worker_id=True),
+    )
+
+
+def router_cached_tokens_chat_payload(
+    repeat_count: int = 3,
+    expected_response: Optional[List[str]] = None,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+    min_cached_tokens: int = 64,
+) -> CachedTokensChatPayload:
+    return cached_tokens_chat_payload(
+        repeat_count=repeat_count,
+        expected_response=expected_response,
+        max_tokens=max_tokens,
+        temperature=temperature,
         min_cached_tokens=min_cached_tokens,
     )
 
@@ -216,6 +276,7 @@ def metric_payload_default(
     expected_log: Optional[List[str]] = None,
     backend: Optional[str] = None,
     port: int = DefaultPort.SYSTEM1.value,
+    check_lifecycle_gauges: bool = False,
 ) -> MetricsPayload:
     """Create a metrics payload for the specified backend.
 
@@ -225,6 +286,10 @@ def metric_payload_default(
         expected_log: Expected log messages
         backend: Backend type ('vllm', 'sglang', 'trtllm', 'lmcache')
         port: Port to use for metrics endpoint
+        check_lifecycle_gauges: Assert the unified-only lifecycle gauges
+            (``cleanup_time_seconds``, ``drain_time_seconds``,
+            ``kv_cache_hit_rate``) are registered. Default False because
+            legacy entry points don't emit them.
 
     Returns:
         Backend-specific MetricsPayload subclass based on backend parameter
@@ -236,6 +301,7 @@ def metric_payload_default(
         "expected_response": [],
         "min_num_requests": min_num_requests,
         "port": port,
+        "check_lifecycle_gauges": check_lifecycle_gauges,
     }
 
     # Return backend-specific payload class
@@ -250,6 +316,28 @@ def metric_payload_default(
     else:
         # Default to base MetricsPayload for unknown backends
         return MetricsPayload(**common_args)
+
+
+def kv_events_metrics_payload(
+    *,
+    event_type: str = "stored",
+    min_received: int = 1,
+    min_accepted: int = 1,
+    port: int = DefaultPort.SYSTEM1.value,
+    system_ports: Optional[List[int]] = None,
+    settle_seconds: float = 0.5,
+) -> KvEventMetricsPayload:
+    return KvEventMetricsPayload(
+        body={},
+        expected_response=[],
+        expected_log=[],
+        port=port,
+        system_ports=system_ports or [],
+        event_type=event_type,
+        min_received=min_received,
+        min_accepted=min_accepted,
+        settle_seconds=settle_seconds,
+    )
 
 
 def chat_payload(
@@ -350,11 +438,15 @@ def embedding_payload_default(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> EmbeddingPayload:
+    body: Dict[str, Any] = {
+        "input": ["The sky is blue.", "Machine learning is fascinating."],
+    }
+    if extra_body:
+        body.update(extra_body)
     return EmbeddingPayload(
-        body={
-            "input": ["The sky is blue.", "Machine learning is fascinating."],
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response
@@ -367,6 +459,7 @@ def embedding_payload(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> EmbeddingPayload:
     # Normalize input to list for consistent processing
     if isinstance(input_text, str):
@@ -376,10 +469,14 @@ def embedding_payload(
         input_list = input_text
         expected_count = len(input_text)
 
+    body: Dict[str, Any] = {
+        "input": input_list,
+    }
+    if extra_body:
+        body.update(extra_body)
+
     return EmbeddingPayload(
-        body={
-            "input": input_list,
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response

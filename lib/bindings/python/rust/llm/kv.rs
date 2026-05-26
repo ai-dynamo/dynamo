@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
+use super::local_model::RoutingConstraints;
 use super::*;
 use crate::Endpoint;
 #[cfg(feature = "kv-indexer")]
@@ -238,7 +239,8 @@ impl KvEventPublisher {
     ///
     /// Args:
     ///     endpoint: The Dynamo component endpoint for this worker.
-    ///     worker_id: Identifier of this worker (default 0).
+    ///     worker_id: Optional worker identity override. When None, the publisher
+    ///         uses the endpoint's local connection id.
     ///     kv_block_size: KV cache block size in tokens; must be > 0.
     ///     dp_rank: Data-parallel rank of this worker (default 0).
     ///     enable_local_indexer: When True, a local KV indexer is kept in-process
@@ -252,11 +254,11 @@ impl KvEventPublisher {
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
-        worker_id: WorkerId,
+        worker_id: Option<WorkerId>,
         kv_block_size: usize,
         dp_rank: DpRank,
         enable_local_indexer: bool,
@@ -264,8 +266,6 @@ impl KvEventPublisher {
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
     ) -> PyResult<Self> {
-        let _ = worker_id;
-
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
@@ -278,15 +278,17 @@ impl KvEventPublisher {
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();
 
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component,
-            kv_block_size as u32,
-            source_config,
-            enable_local_indexer,
-            dp_rank,
-            batching_timeout_ms,
-        )
-        .map_err(to_pyerr)?;
+        let inner =
+            llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id(
+                component,
+                worker_id,
+                kv_block_size as u32,
+                source_config,
+                enable_local_indexer,
+                dp_rank,
+                batching_timeout_ms,
+            )
+            .map_err(to_pyerr)?;
 
         Ok(Self {
             inner: inner.into(),
@@ -916,6 +918,9 @@ impl KvRouter {
                         config.model_path(),
                         config.tp_size(),
                         config.backend_version(),
+                        config.moe_tp_size(),
+                        config.moe_ep_size(),
+                        config.attention_dp_size(),
                     )
                 })
             })
@@ -957,7 +962,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None, routing_constraints=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -973,6 +978,7 @@ impl KvRouter {
         block_mm_infos: Option<PyObject>,
         multi_modal_data: Option<PyObject>,
         mm_routing_info: Option<PyObject>,
+        routing_constraints: Option<RoutingConstraints>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
@@ -1048,10 +1054,11 @@ impl KvRouter {
             .tracker(Some(tracker.clone()));
 
         // Set routing hints if worker_id or dp_rank is provided
-        if worker_id.is_some() || dp_rank.is_some() {
+        if worker_id.is_some() || dp_rank.is_some() || routing_constraints.is_some() {
             let routing = llm_rs::protocols::common::preprocessor::RoutingHints {
                 backend_instance_id: worker_id,
                 dp_rank,
+                routing_constraints: routing_constraints.map(Into::into),
                 ..Default::default()
             };
             request_builder.routing(Some(routing));
@@ -1087,7 +1094,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -1097,6 +1104,7 @@ impl KvRouter {
         update_indexer: bool,
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
+        routing_constraints: Option<RoutingConstraints>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1114,20 +1122,55 @@ impl KvRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
-                .find_best_match(
+            let outcome = chooser
+                .find_best_match_details(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
+                    false,
                     lora_name.clone(),
                     0.0,
                     None,
+                    None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
+                    routing_constraints.map(Into::into).unwrap_or_default(),
                 )
                 .await
                 .map_err(to_pyerr)?;
+            let (best_worker, overlap_blocks) = match outcome {
+                llm_rs::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    ..
+                } => (worker, overlap_blocks),
+                llm_rs::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                } => {
+                    // Note: Backpressure is currently treated as Unavailable and falls through
+                    // to the error path. Distinguishing backpressure from regular errors in Python
+                    // would require returning a structured result type instead of raising an exception,
+                    // which is a breaking API change. For now, callers should treat any error from
+                    // best_worker as potentially transient and implement retry logic accordingly.
+                    // The backpressure info (reason, queued_isl_tokens, max_queued_isl_tokens) is logged but
+                    // not exposed to Python callers.
+                    tracing::warn!(
+                        reason = ?reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens = ?max_queued_isl_tokens,
+                        "Router backpressure - treating as unavailable"
+                    );
+                    return Err(to_pyerr(anyhow::anyhow!(
+                        "router backpressure: {:?} (queued_isl_tokens={}, max_queued_isl_tokens={:?})",
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens
+                    )));
+                }
+            };
 
             if update_indexer {
                 let cfg = chooser.kv_router_config();
