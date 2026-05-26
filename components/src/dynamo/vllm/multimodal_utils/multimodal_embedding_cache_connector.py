@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -14,7 +15,6 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
-from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -26,10 +26,19 @@ MINIMUM_VLLM_VERSION = "0.17.0"
 logger = logging.getLogger(__name__)
 
 
-def _current_accelerator_device() -> str:
-    device_type = getattr(current_platform, "device_type", None)
-    if device_type in ("cuda", "xpu"):
-        return device_type
+def _get_device(vllm_config: "VllmConfig") -> str:
+    device_config = getattr(vllm_config, "device_config", None)
+    for field_name in ("device", "device_type"):
+        device = getattr(device_config, field_name, None)
+        if isinstance(device, torch.device):
+            device = device.type
+        if isinstance(device, str) and device in ("cuda", "xpu"):
+            return device
+
+    target_device = os.environ.get("VLLM_TARGET_DEVICE")
+    if target_device in ("cuda", "xpu"):
+        return target_device
+
     return "cuda"
 
 
@@ -63,8 +72,9 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 _vllm_version,
             )
         super().__init__(vllm_config=vllm_config, role=role)
+            self._vllm_config = vllm_config
 
-        transfer_config = vllm_config.ec_transfer_config
+            transfer_config = vllm_config.ec_transfer_config
         if transfer_config is None:
             raise ValueError(
                 "ec_transfer_config must be set for DynamoMultimodalEmbeddingCacheConnector"
@@ -211,7 +221,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 continue
             if mm_hash in self._cpu_store:
                 encoder_cache[mm_hash] = self._cpu_store[mm_hash].to(
-                    _current_accelerator_device(), non_blocking=True
+                    _get_device(self._vllm_config), non_blocking=True
                 )
             else:
                 logger.warning(
