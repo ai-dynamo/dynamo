@@ -28,7 +28,13 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /usr/bin/uv
 COPY --from=dynamo_base /bin/uvx /usr/bin/uvx
 
+{% if target == "runtime" %}
+# Renamed `runtime` → `runtime_full` so the final stage can re-FROM upstream
+# and overlay our changes as a single layer (cuts depth for downstream wrappers).
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_full
+{% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+{% endif %}
 
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
@@ -157,3 +163,34 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 # other Dynamo images and can execute arbitrary commands directly.
 ENTRYPOINT []
 CMD ["/bin/bash"]
+
+{% if target == "runtime" %}
+# Rebase on upstream so this stage inherits upstream's image config
+# (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
+# single layer. Only Dynamo-specific env needs redeclaring below.
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+# Whiteout paths runtime_full removed — COPY can't represent deletions, so
+# without this, upstream's /workspace, /home/ubuntu, and single-file
+# /usr/local/bin/etcd would leak alongside our content.
+RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd
+COPY --from=runtime_full / /
+
+# Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
+# because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
+ENV DYNAMO_HOME=/workspace \
+    HOME=/home/dynamo \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/opt/dynamo/venv/bin:/usr/local/bin/etcd:${PATH} \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+
+WORKDIR /workspace
+
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
+
+USER dynamo
+
+ENTRYPOINT []
+CMD ["/bin/bash"]
+{% endif %}
