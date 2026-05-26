@@ -104,55 +104,69 @@ tsh kubectl cp ${NAMESPACE}/q32b-1p1d-nscale-ib-benchmark:/perf-cache/artifacts 
 - **No `FI_*` env, no `LD_LIBRARY_PATH=/opt/amazon/efa/lib`** — those are AWS-EFA only; would silently break UCX device selection or load unrelated libfabric on this cluster.
 - **`--gpu-cluster`-style placement domain (Nebius):** Nscale's analog (rack/island grouping) is *unverified*; pod anti-affinity on `kubernetes.io/hostname` is enough for the 1P1D measurement here. If you scale to many workers, verify IB-island alignment with Nscale support.
 
-## Status: cluster-blocked at IB SR-IOV layer (2026-05-22)
+## Status: IB cluster-blocked; **TCP fallback measured 2026-05-26**
 
-**The recipe deploys cleanly and serves locally, but cross-pod NIXL KV transfer cannot complete on this cluster.** This is a cluster-side limitation, not a recipe bug. Do not retry UCX/NIXL tuning here until the underlying cluster issue is fixed.
+**Cluster RDMA was blocked.** Cross-pod NIXL via UCX `rc_mlx5` cannot complete on this cluster — `mlx5dv_devx_general_cmd(ALLOW_OTHER_VHCA_ACCESS) failed: syndrome 0x172df6: Remote I/O error`. The Nscale IB SR-IOV config refuses cross-VHCA memory-key permission. NCCL TP works (different RDMA path); UCX cross-pod RDMA does not.
 
-**Symptom:** First chat completion request returns HTTP 500. Decode worker's `nixl_connector.py` logs:
+**Recipe pivoted to `UCX_TLS=tcp` over `eth0`** as a working fallback. Loses IB performance, but gives a real cross-node disagg measurement to compare against AWS EFA and AKS IB.
 
-```
-NIXL transfer failure: transfer_exception
-remote_engine_id: <prefill engine>  remote_port: 5600
-nixl_cu12._bindings.nixlRemoteDisconnectError: NIXL_ERR_REMOTE_DISCONNECT
-```
-
-Engine restarts in-place; the next request hits the same failure. `agent_rx_bytes` stays at 0.
-
-**Root cause (from UCX trace logs on both sides):**
-
-1. `mlx5dv_devx_general_cmd(ALLOW_OTHER_VHCA_ACCESS) failed on mlx5_0, syndrome 0x172df6: Remote I/O error` — the Nscale IB driver/SR-IOV config refuses to grant cross-VHCA memory key permissions. UCX's `rc_mlx5` transport sets up locally but cross-pod RDMA establishment fails when actually used. NCCL works on the same hardware because it uses a different RDMA path that doesn't require this permission.
-2. `dlopen('libuct_cuda_gdrcopy.so.0') failed: libgdrapi.so.2: cannot open shared object file` — `vllm-runtime:1.1.1` is missing GDRCopy. Lower priority — fallback path exists if cross-VHCA were allowed.
-
-**What didn't fix it (already tried, leave alone):**
-
-- `UCX_IB_GPU_DIRECT_RDMA=yes`
-- `kv_connector_extra_config:{"backends":["UCX"]}` in `--kv-transfer-config`
-- Clean delete + reapply (no rolling-update race)
-- Picking specific HCAs via `UCX_NET_DEVICES`
-
-**What's needed to unblock:**
-
-- Nscale ops to enable `ALLOW_OTHER_VHCA_ACCESS` on the SR-IOV / IB partition config, OR move from `rdma/ib` (shared-device-plugin) to a per-pod exclusive HCA mode if available.
-- Optional: image rebuild with `libgdrapi.so.2` baked in — won't fix the VHCA issue alone, but needed alongside the cluster fix for full GPUDirect.
-
-## Recipe state (current best known)
-
-The following recipe-side fixes are persisted in `deploy.yaml`. They are correct for Nscale; the recipe will deploy and serve fine, just won't cross-node-transfer.
-
-- `--gpu-memory-utilization 0.70` (not 0.90): Nscale is a multi-tenant cluster; other tenants leave ~45 GiB/GPU of ghost CUDA contexts that the K8s `nvidia.com/gpu` accounting doesn't reflect. 0.90 OOMs intermittently depending on which node decode lands on.
-- `NCCL_DEBUG=INFO` (was WARN): surfaces NCCL TP-init progress if engine hangs; doesn't affect performance once running.
-- `UCX_IB_GPU_DIRECT_RDMA=yes`, `UCX_LOG_LEVEL=info`, `UCX_PROTO_INFO=y`: kept in for future debugging; do no harm.
-- TP=4 (not 8): historical, reflecting prior session's cluster capacity. Cluster has had unreserved 8-GPU nodes available since then — could bump to TP=8 to match AWS once the SR-IOV issue is fixed.
-
-## Results
-
-_(blocked — see "Status" above; will fill in once cross-VHCA access is enabled at the cluster)_
+### Measured numbers (TCP fallback, 2026-05-26)
 
 | Metric | Value |
 |---|---|
-| Mean NIXL KV transfer BW (GB/s) | blocked |
-| P50 TTFT (ms) | blocked |
-| P99 TTFT (ms) | blocked |
-| P50 ITL (ms) | blocked |
-| Goodput (req/s) | blocked |
-| aiperf artifact | n/a |
+| **Aggregate NIXL KV BW (TCP)** | **~1.0 GB/s** (1787.6 GiB rank-0 × TP=4 / 7200 s) |
+| Mean ITL | 8.45 ms |
+| P50 ITL | 6.86 ms |
+| P50 per-user throughput | 145.82 tok/s |
+| Mean per-user throughput | 133.77 tok/s |
+| Mean TTFT (queue-bound) | 53 min |
+| Successful requests | 2,058 / 12,031 (17%) |
+| Errored / timed-out | 3,642 (long-prompt timeouts; queue depth blew past engine's tolerance) |
+| TP | 4 (cluster IB partition layout makes TP=8 infeasible here) |
+
+aiperf artifact: `dynamo-nscale-dev-cluster / jihao / perf-cache PVC / artifacts/Qwen3-32B_nscale-ib_20260526-1808/`
+
+### Cross-CSP comparison (all 3 measured points)
+
+| | AWS H100/EFA TP=8 | AKS A100/IB TP=8 (4 NICs) | **Nscale B200/TCP TP=4** |
+|---|---|---|---|
+| Aggregate KV BW | 10.7 GB/s | 3.23 GB/s | **~1.0 GB/s (TCP fallback)** |
+| Mean ITL | 12.63 ms | 15.34 ms | **8.45 ms** ← fastest |
+| Per-user throughput (mean) | 82.75 tok/s | 68.53 tok/s | **133.77 tok/s** ← fastest |
+| Goodput | queue-bound | queue-bound | queue-bound |
+| Completion rate | 100% | 58% | 17% |
+
+**Takeaway:** B200 has the fastest per-token decode (steady-state ITL 6.9 ms p50, 33% faster than H100). But TCP transport caps aggregate KV BW at ~1 GB/s vs the ~50 GB/s NDR IB would deliver if SR-IOV were configured correctly. Result: the disagg pipeline works, but the queue grows fastest of the three clusters.
+
+### Root cause (preserved for cluster-ops record)
+
+UCX trace at `UCX_LOG_LEVEL=trace` on both prefill and decode produced these errors during cross-pod RDMA setup:
+
+```
+mlx5dv_devx_general_cmd(ALLOW_OTHER_VHCA_ACCESS) failed on mlx5_0,
+  syndrome 0x172df6: Remote I/O error
+dlopen('libuct_cuda_gdrcopy.so.0') failed:
+  libgdrapi.so.2: cannot open shared object file
+```
+
+**What didn't fix it (don't retry on Nscale):**
+- `UCX_IB_GPU_DIRECT_RDMA=yes`
+- `kv_connector_extra_config:{"backends":["UCX"]}`
+- Picking specific HCAs via `UCX_NET_DEVICES`
+- All `UCX_TLS=rc*` variants
+- Clean delete + reapply (no rolling-update race)
+
+**What would unblock the IB path (cluster-ops task):**
+- Enable `ALLOW_OTHER_VHCA_ACCESS` on the SR-IOV / IB partition config, OR
+- Migrate from `rdma/ib` (shared-device-plugin) to per-pod exclusive HCA mode, AND
+- Bake `libgdrapi.so.2` (GDRCopy) into the runtime image for full GPUDirect
+
+## Recipe state (current persisted config)
+
+- `UCX_TLS=tcp,cuda_copy,cuda_ipc` + `UCX_NET_DEVICES=eth0` — TCP fallback over standard pod network. Working but eth0-line-rate bound (~1 GB/s measured single-stream cross-node).
+- `--gpu-memory-utilization 0.70` (not 0.90): multi-tenant cluster leaves ~45 GiB/GPU of ghost CUDA contexts that K8s `nvidia.com/gpu` doesn't account for.
+- `NCCL_DEBUG=WARN`: TP NCCL uses IB (intra-pod path works fine).
+- TP=4: cluster IB partition layout makes TP=8 across nodes infeasible.
+- `privileged: true` + `IPC_LOCK`: still required for any NIXL backend that does GPU memory registration; harmless under TCP.
+
+## Results (filled — see "Measured numbers" above)

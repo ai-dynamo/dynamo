@@ -94,14 +94,15 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
-          # --- UCX over NDR IB (8 HCAs) ---
-          - { name: UCX_TLS,         value: "rc,cuda_copy,cuda_ipc" }
-          - { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }
-          - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
-          - { name: UCX_LOG_LEVEL,   value: "trace" }
-          - { name: UCX_PROTO_INFO,  value: "y" }
+          # --- UCX TCP fallback (Nscale IB SR-IOV blocks cross-pod RDMA — see README) ---
+          # Cluster denies ALLOW_OTHER_VHCA_ACCESS so rc/rc_mlx5 cross-pod handshake fails.
+          # Falling back to TCP over eth0 to get a working cross-node disagg measurement.
+          # Expected throughput: ~eth0 line rate (single Gbps range), not IB.
+          - { name: UCX_TLS,         value: "tcp,cuda_copy,cuda_ipc" }
+          - { name: UCX_NET_DEVICES, value: "eth0" }
+          # NCCL keeps using IB for TP within a pod (that path works fine intra-pod).
           - { name: NCCL_IB_HCA,     value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
-          - { name: NCCL_DEBUG,      value: "INFO" }
+          - { name: NCCL_DEBUG,      value: "WARN" }
           # --- Dynamo / vLLM ---
           - { name: DYN_HEALTH_CHECK_ENABLED,  value: "false" }
           - { name: HF_HOME,                   value: /shared-models }
@@ -185,13 +186,11 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
-          - { name: UCX_TLS,         value: "rc,cuda_copy,cuda_ipc" }
-          - { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }
-          - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
-          - { name: UCX_LOG_LEVEL,   value: "trace" }
-          - { name: UCX_PROTO_INFO,  value: "y" }
+          # --- UCX TCP fallback (Nscale IB SR-IOV blocks cross-pod RDMA — see README) ---
+          - { name: UCX_TLS,         value: "tcp,cuda_copy,cuda_ipc" }
+          - { name: UCX_NET_DEVICES, value: "eth0" }
           - { name: NCCL_IB_HCA,     value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
-          - { name: NCCL_DEBUG,      value: "INFO" }
+          - { name: NCCL_DEBUG,      value: "WARN" }
           - { name: DYN_HEALTH_CHECK_ENABLED,  value: "false" }
           - { name: HF_HOME,                   value: /shared-models }
           - { name: VLLM_LOGGING_LEVEL,        value: "INFO" }
