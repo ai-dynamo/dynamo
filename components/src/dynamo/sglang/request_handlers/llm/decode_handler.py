@@ -40,7 +40,7 @@ _REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY = "remote_kv_reuse_plan"
 _REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY = "remote_kv_reuse_no_plan_reason"
 _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV = "DYN_SHARED_HICACHE_SOURCE_ENDPOINTS"
 _SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV = "DYN_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE"
-_SHARED_HICACHE_ATTN_TP_SIZE_ENV = "DYN_SHARED_HICACHE_ATTN_TP_SIZE"
+_SHARED_HICACHE_TP_SIZE_ENV = "DYN_SHARED_HICACHE_TP_SIZE"
 _SHARED_HICACHE_SOURCE_MEDIUM = "CPU_PINNED"
 
 
@@ -170,14 +170,9 @@ def _to_shared_hicache_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     shared_plan = dict(plan)
     shared_plan["source_medium"] = _SHARED_HICACHE_SOURCE_MEDIUM
     shared_plan.pop("source_tier", None)
-    if "source_dp_rank" in shared_plan:
-        shared_plan["source_attn_dp_rank"] = shared_plan.pop("source_dp_rank")
-    if "target_dp_rank" in shared_plan:
-        shared_plan["target_attn_dp_rank"] = shared_plan.pop("target_dp_rank")
-
-    attn_tp_size = int(os.environ.get(_SHARED_HICACHE_ATTN_TP_SIZE_ENV, "1"))
-    shared_plan.setdefault("source_attn_tp_size", attn_tp_size)
-    shared_plan.setdefault("target_attn_tp_size", attn_tp_size)
+    tp_size = int(os.environ.get(_SHARED_HICACHE_TP_SIZE_ENV, "1"))
+    shared_plan.setdefault("source_tp_size", tp_size)
+    shared_plan.setdefault("target_tp_size", tp_size)
 
     if not shared_plan.get("source_endpoint"):
         source_worker_id = shared_plan.get("source_worker_id")
