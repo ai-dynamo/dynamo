@@ -666,7 +666,25 @@ impl AddressedPushRouter {
 
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
         let tx_start = Instant::now();
+        self.dispatch_buffer(address, buffer, request_id, nvtx_label)
+            .await?;
+        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
+        Ok(tx_start)
+    }
+
+    /// Build the standard request-plane headers (trace propagation +
+    /// request-id + frontend send-timestamp) and dispatch the encoded
+    /// buffer through the request-plane client inside an `nvtx_label`
+    /// range. Used by [`Self::dispatch_request_envelope`] for the wire
+    /// write step.
+    async fn dispatch_buffer(
+        &self,
+        address: String,
+        buffer: bytes::Bytes,
+        request_id: &str,
+        nvtx_label: &'static str,
+    ) -> Result<(), Error> {
         let mut headers = std::collections::HashMap::new();
         inject_trace_headers_into_map(&mut headers);
         headers.insert("request-id".to_string(), request_id.to_string());
@@ -681,9 +699,7 @@ impl AddressedPushRouter {
             .send_request(address, buffer, headers)
             .await?;
         drop(_nvtx_send);
-        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
-
-        Ok(tx_start)
+        Ok(())
     }
 }
 
