@@ -270,10 +270,24 @@ Puller-side. Pulls each `hashes[i]` from peer into `dst[i]`.
   `peer_block_ids ↔ dst_block_ids` zip is correct by
   construction; current tests verify the shell. End-to-end RDMA
   pairing is a follow-up.
-- Pulling a hash that is committed but not yet available
-  ("commit-but-not-yet-available wait"). Current contract is
-  **explicit**: caller must observe availability first, then pull.
-  Such an abstraction can layer on top without wire change.
+
+**Commit-then-late-availability — supported pattern, no helper:**
+- Pulling a hash that has been COMMITTED but not yet
+  MADE-AVAILABLE is the central pattern exercised by the
+  conditional-disagg prefix-promotion path (kvbm-connector
+  Stage 1: G1→G2 promoted prefix; Stage 2: G3→G2 staged
+  prefix). The holder commits the planned prefix hashes
+  up-front at GNMT, calls `finish_commits` (sealing the planned
+  set), and later calls `make_available` from a per-request
+  promotion task as the G2 blocks land. The session API
+  permits this — `commit` accepts hashes whose backing blocks
+  do not exist yet — and the puller-side contract is
+  **explicit**: the caller must observe each hash in
+  `peer_available` (via `availability()` / `peer_available()`)
+  BEFORE calling `pull`. Any wrapper that internally drives
+  "wait for availability, then pull" can layer on top without
+  a wire change; see §8 "drain-then-pull abstraction" for the
+  proposed shape.
 
 ### 2.12 `lifecycle() -> LifecycleStream` (`mod.rs:299`)
 

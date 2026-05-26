@@ -229,27 +229,41 @@ These invariants govern how the disagg path turns a vLLM GNMT call into a CD dis
 
 **Statement.** For the prefix window `[0, num_computed_tokens / block_size)`, decode advertises EITHER the full set of prefix hashes on the session OR no prefix at all. Partial advertisement is forbidden.
 
-The full set is constructed from two sources:
+The full set is constructed from three sources, tried in order:
 
-- **G2-resident prefix blocks** — returned by `ConnectorLeader::find_prefix_g2_blocks`. These are immediately made-available on the session at GNMT.
-- **G1-only prefix blocks** (Stage 1 promotion path) — when the G2 query misses, the promotion plan is captured at GNMT (canonical hashes from the slot's full sequence) and the actual G1→G2 transfer is fired as an uncancellable task at USAA. The promoted G2 blocks are made-available on the session as they land; the GNMT-time `session.commit` already includes their hashes so `finish_commits` seals the full planned set up front.
+- **G2-resident prefix blocks** (fast path) — returned by `ConnectorLeader::find_prefix_g2_blocks`. These are immediately made-available on the session at GNMT.
+- **G3-resident prefix blocks** (Stage 2 promotion path) — when the G2 query misses, the connector first asks `find_prefix_g3_hashes` whether decode's NVMe tier holds the prefix. If yes, the promotion plan's `source_tier` is `G3` and the actual G3→G2 stage is fired as an uncancellable task at USAA via `promote_g3_to_g2`.
+- **G1-only prefix blocks** (Stage 1 promotion path) — when both G2 and G3 miss, the fallback plan's `source_tier` is `G1` and the G1→G2 transfer is fired at USAA via `promote_g1_to_g2`.
+
+In all three cases, the GNMT-time `session.commit` already includes the full planned-prefix hashes so `finish_commits` seals the planned set up front. The promoted G2 blocks (from either tier) are made-available on the session as they land; `session.finish_availability` is deferred until the promotion task completes.
 
 **Enforced by.**
 
 - `ConnectorLeader::find_prefix_g2_blocks` (`lib/kvbm-connector/src/connector/leader/mod.rs`). On any G2 miss the function drops the partial hits (RAII returns them to G2's inactive pool) and returns `Ok(Vec::new())`. Emits `prefix_g2_incomplete_skip`.
-- `DecodeDisaggLeader::commit_gnmt_remote` (`decode_leader.rs`). When `find_prefix_g2_blocks` returns empty AND `num_computed_tokens > 0`, builds a `PendingTierPromotion { source_tier, prefix_block_count, prefix_hashes }`. Plumbs the planned hashes to `begin_remote_prefill` and stashes the plan on `CdRequestState`. `source_tier` selects which lower tier the promotion will dispatch through at USAA (Stage 1 = `G1`; Stage 2 = `G3`).
-- `DecodeDisaggLeader::commit_usaa1` (`decode_leader.rs`). Pairs `block_ids[..prefix_block_count]` with the GNMT-time `prefix_hashes` to build `Vec<ExternalBlock<G1>>`, calls `inner.promote_g1_to_g2(source_blocks)`, spawns a task that awaits the future and drives `session.make_available` + `session.finish_availability` on the promoted G2 blocks.
+- `ConnectorLeaderShim::find_prefix_g3_hashes` (`lib/kvbm-connector/src/connector/leader/p2p/transport.rs`). On any G3 miss (or absent NVMe tier) returns `Ok(Vec::new())`. Emits `prefix_g3_incomplete_skip` on partial-G3 hit so post-mortem triage can distinguish "G3 doesn't have it" from "G3 has it but evicted partway through the scan."
+- `DecodeDisaggLeader::commit_gnmt_remote` (`decode_leader.rs`). When `find_prefix_g2_blocks` returns empty AND `num_computed_tokens > 0`, tries `find_prefix_g3_hashes` first; builds `PendingTierPromotion { source_tier, prefix_block_count, prefix_hashes }` with the appropriate tier discriminant. Plumbs the planned hashes to `begin_remote_prefill` and stashes the plan on `CdRequestState`.
+- `DecodeDisaggLeader::commit_usaa1` (`decode_leader.rs`). Matches on `plan.source_tier`:
+  - `G1`: pairs `block_ids[..prefix_block_count]` with the GNMT-time `prefix_hashes` to build `Vec<ExternalBlock<G1>>` and calls `inner.promote_g1_to_g2(source_blocks)`.
+  - `G3`: calls `inner.promote_g3_to_g2(prefix_hashes)` directly — no vLLM block_ids needed (the source blocks live in decode's own G3 manager; the shim re-matches G3 + stages via `kvbm_engine::leader::stage_g3_to_g2`).
+
+  Either arm spawns a task that awaits the resulting future and drives `session.make_available` + `session.finish_availability` on the promoted G2 blocks; the task body downstream is identical for both tiers.
 - `ConditionalDisaggCoordinator::begin_remote_prefill` (`coordinator/driver.rs`). Includes `pending_promotion_hashes` in the up-front `session.commit` (positionally first, ahead of `local_match`); calls `session.finish_commits` unconditionally; skips `session.finish_availability` when promotion is pending.
 
-**Consumed by.** Decode's `commit_gnmt_remote` treats an empty `find_prefix_g2_blocks` result as "plan a promotion" rather than "advertise nothing." Prefill's `ensure_started` pulls the full `[0, DNPT/BS)` hash range regardless of whether decode sourced each block from G2 directly or via the promotion path; both look identical on the session.
+**Consumed by.** Decode's `commit_gnmt_remote` treats an empty `find_prefix_g2_blocks` result as "try G3, then plan G1 promotion" rather than "advertise nothing." Prefill's `ensure_started` pulls the full `[0, DNPT/BS)` hash range regardless of whether decode sourced each block from G2 directly, from G3 via stage, or from G1 via offload; all three look identical on the session.
 
 **Why partial is forbidden.** Publishing `[0..M)` (the leading-contiguous G2-resident portion) to the session tells prefill "decode has prefix `[0..M)` available, not `[M..P)`." But decode's G1 holds the FULL prefix `[0..P)` — the "missing" `[M..P)` is a hole only in G2, not in the conversation state. Advertising the partial set creates an inconsistent view (prefill treats `[M..P)` as cache misses while decode actually has them in G1).
 
-**Promotion failure handling.** `promote_g1_to_g2` Err (synchronous enqueue Err, `TransferHandle::wait` Err, or partial register after transfer) routes the task to `session.close(reason)`. The prefill peer's lifecycle watcher observes `Detached`/`Failed` and runs `cleanup_failed_request` through the standard CD failure path; vLLM is notified via `mark_failed_onboarding`. Decode's G2 cache is unaffected — only the in-flight transfer is lost.
+**Promotion failure handling.** Both `promote_g1_to_g2` Err (synchronous enqueue Err, `TransferHandle::wait` Err, or partial register after transfer) and `promote_g3_to_g2` Err (G3 evicted between GNMT and USAA, no parallel worker configured, `stage_g3_to_g2` failure) route the task to `session.close(reason)`. The reason string carries a tier prefix (`"g1->g2 promotion: …"` or `"g3->g2 promotion: …"`). The prefill peer's lifecycle watcher observes `Detached`/`Failed` and runs `cleanup_failed_request` through the standard CD failure path; vLLM is notified via `mark_failed_onboarding`. Decode's G2/G3 cache is unaffected — only the in-flight transfer is lost.
 
-**Promotion-task lifetime.** The promotion `JoinHandle` lives on `CdRequestState.pending_promotion_task` next to the session. Dropping it does NOT abort the task (tokio's `JoinHandle` detaches on drop). The task survives request teardown — the resulting G2 blocks remain registered in the cache and benefit future requests.
+**G3 eviction window.** `find_prefix_g3_hashes` returns hashes (not pinned `ImmutableBlock<G3>` entries). Between the GNMT-time call and the USAA-time `promote_g3_to_g2`, the matched G3 blocks could be evicted under cache pressure. `promote_g3_to_g2` re-matches at USAA and Errs on partial match; that Err routes through the standard failure handling above. The eviction window is microseconds under the V1 scheduler (GNMT and USAA are back-to-back on the engine-core thread).
 
-**Audit events.** `prefix_g1_to_g2_promotion_planned` (GNMT), `prefix_g1_to_g2_promotion_enqueued` (USAA), `prefix_g2_promotion_landed` (task completion), `prefix_g2_promotion_failed` (task error).
+**Promotion-task lifetime.** The promotion `JoinHandle` lives on `DecodeBits.pending_promotion_task` next to the session. Dropping it does NOT abort the task (tokio's `JoinHandle` detaches on drop). The task survives request teardown — the resulting G2 blocks remain registered in the cache and benefit future requests, regardless of whether the source was G1 or G3.
+
+**Audit events.** Tier-specific planning + enqueue events, tier-agnostic terminal events:
+- `prefix_g1_to_g2_promotion_planned` / `prefix_g3_to_g2_promotion_planned` (GNMT)
+- `prefix_g1_to_g2_promotion_enqueued` / `prefix_g3_to_g2_promotion_enqueued` (USAA)
+- `prefix_g2_promotion_landed` (task completion; same for both tiers)
+- `prefix_g2_promotion_failed` (task error; carries `source_tier` field for triage)
 
 ### Invariant B — Sequential-left-to-right match terminating at first miss
 
