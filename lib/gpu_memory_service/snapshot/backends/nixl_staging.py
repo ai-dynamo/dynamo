@@ -49,6 +49,63 @@ NixlGroupingFn = Callable[
 ]
 
 
+def _file_group_size(file_group: NixlFileGroup) -> int:
+    return sum(source.byte_count for source in file_group[1])
+
+
+def _split_work_groups(
+    work_groups: Sequence[NixlWorkGroup],
+    worker_count: int,
+) -> List[NixlWorkGroup]:
+    """Split logical work groups into at most worker_count balanced buckets.
+
+    The grouping function chooses the storage-affinity unit for a backend: one
+    checkpoint file for the default NIXL/POSIX backend, or one SSD root for the
+    sharded-SSD backend.  The staging code creates one NIXL agent and one pair
+    of pinned staging buffers per submitted work item, so submitting one item per
+    checkpoint shard can create hundreds of agents for large models.  Instead,
+    preserve each logical file/root group internally while coalescing them into
+    a bounded number of balanced worker buckets.
+    """
+    if not work_groups:
+        return []
+
+    worker_count = max(1, min(int(worker_count), len(work_groups)))
+    if len(work_groups) <= worker_count:
+        return list(work_groups)
+
+    bucket_file_groups: List[List[NixlFileGroup]] = [[] for _ in range(worker_count)]
+    bucket_names: List[List[str]] = [[] for _ in range(worker_count)]
+    bucket_bytes = [0] * worker_count
+
+    # Largest-first greedy bin packing keeps workers reasonably balanced while
+    # staying deterministic for equal-sized groups.
+    sized_groups = [
+        (
+            sum(_file_group_size(file_group) for file_group in file_groups),
+            index,
+            group_name,
+            file_groups,
+        )
+        for index, (group_name, file_groups) in enumerate(work_groups)
+    ]
+    sized_groups.sort(key=lambda item: (-item[0], item[1]))
+
+    for size_bytes, _index, group_name, file_groups in sized_groups:
+        bucket_index = min(range(worker_count), key=lambda idx: bucket_bytes[idx])
+        bucket_file_groups[bucket_index].extend(file_groups)
+        bucket_names[bucket_index].append(group_name)
+        bucket_bytes[bucket_index] += size_bytes
+
+    buckets: List[NixlWorkGroup] = []
+    for index, file_groups in enumerate(bucket_file_groups):
+        if not file_groups:
+            continue
+        group_name = ",".join(bucket_names[index])
+        buckets.append((group_name, file_groups))
+    return buckets
+
+
 class NixlPosixStagingTransferBackend:
     """Restore files through NIXL POSIX direct I/O and pinned host staging."""
 
@@ -129,16 +186,21 @@ class _NixlPosixStagingTransferSession:
         work_groups: List[NixlWorkGroup] = [
             (group_name, file_groups) for group_name, file_groups in grouped.items()
         ]
-        worker_count = min(self._max_workers, len(work_groups))
-        if self._warn_under_parallelized and worker_count < len(work_groups):
+        logical_group_count = len(work_groups)
+        if logical_group_count == 0:
+            self._active = False
+            return
+        worker_count = min(self._max_workers, logical_group_count)
+        if self._warn_under_parallelized and worker_count < logical_group_count:
             logger.warning(
                 "%s has %d active %s groups but only %d workers; "
                 "increase --max-workers for full parallelism",
                 self._backend_name,
-                len(work_groups),
+                logical_group_count,
                 self._group_kind,
                 worker_count,
             )
+        work_groups = _split_work_groups(work_groups, worker_count)
 
         total_bytes = sum(source.byte_count for source in self._sources)
         t0 = time.monotonic()
@@ -178,7 +240,7 @@ class _NixlPosixStagingTransferSession:
             elapsed,
             throughput,
             self._group_kind,
-            len(work_groups),
+            logical_group_count,
         )
 
     def close(self) -> None:
