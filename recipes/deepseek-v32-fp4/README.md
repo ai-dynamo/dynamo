@@ -198,8 +198,3 @@ kubectl delete dynamographdeployment disagg-kv-dsv32-nvfp4 -n ${NAMESPACE}
 
 - [Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving](https://github.com/kvcache-ai/Mooncake) - FAST25 paper and trace data
 - [Optimizing DeepSeek-V3.2 on NVIDIA Blackwell GPUs](https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog15_Optimizing_DeepSeek_V32_on_NVIDIA_Blackwell_GPUs.html) - TRTLLM tech blog on available optimizations for DSV3.2 on GB200
-
-
-## Notes
-
-- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers (see [XET download buffers](https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers)). On machines with lower memory footprints, set `HF_XET_HIGH_PERFORMANCE=0` instead — this caps the reconstruction buffer at 8 GB.

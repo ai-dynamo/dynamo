@@ -26,6 +26,7 @@ spec:
               value: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
             - name: HF_HOME
               value: /model-store
+            # Uses up to 64 GB RAM for XET buffers; set "0" on low-memory nodes (8 GB cap): https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
           args:

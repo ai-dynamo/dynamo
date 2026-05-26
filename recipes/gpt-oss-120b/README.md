@@ -56,4 +56,3 @@ curl http://localhost:8000/v1/chat/completions \
 - Update `storageClassName` in `model-cache/model-cache.yaml` before deploying
 - This recipe requires ARM64 (GB200) nodes — it will not run on x86 Hopper/Ampere hardware
 - Update the container image tag in `deploy.yaml` to match your Dynamo release version
-- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers (see [XET download buffers](https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers)). On machines with lower memory footprints, set `HF_XET_HIGH_PERFORMANCE=0` instead — this caps the reconstruction buffer at 8 GB.

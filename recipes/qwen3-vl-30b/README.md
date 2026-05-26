@@ -54,7 +54,6 @@ kubectl apply -f data-gen/generate-datasets-job.yaml -n ${NAMESPACE}
    - `storageClassName: "your-storage-class-name"` in `model-cache/model-cache.yaml`
    - `image: <your-dynamo-image>` in all `vllm/*/deploy.yaml` files
    - `NAMESPACE=your-namespace` and `HF_TOKEN="your-token"` in the setup commands
-- `HF_XET_HIGH_PERFORMANCE=1` enables high-performance parallel XET downloads and can use up to 64 GB of RAM for in-memory reconstruction buffers (see [XET download buffers](https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers)). On machines with lower memory footprints, set `HF_XET_HIGH_PERFORMANCE=0` instead — this caps the reconstruction buffer at 8 GB.
 ## Directory setup
 
 This recipe has three top-level components: `model-cache/` for PVC/model prep, `data-gen/` for dataset creation, and `vllm/agg-embedding-cache/` for deployment and benchmarking with [AIPerf](https://github.com/ai-dynamo/aiperf).
