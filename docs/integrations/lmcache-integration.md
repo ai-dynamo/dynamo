@@ -20,6 +20,8 @@ uv pip install lmcache
 
 LMCache only publishes x86_64 manylinux wheels linked against CUDA 12. For aarch64 hosts, or hosts running PyTorch built against a different CUDA major version, build LMCache from source against your matching torch + CUDA stack — see the official [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html).
 
+LMCache is compatible with vLLM 0.20.0 after [PR](https://github.com/LMCache/LMCache/pull/3282).
+
 ## Aggregated Serving
 
 ### Configuration
