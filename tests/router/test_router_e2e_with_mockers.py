@@ -1763,6 +1763,7 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                     request_plane="tcp",
                 )
 
+
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
 @pytest.mark.parametrize(
     "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
