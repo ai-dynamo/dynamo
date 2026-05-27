@@ -97,7 +97,7 @@ where
     Ok(())
 }
 
-#[cfg_attr(not(feature = "block-manager"), allow(dead_code))]
+#[cfg(test)]
 pub(crate) async fn send_multipart_direct<S>(socket: &mut S, frames: MultipartMessage) -> Result<()>
 where
     S: futures::Sink<Multipart, Error = tmq::TmqError> + Unpin,
