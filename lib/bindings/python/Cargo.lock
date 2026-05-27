@@ -2203,6 +2203,7 @@ name = "dynamo-mocker"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "dashmap",
  "derive-getters",
  "derive_builder",
@@ -2219,11 +2220,13 @@ dependencies = [
  "ndarray-interp",
  "ndarray-npy",
  "rand 0.9.4",
+ "rmp-serde",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "serde_path_to_error",
  "slotmap",
+ "tmq",
  "tokio",
  "tokio-timerfd",
  "tokio-util",
