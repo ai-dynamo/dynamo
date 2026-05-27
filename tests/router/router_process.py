@@ -33,6 +33,7 @@ class FrontendRouterProcess(ManagedProcess):
         router_aic_config: dict[str, str | int] | None = None,
         serve_indexer: bool = False,
         use_remote_indexer: bool = False,
+        event_plane: str | None = None,
     ):
         command = [
             sys.executable,
@@ -100,6 +101,10 @@ class FrontendRouterProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
+        if event_plane is not None:
+            env["DYN_EVENT_PLANE"] = event_plane
+        if event_plane == "zmq" and request_plane != "nats":
+            env.pop("NATS_SERVER", None)
         if min_initial_workers is not None:
             env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = str(min_initial_workers)
 

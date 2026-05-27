@@ -129,7 +129,7 @@ impl
         }
 
         let prefill_result = match self
-            .resolve_prefill_worker(&prefill_req, preselected_worker)
+            .resolve_prefill_worker(&request_id, &prefill_req, preselected_worker)
             .await
         {
             PrefillResolveDecision::Resolved {

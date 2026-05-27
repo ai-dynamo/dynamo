@@ -22,7 +22,7 @@ use tracing::Instrument;
 use crate::{
     kv_router::{
         KvRouter,
-        agent_controller::{AgentController, SessionCloseAction},
+        agent_controller::{AgentController, SessionCloseAction, SessionLifecycleOutcome},
         metrics::RouterRequestMetrics,
         sticky_sessions::{InMemoryAffinityStore, StickySessionRouter},
     },
@@ -296,6 +296,7 @@ impl KvPushRouter {
         request: &PreprocessedRequest,
         phase: RequestPhase,
         is_query_only: bool,
+        sticky_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
@@ -307,7 +308,10 @@ impl KvPushRouter {
             .and_then(|r| r.routing_constraints.clone())
             .unwrap_or_default();
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
-        let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
+        let sticky_pin = sticky_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let Some((pinned_worker_id, requested_dp_rank)) =
+            pinned_worker_hint(phase, routing).or(sticky_pin)
+        else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .chooser
@@ -363,7 +367,7 @@ impl KvPushRouter {
             .or_else(|| self.chooser.unique_dp_rank_for_worker(pinned_worker_id))
             .map(|dp_rank| WorkerWithDpRank::new(pinned_worker_id, dp_rank));
 
-        if !is_query_only && let Some(pinned_worker) = resolved_pinned_worker {
+        if let Some(pinned_worker) = resolved_pinned_worker {
             let selection = self
                 .chooser
                 .find_best_match_details(
@@ -371,7 +375,7 @@ impl KvPushRouter {
                     routing_token_ids,
                     block_mm_infos,
                     request.router_config_override.as_ref(),
-                    true,
+                    !is_query_only,
                     lora_name.clone(),
                     priority_jump,
                     expected_output_tokens,
@@ -391,7 +395,7 @@ impl KvPushRouter {
                 overlap_amount,
                 effective_overlap_blocks,
                 cached_tokens,
-                scheduler_tracked: true,
+                scheduler_tracked: !is_query_only,
             });
         }
 
@@ -490,6 +494,54 @@ impl KvPushRouter {
             scheduler_tracked: !is_query_only && resolved_dp_rank.is_some(),
         })
     }
+
+    pub(crate) fn sticky_worker_for_phase(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+    ) -> Option<WorkerWithDpRank> {
+        let routing = request.routing.as_ref()?;
+        let sc = routing.session_control.as_ref()?;
+        if !sticky_allowed_for_phase(phase, Some(routing)) {
+            return None;
+        }
+
+        self.sticky_sessions.peek_session(&sc.session_id)
+    }
+
+    pub(crate) fn refresh_sticky_worker_for_phase(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+    ) {
+        let Some(routing) = request.routing.as_ref() else {
+            return;
+        };
+        let Some(sc) = routing.session_control.as_ref() else {
+            return;
+        };
+        if sc.action.is_some() || !sticky_allowed_for_phase(phase, Some(routing)) {
+            return;
+        }
+
+        self.sticky_sessions.resolve_session(&sc.session_id);
+    }
+
+    pub(crate) async fn validate_sticky_worker_for_phase(
+        &self,
+        context_id: &str,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+        worker: WorkerWithDpRank,
+    ) -> Result<WorkerWithDpRank, Error> {
+        let selection = self
+            .select_worker(context_id, request, phase, true, Some(worker))
+            .await?;
+        Ok(WorkerWithDpRank::new(
+            selection.instance_id,
+            selection.dp_rank,
+        ))
+    }
 }
 
 #[async_trait]
@@ -517,7 +569,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
-        mut request: SingleIn<PreprocessedRequest>,
+        request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
@@ -525,46 +577,48 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
-        // Pin a bound session to its (worker, dp_rank) before selection so it
-        // stays on the rank where its prefix is warm. Pinning dp_rank (not just
-        // the worker) is what stops a multi-rank engine from drifting the
-        // conversation across ranks. A miss is bound after routing, below.
-        let mut bind_session_after_route = false;
-        if request
-            .routing
-            .as_ref()
-            .and_then(|r| r.session_control.as_ref())
-            .is_some()
-            && request
-                .routing
-                .as_ref()
-                .and_then(|r| r.backend_instance_id)
-                .is_none()
-        {
-            match self.sticky_sessions.resolve(&request) {
-                Some(worker) => {
-                    let routing = request.routing_mut();
-                    routing.backend_instance_id = Some(worker.worker_id);
-                    routing.dp_rank = Some(worker.dp_rank);
-                }
-                None => bind_session_after_route = true,
-            }
-        }
-
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
             .tracker
             .as_ref()
             .map(|t| t.phase())
             .unwrap_or(RequestPhase::Aggregated);
+
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
 
         let block_size = self.chooser.block_size() as usize;
-        let selection = self
-            .select_worker(&context_id, &request, phase, is_query_only)
+        // Treat sticky affinity as a best-effort candidate. The scheduler still
+        // validates the candidate against current worker eligibility before it
+        // becomes the route; if validation fails, fall back to normal routing.
+        let sticky_worker = self.sticky_worker_for_phase(&request, phase);
+        let selection = match self
+            .select_worker(&context_id, &request, phase, is_query_only, sticky_worker)
             .instrument(tracing::info_span!("kv_router.select_worker"))
-            .await?;
+            .await
+        {
+            Ok(selection) => {
+                if sticky_worker.is_some() && !is_query_only {
+                    self.refresh_sticky_worker_for_phase(&request, phase);
+                }
+                selection
+            }
+            Err(error) if sticky_worker.is_some() => {
+                if let Some(worker) = sticky_worker {
+                    tracing::warn!(
+                        request_id = %context_id,
+                        worker_id = worker.worker_id,
+                        dp_rank = worker.dp_rank,
+                        error = %error,
+                        "Sticky worker failed validation; falling back to normal routing"
+                    );
+                }
+                self.select_worker(&context_id, &request, phase, is_query_only, None)
+                    .instrument(tracing::info_span!("kv_router.select_worker_fallback"))
+                    .await?
+            }
+            Err(error) => return Err(error),
+        };
         let WorkerSelection {
             instance_id,
             dp_rank,
@@ -668,25 +722,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
-        // Bind a new session to the (worker, dp_rank) it just landed on so its
-        // later turns stick to that rank. Routing-layer only -- no worker RPC.
-        // Bound sessions are kept alive by the sliding TTL refresh in resolve().
-        if bind_session_after_route
-            && let Some(sc) = request
-                .routing
-                .as_ref()
-                .and_then(|r| r.session_control.as_ref())
-        {
-            self.sticky_sessions.bind(
-                &sc.session_id,
-                WorkerWithDpRank::new(instance_id, dp_rank),
-                Duration::from_secs(sc.timeout),
-            );
-        }
-
         // Session lifecycle RPCs via agent controller.
         // Fails fast if session_control.open is requested but the client can't be created.
-        let deferred_close = self
+        let route_outcome = self
             .agent_controller
             .on_routed(
                 &request,
@@ -695,6 +733,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 Some(&*self.sticky_sessions),
             )
             .await?;
+        if route_outcome.lifecycle == SessionLifecycleOutcome::OpenSucceeded
+            && let Some(sc) = request
+                .routing
+                .as_ref()
+                .and_then(|r| r.session_control.as_ref())
+        {
+            // Bind/rebind only after the worker accepted open_session. This keeps
+            // first ambiguous opens on normal KV routing while repeated opens renew
+            // the timeout for the selected worker/rank.
+            self.sticky_sessions.bind(
+                &sc.session_id,
+                WorkerWithDpRank::new(instance_id, dp_rank),
+                Duration::from_secs(sc.timeout),
+            );
+        }
+        let deferred_close = route_outcome.deferred_close;
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
@@ -819,6 +873,41 @@ fn pinned_worker_hint(
     }
 }
 
+fn sticky_allowed_for_phase(phase: RequestPhase, routing: Option<&RoutingHints>) -> bool {
+    let Some(routing) = routing else {
+        return false;
+    };
+    if routing.session_control.is_none() {
+        return false;
+    }
+
+    // Routing precedence: caller-visible pins win over sticky affinity. Sticky is
+    // only considered for requests with session_control, so the default KV/direct
+    // routing paths stay unchanged.
+    match phase {
+        RequestPhase::Prefill => {
+            routing.prefill_worker_id.is_none()
+                && routing.prefill_dp_rank.is_none()
+                && routing.backend_instance_id.is_none()
+        }
+        RequestPhase::Decode => {
+            routing.decode_worker_id.is_none()
+                && routing.dp_rank.is_none()
+                && routing.backend_instance_id.is_none()
+        }
+        RequestPhase::Aggregated => {
+            routing.backend_instance_id.is_none() && routing.dp_rank.is_none()
+        }
+    }
+}
+
+#[cfg(test)]
+fn write_sticky_backend_pin(request: &mut PreprocessedRequest, worker: WorkerWithDpRank) {
+    let routing = request.routing_mut();
+    routing.backend_instance_id = Some(worker.worker_id);
+    routing.dp_rank = Some(worker.dp_rank);
+}
+
 /// A direct routing wrapper for `RouterMode::Direct`.
 ///
 /// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
@@ -866,8 +955,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
 #[cfg(test)]
 mod tests {
-    use super::pinned_worker_hint;
+    use super::{pinned_worker_hint, sticky_allowed_for_phase, write_sticky_backend_pin};
     use crate::protocols::common::{preprocessor::RoutingHints, timing::RequestPhase};
+    use crate::protocols::openai::nvext::SessionControl;
+    use dynamo_kv_router::protocols::WorkerWithDpRank;
+
+    fn session_control() -> SessionControl {
+        SessionControl {
+            session_id: "sess-1".to_string(),
+            action: None,
+            timeout: 300,
+        }
+    }
 
     #[test]
     fn pinned_worker_hint_prefill_uses_prefill_worker_before_backend() {
@@ -906,5 +1005,111 @@ mod tests {
 
         let hint = pinned_worker_hint(RequestPhase::Aggregated, Some(&routing));
         assert_eq!(hint, Some((9, Some(7))));
+    }
+
+    #[test]
+    fn sticky_is_noop_without_session_control() {
+        let routing = RoutingHints::default();
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Aggregated,
+            Some(&routing)
+        ));
+    }
+
+    #[test]
+    fn sticky_allowed_when_only_session_control_is_present() {
+        let routing = RoutingHints {
+            session_control: Some(session_control()),
+            ..Default::default()
+        };
+        assert!(sticky_allowed_for_phase(
+            RequestPhase::Aggregated,
+            Some(&routing)
+        ));
+        assert!(sticky_allowed_for_phase(
+            RequestPhase::Prefill,
+            Some(&routing)
+        ));
+        assert!(sticky_allowed_for_phase(
+            RequestPhase::Decode,
+            Some(&routing)
+        ));
+    }
+
+    #[test]
+    fn sticky_skips_phase_specific_explicit_pins() {
+        let prefill = RoutingHints {
+            session_control: Some(session_control()),
+            prefill_worker_id: Some(1),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Prefill,
+            Some(&prefill)
+        ));
+
+        let prefill_rank = RoutingHints {
+            session_control: Some(session_control()),
+            prefill_dp_rank: Some(2),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Prefill,
+            Some(&prefill_rank)
+        ));
+
+        let decode = RoutingHints {
+            session_control: Some(session_control()),
+            decode_worker_id: Some(3),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Decode,
+            Some(&decode)
+        ));
+
+        let decode_rank = RoutingHints {
+            session_control: Some(session_control()),
+            dp_rank: Some(4),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Decode,
+            Some(&decode_rank)
+        ));
+
+        let aggregated = RoutingHints {
+            session_control: Some(session_control()),
+            backend_instance_id: Some(5),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Aggregated,
+            Some(&aggregated)
+        ));
+    }
+
+    #[test]
+    fn sticky_backend_pin_writes_worker_and_rank_together() {
+        let mut request = crate::protocols::common::preprocessor::PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .routing(Some(RoutingHints {
+                session_control: Some(session_control()),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+
+        write_sticky_backend_pin(&mut request, WorkerWithDpRank::new(11, 7));
+
+        let routing = request.routing.unwrap();
+        assert_eq!(routing.backend_instance_id, Some(11));
+        assert_eq!(routing.dp_rank, Some(7));
+        assert_eq!(routing.prefill_worker_id, None);
+        assert_eq!(routing.decode_worker_id, None);
     }
 }

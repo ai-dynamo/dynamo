@@ -23,6 +23,7 @@ impl PrefillRouter {
     /// Otherwise, query for the best worker (KV mode) or select next worker (non-KV modes).
     pub(super) async fn resolve_prefill_worker(
         &self,
+        context_id: &str,
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
     ) -> PrefillResolveDecision {
@@ -33,8 +34,23 @@ impl PrefillRouter {
             return PrefillResolveDecision::NotActivated;
         }
 
+        // Treat a preselected prefill worker as a caller/external pin. Otherwise,
+        // sticky affinity wins before this router writes generated bootstrap hints.
+        let sticky_worker = if preselected_worker.is_none() {
+            self.resolve_sticky_prefill_worker(context_id, req).await
+        } else {
+            None
+        };
+
         // Worker selection
-        let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
+        let (worker_id, dp_rank) = if let Some(worker) = sticky_worker {
+            tracing::debug!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                "Using sticky prefill worker for bootstrap"
+            );
+            (worker.worker_id, Some(worker.dp_rank))
+        } else if let Some(id) = preselected_worker {
             let dp_rank = req
                 .routing
                 .as_ref()
@@ -46,36 +62,7 @@ impl PrefillRouter {
             );
             (id, dp_rank)
         } else {
-            // Use shared worker selection logic (update_states=false for peek behavior)
-            // Extract LORA name and priority jump from routing hints
-            let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
-            let priority_jump = req
-                .routing
-                .as_ref()
-                .and_then(|r| r.priority_jump)
-                .unwrap_or(0.0);
-            let allowed_worker_ids = req
-                .routing
-                .as_ref()
-                .and_then(|r| r.allowed_worker_ids.clone());
-            let routing_constraints = req
-                .routing
-                .as_ref()
-                .and_then(|r| r.routing_constraints.clone())
-                .unwrap_or_default();
-            let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
-            match self
-                .query_prefill_worker(
-                    routing_token_ids,
-                    block_mm_infos,
-                    false,
-                    lora_name,
-                    priority_jump,
-                    allowed_worker_ids,
-                    routing_constraints,
-                )
-                .await
-            {
+            match self.query_prefill_worker_for_request(req).await {
                 Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
                 Err(_) => return PrefillResolveDecision::Unavailable,
             }
@@ -120,6 +107,67 @@ impl PrefillRouter {
                 bootstrap_room,
             },
         }
+    }
+
+    async fn resolve_sticky_prefill_worker(
+        &self,
+        context_id: &str,
+        req: &PreprocessedRequest,
+    ) -> Option<dynamo_kv_router::protocols::WorkerWithDpRank> {
+        let router = self.prefill_router.get()?;
+        let worker = router.sticky_worker_for_prefill(req)?;
+        match router
+            .validate_sticky_prefill_worker(context_id, req, worker)
+            .await
+        {
+            Ok(worker) => {
+                router.refresh_sticky_prefill_worker(req);
+                Some(worker)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    request_id = %context_id,
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    error = %error,
+                    "Sticky prefill worker failed validation; falling back to normal prefill routing"
+                );
+                None
+            }
+        }
+    }
+
+    async fn query_prefill_worker_for_request(
+        &self,
+        req: &PreprocessedRequest,
+    ) -> Result<(WorkerId, Option<u32>)> {
+        let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
+        let priority_jump = req
+            .routing
+            .as_ref()
+            .and_then(|r| r.priority_jump)
+            .unwrap_or(0.0);
+        let allowed_worker_ids = req
+            .routing
+            .as_ref()
+            .and_then(|r| r.allowed_worker_ids.clone());
+        let routing_constraints = req
+            .routing
+            .as_ref()
+            .and_then(|r| r.routing_constraints.clone())
+            .unwrap_or_default();
+        let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
+
+        self.query_prefill_worker(
+            routing_token_ids,
+            block_mm_infos,
+            false,
+            lora_name,
+            priority_jump,
+            allowed_worker_ids,
+            routing_constraints,
+        )
+        .await
     }
 
     /// Execute prefill with the given router and extract structured result.

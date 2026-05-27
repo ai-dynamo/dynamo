@@ -32,7 +32,9 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::{
     component::Component,
     engine::AsyncEngineContextProvider,
-    pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
+    pipeline::{
+        AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait, network::Ingress,
+    },
     traits::DistributedRuntimeProvider,
 };
 use futures::StreamExt;
@@ -357,6 +359,47 @@ pub struct MockEngine {
     _fpm_publisher: OnceCell<crate::fpm_publisher::FpmDirectPublisher>,
 }
 
+struct MockSessionControlEngine;
+
+#[async_trait]
+impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
+    for MockSessionControlEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<serde_json::Value>,
+    ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        let (body, context) = request.into_parts();
+        let action = body.get("action").and_then(|value| value.as_str());
+        let session_id = body.get("session_id").and_then(|value| value.as_str());
+
+        let response = match (action, session_id) {
+            (Some("open_session" | "close_session"), Some(session_id)) => {
+                serde_json::json!({
+                    "status": "ok",
+                    "session_id": session_id,
+                })
+            }
+            (_, None) => {
+                serde_json::json!({
+                    "status": "error",
+                    "message": "session_id required",
+                })
+            }
+            (other, Some(session_id)) => {
+                serde_json::json!({
+                    "status": "error",
+                    "session_id": session_id,
+                    "message": format!("unsupported action {:?}", other),
+                })
+            }
+        };
+
+        let stream = futures::stream::iter(vec![Annotated::from_data(response)]);
+        Ok(ResponseStream::new(Box::pin(stream), context.context()))
+    }
+}
+
 impl MockEngine {
     /// Create a new MockEngine with the given parameters
     pub fn new(engine_args: MockEngineArgs) -> Self {
@@ -393,6 +436,8 @@ impl MockEngine {
             tokio::time::sleep(Duration::from_secs_f64(startup_time_secs)).await;
             tracing::info!("Engine startup simulation completed");
         }
+
+        Self::start_session_control_endpoint(component.clone());
 
         // Start bootstrap server for prefill workers in disaggregated mode
         if self.engine_args.is_prefill()
@@ -445,6 +490,29 @@ impl MockEngine {
         let _ = self._schedulers.set(schedulers);
 
         Ok(())
+    }
+
+    fn start_session_control_endpoint(component: Component) {
+        let ingress = match Ingress::for_engine(Arc::new(MockSessionControlEngine)) {
+            Ok(ingress) => ingress,
+            Err(e) => {
+                tracing::error!("Failed to build mocker session_control ingress: {e}");
+                return;
+            }
+        };
+
+        tokio::spawn(async move {
+            if let Err(e) = component
+                .endpoint("session_control")
+                .endpoint_builder()
+                .handler(ingress)
+                .graceful_shutdown(true)
+                .start()
+                .await
+            {
+                tracing::error!("Mocker session_control endpoint failed: {e}");
+            }
+        });
     }
 
     /// Send a request to the appropriate scheduler, waiting for initialization if needed.

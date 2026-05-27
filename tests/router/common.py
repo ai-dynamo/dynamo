@@ -2168,6 +2168,194 @@ def _test_router_decisions_disagg(
         )
 
 
+def _test_disagg_background_prefill_sticky_routing(
+    prefill_workers,
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    model_name: str,
+    store_backend: str = "file",
+    request_plane: str = "tcp",
+    event_plane: str = "zmq",
+    frontend_already_running: bool = False,
+):
+    """Verify sticky prefill routing overrides normal KV choice in bootstrap disagg."""
+
+    frontend_context = contextlib.nullcontext()
+    if not frontend_already_running:
+        frontend_context = FrontendRouterProcess(
+            request,
+            block_size,
+            frontend_port,
+            decode_workers.namespace,
+            store_backend,
+            enforce_disagg=True,
+            request_plane=request_plane,
+            event_plane=event_plane,
+            durable_kv_events=False,
+            min_initial_workers=decode_workers.num_workers,
+        )
+
+    with frontend_context:
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        async def send_chat(
+            session: aiohttp.ClientSession,
+            content: str,
+            *,
+            session_control: Optional[dict[str, Any]] = None,
+        ) -> tuple[int, int]:
+            payload: dict[str, Any] = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": content}],
+                "stream": True,
+                "max_tokens": 2,
+                "nvext": {"extra_fields": ["worker_id", "timing"]},
+            }
+            if session_control is not None:
+                payload["nvext"]["session_control"] = session_control
+
+            async with session.post(chat_url, json=payload) as response:
+                body = []
+                assert response.status == 200, (
+                    f"Request failed with status {response.status}: "
+                    f"{await response.text()}"
+                )
+
+                prefill_worker_id = None
+                prefill_dp_rank = None
+                async for line in response.content:
+                    line_str = line.decode("utf-8", errors="replace").strip()
+                    body.append(line_str)
+                    if not line_str.startswith("data:"):
+                        continue
+                    data_str = line_str[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    worker_id = data.get("nvext", {}).get("worker_id", {})
+                    prefill_worker_id = worker_id.get(
+                        "prefill_worker_id", prefill_worker_id
+                    )
+                    prefill_dp_rank = worker_id.get("prefill_dp_rank", prefill_dp_rank)
+
+                assert (
+                    prefill_worker_id is not None
+                ), "Missing prefill_worker_id in response body: " + "\n".join(body)
+                assert (
+                    prefill_dp_rank is not None
+                ), "Missing prefill_dp_rank in response body: " + "\n".join(body)
+                return int(prefill_worker_id), int(prefill_dp_rank)
+
+        async def test_sync():
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+            )
+
+            runtime = get_runtime(
+                store_backend=store_backend, request_plane=request_plane
+            )
+            prefill_endpoint = runtime.endpoint(
+                f"{prefill_workers.namespace}.prefill.generate"
+            )
+            await poll_for_worker_instances(
+                prefill_endpoint,
+                prefill_workers.num_workers,
+                max_wait_time=120,
+            )
+
+            suffix = random.randint(100_000, 999_999)
+            session_a = f"sticky-a-{suffix}"
+            session_b = f"sticky-b-{suffix}"
+            prompt_a = (
+                f"session alpha {suffix}: "
+                "redwood vectors amber matrix northbound lantern " * 20
+            )
+
+            async with aiohttp.ClientSession() as session:
+                session_a_pair = await send_chat(
+                    session,
+                    prompt_a,
+                    session_control={
+                        "session_id": session_a,
+                        "action": "open",
+                        "timeout": 300,
+                    },
+                )
+
+                competing_pair = None
+                competing_prompt = None
+                for attempt in range(6):
+                    candidate = (
+                        f"session beta {suffix} attempt {attempt}: "
+                        "cerulean ledger quartz valley transit cacheline " * 20
+                    )
+                    pair = await send_chat(
+                        session,
+                        candidate,
+                        session_control={
+                            "session_id": f"{session_b}-{attempt}",
+                            "action": "open",
+                            "timeout": 300,
+                        },
+                    )
+                    if pair != session_a_pair:
+                        competing_pair = pair
+                        competing_prompt = candidate
+                        break
+
+                assert competing_pair is not None, (
+                    "Could not warm a competing prefill worker/rank different from "
+                    f"session A pair {session_a_pair}"
+                )
+
+                control_pair = None
+                for _ in range(10):
+                    control_pair = await send_chat(
+                        session,
+                        competing_prompt
+                        + " control continuation proving normal kv routing",
+                    )
+                    if control_pair == competing_pair:
+                        break
+                    await asyncio.sleep(0.5)
+
+                assert control_pair == competing_pair, (
+                    "No-sticky control did not follow normal KV overlap routing: "
+                    f"expected {competing_pair}, got {control_pair}"
+                )
+
+                followups = [
+                    competing_prompt + f" sticky continuation {idx} {suffix}"
+                    for idx in range(3)
+                ]
+                results = await asyncio.gather(
+                    *[
+                        send_chat(
+                            session,
+                            content,
+                            session_control={"session_id": session_a},
+                        )
+                        for content in followups
+                    ]
+                )
+
+            assert results == [session_a_pair] * len(results), (
+                "Sticky follow-ups should stay pinned to session A prefill pair "
+                f"{session_a_pair}, but got {results}; competing pair was "
+                f"{competing_pair}"
+            )
+
+        asyncio.run(test_sync())
+
+
 def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
     prefill_workers,
     decode_workers,
