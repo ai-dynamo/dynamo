@@ -9,6 +9,7 @@
 # @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -991,15 +992,29 @@ async def _wait_for_frontend_models(frontend_url: str, timeout_s: int = 120) -> 
     raise TimeoutError(f"Timed out waiting for models at {models_url}")
 
 
-async def _send_topology_mismatched_request_expect_failure(
-    chat_url: str,
+def _topology_pinned_payload(
     test_payload: Dict[str, Any],
-    timeout_s: int = 120,
-) -> tuple[int, str]:
-    payload = {
+    prefill_worker_id: int,
+) -> Dict[str, Any]:
+    return {
         **test_payload,
         "stream": False,
+        "nvext": {
+            **test_payload.get("nvext", {}),
+            "prefill_worker_id": prefill_worker_id,
+            "extra_fields": ["worker_id"],
+        },
     }
+
+
+async def _send_topology_pinned_request_expect_success(
+    chat_url: str,
+    test_payload: Dict[str, Any],
+    prefill_worker_id: int,
+    decode_worker_ids: list[int],
+    timeout_s: int = 120,
+) -> Dict[str, Any]:
+    payload = _topology_pinned_payload(test_payload, prefill_worker_id)
     deadline = asyncio.get_running_loop().time() + timeout_s
 
     async with aiohttp.ClientSession() as session:
@@ -1010,13 +1025,41 @@ async def _send_topology_mismatched_request_expect_failure(
                     await asyncio.sleep(1)
                     continue
 
-                assert response.status != 200, (
-                    "Expected required KV-transfer topology mismatch to fail, "
-                    f"got status=200 body={response_body}"
+                assert response.status == 200, (
+                    "Expected required KV-transfer topology match to succeed, "
+                    f"got status={response.status} body={response_body}"
                 )
-                return response.status, response_body
+                data = json.loads(response_body)
+                worker_id_info = data.get("nvext", {}).get("worker_id", {})
+                assert worker_id_info.get("prefill_worker_id") == prefill_worker_id, (
+                    f"Expected prefill_worker_id={prefill_worker_id}, "
+                    f"got worker_id={worker_id_info}"
+                )
+                decode_worker_id = worker_id_info.get("decode_worker_id")
+                assert decode_worker_id in decode_worker_ids, (
+                    f"Expected decode_worker_id in {decode_worker_ids}, "
+                    f"got worker_id={worker_id_info}"
+                )
+                return worker_id_info
 
-    raise TimeoutError("Timed out waiting for chat completions route to become ready")
+    raise TimeoutError("Timed out waiting for topology-matched chat completion")
+
+
+async def _send_topology_pinned_request_expect_failure(
+    chat_url: str,
+    test_payload: Dict[str, Any],
+    prefill_worker_id: int,
+) -> tuple[int, str]:
+    payload = _topology_pinned_payload(test_payload, prefill_worker_id)
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(chat_url, json=payload) as response:
+            response_body = await response.text()
+            assert response.status != 200, (
+                "Expected required KV-transfer topology mismatch to fail, "
+                f"got status=200 body={response_body}"
+            )
+            return response.status, response_body
 
 
 @pytest.mark.timeout(180)  # planner-profile mocker setup can exceed 120s on CI CPUs
@@ -1745,14 +1788,14 @@ def test_disagg_background_prefill_sticky(
 
 
 @pytest.mark.timeout(180)
-def test_disagg_topology_required_mismatch_fails_chat_completion(
+def test_disagg_topology_required_prefill_pin_match_and_mismatch(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     tmp_path,
 ):
-    """Validate required KV-transfer topology policy fails closed."""
-    logger.info("Starting disaggregated topology-aware fail-closed test")
+    """Validate required KV-transfer topology policy from pinned prefill workers."""
+    logger.info("Starting disaggregated topology-aware prefill pin test")
     _ = (runtime_services_dynamic_ports, predownload_tokenizers)
 
     namespace_suffix = generate_random_suffix()
@@ -1762,8 +1805,9 @@ def test_disagg_topology_required_mismatch_fails_chat_completion(
         "block_size": BLOCK_SIZE,
     }
 
-    prefill_env = _topology_env(tmp_path, "prefill-zone-a", {"zone": "zone-a"})
-    decode_env = _topology_env(tmp_path, "decode-zone-b", {"zone": "zone-b"})
+    prefill_zone_a_env = _topology_env(tmp_path, "prefill-zone-a", {"zone": "zone-a"})
+    prefill_zone_b_env = _topology_env(tmp_path, "prefill-zone-b", {"zone": "zone-b"})
+    decode_zone_a_env = _topology_env(tmp_path, "decode-zone-a", {"zone": "zone-a"})
 
     with DisaggMockerProcess(
         request,
@@ -1772,51 +1816,86 @@ def test_disagg_topology_required_mismatch_fails_chat_completion(
         mocker_args=mocker_args,
         num_mockers=1,
         request_plane="tcp",
-        env_overrides=prefill_env,
+        env_overrides=prefill_zone_a_env,
     ):
         runtime = get_runtime()
-        endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
-        prefill_ids = asyncio.run(poll_for_worker_instances(endpoint, 1))
-        logger.info("Prefill topology worker ids: %s", prefill_ids)
+        prefill_endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
+        prefill_zone_a_ids = asyncio.run(poll_for_worker_instances(prefill_endpoint, 1))
+        assert len(prefill_zone_a_ids) == 1
+        prefill_zone_a_id = prefill_zone_a_ids[0]
+        logger.info("Prefill zone-a worker id: %s", prefill_zone_a_id)
 
         with DisaggMockerProcess(
             request,
             namespace=shared_namespace,
-            worker_type="decode",
+            worker_type="prefill",
             mocker_args=mocker_args,
             num_mockers=1,
             request_plane="tcp",
-            env_overrides=decode_env,
-        ) as decode_workers:
-            endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
-            decode_ids = asyncio.run(poll_for_worker_instances(endpoint, 1))
-            logger.info("Mismatched decode topology worker ids: %s", decode_ids)
+            env_overrides=prefill_zone_b_env,
+        ):
+            prefill_ids = asyncio.run(poll_for_worker_instances(prefill_endpoint, 2))
+            prefill_zone_b_ids = sorted(set(prefill_ids) - {prefill_zone_a_id})
+            assert len(prefill_zone_b_ids) == 1, (
+                f"Expected one new zone-b prefill worker, got all={prefill_ids}, "
+                f"zone_a={prefill_zone_a_id}"
+            )
+            prefill_zone_b_id = prefill_zone_b_ids[0]
+            logger.info("Prefill zone-b worker id: %s", prefill_zone_b_id)
 
-            frontend_port = get_unique_ports(request, num_ports=1)[0]
-            with KVRouterProcess(
+            with DisaggMockerProcess(
                 request,
-                BLOCK_SIZE,
-                frontend_port,
                 namespace=shared_namespace,
-                enforce_disagg=True,
+                worker_type="decode",
+                mocker_args=mocker_args,
+                num_mockers=2,
                 request_plane="tcp",
-                min_initial_workers=decode_workers.num_workers,
-            ):
-                frontend_url = f"http://localhost:{frontend_port}"
-                chat_url = f"{frontend_url}/v1/chat/completions"
-
-                async def run_request() -> tuple[int, str]:
-                    await _wait_for_frontend_models(frontend_url)
-                    return await _send_topology_mismatched_request_expect_failure(
-                        chat_url, TEST_PAYLOAD
-                    )
-
-                status, body = asyncio.run(run_request())
-                logger.info(
-                    "Topology mismatch failed closed with status=%s body=%s",
-                    status,
-                    body,
+                env_overrides=decode_zone_a_env,
+            ) as decode_workers:
+                decode_endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
+                decode_ids = sorted(
+                    asyncio.run(poll_for_worker_instances(decode_endpoint, 2))
                 )
+                logger.info("Decode zone-a worker ids: %s", decode_ids)
+
+                frontend_port = get_unique_ports(request, num_ports=1)[0]
+                with KVRouterProcess(
+                    request,
+                    BLOCK_SIZE,
+                    frontend_port,
+                    namespace=shared_namespace,
+                    enforce_disagg=True,
+                    request_plane="tcp",
+                    min_initial_workers=decode_workers.num_workers,
+                ):
+                    frontend_url = f"http://localhost:{frontend_port}"
+                    chat_url = f"{frontend_url}/v1/chat/completions"
+
+                    async def run_requests() -> tuple[Dict[str, Any], tuple[int, str]]:
+                        await _wait_for_frontend_models(frontend_url)
+                        success_worker_ids = (
+                            await _send_topology_pinned_request_expect_success(
+                                chat_url,
+                                TEST_PAYLOAD,
+                                prefill_zone_a_id,
+                                decode_ids,
+                            )
+                        )
+                        failure = await _send_topology_pinned_request_expect_failure(
+                            chat_url,
+                            TEST_PAYLOAD,
+                            prefill_zone_b_id,
+                        )
+                        return success_worker_ids, failure
+
+                    success_worker_ids, (status, body) = asyncio.run(run_requests())
+                    logger.info(
+                        "Topology match succeeded with worker_id=%s; "
+                        "mismatch failed closed with status=%s body=%s",
+                        success_worker_ids,
+                        status,
+                        body,
+                    )
 
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
 @pytest.mark.parametrize(
