@@ -11,11 +11,14 @@ returns a dict that can be unpacked into
 ``RouterConfig(mode, kv_config, **config.router_kwargs())``.
 """
 
-from typing import Optional
+import logging
+from typing import Any, Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+
+logger = logging.getLogger(__name__)
 
 # Fields forwarded verbatim as kwargs to RouterConfig.__init__.
 _ROUTER_FIELDS: tuple[str, ...] = (
@@ -24,6 +27,15 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_prefill_tokens_threshold_frac",
     "enforce_disagg",
 )
+
+ADMISSION_CONTROL_CHOICES: tuple[str, ...] = ("token-capacity", "none")
+_ADMISSION_CONTROL_AUTO: str = "_auto_"
+
+_DEFAULT_ACTIVE_DECODE_BLOCKS_THRESHOLD: float = 1.0
+_DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD: int = 10_000_000
+_DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: float = 64.0
+
+_THRESHOLD_UNSET: Any = object()
 
 
 def _nullable_float(value: str) -> Optional[float]:
@@ -49,10 +61,74 @@ class RouterConfigBase(ConfigBase):
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
+    admission_control: str = _ADMISSION_CONTROL_AUTO
 
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
+        self.apply_admission_control()
         return {f: getattr(self, f) for f in _ROUTER_FIELDS}
+
+    def apply_admission_control(self) -> None:
+        numeric_thresholds: list[str] = []
+        for value, flag in (
+            (self.active_decode_blocks_threshold, "--active-decode-blocks-threshold"),
+            (self.active_prefill_tokens_threshold, "--active-prefill-tokens-threshold"),
+            (
+                self.active_prefill_tokens_threshold_frac,
+                "--active-prefill-tokens-threshold-frac",
+            ),
+        ):
+            if value is _THRESHOLD_UNSET or value is None:
+                continue
+            numeric_thresholds.append(flag)
+
+        if self.admission_control == _ADMISSION_CONTROL_AUTO:
+            if numeric_thresholds:
+                logger.info(
+                    "admission-control: implicit mode resolved to 'token-capacity' "
+                    "because %s was set to a numeric value. Pass --admission-control "
+                    "token-capacity to make this explicit, or unset the threshold(s) "
+                    "to keep admission control disabled.",
+                    ", ".join(numeric_thresholds),
+                )
+                self.admission_control = "token-capacity"
+            else:
+                self.admission_control = "none"
+
+        if self.admission_control not in ADMISSION_CONTROL_CHOICES:
+            raise ValueError(
+                f"--admission-control must be one of {ADMISSION_CONTROL_CHOICES}, "
+                f"got {self.admission_control!r}"
+            )
+
+        if self.admission_control == "token-capacity":
+            if self.active_decode_blocks_threshold is _THRESHOLD_UNSET:
+                self.active_decode_blocks_threshold = (
+                    _DEFAULT_ACTIVE_DECODE_BLOCKS_THRESHOLD
+                )
+            if self.active_prefill_tokens_threshold is _THRESHOLD_UNSET:
+                self.active_prefill_tokens_threshold = (
+                    _DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD
+                )
+            if self.active_prefill_tokens_threshold_frac is _THRESHOLD_UNSET:
+                self.active_prefill_tokens_threshold_frac = (
+                    _DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC
+                )
+            return
+
+        if numeric_thresholds:
+            raise ValueError(
+                "--admission-control none cannot be combined with explicit "
+                f"{', '.join(numeric_thresholds)}; drop the threshold flag(s) "
+                "to keep admission disabled, or pass --admission-control "
+                "token-capacity to activate the threshold(s)."
+            )
+        if self.active_decode_blocks_threshold is _THRESHOLD_UNSET:
+            self.active_decode_blocks_threshold = None
+        if self.active_prefill_tokens_threshold is _THRESHOLD_UNSET:
+            self.active_prefill_tokens_threshold = None
+        if self.active_prefill_tokens_threshold_frac is _THRESHOLD_UNSET:
+            self.active_prefill_tokens_threshold_frac = None
 
 
 class RouterArgGroup(ArgGroup):
@@ -115,10 +191,11 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-decode-blocks-threshold",
             env_var="DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
-            default=1.0,
+            default=_THRESHOLD_UNSET,
             help=(
                 "Threshold fraction (0.0-1.0) of KV cache block utilization above which a worker "
-                "is considered busy. Pass 'None' on the CLI to disable this check. Default: 1.0."
+                "is considered busy. Setting this implies --admission-control token-capacity. "
+                "Pass 'None' on the CLI to disable this check. Token-capacity default: 1.0."
             ),
             arg_type=_nullable_float,
         )
@@ -126,12 +203,14 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-prefill-tokens-threshold",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            default=10_000_000,
+            default=_THRESHOLD_UNSET,
             help=(
                 "Literal token count threshold for determining when a worker is considered busy "
                 "based on prefill token utilization. When active prefill tokens exceed this "
-                "threshold, the worker is marked as busy. Pass 'None' on the CLI to disable this "
-                "check. Uses OR logic with --active-prefill-tokens-threshold-frac. Default: 10000000."
+                "threshold, the worker is marked as busy. Setting this implies "
+                "--admission-control token-capacity. Pass 'None' on the CLI to disable this "
+                "check. Uses OR logic with --active-prefill-tokens-threshold-frac. "
+                "Token-capacity default: 10000000."
             ),
             arg_type=_nullable_int,
         )
@@ -139,11 +218,26 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-prefill-tokens-threshold-frac",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-            default=10.0,
+            default=_THRESHOLD_UNSET,
             help=(
                 "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
-                "active_prefill_tokens > frac * max_num_batched_tokens. Pass 'None' on the CLI to "
-                "disable this check. Uses OR logic with --active-prefill-tokens-threshold. Default: 10.0."
+                "active_prefill_tokens > frac * max_num_batched_tokens. Setting this implies "
+                "--admission-control token-capacity. Pass 'None' on the CLI to disable this "
+                "check. Uses OR logic with --active-prefill-tokens-threshold. "
+                "Token-capacity default: 64.0."
             ),
             arg_type=_nullable_float,
+        )
+        add_argument(
+            g,
+            flag_name="--admission-control",
+            env_var="DYN_ADMISSION_CONTROL",
+            default=_ADMISSION_CONTROL_AUTO,
+            help=(
+                "Admission control mode. 'token-capacity' enables per-worker busy checks using "
+                "--active-decode-blocks-threshold, --active-prefill-tokens-threshold, and "
+                "--active-prefill-tokens-threshold-frac. 'none' disables those busy checks; "
+                "router queueing remains controlled by --router-queue-threshold."
+            ),
+            choices=list(ADMISSION_CONTROL_CHOICES),
         )
