@@ -738,7 +738,7 @@ jobs:
         with:
           vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
-      - name: Install GAIE prerequisites (Gateway API, kgateway, Inference Extension CRDs)
+      - name: Install GAIE prerequisites (Gateway API, agentgateway, Inference Extension CRDs)
         shell: bash
         env:
           KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
@@ -746,7 +746,7 @@ jobs:
           echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
           export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
           export NAMESPACE=default
-          bash deploy/inference-gateway/scripts/install_gaie_crd_kgateway.sh
+          bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
           rm -f ${{ github.workspace }}/.kubeconfig_gaie
       - name: Run GAIE Deploy Test
         id: deploy-test
