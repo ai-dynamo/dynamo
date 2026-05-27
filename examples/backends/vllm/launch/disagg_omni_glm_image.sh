@@ -64,6 +64,7 @@ sleep 20
 
 # Stage 1: DiT worker (GPU 1) — diffusion denoising + VAE decode
 echo "Starting Stage 1 (DiT)..."
+# Use CUDA_VISIBLE_DEVICES to select GPU 1, which appears as device "0" to this process
 CUDA_VISIBLE_DEVICES=1 DYN_SYSTEM_PORT=8082 \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \

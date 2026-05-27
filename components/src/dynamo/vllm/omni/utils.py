@@ -3,9 +3,12 @@
 
 """Shared utilities for the vLLM-Omni backend."""
 
+import asyncio
+import json
 import logging
 from typing import Any, cast
 
+import torch
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
@@ -21,6 +24,99 @@ DEFAULT_VIDEO_SIZE = "832x480"
 def shm_deserialize(shm_meta: dict) -> Any:
     """Read and deserialize an OmniRequestOutput from shared memory."""
     return OmniSerializer.deserialize(shm_read_bytes(shm_meta))
+
+
+async def ensure_awaited(value: Any) -> Any:
+    """Await a value if it is a coroutine, otherwise return it directly."""
+    if asyncio.iscoroutine(value):
+        return await value
+    return value
+
+
+def unwrap_connector_payload(payload: Any) -> Any:
+    """Unpack connector return value (some return (payload,) tuples)."""
+    return payload[0] if isinstance(payload, tuple) else payload
+
+
+def is_tensor_payload(payload: Any) -> bool:
+    """Check if payload is a torch.Tensor or list of torch.Tensors."""
+    if isinstance(payload, torch.Tensor):
+        return True
+    return (
+        isinstance(payload, (list, tuple))
+        and bool(payload)
+        and all(isinstance(item, torch.Tensor) for item in payload)
+    )
+
+
+def is_empty_payload(value: Any) -> bool:
+    """Check if a payload value is empty/None (tensor-aware)."""
+    if value is None:
+        return True
+    if isinstance(value, torch.Tensor):
+        return value.numel() == 0
+    if isinstance(value, (list, tuple, dict, str, bytes, bytearray, set)):
+        return len(value) == 0
+    return False
+
+
+def coerce_token_ids_to_list(token_ids: Any) -> list[Any]:
+    """Normalize token_ids (tensor, list, tuple, or other) to a Python list."""
+    if token_ids is None:
+        return []
+    if isinstance(token_ids, torch.Tensor):
+        return token_ids.detach().cpu().tolist()
+    if isinstance(token_ids, (list, tuple)):
+        return list(token_ids)
+    try:
+        return list(token_ids)
+    except TypeError:
+        return [token_ids]
+
+
+def tensor_uint8_to_bytes(tensor: torch.Tensor) -> bytes:
+    """Convert a uint8 tensor to bytes efficiently via numpy zero-copy."""
+    flat = tensor.detach().cpu().contiguous().view(-1)
+    if flat.dtype != torch.uint8:
+        flat = flat.to(dtype=torch.uint8)
+    return flat.numpy().tobytes()
+
+
+def json_to_uint8_tensor(
+    value: Any,
+    device: torch.device,
+    default: Any | None = None,
+) -> torch.Tensor:
+    """Serialize value to JSON and return as a contiguous uint8 tensor on device."""
+    payload = json.dumps(value, default=default).encode("utf-8")
+    return (
+        torch.frombuffer(payload, dtype=torch.uint8)
+        .clone()
+        .to(device=device)
+        .contiguous()
+    )
+
+
+def try_json_encode(value: Any, default: Any | None = None) -> bytes | None:
+    """Try to JSON-encode a value, returning bytes on success or None on failure.
+
+    Avoids the double-serialization pattern of calling json.dumps() to check
+    serializability and then calling it again to actually serialize.
+    """
+    try:
+        return json.dumps(value, default=default).encode("utf-8")
+    except (TypeError, OverflowError):
+        return None
+
+
+def bytes_to_uint8_tensor(value: bytes, device: torch.device) -> torch.Tensor:
+    """Convert raw bytes to a contiguous uint8 tensor on device."""
+    return (
+        torch.frombuffer(value, dtype=torch.uint8)
+        .clone()
+        .to(device=device)
+        .contiguous()
+    )
 
 
 def image_generation_mm_processor_kwargs(height: int, width: int) -> dict[str, int]:
