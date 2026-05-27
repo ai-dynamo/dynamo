@@ -125,7 +125,7 @@ pub(crate) struct EnginePassResult {
     pub(crate) completed_requests: usize,
     pub(crate) output_signals: Vec<OutputSignal>,
     pub(crate) admissions: Vec<AdmissionEvent>,
-    pub(crate) active_decode_blocks: u64,
+    pub(crate) mocker_metrics: MockerMetrics,
     /// Controls when replay/live schedulers should expose this pass's buffered
     /// KV events to the real router or publisher sink.
     pub(crate) router_event_visibility: RouterEventVisibility,

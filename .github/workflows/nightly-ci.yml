@@ -6,6 +6,11 @@ name: Nightly CI Pipeline
 on:
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  # TODO: REVERT — testing only. Triggers full nightly on push to this dev
+  # branch. MUST be removed before merging to main.
+  push:
+    branches:
+      - pvijayakrish/nightly-notifications
   workflow_dispatch:  # Allow manual triggering for testing
     inputs:
       release:
@@ -127,6 +132,13 @@ jobs:
               echo "release=true" >> "$GITHUB_OUTPUT"
               echo "run_tests=true" >> "$GITHUB_OUTPUT"
               ;;
+            push)
+              # TODO: REVERT — testing only. Treats push to the dev branch like
+              # schedule so the full nightly (incl. release.yml + GitLab) runs.
+              # MUST be removed before merging to main.
+              echo "release=true" >> "$GITHUB_OUTPUT"
+              echo "run_tests=true" >> "$GITHUB_OUTPUT"
+              ;;
             workflow_dispatch)
               if [ "${DISPATCH_RELEASE}" = "false" ]; then
                 echo "release=false" >> "$GITHUB_OUTPUT"
@@ -144,6 +156,78 @@ jobs:
               echo "run_tests=true" >> "$GITHUB_OUTPUT"
               ;;
           esac
+
+  # Seeds the nightly Slack thread; exposes ts so downstream jobs (and the
+  # GitLab pipeline) can reply. continue-on-error so a Slack outage doesn't
+  # block the nightly — downstream jobs skip on empty outputs.
+  notify-slack-start:
+    name: Notify Slack — nightly started
+    runs-on: prod-default-v2
+    needs: [compute-release-mode, resolve-source-sha, compute-dev-version]
+    if: ${{ needs.compute-release-mode.outputs.release == 'true' }}
+    permissions:
+      contents: read
+    outputs:
+      thread_ts:  ${{ steps.post.outputs.thread_ts }}
+    steps:
+      - name: Post start message
+        id: post
+        continue-on-error: true
+        env:
+          SLACK_BOT_TOKEN:  ${{ secrets.SLACK_RELEASE_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
+          SOURCE_SHA:       ${{ needs.resolve-source-sha.outputs.source_sha }}
+          DEV_SUFFIX:       ${{ needs.compute-dev-version.outputs.dev_suffix }}
+          RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATE_UTC=$(date -u +%Y-%m-%d)
+          SHORT_SHA="${SOURCE_SHA:0:7}"
+
+          PAYLOAD=$(jq -n \
+            --arg channel "${SLACK_CHANNEL_ID}" \
+            --arg date    "${DATE_UTC}" \
+            --arg sha     "${SHORT_SHA}" \
+            --arg run_url "${RUN_URL}" \
+            --arg dev     "${DEV_SUFFIX}" \
+            '{
+              channel: $channel,
+              text: ("Dynamo Nightly build started — " + $date),
+              blocks: [
+                { type: "header",
+                  text: { type: "plain_text", text: (":crescent_moon: Dynamo Nightly build started — " + $date) } },
+                { type: "section",
+                  fields: [
+                    { type: "mrkdwn", text: ("*Commit:*\n`" + $sha + "`") },
+                    { type: "mrkdwn", text: ("*Dev version suffix:*\n`" + $dev + "`") }
+                  ] },
+                { type: "context",
+                  elements: [ { type: "mrkdwn", text: ("<" + $run_url + "|GitHub Actions run>") } ] }
+              ]
+            }')
+
+          RESPONSE=$(curl -fsSL -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "${PAYLOAD}")
+
+          OK=$(echo "${RESPONSE}" | jq -r '.ok')
+          if [ "${OK}" != "true" ]; then
+            # RESPONSE may carry channel/ts/warning fields; surface only .error.
+            ERR=$(echo "${RESPONSE}" | jq -r '.error // "unknown"')
+            echo "::error::Slack chat.postMessage failed: ${ERR}"
+            exit 1
+          fi
+          TS=$(echo "${RESPONSE}" | jq -r '.ts')
+          # ts is a runtime per-message identifier (not a secret) and is the only
+          # value other jobs need; channel ID is read by every downstream Slack
+          # step directly from secrets.SLACK_RELEASE_CHANNEL_ID so it stays
+          # auto-masked. Do NOT ::add-mask:: the ts — masking it before writing
+          # GITHUB_OUTPUT caused the value to arrive empty across the
+          # workflow_call boundary, silently skipping downstream reply steps.
+          echo "thread_ts=${TS}" >> "${GITHUB_OUTPUT}"
+          echo "Posted nightly start message"
 
   # ============================================================================
   # MANUAL RELEASE APPROVAL GATE
@@ -463,6 +547,7 @@ jobs:
     needs:
       - resolve-source-sha
       - compute-release-mode
+      - notify-slack-start
       - manual-release-approval
       - vllm-test
       - vllm-multi-gpu-test
@@ -485,6 +570,7 @@ jobs:
       commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
       nightly: true
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
+      slack_thread_ts:  ${{ needs.notify-slack-start.outputs.thread_ts }}
     secrets: inherit
 
   # ============================================================================
