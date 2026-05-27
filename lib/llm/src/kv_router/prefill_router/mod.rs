@@ -129,7 +129,8 @@ impl
             ));
         }
 
-        let prefill_result = match self
+        let endpoint_id = self.endpoint_id.get();
+        let (prefill_result, topology_constraints) = match self
             .resolve_prefill_worker(&request_id, &prefill_req, preselected_worker)
             .await
         {
@@ -138,6 +139,9 @@ impl
                 dp_rank,
                 bootstrap_info,
             } => {
+                let topology_constraints =
+                    self.preflight_kv_transfer_constraints(endpoint_id, Some(worker_id))?;
+
                 // Bootstrap optimization path: spawn prefill in background
                 self.commit_selected_prefill_worker(
                     &mut prefill_req,
@@ -166,10 +170,13 @@ impl
                 // completes so worker recording finishes before phase changes to Decode.
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
 
-                Ok(PrefillOutcome::Bootstrap {
-                    bootstrap_info,
-                    worker_id,
-                })
+                (
+                    Ok(PrefillOutcome::Bootstrap {
+                        bootstrap_info,
+                        worker_id,
+                    }),
+                    topology_constraints,
+                )
             }
             PrefillResolveDecision::Backpressure {
                 reason,
@@ -198,6 +205,9 @@ impl
                 worker_id: resolved_wid,
                 dp_rank: resolved_dp_rank,
             } => {
+                let topology_constraints =
+                    self.preflight_kv_transfer_constraints(endpoint_id, Some(resolved_wid))?;
+
                 // Bootstrap unavailable after resolve_prefill_worker selected a worker.
                 // Commit the same selection in the synchronous path
                 tracing::debug!(
@@ -224,13 +234,19 @@ impl
                     None,
                 )
                 .await?;
-                Ok(PrefillOutcome::Completed {
-                    result: completion.result,
-                    worker_id: Some(resolved_wid),
-                    worker_link: completion.worker_link,
-                })
+                (
+                    Ok(PrefillOutcome::Completed {
+                        result: completion.result,
+                        worker_id: Some(resolved_wid),
+                        worker_link: completion.worker_link,
+                    }),
+                    topology_constraints,
+                )
             }
             PrefillResolveDecision::Unavailable | PrefillResolveDecision::NotActivated => {
+                let topology_constraints =
+                    self.preflight_kv_transfer_constraints(endpoint_id, None)?;
+
                 // No worker resolved; fall back to router-selected prefill.
                 tracing::debug!("Using original prefill path (no resolved worker)");
 
@@ -258,11 +274,14 @@ impl
                     .worker_info
                     .map(|(wid, _)| wid)
                     .or(preselected_worker);
-                Ok(PrefillOutcome::Completed {
-                    result: completion.result,
-                    worker_id: prefill_worker_id,
-                    worker_link: completion.worker_link,
-                })
+                (
+                    Ok(PrefillOutcome::Completed {
+                        result: completion.result,
+                        worker_id: prefill_worker_id,
+                        worker_link: completion.worker_link,
+                    }),
+                    topology_constraints,
+                )
             }
         };
 
@@ -294,14 +313,13 @@ impl
 
                 let mut decode_req = req;
 
-                let selected_prefill_worker_id = match outcome {
+                match outcome {
                     PrefillOutcome::Bootstrap {
                         bootstrap_info,
                         worker_id,
                     } => {
                         decode_req.bootstrap_info = Some(bootstrap_info);
                         decode_req.routing_mut().prefill_worker_id = Some(worker_id);
-                        Some(worker_id)
                     }
                     PrefillOutcome::Completed {
                         result,
@@ -313,32 +331,7 @@ impl
                         if let Some(wid) = worker_id {
                             decode_req.routing_mut().prefill_worker_id = Some(wid);
                         }
-                        worker_id
                     }
-                };
-
-                // Resolve prefill worker topology from the prefill endpoint's worker configs,
-                // then express it through the standard decode routing constraints.
-                let endpoint_id = self.endpoint_id.get();
-                let topology_constraints = if let Some((wid, eid)) =
-                    selected_prefill_worker_id.zip(endpoint_id)
-                {
-                    self.model_manager
-                        .get_kv_transfer_routing_constraints(eid, wid)?
-                } else {
-                    // TODO: Make synchronous prefill completion always report the exact
-                    // prefill worker id. Required KV-transfer policy needs that id to derive
-                    // decode constraints, so fail closed until attribution is authoritative.
-                    if let Some(eid) = endpoint_id
-                        && self
-                            .model_manager
-                            .has_kv_transfer_required_routing_policy(eid)
-                    {
-                        return Err(anyhow::anyhow!(
-                            "prefill worker id unavailable after prefill; cannot derive KV transfer topology constraints for endpoint {eid}"
-                        ));
-                    }
-                    None
                 };
 
                 if let Some(topology_constraints) = topology_constraints {
@@ -374,6 +367,36 @@ impl
 }
 
 impl PrefillRouter {
+    fn preflight_kv_transfer_constraints(
+        &self,
+        endpoint_id: Option<&EndpointId>,
+        worker_id: Option<u64>,
+    ) -> anyhow::Result<Option<RoutingConstraints>> {
+        let Some(endpoint_id) = endpoint_id else {
+            return Ok(None);
+        };
+
+        if let Some(worker_id) = worker_id {
+            return self
+                .model_manager
+                .get_kv_transfer_routing_constraints(endpoint_id, worker_id);
+        }
+
+        // TODO: Make synchronous prefill completion always report the exact
+        // prefill worker id. Required KV-transfer policy needs that id to derive
+        // decode constraints, so fail closed until attribution is authoritative.
+        if self
+            .model_manager
+            .has_kv_transfer_required_routing_policy(endpoint_id)
+        {
+            anyhow::bail!(
+                "prefill worker id unavailable before prefill; cannot derive KV transfer topology constraints for endpoint {endpoint_id}"
+            );
+        }
+
+        Ok(None)
+    }
+
     fn commit_selected_prefill_worker(
         &self,
         prefill_req: &mut PreprocessedRequest,
