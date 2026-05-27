@@ -123,6 +123,9 @@ class DistributedRuntime:
         event_loop: Any,
         discovery_backend: str,
         request_plane: str,
+        enable_nats: Optional[bool] = None,
+        *,
+        event_plane: Optional[str] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -131,6 +134,8 @@ class DistributedRuntime:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp" or "nats")
+            enable_nats: Deprecated; NATS enablement is inferred from runtime config
+            event_plane: Event plane transport ("nats" or "zmq")
         """
         ...
 
