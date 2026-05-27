@@ -547,32 +547,36 @@ class GMSClientMemoryManager:
 
         assert self._granted_lock_type is not None
 
-        allocations_by_slot = {
-            int(info.layout_slot): info for info in self.list_handles()
-        }
+        committed_allocations = sorted(
+            self.list_handles(),
+            key=lambda info: int(info.layout_slot),
+        )
+        local_mappings = sorted(
+            self._mappings.items(), key=lambda item: item[1].layout_slot
+        )
+        if len(committed_allocations) != len(local_mappings):
+            raise StaleMemoryLayoutError(
+                "Layout allocation count changed: "
+                f"{len(local_mappings)} vs {len(committed_allocations)}"
+            )
 
         remapped_count = 0
         total_bytes = 0
         remapped_vas: list[int] = []
-        for va, mapping in sorted(
-            self._mappings.items(), key=lambda item: item[1].layout_slot
+        for rank, ((va, mapping), alloc_info) in enumerate(
+            zip(local_mappings, committed_allocations)
         ):
             if mapping.handle != 0:
                 continue
 
-            alloc_info = allocations_by_slot.get(mapping.layout_slot)
-            if alloc_info is None:
-                raise StaleMemoryLayoutError(
-                    f"Layout slot {mapping.layout_slot} is missing from the committed layout"
-                )
             if int(alloc_info.aligned_size) != mapping.aligned_size:
                 raise StaleMemoryLayoutError(
-                    f"Layout slot {mapping.layout_slot} size changed: "
+                    f"Layout rank {rank} size changed: "
                     f"{mapping.aligned_size} vs {int(alloc_info.aligned_size)}"
                 )
             if str(alloc_info.tag) != mapping.tag:
                 raise StaleMemoryLayoutError(
-                    f"Layout slot {mapping.layout_slot} tag changed: "
+                    f"Layout rank {rank} tag changed: "
                     f"{mapping.tag} vs {alloc_info.tag}"
                 )
 
