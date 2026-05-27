@@ -99,5 +99,6 @@ cases:
           </｜DSML｜invoke>
           </｜DSML｜invoke>
           </｜DSML｜invoke>
+        reason: "vLLM accepts a bare <｜DSML｜invoke> body without the outer <｜DSML｜tool_calls> wrapper and leaks the markup into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
