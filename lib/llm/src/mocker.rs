@@ -6,9 +6,11 @@
 //! The core mocker logic lives in the `dynamo-mocker` crate.
 //! This module provides the runtime-dependent engine wrapper.
 
+mod metrics;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::backend::ExecutionContext;
 use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
@@ -27,6 +29,7 @@ use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_mocker::services::bootstrap::{BootstrapServer, connect_to_prefill};
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::{
     component::Component,
@@ -42,6 +45,8 @@ use tokio::sync::{Notify, OnceCell, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use self::metrics::NativeMockerMetrics;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
@@ -80,6 +85,7 @@ pub struct MockEngine {
     unset_dp_rank_counter: AtomicU32,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
+    native_metrics: Arc<NativeMockerMetrics>,
     /// Keep schedulers alive so their CancelGuards don't fire prematurely.
     _schedulers: OnceCell<Vec<Box<dyn SchedulerHandle>>>,
     /// Forward pass metrics publisher (kept alive for the engine lifetime).
@@ -130,6 +136,8 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
 impl MockEngine {
     /// Create a new MockEngine with the given parameters
     pub fn new(engine_args: MockEngineArgs) -> Self {
+        let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
+            .expect("mocker native metrics collectors should be valid");
         Self {
             active_requests: Arc::new(DashMap::new()),
             request_senders: OnceCell::new(),
@@ -137,6 +145,7 @@ impl MockEngine {
             engine_args,
             unset_dp_rank_counter: AtomicU32::new(0),
             bootstrap_server: Arc::new(OnceCell::new()),
+            native_metrics,
             _schedulers: OnceCell::new(),
             _fpm_publisher: OnceCell::new(),
         }
@@ -156,6 +165,8 @@ impl MockEngine {
         // child_token() is a child of endpoint_shutdown_token which is cancelled in Phase 1.
         // primary_token() is only cancelled in Phase 3, after waiting for inflight requests.
         let cancel_token = component.drt().primary_token();
+        self.native_metrics
+            .register(component.get_metrics_registry())?;
 
         // Simulate engine startup time if configured
         if let Some(startup_time_secs) = self.engine_args.startup_time {
@@ -211,8 +222,13 @@ impl MockEngine {
             .start_schedulers(kv_component, cancel_token.clone(), fpm_sinks)
             .await;
 
-        Self::start_metrics_publishing(&schedulers, component.clone(), cancel_token.clone())
-            .await?;
+        Self::start_metrics_publishing(
+            &schedulers,
+            component.clone(),
+            self.native_metrics.clone(),
+            cancel_token.clone(),
+        )
+        .await?;
 
         let _ = self._schedulers.set(schedulers);
 
@@ -417,6 +433,7 @@ impl MockEngine {
     async fn start_metrics_publishing(
         schedulers: &[Box<dyn SchedulerHandle>],
         component: Component,
+        native_metrics: Arc<NativeMockerMetrics>,
         cancel_token: CancellationToken,
     ) -> Result<()> {
         let metrics_publisher = Arc::new(WorkerMetricsPublisher::new()?);
@@ -427,6 +444,7 @@ impl MockEngine {
         for scheduler in schedulers.iter() {
             let mut metrics_rx = scheduler.metrics_receiver();
             let publisher = metrics_publisher.clone();
+            let native_metrics = native_metrics.clone();
             let cancel_token = cancel_token.clone();
 
             tokio::spawn(async move {
@@ -436,6 +454,7 @@ impl MockEngine {
                         Ok(_) = metrics_rx.changed() => {
                             // Get the latest metrics
                             let metrics = metrics_rx.borrow().clone();
+                            native_metrics.update_scheduler_snapshot(&metrics);
 
                             // Publish metrics using flat API
                             if let Err(e) = publisher.publish(
@@ -474,6 +493,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         input: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<LLMEngineOutput>, Error> {
         let (request, ctx) = input.into_parts();
+        let request_start = Instant::now();
 
         let dp_rank = self.resolve_dp_rank(&request);
 
@@ -484,6 +504,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 dp_rank, self.engine_args.dp_size
             )));
         }
+
+        let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
+        let is_prefill = self.engine_args.is_prefill();
+        let max_output_tokens = if is_prefill {
+            1
+        } else {
+            request
+                .stop_conditions
+                .max_tokens
+                .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
+                as usize
+        };
+        let native_timing = self
+            .native_metrics
+            .request_timing(&request.model, dp_rank, is_prefill, request_start)
+            .await;
 
         // Bootstrap rendezvous for disaggregated serving
         // - Decode: send receiver metadata to prefill, then wait for prefill completion
@@ -500,19 +536,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             .await
             .map_err(|e| Error::msg(format!("Bootstrap connection failed: {e}")))?;
         }
-
-        let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
-
-        let is_prefill = self.engine_args.is_prefill();
-        let max_output_tokens = if is_prefill {
-            1
-        } else {
-            request
-                .stop_conditions
-                .max_tokens
-                .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
-                as usize
-        };
 
         // Convert PreprocessedRequest to DirectRequest for scheduler
         let direct_request = DirectRequest {
@@ -549,16 +572,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
         let reasoning = self.engine_args.reasoning.clone();
+        let mut native_timing = native_timing;
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
             if let Some((server, room_id, sender, direct_request)) = delayed_prefill_submission {
-                if let Err(e) = server.wait_for_decode_ready(room_id).await {
-                    let _ = stream_tx.send(LLMEngineOutput::error(format!(
-                        "Bootstrap wait for decode metadata failed: {e}"
-                    )));
-                    active_requests.remove(&request_uuid);
-                    return;
+                tokio::select! {
+                    result = server.wait_for_decode_ready(room_id) => {
+                        if let Err(e) = result {
+                            let _ = stream_tx.send(LLMEngineOutput::error(format!(
+                                "Bootstrap wait for decode metadata failed: {e}"
+                            )));
+                            active_requests.remove(&request_uuid);
+                            return;
+                        }
+                    }
+                    _ = async_context.stopped() => {
+                        let _ = stream_tx.send(LLMEngineOutput::cancelled());
+                        active_requests.remove(&request_uuid);
+                        return;
+                    }
                 }
 
                 if sender.send(direct_request).is_err() {
@@ -607,7 +640,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                         }
 
                         if signal.completed {
-                            let _ = stream_tx.send(output);
+                            if stream_tx.send(output).is_err() {
+                                tracing::error!("Output stream receiver closed.");
+                                break;
+                            }
+                            native_timing.record_tokens(1);
 
                             // Prefill-to-decode handoff delay is emitted by the shared mocker core.
                             if is_prefill
@@ -623,7 +660,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                                 server.complete_room(room_id);
                             }
 
-                            let _ = stream_tx.send(LLMEngineOutput::length());
+                            if stream_tx.send(LLMEngineOutput::length()).is_err() {
+                                tracing::error!("Output stream receiver closed.");
+                                break;
+                            }
+                            native_timing.record_normal_completion();
                             break;
                         }
 
@@ -631,6 +672,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             tracing::error!("Output stream receiver closed.");
                             break;
                         }
+                        native_timing.record_tokens(1);
                     }
 
                     _ = async_context.stopped() => {
