@@ -40,6 +40,11 @@ spec:
     metadata:
       labels:
         app: {{ .Values.model.shortName }}-epp
+      annotations:
+        # Exclude Istio sidecar injection: EPP serves TLS on port 9002
+        # (--secure-serving true); an Istio sidecar in STRICT mTLS mode
+        # causes a double-TLS handshake failure on that port.
+        sidecar.istio.io/inject: "false"
     spec:
       terminationGracePeriodSeconds: 130
 
