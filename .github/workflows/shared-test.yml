@@ -175,6 +175,8 @@ jobs:
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
+          # Internal pytest timeout 2 min below the step timeout so allure flushes before kill.
+          pytest_timeout_minutes: ${{ inputs.cpu_only_test_timeout_minutes - 2 }}
       - name: Run GPU tests (parallel)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
@@ -192,6 +194,8 @@ jobs:
           max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
+          # Internal pytest timeout 2 min below the step timeout so allure flushes before kill.
+          pytest_timeout_minutes: ${{ inputs.gpu_test_timeout_minutes - 2 }}
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         # !cancelled() so a parallel-stage failure doesn't hide sequential results.
@@ -208,3 +212,5 @@ jobs:
           parallel_mode: 'none'
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
+          # Internal pytest timeout 2 min below the step timeout so allure flushes before kill.
+          pytest_timeout_minutes: ${{ inputs.gpu_test_timeout_minutes - 2 }}

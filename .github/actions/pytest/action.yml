@@ -55,6 +55,10 @@ inputs:
     description: 'Target device (cuda, xpu, cpu)'
     required: false
     default: 'cuda'
+  pytest_timeout_minutes:
+    description: 'Internal pytest timeout in minutes. When set, pytest is wrapped in `timeout --signal=TERM --kill-after=30s ${N}m` inside the docker container so it receives SIGTERM (and flushes allure per-test JSONs) before the calling step `timeout-minutes` cuts off the entire composite action. Set 2-3 minutes lower than the step timeout-minutes. Empty disables the wrapper.'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -170,6 +174,15 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
+        # Optional internal timeout: gives pytest SIGTERM (so allure-pytest can flush per-test
+        # JSONs) before the calling step's `timeout-minutes` kills the whole composite action.
+        # Skip in dry_run mode — collect-only exits cleanly anyway.
+        TIMEOUT_PREFIX=""
+        if [[ "${{ inputs.dry_run }}" != "true" ]] && [[ -n "${{ inputs.pytest_timeout_minutes }}" ]]; then
+          TIMEOUT_PREFIX="timeout --signal=TERM --kill-after=30s ${{ inputs.pytest_timeout_minutes }}m "
+          echo "⏱️  Internal pytest timeout: ${{ inputs.pytest_timeout_minutes }}m (SIGTERM, +30s grace before SIGKILL)"
+        fi
+
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
@@ -181,10 +194,13 @@ runs:
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
-          sh -c "umask 0022 && ${PYTEST_CMD}"
+          sh -c "umask 0022 && ${TIMEOUT_PREFIX}${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        if [[ ${TEST_EXIT_CODE} -eq 124 || ${TEST_EXIT_CODE} -eq 137 ]]; then
+          echo "⏱️  Pytest hit the internal timeout (exit ${TEST_EXIT_CODE}); partial allure results should still be on disk."
+        fi
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
         # Verify test results were written (only in normal mode)
@@ -306,6 +322,15 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src")
         fi
 
+        # Optional internal timeout: gives pytest SIGTERM (so allure-pytest can flush per-test
+        # JSONs) before the calling step's `timeout-minutes` kills the whole composite action.
+        # Skip in dry_run mode — collect-only exits cleanly anyway.
+        TIMEOUT_PREFIX=""
+        if [[ "${{ inputs.dry_run }}" != "true" ]] && [[ -n "${{ inputs.pytest_timeout_minutes }}" ]]; then
+          TIMEOUT_PREFIX="timeout --signal=TERM --kill-after=30s ${{ inputs.pytest_timeout_minutes }}m "
+          echo "⏱️  Internal pytest timeout: ${{ inputs.pytest_timeout_minutes }}m (SIGTERM, +30s grace before SIGKILL)"
+        fi
+
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} \
           "${DOCKER_EXTRA_FLAGS[@]}" \
           --rm -w /workspace \
@@ -315,10 +340,13 @@ runs:
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           -v "/models:${HF_HOME}" \
           ${{ inputs.image_tag }} \
-          sh -c "umask 0022 && ${PYTEST_CMD}"
+          sh -c "umask 0022 && ${TIMEOUT_PREFIX}${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        if [[ ${TEST_EXIT_CODE} -eq 124 || ${TEST_EXIT_CODE} -eq 137 ]]; then
+          echo "⏱️  Pytest hit the internal timeout (exit ${TEST_EXIT_CODE}); partial allure results should still be on disk."
+        fi
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
         # Verify test results were written (only in normal mode)

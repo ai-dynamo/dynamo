@@ -62,6 +62,10 @@ inputs:
     description: 'Is this a GPU test job?'
     required: false
     default: 'false'
+  pytest_timeout_minutes:
+    description: 'Internal pytest timeout in minutes. When set, pytest is wrapped in `timeout --signal=TERM --kill-after=30s ${N}m` so it receives SIGTERM (and flushes allure per-test JSONs) before the calling step `timeout-minutes` cuts off the entire composite action. Set 2-3 minutes lower than the step timeout-minutes. Empty disables the wrapper.'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -217,14 +221,26 @@ runs:
           PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
-        echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
+        # Optional internal timeout: gives pytest SIGTERM (so allure-pytest can flush per-test
+        # JSONs) before the calling step's `timeout-minutes` kills the whole composite action.
+        # Skip in dry_run mode — collect-only is fast and exits cleanly anyway.
+        TIMEOUT_PREFIX=""
+        if [[ "${{ inputs.dry_run }}" != "true" ]] && [[ -n "${{ inputs.pytest_timeout_minutes }}" ]]; then
+          TIMEOUT_PREFIX="timeout --signal=TERM --kill-after=30s ${{ inputs.pytest_timeout_minutes }}m "
+          echo "⏱️  Internal pytest timeout: ${{ inputs.pytest_timeout_minutes }}m (SIGTERM, +30s grace before SIGKILL)"
+        fi
+
+        echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${TIMEOUT_PREFIX}${PYTEST_CMD}"
 
         umask 0022
         cd "${CONTAINER_WORKSPACE}"
-        bash -c "${PYTEST_CMD}"
+        bash -c "${TIMEOUT_PREFIX}${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        if [[ ${TEST_EXIT_CODE} -eq 124 || ${TEST_EXIT_CODE} -eq 137 ]]; then
+          echo "⏱️  Pytest hit the internal timeout (exit ${TEST_EXIT_CODE}); partial allure results should still be on disk."
+        fi
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
         # Verify test results were written (only in normal mode)
