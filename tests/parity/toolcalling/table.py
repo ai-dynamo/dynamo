@@ -339,7 +339,7 @@ STREAM_SUB_CASE_GROUPS = [
     ("Single-call", ("1.a", "1.b")),
     ("Multi-call", ("2",)),
     ("Partial-token", ("3",)),
-    ("Termination", ("4.a", "4.b")),
+    ("Termination", ("4.a", "4.b", "4.c")),
 ]
 
 SUB_CASE_GROUPS_BY_MODE = {
