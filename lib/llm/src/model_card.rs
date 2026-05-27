@@ -317,13 +317,8 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
 /// the fallback when `size` is absent on a `CheckedFile`.
 const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// File extensions that identify model weights. Used by both gh-8749
-/// harvest paths — the frontend hf:// sibling harvest below and the
-/// worker self-host harvest in `local_model::move_to_self_host`. Wider
-/// than mx's `HuggingFaceProvider::is_weight_file` so a stray `.pt` /
-/// `.gguf` / `.onnx` weight doesn't ride the metadata HTTP path.
-///
-/// `.safetensors.index.json` is correctly kept: extension is `.json`.
+/// File extensions that identify model weights. Callers: the frontend
+/// hf:// sibling harvest below and `local_model::harvest_extra_files`.
 pub(crate) fn is_weight_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
@@ -732,11 +727,8 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config: Option<RouterConfig>,
 
-    /// Non-typed sibling files the worker found next to the typed slots
-    /// (`preprocessor_config.json`, `special_tokens_map.json`, etc.).
-    /// Populated by the worker for self-host; ride the same
-    /// resolve-and-cache pipeline as typed slots so external preprocessors
-    /// see a complete `slug_dir`.
+    /// Sibling files (e.g. `preprocessor_config.json`) the worker
+    /// advertises alongside the typed slots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_files: Vec<CheckedFile>,
 

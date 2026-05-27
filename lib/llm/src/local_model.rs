@@ -715,10 +715,8 @@ pub(crate) fn self_host_base_url(
 /// Scan `model_dir` for files to advertise alongside the typed MDC slots.
 /// Skips weights, dotfiles / README (`is_ignored`), already-typed
 /// filenames, and anything that isn't a regular file. Non-recursive.
-/// Results are sorted by filename so the resulting `mdcsum` is stable
-/// across filesystems that return `read_dir` entries in different
-/// orders. Returns an empty vec when `model_dir` doesn't exist (e.g.
-/// name-only `LocalModel` placeholders).
+/// Returns an empty vec when `model_dir` doesn't exist (e.g. name-only
+/// `LocalModel` placeholders).
 fn harvest_extra_files(
     model_dir: &Path,
     typed_filenames: &HashSet<String>,
@@ -749,7 +747,6 @@ fn harvest_extra_files(
         }
         out.push(CheckedFile::from_disk(&path)?);
     }
-    out.sort_by(|a, b| a.path().cmp(&b.path()));
     Ok(out)
 }
 
