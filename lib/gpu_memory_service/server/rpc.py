@@ -19,7 +19,11 @@ from gpu_memory_service.common.protocol.messages import (
     HandshakeRequest,
     HandshakeResponse,
 )
-from gpu_memory_service.common.protocol.wire import recv_message, send_message
+from gpu_memory_service.common.protocol.wire import (
+    recv_message,
+    send_message,
+    send_message_with_fds,
+)
 from gpu_memory_service.common.utils import fail
 
 from .allocations import AllocationNotFoundError
@@ -272,7 +276,10 @@ class GMSRPCServer:
                 fail("fatal server error", exc_info=exc)
 
             try:
-                await send_message(conn.writer, response, fd)
+                if isinstance(fd, list):
+                    await send_message_with_fds(conn.writer, response, fd)
+                else:
+                    await send_message(conn.writer, response, fd)
             except Exception as exc:
                 logger.warning(
                     "Response send failed for %s on session %s: %s",
@@ -282,7 +289,10 @@ class GMSRPCServer:
                 )
                 return
             finally:
-                if fd >= 0:
+                if isinstance(fd, list):
+                    for one_fd in fd:
+                        os.close(one_fd)
+                elif fd >= 0:
                     os.close(fd)
 
             if should_close:

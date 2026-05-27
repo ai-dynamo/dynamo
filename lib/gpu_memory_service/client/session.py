@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import List, Optional, Tuple
 
 from gpu_memory_service.client.rpc import _GMSRPCTransport
@@ -19,6 +20,8 @@ from gpu_memory_service.common.protocol.messages import (
     CommitResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
+    ExportAllocationsRequest,
+    ExportAllocationsResponse,
     FreeAllocationRequest,
     FreeAllocationResponse,
     GetAllocationRequest,
@@ -161,6 +164,39 @@ class _GMSClientSession:
                 f"GMS export returned no FD for allocation_id={allocation_id}"
             )
         return fd
+
+    def export_many(self, allocation_ids: List[str]) -> List[int]:
+        if not allocation_ids:
+            return []
+        response, fds = self._transport.request_with_fds(
+            ExportAllocationsRequest(allocation_ids=allocation_ids),
+            ExportAllocationsResponse,
+        )
+        if len(response.allocations) != len(allocation_ids):
+            for fd in fds:
+                os.close(fd)
+            raise RuntimeError(
+                "GMS export_many response count mismatch: "
+                f"{len(response.allocations)} vs {len(allocation_ids)}"
+            )
+        if len(fds) != len(allocation_ids):
+            for fd in fds:
+                os.close(fd)
+            raise RuntimeError(
+                "GMS export_many FD count mismatch: "
+                f"{len(fds)} vs {len(allocation_ids)}"
+            )
+        for expected_id, allocation in zip(
+            allocation_ids, response.allocations, strict=True
+        ):
+            if allocation.allocation_id != expected_id:
+                for fd in fds:
+                    os.close(fd)
+                raise RuntimeError(
+                    "GMS export_many allocation order mismatch: "
+                    f"{allocation.allocation_id} vs {expected_id}"
+                )
+        return fds
 
     def get_allocation(self, allocation_id: str) -> GetAllocationResponse:
         return self._transport.request(

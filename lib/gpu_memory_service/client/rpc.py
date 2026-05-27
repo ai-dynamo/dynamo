@@ -21,7 +21,11 @@ from gpu_memory_service.common.protocol.messages import (
     HandshakeRequest,
     HandshakeResponse,
 )
-from gpu_memory_service.common.protocol.wire import recv_message_sync, send_message_sync
+from gpu_memory_service.common.protocol.wire import (
+    recv_message_sync,
+    recv_message_sync_with_fds,
+    send_message_sync,
+)
 
 T = TypeVar("T")
 
@@ -100,26 +104,48 @@ class _GMSRPCTransport:
         *,
         error_prefix: Optional[str] = None,
     ) -> Tuple[T, int]:
-        response, fd = self._send_recv(request, error_prefix=error_prefix)
+        response, fds = self.request_with_fds(
+            request, response_type, error_prefix=error_prefix
+        )
+        for extra_fd in fds[1:]:
+            os.close(extra_fd)
+        return response, (fds[0] if fds else -1)
+
+    def request_with_fds(
+        self,
+        request,
+        response_type: Type[T],
+        *,
+        error_prefix: Optional[str] = None,
+    ) -> Tuple[T, list[int]]:
+        response, fds = self._send_recv_fds(request, error_prefix=error_prefix)
         if not isinstance(response, response_type):
             prefix = error_prefix or f"GMS request {type(request).__name__}"
-            if fd >= 0:
+            for fd in fds:
                 os.close(fd)
             raise RuntimeError(
                 f"{prefix} returned unexpected response type: {type(response)}"
             )
-        return response, fd
+        return response, fds
 
     def _send_recv(
         self, request, *, error_prefix: Optional[str] = None
     ) -> Tuple[object, int]:
+        response, fds = self._send_recv_fds(request, error_prefix=error_prefix)
+        for extra_fd in fds[1:]:
+            os.close(extra_fd)
+        return response, (fds[0] if fds else -1)
+
+    def _send_recv_fds(
+        self, request, *, error_prefix: Optional[str] = None
+    ) -> Tuple[object, list[int]]:
         if self._socket is None:
             raise RuntimeError("Attempted GMS request on disconnected transport")
 
         prefix = error_prefix or f"GMS request {type(request).__name__}"
         try:
             send_message_sync(self._socket, request)
-            response, fd, self._recv_buffer = recv_message_sync(
+            response, fds, self._recv_buffer = recv_message_sync_with_fds(
                 self._socket, self._recv_buffer
             )
         except Exception as exc:
@@ -131,10 +157,10 @@ class _GMSRPCTransport:
             raise ConnectionError(f"{prefix} failed: {exc}") from exc
 
         if isinstance(response, ErrorResponse):
-            if fd >= 0:
+            for fd in fds:
                 os.close(fd)
             raise RuntimeError(f"{prefix} error: {response.error}")
-        return response, fd
+        return response, fds
 
     def close(self) -> None:
         if self._socket is None:

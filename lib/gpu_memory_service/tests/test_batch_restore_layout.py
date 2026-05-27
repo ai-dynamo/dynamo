@@ -98,9 +98,16 @@ def test_restore_phase_a_uses_batched_allocation_api():
             raise AssertionError("restore should not allocate through create_mapping()")
 
         def export_handle(self, allocation_id):
-            read_fd, write_fd = os.pipe()
-            os.close(write_fd)
-            return read_fd
+            raise AssertionError("restore should use export_handles()")
+
+        def export_handles(self, allocation_ids):
+            fds = []
+            for allocation_id in allocation_ids:
+                assert allocation_id in {"new-0", "new-1"}
+                read_fd, write_fd = os.pipe()
+                os.close(write_fd)
+                fds.append(read_fd)
+            return fds
 
         def reserve_va(self, size):
             va = self._next_va

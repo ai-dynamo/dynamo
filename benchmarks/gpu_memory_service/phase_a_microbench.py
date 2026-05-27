@@ -179,7 +179,11 @@ def _close_fds(fds: Iterable[int]) -> None:
             pass
 
 
-def _cleanup_mappings(vas: Sequence[int], sizes: Sequence[int], handles: Sequence[int]) -> None:
+def _cleanup_mappings(
+    vas: Sequence[int],
+    sizes: Sequence[int],
+    handles: Sequence[int],
+) -> None:
     for va, size in zip(vas, sizes, strict=False):
         if va:
             try:
@@ -200,7 +204,13 @@ def _cleanup_mappings(vas: Sequence[int], sizes: Sequence[int], handles: Sequenc
                 pass
 
 
-def _cleanup_arena(arena_va: int, arena_size: int, offsets: Sequence[int], sizes: Sequence[int], handles: Sequence[int]) -> None:
+def _cleanup_arena(
+    arena_va: int,
+    arena_size: int,
+    offsets: Sequence[int],
+    sizes: Sequence[int],
+    handles: Sequence[int],
+) -> None:
     for offset, size in zip(offsets, sizes, strict=False):
         try:
             cumem_unmap(arena_va + offset, size)
@@ -225,7 +235,12 @@ def _allocate(mm: GMSClientMemoryManager, sizes: Sequence[int], timings: list[St
     return allocations
 
 
-def _metadata_put_loop(mm: GMSClientMemoryManager, allocations, count: int, timings: list[StepTiming]) -> None:
+def _metadata_put_loop(
+    mm: GMSClientMemoryManager,
+    allocations,
+    count: int,
+    timings: list[StepTiming],
+) -> None:
     payload = b'{"shape":[1],"dtype":"torch.float16","stride":[1],"tensor_type":"parameter"}'
     with Timer(timings, "metadata_put_loop", count=count, bytes=len(payload) * count):
         for i, alloc in enumerate(allocations[:count]):
@@ -234,15 +249,55 @@ def _metadata_put_loop(mm: GMSClientMemoryManager, allocations, count: int, timi
                 raise RuntimeError(f"metadata_put failed at index {i}")
 
 
-def _run_per_allocation(mm: GMSClientMemoryManager, sizes: Sequence[int], *, metadata_count: int, timings: list[StepTiming]) -> None:
+def _export_allocations(
+    mm: GMSClientMemoryManager,
+    allocations,
+    timings: list[StepTiming],
+    *,
+    batch: bool,
+    chunk_size: int,
+) -> list[int]:
+    fds: list[int] = []
+    if not batch:
+        with Timer(timings, "export_loop", count=len(allocations)):
+            for alloc in allocations:
+                fds.append(mm.export_handle(alloc.allocation_id))
+        return fds
+
+    allocation_ids = [alloc.allocation_id for alloc in allocations]
+    with Timer(
+        timings,
+        "export_many_loop",
+        count=len(allocation_ids),
+        extra={"chunk_size": chunk_size},
+    ):
+        for start in range(0, len(allocation_ids), chunk_size):
+            chunk = allocation_ids[start : start + chunk_size]
+            fds.extend(mm.export_handles(chunk))
+    return fds
+
+
+def _run_per_allocation(
+    mm: GMSClientMemoryManager,
+    sizes: Sequence[int],
+    *,
+    metadata_count: int,
+    timings: list[StepTiming],
+    batch_export: bool = False,
+    export_chunk_size: int = 128,
+) -> None:
     allocations = _allocate(mm, sizes, timings)
     fds: list[int] = []
     vas: list[int] = []
     handles: list[int] = []
     try:
-        with Timer(timings, "export_loop", count=len(allocations)):
-            for alloc in allocations:
-                fds.append(mm.export_handle(alloc.allocation_id))
+        fds = _export_allocations(
+            mm,
+            allocations,
+            timings,
+            batch=batch_export,
+            chunk_size=export_chunk_size,
+        )
 
         with Timer(timings, "reserve_va_loop", count=len(sizes), bytes=sum(sizes)):
             for size in sizes:
@@ -257,14 +312,29 @@ def _run_per_allocation(mm: GMSClientMemoryManager, sizes: Sequence[int], *, met
             for va, size, handle in zip(vas, sizes, handles, strict=True):
                 cumem_map(va, size, handle)
 
-        with Timer(timings, "cu_mem_set_access_loop", count=len(handles), bytes=sum(sizes)):
+        with Timer(
+            timings,
+            "cu_mem_set_access_loop",
+            count=len(handles),
+            bytes=sum(sizes),
+        ):
             for va, size in zip(vas, sizes, strict=True):
                 cumem_set_access(va, size, mm.device, GrantedLockType.RW)
 
         if metadata_count:
-            _metadata_put_loop(mm, allocations, min(metadata_count, len(allocations)), timings)
+            _metadata_put_loop(
+                mm,
+                allocations,
+                min(metadata_count, len(allocations)),
+                timings,
+            )
 
-        with Timer(timings, "local_unmap_release_free_loop", count=len(handles), bytes=sum(sizes)):
+        with Timer(
+            timings,
+            "local_unmap_release_free_loop",
+            count=len(handles),
+            bytes=sum(sizes),
+        ):
             _cleanup_mappings(vas, sizes, handles)
             vas.clear()
             handles.clear()
@@ -276,7 +346,16 @@ def _run_per_allocation(mm: GMSClientMemoryManager, sizes: Sequence[int], *, met
         _cleanup_mappings(vas, sizes, handles)
 
 
-def _run_arena(mm: GMSClientMemoryManager, sizes: Sequence[int], *, one_set_access: bool, metadata_count: int, timings: list[StepTiming]) -> None:
+def _run_arena(
+    mm: GMSClientMemoryManager,
+    sizes: Sequence[int],
+    *,
+    one_set_access: bool,
+    metadata_count: int,
+    timings: list[StepTiming],
+    batch_export: bool = False,
+    export_chunk_size: int = 128,
+) -> None:
     allocations = _allocate(mm, sizes, timings)
     fds: list[int] = []
     handles: list[int] = []
@@ -288,9 +367,13 @@ def _run_arena(mm: GMSClientMemoryManager, sizes: Sequence[int], *, one_set_acce
         offsets.append(pos)
         pos += size
     try:
-        with Timer(timings, "export_loop", count=len(allocations)):
-            for alloc in allocations:
-                fds.append(mm.export_handle(alloc.allocation_id))
+        fds = _export_allocations(
+            mm,
+            allocations,
+            timings,
+            batch=batch_export,
+            chunk_size=export_chunk_size,
+        )
 
         with Timer(timings, "arena_reserve_va", count=1, bytes=total):
             arena_va = cumem_address_reserve(total, mm.granularity)
@@ -300,7 +383,12 @@ def _run_arena(mm: GMSClientMemoryManager, sizes: Sequence[int], *, one_set_acce
                 handles.append(cumem_import_from_shareable_handle_close_fd(fd))
             fds.clear()
 
-        with Timer(timings, "cu_mem_map_loop", count=len(handles), bytes=total):
+        with Timer(
+            timings,
+            "cu_mem_map_loop",
+            count=len(handles),
+            bytes=total,
+        ):
             for offset, size, handle in zip(offsets, sizes, handles, strict=True):
                 cumem_map(arena_va + offset, size, handle)
 
@@ -319,18 +407,38 @@ def _run_arena(mm: GMSClientMemoryManager, sizes: Sequence[int], *, one_set_acce
                 )
             )
             if not ok:
-                with Timer(timings, "cu_mem_set_access_loop_after_once_failed", count=len(handles), bytes=total):
+                with Timer(
+                    timings,
+                    "cu_mem_set_access_loop_after_once_failed",
+                    count=len(handles),
+                    bytes=total,
+                ):
                     for offset, size in zip(offsets, sizes, strict=True):
                         cumem_set_access(arena_va + offset, size, mm.device, GrantedLockType.RW)
         else:
-            with Timer(timings, "cu_mem_set_access_loop", count=len(handles), bytes=total):
+            with Timer(
+                timings,
+                "cu_mem_set_access_loop",
+                count=len(handles),
+                bytes=total,
+            ):
                 for offset, size in zip(offsets, sizes, strict=True):
                     cumem_set_access(arena_va + offset, size, mm.device, GrantedLockType.RW)
 
         if metadata_count:
-            _metadata_put_loop(mm, allocations, min(metadata_count, len(allocations)), timings)
+            _metadata_put_loop(
+                mm,
+                allocations,
+                min(metadata_count, len(allocations)),
+                timings,
+            )
 
-        with Timer(timings, "local_unmap_release_arena_free", count=len(handles), bytes=total):
+        with Timer(
+            timings,
+            "local_unmap_release_arena_free",
+            count=len(handles),
+            bytes=total,
+        ):
             _cleanup_arena(arena_va, total, offsets, sizes, handles)
             arena_va = 0
             handles.clear()
@@ -343,7 +451,12 @@ def _run_arena(mm: GMSClientMemoryManager, sizes: Sequence[int], *, one_set_acce
             _cleanup_arena(arena_va, total, offsets, sizes, handles)
 
 
-def run_once(args: argparse.Namespace, variant: str, sizes: Sequence[int], iteration: int) -> dict[str, object]:
+def run_once(
+    args: argparse.Namespace,
+    variant: str,
+    sizes: Sequence[int],
+    iteration: int,
+) -> dict[str, object]:
     socket_path = args.socket_path or get_socket_path(args.device, "weights")
     timings: list[StepTiming] = []
     mm = GMSClientMemoryManager(socket_path, device=args.device, tag="weights")
@@ -353,13 +466,62 @@ def run_once(args: argparse.Namespace, variant: str, sizes: Sequence[int], itera
             mm.connect(RequestedLockType.RW, timeout_ms=args.timeout_ms)
             connected = True
         if variant == "per-allocation":
-            _run_per_allocation(mm, sizes, metadata_count=args.metadata_count, timings=timings)
+            _run_per_allocation(
+                mm,
+                sizes,
+                metadata_count=args.metadata_count,
+                timings=timings,
+            )
             connected = False  # commit closed it
+        elif variant == "batch-export":
+            _run_per_allocation(
+                mm,
+                sizes,
+                metadata_count=args.metadata_count,
+                timings=timings,
+                batch_export=True,
+                export_chunk_size=args.export_chunk_size,
+            )
+            connected = False
         elif variant == "arena-loop-access":
-            _run_arena(mm, sizes, one_set_access=False, metadata_count=args.metadata_count, timings=timings)
+            _run_arena(
+                mm,
+                sizes,
+                one_set_access=False,
+                metadata_count=args.metadata_count,
+                timings=timings,
+            )
+            connected = False
+        elif variant == "arena-loop-access-batch-export":
+            _run_arena(
+                mm,
+                sizes,
+                one_set_access=False,
+                metadata_count=args.metadata_count,
+                timings=timings,
+                batch_export=True,
+                export_chunk_size=args.export_chunk_size,
+            )
             connected = False
         elif variant == "arena-once-access":
-            _run_arena(mm, sizes, one_set_access=True, metadata_count=args.metadata_count, timings=timings)
+            _run_arena(
+                mm,
+                sizes,
+                one_set_access=True,
+                metadata_count=args.metadata_count,
+                timings=timings,
+            )
+            connected = False
+        elif variant == "arena-once-access-batch-export":
+            _run_arena(
+                mm,
+                sizes,
+                one_set_access=True,
+                metadata_count=args.metadata_count,
+                timings=timings,
+                batch_export=True,
+                export_chunk_size=args.export_chunk_size,
+            )
             connected = False
         else:
             raise ValueError(f"unknown variant: {variant}")
@@ -393,9 +555,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--variant",
         action="append",
-        choices=("per-allocation", "arena-loop-access", "arena-once-access"),
+        choices=(
+            "per-allocation",
+            "batch-export",
+            "arena-loop-access",
+            "arena-loop-access-batch-export",
+            "arena-once-access",
+            "arena-once-access-batch-export",
+        ),
         help="Variant to run. May be passed multiple times. Default: per-allocation.",
     )
+    parser.add_argument("--export-chunk-size", type=int, default=128)
     parser.add_argument("--json-out", default=None)
     args = parser.parse_args(argv)
 
@@ -405,7 +575,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.manifest:
         sizes = _sizes_from_manifest(args.manifest, granularity)
     else:
-        sizes = _sizes_from_total(args.count, _parse_total_bytes(args.total_bytes), granularity)
+        sizes = _sizes_from_total(
+            args.count,
+            _parse_total_bytes(args.total_bytes),
+            granularity,
+        )
 
     variants = args.variant or ["per-allocation"]
     results: list[dict[str, object]] = []

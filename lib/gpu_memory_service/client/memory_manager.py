@@ -338,6 +338,10 @@ class GMSClientMemoryManager:
         """Export allocation as POSIX FD."""
         return self._client_rpc.export(allocation_id)
 
+    def export_handles(self, allocation_ids: List[str]) -> List[int]:
+        """Export multiple allocations as POSIX FDs in one RPC."""
+        return self._client_rpc.export_many(allocation_ids)
+
     def get_handle_info(self, allocation_id: str):
         """Query allocation info from server."""
         return self._client_rpc.get_allocation(allocation_id)

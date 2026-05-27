@@ -44,11 +44,13 @@ logger = logging.getLogger(__name__)
 try:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
     from gpu_memory_service.common.locks import RequestedLockType
+    from gpu_memory_service.common.protocol.wire import MAX_FDS_PER_MESSAGE
 
     _GMS_CORE_IMPORTS_AVAILABLE = True
 except ImportError:
     _GMS_CORE_IMPORTS_AVAILABLE = False
     GMSClientMemoryManager = None  # type: ignore[assignment,misc]
+    MAX_FDS_PER_MESSAGE = 128  # type: ignore[assignment]
     RequestedLockType = None  # type: ignore[assignment]
 
 
@@ -280,45 +282,75 @@ class GMSStorageClient:
         reserve_elapsed = 0.0
         map_elapsed = 0.0
         target_elapsed = 0.0
-        for entry, allocation in zip(
-            manifest.allocations, allocations, strict=True
-        ):
-            if int(allocation.aligned_size) != int(entry.aligned_size):
-                raise RuntimeError(
-                    "GMS restore allocation size mismatch for "
-                    f"{entry.allocation_id}: {allocation.aligned_size} vs "
-                    f"{entry.aligned_size}"
-                )
-            old_id = entry.allocation_id
 
-            step_t0 = time.monotonic()
-            fd = mm.export_handle(allocation.allocation_id)
-            export_elapsed += time.monotonic() - step_t0
+        export_chunk_size = MAX_FDS_PER_MESSAGE
+        for start in range(0, len(allocations), export_chunk_size):
+            allocation_chunk = allocations[start : start + export_chunk_size]
+            manifest_chunk = manifest.allocations[start : start + export_chunk_size]
+            chunk_fds: list[int] = []
+            try:
+                allocation_ids = [
+                    allocation.allocation_id for allocation in allocation_chunk
+                ]
+                step_t0 = time.monotonic()
+                chunk_fds = mm.export_handles(allocation_ids)
+                export_elapsed += time.monotonic() - step_t0
+                if len(chunk_fds) != len(allocation_chunk):
+                    raise RuntimeError(
+                        "GMS export_many FD count mismatch: "
+                        f"{len(chunk_fds)} vs {len(allocation_chunk)}"
+                    )
 
-            step_t0 = time.monotonic()
-            va = mm.reserve_va(allocation.aligned_size)
-            reserve_elapsed += time.monotonic() - step_t0
+                for fd_idx, (entry, allocation) in enumerate(
+                    zip(manifest_chunk, allocation_chunk, strict=True)
+                ):
+                    if int(allocation.aligned_size) != int(entry.aligned_size):
+                        raise RuntimeError(
+                            "GMS restore allocation size mismatch for "
+                            f"{entry.allocation_id}: {allocation.aligned_size} vs "
+                            f"{entry.aligned_size}"
+                        )
+                    old_id = entry.allocation_id
+                    fd = chunk_fds[fd_idx]
 
-            step_t0 = time.monotonic()
-            mm.map_va(
-                fd,
-                va,
-                entry.size,
-                allocation.allocation_id,
-                entry.tag,
-                allocation.layout_slot,
-            )
-            map_elapsed += time.monotonic() - step_t0
+                    step_t0 = time.monotonic()
+                    va = mm.reserve_va(allocation.aligned_size)
+                    reserve_elapsed += time.monotonic() - step_t0
 
-            step_t0 = time.monotonic()
-            id_map[old_id] = allocation.allocation_id
-            targets[old_id] = GMSTransferTarget(
-                allocation_id=old_id,
-                va=va,
-                device=self.device,
-                byte_count=entry.aligned_size,
-            )
-            target_elapsed += time.monotonic() - step_t0
+                    step_t0 = time.monotonic()
+                    try:
+                        mm.map_va(
+                            fd,
+                            va,
+                            entry.size,
+                            allocation.allocation_id,
+                            entry.tag,
+                            allocation.layout_slot,
+                        )
+                    finally:
+                        # map_va imports and closes the POSIX FD, even if the
+                        # CUDA import/map fails. Mark it consumed so the chunk
+                        # cleanup only closes FDs never handed to CUDA.
+                        chunk_fds[fd_idx] = -1
+                    map_elapsed += time.monotonic() - step_t0
+
+                    step_t0 = time.monotonic()
+                    id_map[old_id] = allocation.allocation_id
+                    targets[old_id] = GMSTransferTarget(
+                        allocation_id=old_id,
+                        va=va,
+                        device=self.device,
+                        byte_count=entry.aligned_size,
+                    )
+                    target_elapsed += time.monotonic() - step_t0
+            finally:
+                for fd in chunk_fds:
+                    if fd < 0:
+                        continue
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
 
         total_elapsed = time.monotonic() - t0
         logger.info(

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -21,6 +22,8 @@ from gpu_memory_service.common.protocol.messages import (
     CommitResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
+    ExportAllocationsRequest,
+    ExportAllocationsResponse,
     FreeAllocationRequest,
     FreeAllocationResponse,
     GetAllocationRequest,
@@ -230,7 +233,7 @@ class GMS:
         conn: Connection,
         msg,
         is_connected: Callable[[], bool],
-    ) -> tuple[object, int, bool]:
+    ) -> tuple[object, int | list[int], bool]:
         msg_type = type(msg)
         self._sessions.check_operation(msg_type, conn)
 
@@ -343,6 +346,39 @@ class GMS:
                     layout_slot=info.layout_slot,
                 ),
                 fd,
+                False,
+            )
+
+        if msg_type is ExportAllocationsRequest:
+            infos = [
+                self._allocations.get_allocation(allocation_id)
+                for allocation_id in msg.allocation_ids
+            ]
+            fds: list[int] = []
+            try:
+                for info in infos:
+                    fds.append(self._allocations.export_allocation(info.allocation_id))
+            except Exception:
+                for fd in fds:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                raise
+            return (
+                ExportAllocationsResponse(
+                    allocations=[
+                        ExportAllocationResponse(
+                            allocation_id=info.allocation_id,
+                            size=info.size,
+                            aligned_size=info.aligned_size,
+                            tag=info.tag,
+                            layout_slot=info.layout_slot,
+                        )
+                        for info in infos
+                    ]
+                ),
+                fds,
                 False,
             )
 
