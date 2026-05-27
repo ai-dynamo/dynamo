@@ -1365,6 +1365,7 @@ def _tooltip_for(
     parts: list[str] = []
     dynamo_leak = _has_dynamo_leak(case, family)
     expected = case.get("expected", {})
+    dynamo_leak_reason = _dynamo_leak_reason(expected, family) if dynamo_leak else None
     for impl in ("vllm", "sglang"):
         block = expected.get(impl)
         if not isinstance(block, dict) or block is dyn:
@@ -1377,11 +1378,10 @@ def _tooltip_for(
             continue
         if _canonical(block) == _canonical(dyn):
             continue
-        dynamo_leak_reason = (
-            _dynamo_leak_reason(expected, family) if dynamo_leak else None
-        )
-        if dynamo_leak and dynamo_leak_reason:
-            parts.append(f"{name}: {dynamo_leak_reason}")
+        if dynamo_leak_reason:
+            continue
+        if dynamo_leak:
+            parts.append(f"{name}: (research-needed — no `reason:` field yet)")
         elif "reason" in block and not dynamo_leak:
             parts.append(f"{name}: {block['reason']}")
         elif "reasoning_text" in block or "normal_text" in block:
