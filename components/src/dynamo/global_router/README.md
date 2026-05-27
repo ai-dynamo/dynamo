@@ -254,19 +254,21 @@ Priority is set by the client via the NVIDIA OpenAI extension:
 
 ### Passing SLA Targets
 
-Clients can pass TTFT and ITL targets via `extra_args` in the request:
+Clients can pass TTFT and ITL targets via `nvext.router` in the request:
 
 ```json
 {
     "messages": [...],
-    "extra_args": {
-        "ttft_target": 100,
-        "itl_target": 20
+    "nvext": {
+        "router": {
+            "ttft_target": 100,
+            "itl_target": 20
+        }
     }
 }
 ```
 
-If not provided, the middle of the configured range is used as default. For disagg mode, `ttft_target` drives prefill pool selection and `itl_target` drives decode pool selection. For agg mode, both `ttft_target` and `itl_target` drive pool selection.
+The preprocessor forwards `nvext.router` to the backend as the typed `router` field on `PreprocessedRequest`. If not provided, the middle of the configured range is used as default. For disagg mode, `ttft_target` drives prefill pool selection and `itl_target` drives decode pool selection. For agg mode, both `ttft_target` and `itl_target` drive pool selection.
 
 ## Request Flow
 
