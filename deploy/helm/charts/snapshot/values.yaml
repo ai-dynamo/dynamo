@@ -161,7 +161,6 @@ config:
       - /sys
       - /dev
       - "*/.cache/huggingface"
-      - "*/.cache/vllm/torch_compile_cache"
       - "*/__pycache__"
       - "*.pyc"
 
