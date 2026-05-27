@@ -4,7 +4,8 @@ description: 'Establish a port-forward to a vCluster and output its kubeconfig a
 inputs:
   host_kubeconfig_base64:
     description: 'Base64-encoded kubeconfig for host cluster access'
-    required: true
+    required: false
+    default: ''
   vcluster_name:
     description: 'Name of the vCluster to connect to'
     required: true
@@ -20,6 +21,7 @@ runs:
   using: "composite"
   steps:
     - name: Setup host kubeconfig
+      if: inputs.host_kubeconfig_base64 != ''
       shell: bash
       run: |
         echo "${{ inputs.host_kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host

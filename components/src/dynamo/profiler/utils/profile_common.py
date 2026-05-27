@@ -161,7 +161,7 @@ def resolve_model_path(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
         mount = dgdr.modelCache.pvcMountPath.rstrip("/")
         sub = dgdr.modelCache.pvcModelPath.strip("/")
         local_path = f"{mount}/{sub}"
-        if os.path.isdir(local_path):
+        if os.path.isfile(os.path.join(local_path, "config.json")):
             return local_path
     return dgdr.model
 

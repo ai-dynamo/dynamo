@@ -88,17 +88,18 @@ cases:
         reason: Dynamo keeps visible text outside a complete reasoning span as normal_text; SGLang folds the prefix into reasoning_text.
   REASONING.batch.4:
     description: Dangling end marker without an opening think tag
-    dynamo_leak: true
     ref: *upstream_ref
     model_text: normal</think>answer
     expected:
       dynamo: &d_4
-        reasoning_text: ''
-        normal_text: normal</think>answer
-      vllm:
         reasoning_text: normal
         normal_text: answer
-      sglang: *d_4
+      vllm:
+        <<: *d_4
+      sglang:
+        reasoning_text: ''
+        normal_text: normal</think>answer
+        reason: Dynamo and vLLM treat a dangling end marker as an implicit reasoning close; SGLang keeps the marker in normal_text.
   REASONING.batch.5:
     description: Missing end marker keeps the remaining text as reasoning
     ref: *upstream_ref

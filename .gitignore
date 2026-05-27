@@ -120,7 +120,7 @@ core.*
 /.claude/*
 !/.claude/skills
 /.agents/*
-!/.agents/skills/
+!/.agents/skills
 /CLAUDE.md
 /CLAUDE.md.bak
 
