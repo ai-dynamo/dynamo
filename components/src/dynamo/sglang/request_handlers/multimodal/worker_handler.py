@@ -14,7 +14,6 @@ from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -430,7 +429,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         )
 
         trace_header = (
-            build_trace_headers(context) if context and self.enable_trace else None
+            context.trace_headers() if context and self.enable_trace else None
         )
 
         # Start decode generation with bootstrap info (no image data needed)
@@ -490,7 +489,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             logger.debug(f"Input token sequence length: {len(input_ids)}")
 
             trace_header = (
-                build_trace_headers(context) if context and self.enable_trace else None
+                context.trace_headers() if context and self.enable_trace else None
             )
 
             gen_params: dict[str, Any] = {
@@ -694,7 +693,7 @@ class MultimodalPrefillWorkerHandler(
             ) = await _build_mm_items(request, self.embeddings_processor)
 
         trace_header = (
-            build_trace_headers(context) if context and self.enable_trace else None
+            context.trace_headers() if context and self.enable_trace else None
         )
 
         # Start SGLang prefill generation (like regular SGLang)

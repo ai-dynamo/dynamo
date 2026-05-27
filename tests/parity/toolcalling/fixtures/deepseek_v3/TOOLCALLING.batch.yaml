@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3
+model_label: DeepSeek V3
+mode: batch
+cases:
+  TOOLCALLING.batch.1:
+    description: Single tool call (happy path)
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  TOOLCALLING.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm: *id003
+      sglang: *id003
+  TOOLCALLING.batch.9.a:
+    description: Empty model text
+    model_text: ''
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  TOOLCALLING.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
+      sglang:
+        calls: []
+        normal_text: '   '
+  TOOLCALLING.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "LA"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id002
+    expected:
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id005
+      sglang: *id005
+  TOOLCALLING.batch.30:
+    description: Separator-character case not applicable
+    reason: |-
+      This case is not applicable to deepseek_v3 because <｜tool▁sep｜> separates the function name from JSON arguments, not calls from each other.
+  TOOLCALLING.batch.31:
+    description: Multi-call separator-character case not applicable
+    reason: |-
+      This case is not applicable to deepseek_v3 because <｜tool▁sep｜> separates the function name from JSON arguments, not calls from each other.
+  TOOLCALLING.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>unknown_tool
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
+  TOOLCALLING.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to deepseek_v3 because there is no peer mixed known/unknown DeepSeek V3 parser case to align against.

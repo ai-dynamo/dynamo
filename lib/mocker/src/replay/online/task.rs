@@ -56,7 +56,7 @@ impl Drop for InFlightGuard {
             return;
         }
         if let Ok(mut driver) = self.dispatch.driver.lock() {
-            driver.release_cap_slot(self.uuid);
+            driver.release_cap_slot(self.uuid, now_ms(self.dispatch.start));
         }
         self.dispatch.wakeup.notify_waiters();
     }

@@ -142,6 +142,14 @@ func GetDCDKubeAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]st
 	maps.Copy(annotations, GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
 	AddBaseModelAnnotation(annotations, dcd.Spec.ModelRef)
 	delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
+	delete(annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+
+	// Propagate topology label key from DCD metadata to pods so the topology
+	// label controller can discover which node label to copy.
+	if v := dcd.Annotations[commonconsts.KubeAnnotationTopologyLabelKey]; v != "" {
+		annotations[commonconsts.KubeAnnotationTopologyLabelKey] = v
+	}
+
 	return annotations
 }
 
@@ -182,17 +190,6 @@ func ToAlphaCheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity) *v1alpha1.
 	}
 	dst := &v1alpha1.DynamoCheckpointIdentity{}
 	v1alpha1.ConvertToDynamoCheckpointIdentity(src, dst)
-	return dst
-}
-
-// ToAlphaGPUMemoryService converts a v1beta1 GPU memory service config into
-// the controller's v1alpha1 compatibility shape.
-func ToAlphaGPUMemoryService(src *v1beta1.GPUMemoryServiceSpec) *v1alpha1.GPUMemoryServiceSpec {
-	if src == nil {
-		return nil
-	}
-	dst := &v1alpha1.GPUMemoryServiceSpec{}
-	v1alpha1.ConvertToGPUMemoryServiceSpec(src, dst)
 	return dst
 }
 

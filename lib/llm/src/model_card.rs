@@ -32,6 +32,23 @@ use crate::protocols::TokenIdType;
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
+/// Extract the set of atomic special-token strings from a HuggingFace tokenizer.
+///
+/// "Special" here means `AddedToken { special: true, .. }` — these are the only tokens
+/// guaranteed atomic in BPE (won't be merged with surrounding bytes), so they are the
+/// only safe boundary points for the L1 prefix cache.
+fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
+    let added = hf.get_added_tokens_decoder();
+    let mut out: Vec<String> = added
+        .values()
+        .filter(|t| t.special)
+        .map(|t| t.content.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
@@ -840,6 +857,35 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
+                // Topology fields participate in the checksum so that a rolling
+                // update that changes only worker_type/needs is correctly
+                // rejected as incompatible with the existing WorkerSet (forcing
+                // drain-and-redeploy) instead of silently joining and serving
+                // stale readiness data.
+                //
+                // worker_type discriminator: 0 = None, then the variant ordinal.
+                match self.worker_type {
+                    None => bytes_to_hash.push(0),
+                    Some(crate::worker_type::WorkerType::Prefill) => bytes_to_hash.push(1),
+                    Some(crate::worker_type::WorkerType::Decode) => bytes_to_hash.push(2),
+                    Some(crate::worker_type::WorkerType::Encode) => bytes_to_hash.push(3),
+                    Some(crate::worker_type::WorkerType::Aggregated) => bytes_to_hash.push(4),
+                }
+                // needs is DNF: hash length(outer) || for each alt { length(inner) || each variant }
+                bytes_to_hash.extend((self.needs.len() as u32).to_be_bytes());
+                for alt in &self.needs {
+                    bytes_to_hash.extend((alt.len() as u32).to_be_bytes());
+                    for w in alt {
+                        let v: u8 = match w {
+                            crate::worker_type::WorkerType::Prefill => 1,
+                            crate::worker_type::WorkerType::Decode => 2,
+                            crate::worker_type::WorkerType::Encode => 3,
+                            crate::worker_type::WorkerType::Aggregated => 4,
+                        };
+                        bytes_to_hash.push(v);
+                    }
+                }
+
                 if let Some(router_config) = self.router_config.as_ref()
                     && let Ok(bytes) = serde_json::to_vec(router_config)
                 {
@@ -850,6 +896,8 @@ impl ModelDeploymentCard {
                     // should be defined.
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
+
+                // TODO: Do we want any of user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -865,7 +913,12 @@ impl ModelDeploymentCard {
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
-    /// When the `DYN_TOKENIZER=fastokens` env var is set, uses `fastokens` for encoding
+    /// Env-var controls:
+    /// - `DYN_TOKENIZER=fastokens` — use `fastokens` as the encoding backend
+    /// - `DYN_TOKENIZER_CACHE=1` — wrap the tokenizer in an L1 prefix cache that records
+    ///   tokenizations at special-token boundaries (massive speed-up for shared chat
+    ///   prefixes; default off, zero cost when unset)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 50 MB)
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = match std::env::var("DYN_TOKENIZER") {
             Ok(v) if v == "fastokens" => true,
@@ -880,35 +933,25 @@ impl ModelDeploymentCard {
             Err(_) => false,
         };
 
-        match &self.tokenizer {
+        let cache_enabled = matches!(
+            std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref(),
+            Some("1")
+        );
+        let cache_bytes = std::env::var("DYN_TOKENIZER_CACHE_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(50 * 1024 * 1024);
+
+        let inner: Arc<dyn crate::tokenizers::traits::Tokenizer> = match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
                 })?;
 
-                // Try fastokens backend if requested
-                if use_fast {
-                    if let Some(path_str) = p.to_str() {
-                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
-                            Ok(fast) => {
-                                tracing::info!("Using fastokens tokenizer backend");
-                                return Ok(crate::tokenizers::Tokenizer::from(Arc::new(fast)));
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    %e,
-                                    "Failed to load fastokens, falling back to HuggingFace"
-                                );
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            path = %p.display(),
-                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
-                        );
-                    }
-                }
-
+                // Load HF first — needed both for fallback and (if cache is on) for
+                // extracting special-token strings. `FastTokenizer` does not re-expose
+                // `get_added_tokens_decoder`, so we must capture specials from the raw
+                // HF tokenizer before any swap.
                 let hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
@@ -919,9 +962,65 @@ impl ModelDeploymentCard {
                     })
                     .map_err(anyhow::Error::msg)
                     .with_context(|| p.display().to_string())?;
-                Ok(crate::tokenizers::Tokenizer::from(Arc::new(
-                    crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf),
-                )))
+
+                // Hold onto specials before any move of `hf`.
+                let specials: Vec<String> = if cache_enabled {
+                    extract_hf_special_tokens(&hf)
+                } else {
+                    Vec::new()
+                };
+
+                // Pick the inner backend.
+                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
+                    if let Some(path_str) = p.to_str() {
+                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                            Ok(fast) => {
+                                tracing::info!("Using fastokens tokenizer backend");
+                                Arc::new(fast)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    %e,
+                                    "Failed to load fastokens, falling back to HuggingFace"
+                                );
+                                Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(
+                                    hf,
+                                ))
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            path = %p.display(),
+                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
+                        );
+                        Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                    }
+                } else {
+                    Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                };
+
+                if cache_enabled {
+                    tracing::info!(
+                        cache_bytes,
+                        specials = specials.len(),
+                        "wrapping tokenizer in L1 prefix cache",
+                    );
+                    Arc::new(
+                        crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
+                            .with_observer(
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
+                                        .inc();
+                                }),
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
+                                        .inc();
+                                }),
+                            ),
+                    )
+                } else {
+                    raw
+                }
             }
             Some(TokenizerKind::TikTokenModel(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
@@ -934,7 +1033,31 @@ impl ModelDeploymentCard {
                     .with_context(|| {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
-                Ok(crate::tokenizers::Tokenizer::from(Arc::new(tokenizer)))
+
+                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
+                if cache_enabled {
+                    // Empty specials -> L1 always misses; wrapper is a thin passthrough.
+                    // Special-token extraction for tiktoken is out of scope for v1.
+                    tracing::info!(
+                        cache_bytes,
+                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 will not hit until tiktoken special-token extraction is added)",
+                    );
+                    Arc::new(
+                        crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
+                            .with_observer(
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
+                                        .inc();
+                                }),
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
+                                        .inc();
+                                }),
+                            ),
+                    )
+                } else {
+                    raw
+                }
             }
             None => {
                 anyhow::bail!(
@@ -946,7 +1069,9 @@ impl ModelDeploymentCard {
                     self.display_name
                 );
             }
-        }
+        };
+
+        Ok(crate::tokenizers::Tokenizer::from(inner))
     }
 
     pub(crate) fn set_source_path(&mut self, source_path: PathBuf) {
@@ -2218,6 +2343,62 @@ mod worker_type_tests {
         assert_eq!(back.needs.len(), 2);
         assert_eq!(back.needs[0], vec![WorkerType::Prefill, WorkerType::Decode]);
         assert_eq!(back.needs[1], vec![WorkerType::Aggregated]);
+    }
+
+    /// mdcsum must cover `worker_type` and `needs` so that a rolling update
+    /// which changes only topology metadata produces a different checksum,
+    /// triggering the drain-and-redeploy path in `watcher.rs` instead of
+    /// silently joining an existing WorkerSet with a stale card.
+    ///
+    /// Note: `mdcsum()` caches its result on first call via `OnceLock`, so
+    /// each case builds a fresh card rather than mutating one and re-hashing.
+    #[test]
+    fn mdcsum_covers_worker_type_and_needs() {
+        fn hash(worker_type: Option<WorkerType>, needs: Vec<Vec<WorkerType>>) -> String {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.worker_type = worker_type;
+            card.needs = needs;
+            card.mdcsum().to_string()
+        }
+
+        let baseline = hash(None, vec![]);
+        let prefill_only = hash(Some(WorkerType::Prefill), vec![]);
+        let decode_only = hash(Some(WorkerType::Decode), vec![]);
+        assert_ne!(baseline, prefill_only, "worker_type must change mdcsum");
+        assert_ne!(
+            prefill_only, decode_only,
+            "swapping worker_type must change mdcsum"
+        );
+
+        let prefill_with_decode = hash(Some(WorkerType::Prefill), vec![vec![WorkerType::Decode]]);
+        let prefill_with_decode_encode = hash(
+            Some(WorkerType::Prefill),
+            vec![vec![WorkerType::Decode, WorkerType::Encode]],
+        );
+        assert_ne!(
+            prefill_only, prefill_with_decode,
+            "adding needs must change mdcsum"
+        );
+        assert_ne!(
+            prefill_with_decode, prefill_with_decode_encode,
+            "extending an AND-set must change mdcsum"
+        );
+
+        let encode_dnf = hash(
+            Some(WorkerType::Encode),
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        );
+        let encode_single_alt = hash(
+            Some(WorkerType::Encode),
+            vec![vec![WorkerType::Prefill, WorkerType::Decode]],
+        );
+        assert_ne!(
+            encode_dnf, encode_single_alt,
+            "adding an OR alternative must change mdcsum"
+        );
     }
 
     /// Serde back-compat: an old-format card (no `worker_type` / `needs`
