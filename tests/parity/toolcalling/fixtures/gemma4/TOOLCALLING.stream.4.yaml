@@ -67,3 +67,24 @@ cases:
           arguments: '{"location": "N'
         normal_text: ''
         reason: vLLM emits partial arguments from a mid-body truncated call; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.
+  TOOLCALLING.stream.4.c:
+    description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
+      repeated close markers
+    ref: derived from nemotron-ultra-preview-tool-call-leak-repro/repro_tool_call_leak.py
+    chunks:
+    - delta_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><tool_call|><tool_call|>
+    - delta_text: ''
+      finish_reason: length
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls: []
+        normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><tool_call|><tool_call|>
+      vllm: *id001
+      sglang: *id001

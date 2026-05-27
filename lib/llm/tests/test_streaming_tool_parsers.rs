@@ -170,8 +170,9 @@ async fn parse_response_stream(
         if let Some(tool_parser) = tool_parser_str {
             Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
                 Some(tool_parser),
-                None, // No tool_choice in this test
-                None, // No tool_definitions in this test
+                None,  // No tool_choice in this test
+                None,  // No tool_definitions in this test
+                false, // No structural_tag in this test
                 stream,
             ))
         } else {
@@ -1343,6 +1344,46 @@ mod tests {
             DATA_ROOT_PATH
         );
         run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// `PARSER.stream.4.a` — stream ends after a complete invoke but before
+    /// `</｜DSML｜tool_calls>`. Finalization should recover the complete invoke
+    /// without enabling early stream exit on unterminated DSML wrappers.
+    #[tokio::test]
+    async fn test_deepseek_v4_stream_finalize_recovers_complete_invoke_without_outer_close() {
+        let input_stream = stream::iter(vec![make_chunk(
+            "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>",
+            Some(FinishReason::Stop),
+        )]);
+
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            false,
+            Some("deepseek_v4".to_string()),
+            None,
+        )
+        .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+        assert_eq!(aggregated.normal_content, "");
+        assert!(aggregated.has_tool_calls);
+        assert_tool_calls(
+            &aggregated.tool_calls,
+            &[serde_json::json!({
+                "function": {
+                    "name": "get_weather",
+                    "arguments": "{\"location\":\"NYC\"}"
+                }
+            })],
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for finalized DSML tool call"
+        );
     }
 
     // ---- Kimi K2 streaming jail reproduction tests ----
