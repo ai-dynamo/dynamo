@@ -500,10 +500,6 @@ def read_worker_generate_summary(
     text = response.text
     filters = {"dynamo_component": component, "dynamo_endpoint": "generate"}
     return {
-        "requests_total": _parse_labeled_metric(
-            text, "dynamo_component_requests_total", filters
-        )
-        or 0.0,
         "duration_sum": _parse_labeled_metric(
             text, "dynamo_component_request_duration_seconds_sum", filters
         )
