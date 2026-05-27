@@ -378,6 +378,7 @@ struct MockEngineArgsSerde {
     speedup_ratio: OptionalConfigValue<f64>,
     decode_speedup_ratio: OptionalConfigValue<f64>,
     dp_size: OptionalConfigValue<u32>,
+    streaming_interval: OptionalConfigValue<usize>,
     startup_time: OptionalConfigValue<f64>,
     worker_type: OptionalConfigValue<String>,
     is_prefill: OptionalConfigValue<bool>,
@@ -510,6 +511,17 @@ pub struct MockEngineArgs {
     #[builder(default = "1")]
     #[validate(range(min = 1))]
     pub dp_size: u32,
+
+    /// Coalesce this many decoded tokens into each chunk emitted to the
+    /// frontend. Default `1` preserves the original one-chunk-per-token
+    /// behavior. Larger values reduce the per-token send/serialize overhead
+    /// at the cost of coarser-grained streaming UX — a deliberate, opt-in
+    /// trade-off useful for measuring how chunk count affects throughput.
+    /// The terminal chunk is always flushed regardless of how many tokens
+    /// are currently buffered, so the total token count is preserved.
+    #[builder(default = "1")]
+    #[validate(range(min = 1))]
+    pub streaming_interval: usize,
 
     /// Optional startup time in seconds to simulate engine initialization delay
     #[builder(default = "None")]
@@ -787,6 +799,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(dp_size) = compat.dp_size.into_non_null("dp_size")? {
             builder = builder.dp_size(dp_size);
+        }
+        if let Some(streaming_interval) = compat
+            .streaming_interval
+            .into_non_null("streaming_interval")?
+        {
+            builder = builder.streaming_interval(streaming_interval);
         }
         if let Some(startup_time) = compat.startup_time.into_nullable() {
             builder = builder.startup_time(startup_time);

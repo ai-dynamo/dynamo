@@ -549,6 +549,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
         let reasoning = self.engine_args.reasoning.clone();
+        // Coalesce N decoded tokens into each emitted chunk. `1` keeps the
+        // historical one-chunk-per-token behavior; higher values trade
+        // streaming granularity for fewer per-token sends. The terminal
+        // chunk always flushes any remaining buffered tokens.
+        let streaming_interval = self.engine_args.streaming_interval.max(1);
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
@@ -576,11 +581,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 .as_ref()
                 .map(|cfg| cfg.num_thinking_tokens(max_output_tokens))
                 .unwrap_or(0);
+            // Pending tokens accumulated since the last emitted chunk. Flushed
+            // when `streaming_interval` is reached or at any terminal path.
+            let mut pending_tokens: Vec<u32> = Vec::with_capacity(streaming_interval);
+            let make_chunk = |tokens: Vec<u32>| LLMEngineOutput {
+                token_ids: tokens,
+                disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
+                ..Default::default()
+            };
 
             loop {
                 tokio::select! {
                     maybe_signal = request_rx.recv() => {
                         let Some(signal) = maybe_signal else {
+                            if !pending_tokens.is_empty() {
+                                let _ = stream_tx.send(make_chunk(std::mem::take(&mut pending_tokens)));
+                            }
                             let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string()));
                             break;
                         };
@@ -594,20 +610,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             generate_random_token()
                         };
                         token_count += 1;
-
-                        let output = LLMEngineOutput {
-                            token_ids: vec![token_id],
-                            disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
-                            ..Default::default()
-                        };
+                        pending_tokens.push(token_id);
 
                         if signal.completed && token_count < max_output_tokens {
+                            if !pending_tokens.is_empty() {
+                                let _ = stream_tx.send(make_chunk(std::mem::take(&mut pending_tokens)));
+                            }
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
                             break;
                         }
 
                         if signal.completed {
-                            let _ = stream_tx.send(output);
+                            // Flush the terminal chunk regardless of buffer depth.
+                            let _ = stream_tx.send(make_chunk(std::mem::take(&mut pending_tokens)));
 
                             // Prefill-to-decode handoff delay is emitted by the shared mocker core.
                             if is_prefill
@@ -627,13 +642,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             break;
                         }
 
-                        if stream_tx.send(output).is_err() {
-                            tracing::error!("Output stream receiver closed.");
-                            break;
+                        // Buffer until we've accumulated `streaming_interval` tokens, then
+                        // emit a single chunk containing all of them.
+                        if pending_tokens.len() >= streaming_interval {
+                            let output = make_chunk(std::mem::take(&mut pending_tokens));
+                            if stream_tx.send(output).is_err() {
+                                tracing::error!("Output stream receiver closed.");
+                                break;
+                            }
                         }
                     }
 
                     _ = async_context.stopped() => {
+                        if !pending_tokens.is_empty() {
+                            let _ = stream_tx.send(make_chunk(std::mem::take(&mut pending_tokens)));
+                        }
                         let _ = stream_tx.send(LLMEngineOutput::cancelled());
                         break;
                     }

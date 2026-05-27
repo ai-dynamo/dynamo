@@ -281,6 +281,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Number of data parallel replicas (default: 1)",
     )
     parser.add_argument(
+        "--streaming-interval",
+        type=int,
+        default=1,
+        help="Coalesce this many decoded tokens into each chunk emitted to the "
+        "frontend (default: 1). The mocker continues to generate every token "
+        "internally; this only controls how many are bundled per emitted "
+        "chunk. Larger values reduce per-token send/serialize overhead at the "
+        "cost of coarser-grained streaming UX. The terminal chunk always "
+        "flushes any remaining buffered tokens so the total token count is "
+        "preserved.",
+    )
+    parser.add_argument(
         "--startup-time",
         type=float,
         default=None,

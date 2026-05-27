@@ -252,6 +252,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         speedup_ratio=getattr(args, "speedup_ratio", 1.0),
         decode_speedup_ratio=getattr(args, "decode_speedup_ratio", 1.0),
         dp_size=getattr(args, "dp_size", 1),
+        streaming_interval=getattr(args, "streaming_interval", 1),
         startup_time=getattr(args, "startup_time", None),
         worker_type=worker_type,
         planner_profile_data=getattr(args, "planner_profile_data", None),
