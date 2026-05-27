@@ -50,7 +50,7 @@ else
     WORKER_METRICS_FLAG=""
 fi
 
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/rihuo/dynamo-trtllm-rihuo-x86_64-1-2-0-989902-with-trace.sqsh}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/rihuo/dynamo-trtllm-rihuo-x86_64-1-2-0-cachefix-with-trace.sqsh}"
 EXP_NAME="run_benchx_1ctx1gen_dynamo_kvrouter_${HCTAG}_c${C_TAG}"
 
 HF_TOKEN="${HF_TOKEN:-}"
@@ -74,7 +74,7 @@ DYN_SYS_PORT_CTX=8081
 DYN_SYS_PORT_GEN=8085
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="$REPO_DIR/bench/results/dynamo-b200/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
+RESULTS_DIR="$REPO_DIR/bench/results/dynamo-b200-cachefix/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
 mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
 cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 
@@ -231,7 +231,7 @@ echo "Container: $CONTAINER_IMAGE"
 echo "Results: $RESULTS_DIR"
 echo "============================================"
 
-CTX_CONFIG_SRC="${REPO_DIR}/bench/ctx_config_b200.yaml"
+CTX_CONFIG_SRC="${REPO_DIR}/bench/ctx_config_b200_cachefix.yaml"
 GEN_CONFIG_SRC="${REPO_DIR}/bench/gen_config_b200.yaml"
 
 if [ ! -f "$CTX_CONFIG_SRC" ]; then echo "ERROR: ctx config not found at $CTX_CONFIG_SRC"; exit 1; fi
