@@ -41,9 +41,9 @@ For configuration details, see the [KVBM Guide](../../components/kvbm/kvbm-guide
 | Deployment                                | Launch Script                                                                                                                       |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | Aggregated (MP sidecar — recommended)     | [`agg_lmcache_mp.sh`](/examples/backends/vllm/launch/agg_lmcache_mp.sh)                 |
-| Aggregated (legacy, in-process)           | [`agg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache.sh)                       |
-| Aggregated (legacy, multiprocess metrics) | [`agg_lmcache_multiproc.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)   |
-| Disaggregated                             | [`disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh)                 |
+| Aggregated (legacy, in-process)           | [`agg_lmcache.sh`](/examples/backends/vllm/launch/agg_lmcache.sh)                       |
+| Aggregated (legacy, multiprocess metrics) | [`agg_lmcache_multiproc.sh`](/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)   |
+| Disaggregated                             | [`disagg_lmcache.sh`](/examples/backends/vllm/launch/disagg_lmcache.sh)                 |
 
 
 For configuration details, see the [LMCache Integration Guide](../../integrations/lmcache-integration.md).
