@@ -237,6 +237,17 @@ def test_get_service_name_from_v1beta_component_type(kubernetes_connector):
     assert service.number_replicas() == 3
 
 
+def test_get_service_name_from_v1beta_worker_type_by_name(kubernetes_connector):
+    deployment = _deployment(_component("worker", "worker", replicas=2))
+
+    service = get_component_from_type_or_name(
+        deployment, SubComponentType.PREFILL, "worker"
+    )
+
+    assert service.name == "worker"
+    assert service.number_replicas() == 2
+
+
 def test_get_service_name_from_sub_component_type_not_found(kubernetes_connector):
     deployment = _deployment(_component("test-component-decode", "decode", replicas=3))
     with pytest.raises(SubComponentNotFoundError) as exc_info:

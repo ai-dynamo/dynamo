@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 MAIN_CONTAINER_NAME = "main"
 V1BETA1_COMPONENT_TYPES = {"prefill", "decode"}
+V1BETA1_GENERIC_WORKER_COMPONENT_TYPE = "worker"
 GPU_RESOURCE_KEY = "nvidia.com/gpu"
 
 
@@ -82,6 +83,17 @@ def get_planner_component_role(component: dict) -> str:
     if component_type in V1BETA1_COMPONENT_TYPES:
         return component_type
     return ""
+
+
+def _can_use_explicit_component_name(
+    component: dict, component_type: SubComponentType
+) -> bool:
+    explicit_type = get_component_type(component)
+    return explicit_type in (
+        "",
+        V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
+        component_type.value,
+    )
 
 
 class Service(BaseModel):
@@ -200,8 +212,7 @@ def get_component_from_type_or_name(
 
     if not matching_components and component_name in components:
         component = components[component_name]
-        explicit_type = get_component_type(component)
-        if explicit_type and explicit_type != component_type.value:
+        if not _can_use_explicit_component_name(component, component_type):
             raise SubComponentNotFoundError(component_type.value)
         matching_components.append((component_name, component))
     elif not matching_components:
