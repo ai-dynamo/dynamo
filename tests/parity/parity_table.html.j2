@@ -210,7 +210,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 {% if panel.glossary_groups %}
 <h2 id="case-descriptions-{{ panel.mode|e }}">Case descriptions</h2>
 <p>Full case definitions:
-<a href="{{ case_docs_href|default('../../../lib/parsers/PARSER_CASES.md') }}">{{ case_docs_label|default('lib/parsers/PARSER_CASES.md') }}</a>.</p>
+<a href="{{ case_docs_href|default('../../../lib/parsers/TOOLCALLING_CASES.md') }}">{{ case_docs_label|default('lib/parsers/TOOLCALLING_CASES.md') }}</a>.</p>
 <table class="glossary">
 <tbody>
 {% for group in panel.glossary_groups %}
@@ -219,7 +219,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 {% if case_prefix is defined and case_prefix %}
 <tr><td class="sub">{{ case_prefix|e }}{{ sub|e }}</td><td>{{ desc|e }}</td></tr>
 {% else %}
-<tr><td class="sub">PARSER.{{ panel.mode|e }}.{{ sub|e }}</td><td>{{ desc|e }}</td></tr>
+<tr><td class="sub">TOOLCALLING.{{ panel.mode|e }}.{{ sub|e }}</td><td>{{ desc|e }}</td></tr>
 {% endif %}
 {% endfor %}
 {% endfor %}

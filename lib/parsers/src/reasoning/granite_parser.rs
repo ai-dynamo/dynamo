@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(result.normal_text, " The answer is 42.");
     }
 
-    #[test] // helper, PARSER.fmt.3
+    #[test] // helper, TOOLCALLING.fmt.3
     fn test_alternative_start_token() {
         let mut parser = GraniteReasoningParser::new();
         let text = "Here is my thought process: Different thinking here. Here is my response: Final answer.";
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(result.normal_text, " Direct answer.");
     }
 
-    #[test] // REASONING.batch.2.f, PARSER.fmt.2
+    #[test] // REASONING.batch.2.f, TOOLCALLING.fmt.2
     fn test_reasoning_with_whitespace() {
         let mut parser = GraniteReasoningParser::new();
         let text = "Here's my thought process:   \n  Indented reasoning  \n  Here's my response:   Final result  ";
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(result.normal_text, "   Final result  ");
     }
 
-    #[test] // PARSER.fmt.1 — token case sensitivity
+    #[test] // TOOLCALLING.fmt.1 — token case sensitivity
     fn test_case_sensitive_tokens() {
         let mut parser = GraniteReasoningParser::new();
         let text = "here's my thought process: lowercase. here's my response: answer.";
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(result.normal_text, "The solution is clear.");
     }
 
-    #[test] // REASONING.batch.2.c, PARSER.fmt.3
+    #[test] // REASONING.batch.2.c, TOOLCALLING.fmt.3
     fn test_detect_and_parse_reasoning_alternative_tokens() {
         let mut parser = GraniteReasoningParser::new();
         let text = "Here is my thought process: Different reasoning approach. Here is my response: Final conclusion.";
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(result.normal_text, "");
     }
 
-    #[test] // REASONING.batch.2.f, PARSER.fmt.2
+    #[test] // REASONING.batch.2.f, TOOLCALLING.fmt.2
     fn test_detect_and_parse_reasoning_whitespace_handling() {
         let mut parser = GraniteReasoningParser::new();
         let text = "Here's my thought process:   \n\tSpaced reasoning\n   Here's my response:  \n  Spaced response\n";
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(result.normal_text, "Spaced response");
     }
 
-    #[test] // REASONING.batch.2.f, PARSER.fmt.3
+    #[test] // REASONING.batch.2.f, TOOLCALLING.fmt.3
     fn test_detect_and_parse_reasoning_multiple_end_tokens() {
         let mut parser = GraniteReasoningParser::new();
         let text = "Here's my thought process: Thinking about Here's my response: in the middle. Here's my response: Real end.";
@@ -402,7 +402,7 @@ mod tests {
         );
     }
 
-    #[test] // PARSER.fmt.1
+    #[test] // TOOLCALLING.fmt.1
     fn test_detect_and_parse_reasoning_case_sensitivity() {
         let mut parser = GraniteReasoningParser::new();
         let text =
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
     }
 
-    #[test] // REASONING.batch.2.c, PARSER.fmt.3
+    #[test] // REASONING.batch.2.c, TOOLCALLING.fmt.3
     fn test_detect_and_parse_reasoning_mixed_tokens() {
         let mut parser = GraniteReasoningParser::new();
         let text = "Here's my thought process: First reasoning. Here is my response: Mixed token response.";

@@ -8,11 +8,15 @@ use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
     approx::PruneConfig,
     config::KvRouterConfig,
-    indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, ThreadPoolIndexer},
-    protocols::{DpRank, LocalBlockHash, OverlapScores, WorkerId, WorkerWithDpRank},
+    indexer::{
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, RoutingDecisionHashes,
+        SyncIndexer, ThreadPoolIndexer,
+    },
+    protocols::{DpRank, OverlapScores, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
-use dynamo_tokens::SequenceHash;
+
+use super::lookup::HashInput;
 
 #[derive(Clone)]
 pub enum SideIndexer {
@@ -57,31 +61,44 @@ impl SideIndexer {
         )))
     }
 
-    pub(super) async fn find_matches(
+    pub(super) async fn find_matches_input(
         &self,
-        sequence: Vec<LocalBlockHash>,
+        sequence: HashInput<'_>,
     ) -> Result<OverlapScores, KvRouterError> {
         match self {
-            Self::KvIndexer(indexer) => indexer.find_matches(sequence).await,
-            Self::Concurrent(indexer) => indexer.find_matches(sequence).await,
+            Self::KvIndexer(indexer) => {
+                indexer
+                    .find_matches(sequence.into_owned_at_boundary())
+                    .await
+            }
+            Self::Concurrent(indexer) => {
+                Ok(indexer.backend().find_matches(sequence.as_slice(), false))
+            }
         }
     }
 
-    pub(super) async fn process_routing_decision_with_hashes(
+    pub(super) async fn process_routing_decision_hashes(
         &self,
         worker: WorkerWithDpRank,
-        local_hashes: Vec<LocalBlockHash>,
-        sequence_hashes: Vec<SequenceHash>,
+        hashes: RoutingDecisionHashes,
     ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer(indexer) => {
                 indexer
-                    .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+                    .process_routing_decision_with_hashes(
+                        worker,
+                        hashes.local_hashes,
+                        hashes.sequence_hashes,
+                    )
                     .await
             }
             Self::Concurrent(indexer) => {
                 indexer
-                    .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+                    .process_routing_decision_hash_slices(
+                        worker,
+                        &hashes.local_hashes,
+                        &hashes.sequence_hashes,
+                    )
                     .await
             }
         }
