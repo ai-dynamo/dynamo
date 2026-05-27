@@ -471,6 +471,10 @@ class _NixlPosixStagingTransferSession:
             assert self._prep_pool is not None
             with ThreadPoolExecutor(max_workers=self._worker_count) as pool:
                 transfer_futures: dict[Future[None], str] = {}
+                prepared_count = 0
+                first_prepared_after_s: Optional[float] = None
+                last_prepared_after_s = 0.0
+                max_group_prep_elapsed_s = 0.0
                 for prep_future in as_completed(self._prep_futures):
                     group_name = self._prep_futures[prep_future]
                     try:
@@ -481,6 +485,25 @@ class _NixlPosixStagingTransferSession:
                             f"{self._backend_name} failed while preparing "
                             f"{self._group_kind} group {group_name}: {exc}"
                         ) from exc
+                    group_ready_after_s = (
+                        prepared.prep_started_after_s + prepared.prep_elapsed_s
+                    )
+                    prepared_count += 1
+                    if first_prepared_after_s is None:
+                        first_prepared_after_s = group_ready_after_s
+                    else:
+                        first_prepared_after_s = min(
+                            first_prepared_after_s,
+                            group_ready_after_s,
+                        )
+                    last_prepared_after_s = max(
+                        last_prepared_after_s,
+                        group_ready_after_s,
+                    )
+                    max_group_prep_elapsed_s = max(
+                        max_group_prep_elapsed_s,
+                        prepared.prep_elapsed_s,
+                    )
                     try:
                         transfer_futures[
                             pool.submit(
@@ -492,6 +515,23 @@ class _NixlPosixStagingTransferSession:
                     except Exception:
                         self._close_prepared_group(prepared)
                         raise
+
+                first_prepared_after_s = first_prepared_after_s or 0.0
+                logger.info(
+                    "%s staging prep complete: prepared_groups=%d "
+                    "first_ready_after=%.3fs last_ready_after=%.3fs "
+                    "ready_span=%.3fs max_group_prep=%.3fs "
+                    "targets_wait_for_prep=%.3fs prep_mode=%s prep_workers=%d",
+                    self._backend_name,
+                    prepared_count,
+                    first_prepared_after_s,
+                    last_prepared_after_s,
+                    max(0.0, last_prepared_after_s - first_prepared_after_s),
+                    max_group_prep_elapsed_s,
+                    max(0.0, last_prepared_after_s - prep_overlap_s),
+                    self._prep_mode,
+                    self._prep_worker_count,
+                )
 
                 for transfer_future in as_completed(transfer_futures):
                     group_name = transfer_futures[transfer_future]
