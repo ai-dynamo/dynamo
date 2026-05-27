@@ -45,6 +45,10 @@ request and share the response. See
 [Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
 include when reporting an issue.
 
+## Optional: structural tags
+
+You can optionally turn on **xgrammar structural tags** so guided decoding matches the parser's tool-call format at token granularity. See [Structural tag (guided decoding for tool calls)](structural-tag.md).
+
 ## See Also
 
 - [Troubleshooting Tool Calls](troubleshooting.md) -- capture raw model
@@ -54,3 +58,5 @@ include when reporting an issue.
   tool-call parser and a reasoning parser configured together.
 - [Frontend Configuration Reference](../components/frontend/configuration.md) --
   full CLI flag reference.
+- [Structural tag (guided decoding)](structural-tag.md) — optional xgrammar
+  constraints aligned with Dynamo tool-call parsers.

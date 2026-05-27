@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session lifecycle controller for subagent KV isolation.
+//! Session lifecycle controller for backend KV sessions.
 //!
 //! Manages open/close RPCs to workers via the event plane. Session affinity
 //! (routing the same session to the same worker) is handled separately by
-//! [`super::sticky_sessions::StickySessionRouter`].
+//! [`super::router::StickySessionRouter`].
 //!
 //! The controller:
 //! - Lazily initializes a session_control event plane client
@@ -23,10 +23,6 @@ use dynamo_runtime::{
 };
 use futures::StreamExt;
 use tokio::sync::OnceCell;
-
-use crate::protocols::openai::nvext::SessionAction;
-
-use super::sticky_sessions::{AffinityKind, StickySessionRouter};
 
 /// Untyped event plane client for session_control endpoint.
 pub type EventPlaneClient = PushRouter<serde_json::Value, Annotated<serde_json::Value>>;
@@ -69,35 +65,19 @@ impl SessionCloseAction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionLifecycleOutcome {
-    NoSessionControl,
-    NoAction,
-    OpenSucceeded,
-    BindRequested,
-    NoSessionControlEndpoint,
-    CloseRequested,
-}
-
-pub struct AgentRouteOutcome {
-    pub lifecycle: SessionLifecycleOutcome,
-    pub deferred_close: Option<SessionCloseAction>,
-}
-
 /// Session lifecycle controller.
 ///
-/// Owns a lazy event plane client for the `session_control` endpoint
-/// and coordinates with [`StickySessionRouter`] for affinity management.
-pub struct AgentController {
+/// Owns a lazy event plane client for the `session_control` endpoint.
+pub struct SessionLifecycleController {
     /// `None` means we checked and no worker exposes session_control.
     session_control: OnceCell<Option<EventPlaneClient>>,
     component: Component,
 }
 
-impl AgentController {
+impl SessionLifecycleController {
     pub fn new(component: Component) -> Self {
-        tracing::debug!("AgentController initialized");
-        AgentController {
+        tracing::debug!("SessionLifecycleController initialized");
+        SessionLifecycleController {
             session_control: OnceCell::new(),
             component,
         }
@@ -129,112 +109,57 @@ impl AgentController {
         });
     }
 
-    /// Called after worker selection. Fires open_session if needed and returns
-    /// a deferred close action for RequestGuard::finish().
-    pub async fn on_routed(
+    /// Open a backend session on a selected worker before generation starts.
+    pub async fn open_session(
         &self,
-        request: &crate::preprocessor::PreprocessedRequest,
+        session_id: &str,
+        timeout_secs: u64,
         instance_id: u64,
         context_id: &str,
-        sticky: Option<&StickySessionRouter>,
-    ) -> Result<AgentRouteOutcome> {
-        let sc = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.session_control.as_ref());
-
-        let Some(sc) = sc else {
-            return Ok(AgentRouteOutcome {
-                lifecycle: SessionLifecycleOutcome::NoSessionControl,
-                deferred_close: None,
-            });
+    ) -> Result<bool> {
+        let Some(client) = self.get_session_control_client().await else {
+            return Ok(false);
         };
+        let worker_timeout_secs = timeout_secs.saturating_add(SESSION_TIMEOUT_FALLBACK_BUFFER_SECS);
 
-        let Some(action) = sc.action.as_ref() else {
-            // No action -- just session_id for sticky routing (handled by StickySessionRouter)
-            return Ok(AgentRouteOutcome {
-                lifecycle: SessionLifecycleOutcome::NoAction,
-                deferred_close: None,
-            });
-        };
+        // Open session synchronously -- the session must exist on the worker
+        // before the first generate request arrives.
+        let request = serde_json::json!({
+            "action": "open_session",
+            "session_id": session_id,
+            "timeout": worker_timeout_secs,
+            "capacity_of_str_len": DEFAULT_SESSION_CAPACITY,
+        });
+        let resp = send_session_request(
+            &client,
+            request,
+            instance_id,
+            session_id,
+            context_id,
+            "open_session",
+        )
+        .await;
 
-        match action {
-            SessionAction::Open => {
-                let Some(client) = self.get_session_control_client().await else {
-                    // No session_control endpoint available -- skip session
-                    // lifecycle and let the request proceed without isolation.
-                    return Ok(AgentRouteOutcome {
-                        lifecycle: SessionLifecycleOutcome::NoSessionControlEndpoint,
-                        deferred_close: None,
-                    });
-                };
-                let worker_timeout_secs = sc
-                    .timeout
-                    .saturating_add(SESSION_TIMEOUT_FALLBACK_BUFFER_SECS);
+        let resp =
+            resp.ok_or_else(|| anyhow!("open_session RPC failed for session {session_id}"))?;
+        ensure_session_open_succeeded(&resp, session_id)?;
 
-                // Open session synchronously -- the session must exist on the
-                // worker before the first generate request arrives, otherwise
-                // SGLang rejects it with "session does not exist".
-                let request = serde_json::json!({
-                    "action": "open_session",
-                    "session_id": sc.session_id,
-                    "timeout": worker_timeout_secs,
-                    "capacity_of_str_len": DEFAULT_SESSION_CAPACITY,
-                });
-                let resp = send_session_request(
-                    &client,
-                    request,
-                    instance_id,
-                    &sc.session_id,
-                    context_id,
-                    "open_session",
-                )
-                .await;
+        Ok(true)
+    }
 
-                let resp = resp.ok_or_else(|| {
-                    anyhow!("open_session RPC failed for session {}", sc.session_id)
-                })?;
-                ensure_session_open_succeeded(&resp, &sc.session_id)?;
-
-                // Affinity is bound at the routing layer after worker selection;
-                // this controller only owns the open/close RPC lifecycle.
-
-                Ok(AgentRouteOutcome {
-                    lifecycle: SessionLifecycleOutcome::OpenSucceeded,
-                    deferred_close: None,
-                })
-            }
-            SessionAction::Bind => Ok(AgentRouteOutcome {
-                lifecycle: SessionLifecycleOutcome::BindRequested,
-                deferred_close: None,
-            }),
-            SessionAction::Close => {
-                // Remove affinity immediately
-                let should_close_worker_session = sticky
-                    .map(|sticky| match sticky.unbind(&sc.session_id) {
-                        Some(binding) => binding.kind == AffinityKind::EngineBacked,
-                        None => true,
-                    })
-                    .unwrap_or(true);
-
-                // Defer close to after generation completes
-                let deferred_close = if should_close_worker_session {
-                    self.get_session_control_client()
-                        .await
-                        .map(|client| SessionCloseAction {
-                            session_id: sc.session_id.clone(),
-                            client,
-                            instance_id,
-                        })
-                } else {
-                    None
-                };
-                Ok(AgentRouteOutcome {
-                    lifecycle: SessionLifecycleOutcome::CloseRequested,
-                    deferred_close,
-                })
-            }
-        }
+    /// Build a deferred close action for RequestGuard::finish().
+    pub async fn deferred_close(
+        &self,
+        session_id: String,
+        instance_id: u64,
+    ) -> Option<SessionCloseAction> {
+        self.get_session_control_client()
+            .await
+            .map(|client| SessionCloseAction {
+                session_id,
+                client,
+                instance_id,
+            })
     }
 
     async fn get_session_control_client(&self) -> Option<EventPlaneClient> {

@@ -20,8 +20,6 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 
-use crate::preprocessor::PreprocessedRequest;
-
 /// Interval between sweeps of the background reaper that removes expired entries.
 const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -208,8 +206,7 @@ impl AffinityStore for InMemoryAffinityStore {
 
 /// Routes requests to workers based on session affinity.
 ///
-/// Wraps an [`AffinityStore`] and provides request-level helpers
-/// that extract session IDs from [`PreprocessedRequest`] routing hints.
+/// Wraps an [`AffinityStore`] and provides session-id-level affinity helpers.
 pub struct StickySessionRouter {
     store: Box<dyn AffinityStore>,
 }
@@ -222,29 +219,6 @@ impl StickySessionRouter {
         }
     }
 
-    /// Resolve a request's session to a pinned `(worker, dp_rank)`.
-    ///
-    /// Looks up `session_control.session_id` from the request's routing hints.
-    /// Returns `None` if no session control is present or the session is unknown/expired.
-    pub fn resolve(&self, request: &PreprocessedRequest) -> Option<WorkerWithDpRank> {
-        let routing = request.routing.as_ref()?;
-        let session_id = routing
-            .session_control
-            .as_ref()
-            .map(|sc| sc.session_id.as_str())?;
-        self.store.get(session_id)
-    }
-
-    /// Resolve a request's session without refreshing the sticky TTL.
-    pub fn peek(&self, request: &PreprocessedRequest) -> Option<WorkerWithDpRank> {
-        let routing = request.routing.as_ref()?;
-        let session_id = routing
-            .session_control
-            .as_ref()
-            .map(|sc| sc.session_id.as_str())?;
-        self.store.peek(session_id)
-    }
-
     /// Resolve a session id directly and refresh its sticky TTL.
     pub fn resolve_session(&self, session_id: &str) -> Option<WorkerWithDpRank> {
         self.store.get(session_id)
@@ -253,11 +227,6 @@ impl StickySessionRouter {
     /// Resolve a session id directly without refreshing its sticky TTL.
     pub fn peek_session(&self, session_id: &str) -> Option<WorkerWithDpRank> {
         self.store.peek(session_id)
-    }
-
-    /// Bind an engine-backed session to a `(worker, dp_rank)` with the given TTL.
-    pub fn bind(&self, session_id: &str, worker: WorkerWithDpRank, ttl: Duration) {
-        self.bind_engine_session(session_id, worker, ttl);
     }
 
     /// Bind a router-only session to a `(worker, dp_rank)` with the given TTL.
@@ -300,31 +269,9 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
-    use crate::protocols::openai::nvext::SessionControl;
 
     fn worker(worker_id: u64, dp_rank: u32) -> WorkerWithDpRank {
         WorkerWithDpRank::new(worker_id, dp_rank)
-    }
-
-    fn make_request(session_id: Option<&str>) -> PreprocessedRequest {
-        let routing = session_id.map(|id| RoutingHints {
-            session_control: Some(SessionControl {
-                session_id: id.to_owned(),
-                action: None,
-                timeout: 300,
-            }),
-            ..Default::default()
-        });
-        PreprocessedRequest::builder()
-            .model("test".to_string())
-            .token_ids(vec![1, 2, 3])
-            .stop_conditions(Default::default())
-            .sampling_options(Default::default())
-            .output_options(Default::default())
-            .routing(routing)
-            .build()
-            .unwrap()
     }
 
     #[test]
@@ -334,19 +281,7 @@ mod tests {
             on_expire: None,
         };
         let router = StickySessionRouter::new(store);
-        let req = make_request(Some("unknown-session"));
-        assert!(router.resolve(&req).is_none());
-    }
-
-    #[test]
-    fn resolve_returns_none_when_no_session_id() {
-        let store = InMemoryAffinityStore {
-            map: Arc::new(DashMap::new()),
-            on_expire: None,
-        };
-        let router = StickySessionRouter::new(store);
-        let req = make_request(None);
-        assert!(router.resolve(&req).is_none());
+        assert!(router.resolve_session("unknown-session").is_none());
     }
 
     #[test]
@@ -356,10 +291,9 @@ mod tests {
             on_expire: None,
         };
         let router = StickySessionRouter::new(store);
-        router.bind("sess-1", worker(42, 3), Duration::from_secs(300));
+        router.bind_engine_session("sess-1", worker(42, 3), Duration::from_secs(300));
 
-        let req = make_request(Some("sess-1"));
-        assert_eq!(router.resolve(&req), Some(worker(42, 3)));
+        assert_eq!(router.resolve_session("sess-1"), Some(worker(42, 3)));
     }
 
     #[test]
@@ -382,8 +316,7 @@ mod tests {
         };
         let router = StickySessionRouter::new(store);
 
-        let req = make_request(Some("sess-peek"));
-        assert_eq!(router.peek(&req), Some(worker(7, 2)));
+        assert_eq!(router.peek_session("sess-peek"), Some(worker(7, 2)));
 
         let entry = map.get("sess-peek").unwrap();
         assert_eq!(entry.expires_at, expires_at);
@@ -397,11 +330,10 @@ mod tests {
             on_expire: None,
         };
         let router = StickySessionRouter::new(store);
-        router.bind("sess-1", worker(1, 0), Duration::from_secs(10));
+        router.bind_engine_session("sess-1", worker(1, 0), Duration::from_secs(10));
         router.bind_router_only("sess-1", worker(2, 3), Duration::from_secs(90));
 
-        let req = make_request(Some("sess-1"));
-        assert_eq!(router.peek(&req), Some(worker(2, 3)));
+        assert_eq!(router.peek_session("sess-1"), Some(worker(2, 3)));
 
         let entry = map.get("sess-1").unwrap();
         assert_eq!(entry.worker, worker(2, 3));
@@ -417,7 +349,7 @@ mod tests {
             on_expire: None,
         };
         let router = StickySessionRouter::new(store);
-        router.bind("sess-1", worker(42, 1), Duration::from_secs(300));
+        router.bind_engine_session("sess-1", worker(42, 1), Duration::from_secs(300));
         assert_eq!(
             router.unbind("sess-1"),
             Some(AffinityBinding {
@@ -426,8 +358,7 @@ mod tests {
             })
         );
 
-        let req = make_request(Some("sess-1"));
-        assert!(router.resolve(&req).is_none());
+        assert!(router.resolve_session("sess-1").is_none());
     }
 
     #[test]
@@ -448,8 +379,7 @@ mod tests {
         );
         let router = StickySessionRouter::new(store);
 
-        let req = make_request(Some("sess-expired"));
-        assert!(router.resolve(&req).is_none());
+        assert!(router.resolve_session("sess-expired").is_none());
         // Entry should be cleaned up
         assert!(router.store.peek("sess-expired").is_none());
     }
@@ -474,8 +404,7 @@ mod tests {
         };
         let router = StickySessionRouter::new(store);
 
-        let req = make_request(Some("sess-refresh"));
-        assert_eq!(router.resolve(&req), Some(worker(7, 2)));
+        assert_eq!(router.resolve_session("sess-refresh"), Some(worker(7, 2)));
 
         // After resolve, expires_at should be refreshed to now + ttl (60s),
         // so it should be at least 50s from now (not the original 5s).
@@ -514,8 +443,7 @@ mod tests {
         );
         let router = StickySessionRouter::new(store);
 
-        let req = make_request(Some("sess-expired"));
-        assert!(router.resolve(&req).is_none());
+        assert!(router.resolve_session("sess-expired").is_none());
         assert_eq!(
             expired_sessions.lock().unwrap().as_slice(),
             &[("sess-expired".to_string(), 99)]
@@ -549,8 +477,7 @@ mod tests {
         );
         let router = StickySessionRouter::new(store);
 
-        let req = make_request(Some("sess-router-only"));
-        assert!(router.resolve(&req).is_none());
+        assert!(router.resolve_session("sess-router-only").is_none());
         assert!(expired_sessions.lock().unwrap().is_empty());
     }
 

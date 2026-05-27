@@ -33,8 +33,8 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
-  # Root-level compatibility symlink -> .agents/skills (skills live there).
-  - 'skills'
+  # Canonical agent skills directory (post-flip); .agents/skills is a symlink here.
+  - 'skills/**'
 
 examples:
   - 'recipes/**'

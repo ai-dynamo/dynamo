@@ -19,7 +19,6 @@ use super::{
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorkerCacheHitEstimate {
     pub effective_overlap_blocks: f64,
-    pub cached_tokens: usize,
 }
 
 impl WorkerCacheHitEstimate {
@@ -128,11 +127,6 @@ pub(super) fn cache_hit_for_worker(
             .get(&worker)
             .copied()
             .unwrap_or(0.0),
-        cached_tokens: cache_hit_estimates
-            .cached_tokens
-            .get(&worker)
-            .copied()
-            .unwrap_or(0),
     }
 }
 

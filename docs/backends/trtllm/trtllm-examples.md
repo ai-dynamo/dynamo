@@ -112,7 +112,3 @@ See the [client](../sglang/README.md#testing-the-deployment) section to learn ho
 To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 </Note>
 
-## Benchmarking
-
-To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)

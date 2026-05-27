@@ -12,7 +12,7 @@ on:
         description: 'Stage NGC images, Artifactory wheels, and trigger the GitLab release pipeline. Schedule always sets release=true.'
         required: false
         type: boolean
-        default: true
+        default: false
       run_tests:
         description: 'Run vllm/sglang/trtllm tests + dynamo-pipeline checks. Schedule always runs them.'
         required: false
@@ -472,11 +472,12 @@ jobs:
       - trtllm-multi-gpu-test
       - dynamo-pipeline
       - rust-tests
-    # Framework (vllm/sglang/trtllm) and rust tests do not block publishing.
-    # The manual-release-approval gate is `skipped` on cron and `success` after
-    # reviewer approval on workflow_dispatch — both are accepted here.
+    # !cancelled() lets framework/rust failures fall through; dynamo-pipeline
+    # is gated strictly because stage-wheels-artifactory extracts wheels from
+    # its image. manual-release-approval is `skipped` on cron, `success` on dispatch.
     if: ${{ !cancelled()
         && needs.compute-release-mode.outputs.release == 'true'
+        && needs.dynamo-pipeline.result == 'success'
         && (needs.manual-release-approval.result == 'success'
             || needs.manual-release-approval.result == 'skipped') }}
     uses: ./.github/workflows/release.yml
