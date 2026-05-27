@@ -5,11 +5,10 @@
 # with --no-deps so upstream nvcr.io/nvidia/tensorrt-llm/release's solve
 # stays intact. Sorted alphabetically per pre-commit requirements-txt-fixer.
 
-# Lock huggingface-hub to upstream transformers's <1.0 constraint. Without
-# this pin, Dockerfile.test's `uv pip install --requirement requirements.test.txt`
-# later upgrades the venv copy to 1.x (datasets allows it) and breaks
-# `import transformers` against upstream's compiled stack.
-huggingface-hub<1.0,>=0.34.0
+# Lock huggingface-hub to upstream transformers's constraint. TRT-LLM 1.3.0rc15
+# ships transformers==5.5.3, which requires huggingface-hub>=1.5.0,<2.0 and
+# imports `is_offline_mode` from huggingface_hub.
+huggingface-hub<2.0,>=1.5.0
 # Used by the trtllm video_diffusion handler to encode generated frames to MP4.
 # Upstream tensorrt-llm/release does not ship them.
 imageio>=2.37.0
