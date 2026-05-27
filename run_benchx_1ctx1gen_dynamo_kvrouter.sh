@@ -48,7 +48,7 @@ else
     WORKER_METRICS_FLAG=""
 fi
 
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-publisherfix.sqsh}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-cachefix-parserfix-with-trace.sqsh}"
 EXP_NAME="run_benchx_1ctx1gen_dynamo_kvrouter_${HCTAG}_c${C_TAG}"
 
 HF_TOKEN="${HF_TOKEN:-}"
@@ -72,7 +72,7 @@ DYN_SYS_PORT_CTX=8081
 DYN_SYS_PORT_GEN=8085
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="$REPO_DIR/bench/results/dynamo/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
+RESULTS_DIR="$REPO_DIR/bench/results/dynamo-toolcall-fix/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
 mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
 cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 
@@ -322,6 +322,8 @@ start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
       --disaggregation-mode decode \
       --extra-engine-args $RESULTS_DIR/gen.yaml \
       --request-plane ${DYNAMO_REQUEST_PLANE} \
+      --dyn-tool-call-parser harmony \
+      --dyn-reasoning-parser gpt_oss \
       ${WORKER_METRICS_FLAG}"
 GEN_PID="${SRUN_PIDS[-1]}"
 
@@ -339,6 +341,8 @@ start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
       --disaggregation-mode prefill \
       --extra-engine-args $RESULTS_DIR/ctx.yaml \
       --request-plane ${DYNAMO_REQUEST_PLANE} \
+      --dyn-tool-call-parser harmony \
+      --dyn-reasoning-parser gpt_oss \
       ${WORKER_METRICS_FLAG}"
 CTX_PID="${SRUN_PIDS[-1]}"
 
@@ -447,7 +451,7 @@ echo "==== Running RWLT @ c=${CONCURRENCY} (X-Session-ID enabled) ===="
 srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
   --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
   --no-container-entrypoint \
-  bash -c "cd $REPO_DIR && $COMMON_ENV && \
+  bash -c "cd $REPO_DIR && $COMMON_ENV && export RWLT_CACHE_BUST_MODE=disabled && \
     uv run --isolated --with openai --with httpx --with pyyaml --with pydantic \
       python rwlt/run.py --config $RESULTS_DIR/rwlt_config.yaml" \
   > "$RESULTS_DIR/benchmark.log" 2>&1

@@ -203,6 +203,7 @@ speculative_config:
   max_draft_len: 3
   speculative_model: /lustre/fsw/core_dlfw_ci/rihuo/nvidia_gpt-oss-120b-Eagle3-v3
   eagle3_one_model: true
+  allow_advanced_sampling: true
   eagle3_layers_to_capture:
   - 23
   - 29
