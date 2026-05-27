@@ -112,12 +112,17 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
     ) -> Dict[str, Any]:
         """Transform SGLang response to OpenAI embedding format.
 
-        Applies the optional ``dimensions`` field for Matryoshka-style
-        truncation (slice leading N) and ``encoding_format`` -- ``"float"``
-        (default) returns a JSON array of floats; ``"base64"`` returns a
-        base64-encoded little-endian ``float32`` byte string per the
-        OpenAI spec. Base64 encoding runs after ``dimensions`` truncation
-        so the byte count matches the requested dimensionality.
+        Honors two optional request fields:
+
+        - ``dimensions``: Matryoshka-style truncation; keeps the first N
+          values of each embedding vector.
+        - ``encoding_format``: wire format of ``data[].embedding``.
+          ``"float"`` (default) emits a JSON array of floats;
+          ``"base64"`` emits a base64-encoded little-endian ``float32``
+          byte string per the OpenAI spec.
+
+        When both are set, truncation runs first so the base64 byte
+        count matches the requested dimensionality.
         """
         if not isinstance(ret, list):
             ret = [ret]
