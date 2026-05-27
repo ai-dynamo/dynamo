@@ -404,6 +404,11 @@ impl ReasoningParser for GptOssReasoningParser {
         }
 
         if input_contains_call_marker(text, token_ids, caller_supplied_token_ids) {
+            // Streaming currently feeds the downstream Harmony tool parser through
+            // `normal_text`. This is an internal handoff, not visible-content
+            // semantics: directed commentary tool payloads must become tool calls,
+            // not assistant `content`. Batch parsing does not use this handoff and
+            // keeps directed commentary out of `normal_text`.
             let raw_input_text =
                 raw_input_text_for_tool_parser(text, token_ids, caller_supplied_token_ids);
             normal_delta.push_str(&raw_input_text);
