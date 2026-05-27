@@ -27,6 +27,7 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
     MediaDecoder,
@@ -45,6 +46,7 @@ from dynamo.vllm.worker_factory import WorkerFactory
 from . import envs
 from .args import Config, _uses_dynamo_connector, parse_args
 from .cache_info import get_configured_kv_event_block_size
+from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
@@ -627,6 +629,8 @@ async def register_vllm_model(
     )
     runtime_values = get_engine_cache_info(engine_client)
     num_gpu_blocks = runtime_values["num_gpu_blocks"]
+    # Get data_parallel_size from vllm_config (defaults to 1)
+    dp_range = get_dp_range_for_worker(vllm_config)
     if num_gpu_blocks is None:
         # TODO(upstream-vllm): remove this workaround once vLLM propagates
         # num_gpu_blocks from Ray DP workers back to the main-process vllm_config.
@@ -639,7 +643,7 @@ async def register_vllm_model(
             "Setting total_kv_blocks=0 for model registration."
         )
         num_gpu_blocks = 0
-    runtime_config.total_kv_blocks = num_gpu_blocks
+    runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
@@ -655,6 +659,11 @@ async def register_vllm_model(
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )
+    runtime_config.set_structural_tag_mode(
+        "on" if config.dyn_enable_structural_tag else "off"
+    )
+    runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
+    runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
 
     # Propagate stream_interval so the frontend can respect --stream-interval.
     # set_engine_specific requires a JSON-encoded string (the Rust binding
@@ -663,10 +672,11 @@ async def register_vllm_model(
     if stream_interval is not None:
         runtime_config.set_engine_specific("stream_interval", str(stream_interval))
 
-    # Get data_parallel_size from vllm_config (defaults to 1)
-    dp_range = get_dp_range_for_worker(vllm_config)
     runtime_config.data_parallel_start_rank = dp_range[0]
     runtime_config.data_parallel_size = dp_range[1]
+
+    # Set topology and KV transfer policy for topology-aware routing
+    apply_topology_config(runtime_config)
 
     # Configure media decoder for frontend image decoding when enabled
     # This enables frontend to decode images and transfer via NIXL RDMA

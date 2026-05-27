@@ -43,6 +43,7 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
     MediaDecoder,
@@ -437,8 +438,31 @@ async def init_llm_worker(
         default_sampling_params.detokenize = False
 
     connector = None
-    logging.info("Initializing NIXL Connect.")
-    connector = nixl_connect.Connector()
+    needs_nixl = config.disaggregation_mode != DisaggregationMode.AGGREGATED or (
+        config.modality == Modality.MULTIMODAL
+        and (
+            config.frontend_decoding
+            or config.disaggregation_mode == DisaggregationMode.ENCODE
+            or (
+                config.disaggregation_mode == DisaggregationMode.PREFILL
+                and bool(config.encode_endpoint)
+            )
+        )
+    )
+    if needs_nixl:
+        try:
+            logging.info("Initializing NIXL Connect.")
+            connector = nixl_connect.Connector()
+            await connector._create_connection()
+        except Exception:
+            logging.warning(
+                "Failed to initialize NIXL Connect; "
+                "KV-cache transfer will be unavailable.",
+                exc_info=True,
+            )
+            connector = None
+    else:
+        logging.info("Skipping NIXL Connect initialization (aggregated mode).")
 
     dump_config(
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
@@ -498,6 +522,11 @@ async def init_llm_worker(
         runtime_config.exclude_tools_when_tool_choice_none = (
             config.exclude_tools_when_tool_choice_none
         )
+        runtime_config.set_structural_tag_mode(
+            "on" if config.dyn_enable_structural_tag else "off"
+        )
+        runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
+        runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer
@@ -508,6 +537,9 @@ async def init_llm_worker(
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
         attention_dp_size = engine.get_attention_dp_size()
         runtime_config.data_parallel_size = attention_dp_size
+
+        # Set topology and KV transfer policy for topology-aware routing
+        apply_topology_config(runtime_config)
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(

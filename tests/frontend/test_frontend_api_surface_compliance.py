@@ -417,6 +417,7 @@ def _claude_cli(_tools_cache, _node_bin) -> Path:
 
 
 @pytest.mark.sglang
+@pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model(COMPLIANCE_MODEL)
@@ -777,6 +778,9 @@ def _run_claude_exec_smoke(
         "HOME": str(claude_home),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
+        # Cap output so reasoning models don't blow the 180s subprocess
+        # timeout. Mirrors the codex cap in `_write_codex_config`.
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "4096",
     }
     # claude shells out to `node` internally; make sure the fixture-installed
     # runtime resolves on PATH without inheriting the runner's node.

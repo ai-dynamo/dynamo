@@ -13,9 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
 
-from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+from dynamo._core import (
+    get_reasoning_parser_names,
+    get_tool_parser_names,
+    parse_reasoning_batch,
+    parse_reasoning_stream,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -39,3 +46,54 @@ def test_get_reasoning_parser_names():
     # No Need to update this test when adding a new parser everytime
     assert parsers is not None
     assert len(parsers) > 0
+
+
+def test_parse_reasoning_batch():
+    parsed = json.loads(parse_reasoning_batch("qwen3", "<think>thinking</think>answer"))
+
+    assert parsed == {
+        "reasoning_text": "thinking",
+        "normal_text": "answer",
+    }
+
+
+def test_parse_reasoning_batch_in_reasoning_mode():
+    parsed = json.loads(
+        parse_reasoning_batch("qwen3", "thinking</think>answer", in_reasoning=True)
+    )
+
+    assert parsed == {
+        "reasoning_text": "thinking",
+        "normal_text": "answer",
+    }
+
+
+def test_parse_reasoning_stream():
+    parsed = json.loads(
+        parse_reasoning_stream("qwen3", ["<thi", "nk>thinking</think>", "answer"])
+    )
+
+    assert parsed == {
+        "reasoning_text": "thinking",
+        "normal_text": "answer",
+    }
+
+
+def test_parse_reasoning_stream_in_reasoning_mode():
+    parsed = json.loads(
+        parse_reasoning_stream(
+            "qwen3",
+            ["thinking", "</think>answer"],
+            in_reasoning=True,
+        )
+    )
+
+    assert parsed == {
+        "reasoning_text": "thinking",
+        "normal_text": "answer",
+    }
+
+
+def test_parse_reasoning_stream_rejects_mismatched_token_chunks():
+    with pytest.raises(ValueError, match="token_chunks length"):
+        parse_reasoning_stream("qwen3", ["a", "b"], [[1]])

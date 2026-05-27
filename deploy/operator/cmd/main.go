@@ -476,7 +476,7 @@ func main() {
 		"istio", runtimeConfig.IstioAvailable,
 	)
 
-	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader())
+	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
 	// refresh whenever a secret is created/deleted/updated
 	// Set up informer
 	var factory informers.SharedInformerFactory
@@ -710,6 +710,16 @@ func registerControllers(
 		).SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("unable to create GMS FailoverCascade controller: %w", err)
 		}
+	}
+
+	if err = (&controller.TopologyLabelReconciler{
+		Client:        mgr.GetClient(),
+		NodeReader:    mgr.GetAPIReader(),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+		Recorder:      mgr.GetEventRecorderFor("topology-label"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create TopologyLabel controller: %w", err)
 	}
 
 	setupLog.Info("Controllers registered successfully")
