@@ -404,10 +404,17 @@ trtllm_configs = {
         # Embeddings generation + worker startup takes longer than normal
         delayed_start=180,
         request_payloads=[
-            multimodal_payload_default(
-                image_url="file:///tmp/llava_embeddings.safetensors",
-                text="Describe what this image shows.",
-                expected_response=["bench", "person", "image", "picture"],
+            chat_payload(
+                content=[
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "file:///tmp/llava_embeddings.safetensors"
+                        },
+                    },
+                    {"type": "text", "text": "Describe what this image shows."},
+                ],
+                expected_response=["mountain", "road", "trees", "vegetation"],
             )
         ],
         env={

@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 if TYPE_CHECKING:
-    from tensorrt_llm._torch.visual_gen import VisualGenArgs
+    from tensorrt_llm.visual_gen.args import VisualGenArgs
     from tensorrt_llm._torch.visual_gen.output import MediaOutput
     from tensorrt_llm._torch.visual_gen.pipeline import BasePipeline
 
@@ -131,8 +131,11 @@ class DiffusionEngine:
 
         # Use PipelineLoader for the full loading flow:
         #   VisualGenArgs → DiffusionModelConfig → AutoPipeline → BasePipeline
-        loader = PipelineLoader(diffusion_args)
-        self._pipeline = loader.load(skip_warmup=self.config.skip_warmup)
+        loader = PipelineLoader(diffusion_args, device=self.device)
+        self._pipeline = loader.load(
+            skip_warmup=self.config.skip_warmup,
+            skip_components=self.config.skip_components,
+        )
 
         self._initialized = True
         logger.info(
@@ -144,22 +147,22 @@ class DiffusionEngine:
         """Build VisualGenArgs from DiffusionConfig.
 
         Maps dynamo's DiffusionConfig fields to TensorRT-LLM's VisualGenArgs
-        structure with its nested sub-configs (PipelineConfig, TorchCompileConfig,
-        CudaGraphConfig, AttentionConfig, ParallelConfig, optional cache config,
-        quant_config).
+        structure with its nested sub-configs (CompilationConfig,
+        TorchCompileConfig, CudaGraphConfig, AttentionConfig, ParallelConfig,
+        optional cache_config, quant_config).
 
         Returns:
             VisualGenArgs instance for PipelineLoader.
         """
-        from tensorrt_llm._torch.visual_gen import (
+        from tensorrt_llm.visual_gen.args import (
+            AttentionConfig,
+            CompilationConfig,
             CudaGraphConfig,
             ParallelConfig,
-            PipelineConfig,
             TeaCacheConfig,
             TorchCompileConfig,
             VisualGenArgs,
         )
-        from tensorrt_llm._torch.visual_gen.config import AttentionConfig
 
         # Build quant_config dict if quantization is requested
         # VisualGenArgs accepts a dict in ModelOpt format and parses it via model_validator
@@ -171,39 +174,31 @@ class DiffusionEngine:
             }
 
         args_kwargs: dict = dict(
-            checkpoint_path=self.config.model_path,
-            device=self.device,
-            dtype=self.config.torch_dtype,
-            skip_components=self.config.skip_components,
-            skip_warmup=self.config.skip_warmup,
-            pipeline=PipelineConfig(
-                fuse_qkv=self.config.fuse_qkv,
-                enable_layerwise_nvtx_marker=self.config.enable_layerwise_nvtx_marker,
-                enable_offloading=self.config.enable_async_cpu_offload,
+            model=self.config.model_path,
+            compilation_config=CompilationConfig(
+                skip_warmup=self.config.skip_warmup,
             ),
-            torch_compile=TorchCompileConfig(
-                enable_torch_compile=not self.config.disable_torch_compile,
+            torch_compile_config=TorchCompileConfig(
+                enable=not self.config.disable_torch_compile,
                 enable_fullgraph=self.config.enable_fullgraph,
             ),
-            cuda_graph=CudaGraphConfig(
-                enable_cuda_graph=self.config.enable_cuda_graph,
+            cuda_graph_config=CudaGraphConfig(
+                enable=self.config.enable_cuda_graph,
             ),
-            attention=AttentionConfig(
+            attention_config=AttentionConfig(
                 backend=self.config.attn_backend.upper(),
             ),
-            parallel=ParallelConfig(
-                dit_dp_size=self.config.dit_dp_size,
-                dit_tp_size=self.config.dit_tp_size,
-                dit_ulysses_size=self.config.dit_ulysses_size,
-                dit_ring_size=self.config.dit_ring_size,
-                dit_cfg_size=self.config.dit_cfg_size,
-                dit_fsdp_size=self.config.dit_fsdp_size,
+            parallel_config=ParallelConfig(
+                cfg_size=self.config.dit_cfg_size,
+                ulysses_size=self.config.dit_ulysses_size,
+                ring_size=self.config.dit_ring_size,
             ),
+            enable_layerwise_nvtx_marker=self.config.enable_layerwise_nvtx_marker,
         )
 
         # Add optional fields
         if self.config.enable_teacache:
-            args_kwargs["cache"] = TeaCacheConfig(
+            args_kwargs["cache_config"] = TeaCacheConfig(
                 use_ret_steps=self.config.teacache_use_ret_steps,
                 teacache_thresh=self.config.teacache_thresh,
             )
