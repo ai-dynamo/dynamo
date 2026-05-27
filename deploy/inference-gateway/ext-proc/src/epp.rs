@@ -16,6 +16,7 @@ use anyhow::Result;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
@@ -213,7 +214,8 @@ impl Router {
             self.prefill_router.register_workers(ids);
         }
 
-        self.prefill_router
+        let outcome = self
+            .prefill_router
             .query_prefill_worker(
                 tokens,
                 None,
@@ -224,7 +226,24 @@ impl Router {
                 RoutingConstraints::default(),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))
+            .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
+
+        match outcome {
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
+            // Surface backpressure as an error so the caller's
+            // enforce_disagg / aggregated-fallback logic in `pick()` can
+            // decide whether to fail the request or fall back to decode-only.
+            PrefillQueryOutcome::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            } => Err(anyhow::anyhow!(
+                "Prefill router backpressure: {:?} (queued_isl_tokens={}, max={:?})",
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens
+            )),
+        }
     }
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
