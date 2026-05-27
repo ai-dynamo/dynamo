@@ -35,7 +35,10 @@ from gpu_memory_service.snapshot.transfer import (
 from gpu_memory_service.snapshot.transfer import (
     GMSSnapshotConfig,
     GMSTransferTarget,
+    NIXL_UCX_TRANSFER_BACKEND,
+    StreamingTransferSession,
     build_file_transfer_sources,
+    build_remote_transfer_sources,
     create_transfer_backend,
 )
 
@@ -80,6 +83,14 @@ def _load_manifest_and_metadata(
     input_dir: str,
 ) -> Tuple[SaveManifest, Dict[str, Dict[str, Any]]]:
     return _load_manifest_and_metadata_impl(input_dir)
+
+
+def _is_streaming_transfer_session(
+    session: Any,
+) -> bool:
+    return callable(getattr(session, "submit_targets", None)) and callable(
+        getattr(session, "finish_restore", None)
+    )
 
 
 class GMSStorageClient:
@@ -282,6 +293,44 @@ class GMSStorageClient:
         )
         return id_map, targets
 
+    def _allocate_and_submit_restore_targets(
+        self,
+        mm: Any,
+        manifest: SaveManifest,
+        session: StreamingTransferSession,
+    ) -> Tuple[Dict[str, str], Dict[str, GMSTransferTarget]]:
+        """Allocate restore targets and publish each target immediately.
+
+        The allocation loop intentionally preserves manifest order because the
+        committed GMS layout/remap hash depends on allocation rank.  Streaming
+        only changes when the transfer backend learns about a target, not the
+        resulting committed layout.
+        """
+        t0 = time.monotonic()
+        id_map: Dict[str, str] = {}
+        targets: Dict[str, GMSTransferTarget] = {}
+        for entry in manifest.allocations:
+            old_id = entry.allocation_id
+            va = mm.create_mapping(size=entry.size, tag=entry.tag)
+            new_target = GMSTransferTarget(
+                allocation_id=old_id,
+                va=va,
+                device=self.device,
+                byte_count=entry.aligned_size,
+            )
+            id_map[old_id] = mm.mappings[va].allocation_id
+            targets[old_id] = new_target
+            session.submit_targets({old_id: new_target})
+
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Phase A complete: allocated and submitted %d GMS VAs in %.3fs",
+            len(targets),
+            elapsed,
+        )
+        session.finish_restore()
+        return id_map, targets
+
     def load_to_gms(
         self,
         input_dir: str,
@@ -293,33 +342,68 @@ class GMSStorageClient:
         backend_name = transfer_backend or self._transfer_backend
         self._validate_load_request()
 
-        backend = create_transfer_backend(
-            backend_name,
-            GMSSnapshotConfig(
-                device=self.device,
-                max_workers=max_workers,
-                backend_config={
-                    SHARDED_SSD_ROOTS_CONFIG_KEY: self._sharded_ssd_roots,
-                    SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY: (
-                        self._sharded_ssd_queues_per_root
-                    ),
-                },
+        backend_config = {
+            SHARDED_SSD_ROOTS_CONFIG_KEY: self._sharded_ssd_roots,
+            SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY: (
+                self._sharded_ssd_queues_per_root
             ),
-        )
+        }
+        backend = None
         session = None
         id_map: Dict[str, str] = {}
 
         try:
             manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
-            sources = build_file_transfer_sources(input_dir, manifest.allocations)
+            if backend_name == NIXL_UCX_TRANSFER_BACKEND:
+                from gpu_memory_service.snapshot.backends.nixl_ucx import (
+                    NIXL_UCX_REMOTE_METADATA_CONFIG_KEY,
+                    load_remote_peer_metadata,
+                )
+
+                peer_metadata = load_remote_peer_metadata({})
+                if peer_metadata.get("sources") is None:
+                    raise RuntimeError(
+                        f"{NIXL_UCX_TRANSFER_BACKEND} requires remote peer sources"
+                    )
+                remote_agent = peer_metadata.get("agent_name") or ""
+                backend_config[NIXL_UCX_REMOTE_METADATA_CONFIG_KEY] = peer_metadata[
+                    "metadata"
+                ]
+                sources = build_remote_transfer_sources(
+                    manifest.allocations,
+                    peer_metadata["sources"],
+                    remote_agent=remote_agent,
+                )
+            else:
+                sources = build_file_transfer_sources(input_dir, manifest.allocations)
+
+            backend = create_transfer_backend(
+                backend_name,
+                GMSSnapshotConfig(
+                    device=self.device,
+                    max_workers=max_workers,
+                    backend_config=backend_config,
+                ),
+            )
             session = backend.start_restore(sources)
             with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
                 mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
                 if clear_existing:
                     logger.info("RW connect cleared any previously committed GMS state")
 
-                id_map, targets = self._allocate_restore_targets(mm, manifest)
-                session.restore(targets)
+                if _is_streaming_transfer_session(session):
+                    logger.info(
+                        "Using streaming restore target submission for %s",
+                        backend.name,
+                    )
+                    id_map, targets = self._allocate_and_submit_restore_targets(
+                        mm,
+                        manifest,
+                        session,
+                    )
+                else:
+                    id_map, targets = self._allocate_restore_targets(mm, manifest)
+                    session.restore(targets)
                 logger.info(
                     "Phase B complete: %s restored %d allocations to GMS memory",
                     backend.name,
@@ -332,7 +416,8 @@ class GMSStorageClient:
         finally:
             if session is not None:
                 session.close()
-            backend.close()
+            if backend is not None:
+                backend.close()
 
         logger.info(
             "load_to_gms complete: %d allocations, %d metadata keys",

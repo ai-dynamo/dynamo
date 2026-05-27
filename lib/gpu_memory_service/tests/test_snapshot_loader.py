@@ -85,3 +85,8 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
             "clear_existing": True,
         },
     )
+
+
+def test_ucx_loader_requires_checkpoint_dir():
+    with pytest.raises(SystemExit):
+        loader.main(["--transfer-backend", "nixl-ucx"])

@@ -263,3 +263,105 @@ def test_staging_prep_starts_before_restore(monkeypatch):
     finally:
         allow_finish.set()
         session.close()
+
+
+def test_streaming_staging_starts_ready_group_before_all_targets(monkeypatch):
+    from gpu_memory_service.snapshot.backends import nixl_staging
+
+    sources = [
+        FileTransferSource(
+            allocation_id="alloc-a",
+            file_path="/checkpoint/shard-a.bin",
+            file_offset=0,
+            byte_count=4096,
+        ),
+        FileTransferSource(
+            allocation_id="alloc-b",
+            file_path="/checkpoint/shard-b.bin",
+            file_offset=0,
+            byte_count=4096,
+        ),
+    ]
+    targets = {
+        source.allocation_id: GMSTransferTarget(
+            allocation_id=source.allocation_id,
+            va=0x1000 + index * 0x1000,
+            device=0,
+            byte_count=source.byte_count,
+        )
+        for index, source in enumerate(sources)
+    }
+    first_restore_started = threading.Event()
+    second_restore_started = threading.Event()
+    restore_events = []
+
+    class FakeApi:
+        @staticmethod
+        def agent_config_type(*, backends):
+            return {"backends": backends}
+
+        @staticmethod
+        def agent_type(_agent_name, _config):
+            return FakeAgent()
+
+    class FakeAgent:
+        def create_backend(self, _backend_name, backend_params=None):
+            self.backend_params = backend_params
+
+    def group_sources(_sources):
+        return {
+            "file-a": [(sources[0].file_path, [sources[0]])],
+            "file-b": [(sources[1].file_path, [sources[1]])],
+        }
+
+    def fake_restore_file_groups_with_nixl_staging(**kwargs):
+        allocation_ids = [
+            source.allocation_id
+            for _file_path, grouped_sources in kwargs["file_groups"]
+            for source in grouped_sources
+        ]
+        restore_events.append(tuple(allocation_ids))
+        if allocation_ids == ["alloc-a"]:
+            first_restore_started.set()
+        if allocation_ids == ["alloc-b"]:
+            second_restore_started.set()
+        return sum(
+            source.byte_count
+            for _file_path, grouped_sources in kwargs["file_groups"]
+            for source in grouped_sources
+        )
+
+    monkeypatch.setattr(
+        nixl_staging.cuda_utils,
+        "cuda_runtime_set_device",
+        lambda _device: None,
+    )
+    monkeypatch.setattr(nixl_staging, "load_nixl_api", lambda: FakeApi())
+    monkeypatch.setattr(nixl_staging, "make_pinned_copy_slots", lambda _count: [])
+    monkeypatch.setattr(
+        nixl_staging,
+        "restore_file_groups_with_nixl_staging",
+        fake_restore_file_groups_with_nixl_staging,
+    )
+
+    session = _NixlPosixStagingTransferSession(
+        backend_name="test-backend",
+        device=0,
+        max_workers=2,
+        group_sources=group_sources,
+        group_kind="file",
+        warn_under_parallelized=False,
+        posix_backend_params={"ios_pool_size": "64", "kernel_queue_size": "16"},
+        sources=sources,
+    )
+
+    try:
+        session.submit_targets({"alloc-a": targets["alloc-a"]})
+        assert first_restore_started.wait(timeout=1.0)
+        assert ("alloc-b",) not in restore_events
+
+        session.submit_targets({"alloc-b": targets["alloc-b"]})
+        session.finish_restore()
+        assert second_restore_started.wait(timeout=1.0)
+    finally:
+        session.close()

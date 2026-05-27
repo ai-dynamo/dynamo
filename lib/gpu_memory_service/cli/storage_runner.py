@@ -273,6 +273,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Byte transfer backend for restore. "
             "'nixl' uses NIXL POSIX with host staging; "
             "'nixl-gds' uses NIXL GDS_MT for direct file-to-GPU transfers; "
+            "'nixl-ucx' uses NIXL UCX for peer GPU-to-GMS transfers; "
             "'sharded-ssd' shards reads across local SSD roots using the "
             "same NIXL POSIX host-staging path."
         ),
