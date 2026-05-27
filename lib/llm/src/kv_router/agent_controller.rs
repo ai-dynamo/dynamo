@@ -26,7 +26,7 @@ use tokio::sync::OnceCell;
 
 use crate::protocols::openai::nvext::SessionAction;
 
-use super::sticky_sessions::StickySessionRouter;
+use super::sticky_sessions::{AffinityKind, StickySessionRouter};
 
 /// Untyped event plane client for session_control endpoint.
 pub type EventPlaneClient = PushRouter<serde_json::Value, Annotated<serde_json::Value>>;
@@ -74,6 +74,7 @@ pub enum SessionLifecycleOutcome {
     NoSessionControl,
     NoAction,
     OpenSucceeded,
+    BindRequested,
     NoSessionControlEndpoint,
     CloseRequested,
 }
@@ -203,21 +204,31 @@ impl AgentController {
                     deferred_close: None,
                 })
             }
+            SessionAction::Bind => Ok(AgentRouteOutcome {
+                lifecycle: SessionLifecycleOutcome::BindRequested,
+                deferred_close: None,
+            }),
             SessionAction::Close => {
                 // Remove affinity immediately
-                if let Some(sticky) = sticky {
-                    sticky.unbind(&sc.session_id);
-                }
+                let should_close_worker_session = sticky
+                    .map(|sticky| match sticky.unbind(&sc.session_id) {
+                        Some(binding) => binding.kind == AffinityKind::EngineBacked,
+                        None => true,
+                    })
+                    .unwrap_or(true);
 
                 // Defer close to after generation completes
-                let deferred_close =
+                let deferred_close = if should_close_worker_session {
                     self.get_session_control_client()
                         .await
                         .map(|client| SessionCloseAction {
                             session_id: sc.session_id.clone(),
                             client,
                             instance_id,
-                        });
+                        })
+                } else {
+                    None
+                };
                 Ok(AgentRouteOutcome {
                     lifecycle: SessionLifecycleOutcome::CloseRequested,
                     deferred_close,

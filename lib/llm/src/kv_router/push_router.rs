@@ -29,7 +29,7 @@ use crate::{
         KvRouter,
         agent_controller::{AgentController, SessionCloseAction, SessionLifecycleOutcome},
         metrics::RouterRequestMetrics,
-        sticky_sessions::{InMemoryAffinityStore, StickySessionRouter},
+        sticky_sessions::{AffinityKind, InMemoryAffinityStore, StickySessionRouter},
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -654,7 +654,7 @@ impl KvPushRouter {
             reason = %reason,
             "Sticky worker is no longer eligible; removing session affinity"
         );
-        self.sticky_sessions.unbind(session_id);
+        let _ = self.sticky_sessions.unbind(session_id);
         true
     }
 
@@ -890,20 +890,25 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 Some(&*self.sticky_sessions),
             )
             .await?;
-        if route_outcome.lifecycle == SessionLifecycleOutcome::OpenSucceeded
+        if let Some(kind) = affinity_kind_for_lifecycle(route_outcome.lifecycle)
             && let Some(sc) = request
                 .routing
                 .as_ref()
                 .and_then(|r| r.session_control.as_ref())
         {
-            // Bind/rebind only after the worker accepted open_session. This keeps
-            // first ambiguous opens on normal KV routing while repeated opens renew
-            // the timeout for the selected worker/rank.
-            self.sticky_sessions.bind(
-                &sc.session_id,
-                WorkerWithDpRank::new(instance_id, dp_rank),
-                Duration::from_secs(sc.timeout),
-            );
+            let worker = WorkerWithDpRank::new(instance_id, dp_rank);
+            let ttl = Duration::from_secs(sc.timeout);
+            match kind {
+                AffinityKind::RouterOnly => {
+                    self.sticky_sessions
+                        .bind_router_only(&sc.session_id, worker, ttl);
+                }
+                AffinityKind::EngineBacked => {
+                    // Bind/rebind only after the worker accepted open_session.
+                    self.sticky_sessions
+                        .bind_engine_session(&sc.session_id, worker, ttl);
+                }
+            }
         }
         let deferred_close = route_outcome.deferred_close;
 
@@ -1055,6 +1060,14 @@ fn sticky_allowed_for_phase(phase: RequestPhase, routing: Option<&RoutingHints>)
     }
 }
 
+fn affinity_kind_for_lifecycle(lifecycle: SessionLifecycleOutcome) -> Option<AffinityKind> {
+    match lifecycle {
+        SessionLifecycleOutcome::OpenSucceeded => Some(AffinityKind::EngineBacked),
+        SessionLifecycleOutcome::BindRequested => Some(AffinityKind::RouterOnly),
+        _ => None,
+    }
+}
+
 fn sticky_session_id_for_phase(request: &PreprocessedRequest, phase: RequestPhase) -> Option<&str> {
     let routing = request.routing.as_ref()?;
     if !sticky_allowed_for_phase(phase, Some(routing)) {
@@ -1114,7 +1127,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
 #[cfg(test)]
 mod tests {
-    use super::{pinned_worker_hint, sticky_allowed_for_phase};
+    use super::{affinity_kind_for_lifecycle, pinned_worker_hint, sticky_allowed_for_phase};
+    use crate::kv_router::agent_controller::SessionLifecycleOutcome;
+    use crate::kv_router::sticky_sessions::AffinityKind;
     use crate::protocols::common::{preprocessor::RoutingHints, timing::RequestPhase};
     use crate::protocols::openai::nvext::SessionControl;
 
@@ -1245,5 +1260,29 @@ mod tests {
             RequestPhase::Aggregated,
             Some(&aggregated)
         ));
+    }
+
+    #[test]
+    fn open_lifecycle_binds_engine_backed_affinity() {
+        assert_eq!(
+            affinity_kind_for_lifecycle(SessionLifecycleOutcome::OpenSucceeded),
+            Some(AffinityKind::EngineBacked)
+        );
+    }
+
+    #[test]
+    fn bind_lifecycle_binds_router_only_affinity() {
+        assert_eq!(
+            affinity_kind_for_lifecycle(SessionLifecycleOutcome::BindRequested),
+            Some(AffinityKind::RouterOnly)
+        );
+    }
+
+    #[test]
+    fn no_action_lifecycle_does_not_create_affinity() {
+        assert_eq!(
+            affinity_kind_for_lifecycle(SessionLifecycleOutcome::NoAction),
+            None
+        );
     }
 }
