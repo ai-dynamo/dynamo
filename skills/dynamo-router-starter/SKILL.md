@@ -1,6 +1,11 @@
 ---
 name: dynamo-router-starter
 description: Start or patch Dynamo router modes and run router endpoint smoke checks. Use for round-robin, KV-aware, least-loaded, or device-aware routing setup; use recipe-runner for recipe deployment and troubleshoot for failure diagnosis.
+tags:
+  - dynamo
+  - router
+  - smoke-test
+  - bring-up
 ---
 
 # Dynamo Router Starter

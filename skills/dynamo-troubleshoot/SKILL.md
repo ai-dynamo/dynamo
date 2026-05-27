@@ -1,6 +1,11 @@
 ---
 name: dynamo-troubleshoot
 description: Diagnose failed or unhealthy Dynamo deployments. Use when pods, model-cache jobs, PVCs, workers, frontend/router health, endpoints, or benchmark jobs fail; use recipe-runner/router-starter before this for normal bring-up.
+tags:
+  - dynamo
+  - kubernetes
+  - troubleshooting
+  - day-2
 ---
 
 # Dynamo Troubleshoot
