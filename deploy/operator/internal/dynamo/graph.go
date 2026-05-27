@@ -1004,13 +1004,24 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 		skipVerify = *meshConfig.Istio.InsecureSkipVerify
 	}
 
+	tls := &istioNetworking.ClientTLSSettings{
+		Mode:               tlsMode,
+		InsecureSkipVerify: wrapperspb.Bool(skipVerify),
+	}
+	// Istio's validation webhook requires ClientCertificate and PrivateKey for
+	// MUTUAL mode (CaCertificates is optional). Plumb through the operator
+	// config values so the DR is accepted; for other modes these fields must
+	// remain empty per the Istio proto spec.
+	if tlsMode == istioNetworking.ClientTLSSettings_MUTUAL {
+		tls.ClientCertificate = meshConfig.Istio.ClientCertificate
+		tls.PrivateKey = meshConfig.Istio.PrivateKey
+		tls.CaCertificates = meshConfig.Istio.CaCertificates
+	}
+
 	dr.Spec = istioNetworking.DestinationRule{
 		Host: fmt.Sprintf("%s.%s.svc.cluster.local", normalizedName, namespace),
 		TrafficPolicy: &istioNetworking.TrafficPolicy{
-			Tls: &istioNetworking.ClientTLSSettings{
-				Mode:               tlsMode,
-				InsecureSkipVerify: wrapperspb.Bool(skipVerify),
-			},
+			Tls: tls,
 		},
 	}
 	return dr

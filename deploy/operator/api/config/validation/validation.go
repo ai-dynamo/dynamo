@@ -40,6 +40,7 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 	allErrs = append(allErrs, validateRBAC(config)...)
 	allErrs = append(allErrs, validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators"))...)
 	allErrs = append(allErrs, validateIngress(&config.Ingress, field.NewPath("ingress"))...)
+	allErrs = append(allErrs, validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh"))...)
 
 	return allErrs
 }
@@ -164,4 +165,44 @@ func validateIngress(ingress *configv1alpha1.IngressConfiguration, fldPath *fiel
 	_ = fldPath
 	_ = ingress
 	return nil
+}
+
+// validateServiceMesh validates the service mesh configuration. The most
+// important guard is that "MUTUAL" TLS mode requires a client certificate and
+// private key (and optionally a CA certificates file); without them Istio's
+// validation webhook rejects the EPP DestinationRule and the operator can
+// never finish reconciling the DGD.
+func validateServiceMesh(sm *configv1alpha1.ServiceMeshConfiguration, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if !sm.IsEnabled() || sm.Istio == nil {
+		return allErrs
+	}
+
+	istioPath := fldPath.Child("istio")
+	switch sm.Istio.TLSMode {
+	case "", "SIMPLE", "DISABLE", "ISTIO_MUTUAL":
+		// No additional fields required.
+	case "MUTUAL":
+		if sm.Istio.ClientCertificate == "" {
+			allErrs = append(allErrs, field.Required(
+				istioPath.Child("clientCertificate"),
+				`clientCertificate is required when tlsMode is "MUTUAL"`,
+			))
+		}
+		if sm.Istio.PrivateKey == "" {
+			allErrs = append(allErrs, field.Required(
+				istioPath.Child("privateKey"),
+				`privateKey is required when tlsMode is "MUTUAL"`,
+			))
+		}
+	default:
+		allErrs = append(allErrs, field.NotSupported(
+			istioPath.Child("tlsMode"),
+			sm.Istio.TLSMode,
+			[]string{"DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL"},
+		))
+	}
+
+	return allErrs
 }

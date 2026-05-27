@@ -3046,8 +3046,11 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `tlsMode` _string_ | TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").<br />Defaults to "SIMPLE". |  |  |
+| `tlsMode` _string_ | TLSMode is the Istio TLS mode for DestinationRules.<br />Supported values: "DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL".<br />Defaults to "SIMPLE". |  |  |
 | `insecureSkipVerify` _boolean_ | InsecureSkipVerify skips TLS certificate verification in DestinationRules.<br />Defaults to true (matching upstream GAIE behavior with self-signed certs). |  |  |
+| `clientCertificate` _string_ | ClientCertificate is the path (in the istio-proxy sidecar's filesystem)<br />to the file holding the client-side TLS certificate used for mTLS.<br />REQUIRED when TLSMode is "MUTUAL"; ignored for other modes. |  |  |
+| `privateKey` _string_ | PrivateKey is the path (in the istio-proxy sidecar's filesystem) to the<br />file holding the client-side TLS private key used for mTLS.<br />REQUIRED when TLSMode is "MUTUAL"; ignored for other modes. |  |  |
+| `caCertificates` _string_ | CaCertificates is the optional path (in the istio-proxy sidecar's<br />filesystem) to the file holding CA certificates used to verify the<br />server certificate. Used only when TLSMode is "MUTUAL"; for other modes<br />the field is ignored. |  |  |
 
 
 #### KaiSchedulerConfiguration
