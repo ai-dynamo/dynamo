@@ -281,12 +281,21 @@ class GMSStorageClient:
         export_elapsed = 0.0
         reserve_elapsed = 0.0
         map_elapsed = 0.0
+        access_elapsed = 0.0
         target_elapsed = 0.0
+
+        aligned_sizes = [
+            int(allocation.aligned_size) for allocation in allocations
+        ]
+        step_t0 = time.monotonic()
+        _arena_base, reserved_vas = mm.reserve_va_arena(aligned_sizes)
+        reserve_elapsed += time.monotonic() - step_t0
 
         export_chunk_size = MAX_FDS_PER_MESSAGE
         for start in range(0, len(allocations), export_chunk_size):
             allocation_chunk = allocations[start : start + export_chunk_size]
             manifest_chunk = manifest.allocations[start : start + export_chunk_size]
+            va_chunk = reserved_vas[start : start + export_chunk_size]
             chunk_fds: list[int] = []
             try:
                 allocation_ids = [
@@ -312,20 +321,18 @@ class GMSStorageClient:
                         )
                     old_id = entry.allocation_id
                     fd = chunk_fds[fd_idx]
-
-                    step_t0 = time.monotonic()
-                    va = mm.reserve_va(allocation.aligned_size)
-                    reserve_elapsed += time.monotonic() - step_t0
+                    va = va_chunk[fd_idx]
 
                     step_t0 = time.monotonic()
                     try:
-                        mm.map_va(
+                        mm.map_va_at_reserved(
                             fd,
                             va,
                             entry.size,
                             allocation.allocation_id,
                             entry.tag,
                             allocation.layout_slot,
+                            set_access=False,
                         )
                     finally:
                         # map_va imports and closes the POSIX FD, even if the
@@ -352,23 +359,30 @@ class GMSStorageClient:
                     except OSError:
                         pass
 
+        if reserved_vas:
+            step_t0 = time.monotonic()
+            mm.set_access_all_vas()
+            access_elapsed += time.monotonic() - step_t0
+
         total_elapsed = time.monotonic() - t0
         logger.info(
             "Phase A breakdown: allocations=%d bytes=%.2f GiB "
             "allocate_many=%.3fs export=%.3fs reserve_va=%.3fs "
-            "import_map_access=%.3fs target_build=%.3fs other=%.3fs",
+            "import_map=%.3fs set_access=%.3fs target_build=%.3fs other=%.3fs",
             len(targets),
             sum(int(entry.aligned_size) for entry in manifest.allocations) / (1 << 30),
             allocate_elapsed,
             export_elapsed,
             reserve_elapsed,
             map_elapsed,
+            access_elapsed,
             target_elapsed,
             total_elapsed
             - allocate_elapsed
             - export_elapsed
             - reserve_elapsed
             - map_elapsed
+            - access_elapsed
             - target_elapsed,
         )
         logger.info(

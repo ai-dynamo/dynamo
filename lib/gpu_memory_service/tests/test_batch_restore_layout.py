@@ -110,14 +110,35 @@ def test_restore_phase_a_uses_batched_allocation_api():
             return fds
 
         def reserve_va(self, size):
+            raise AssertionError("restore should use reserve_va_arena()")
+
+        def reserve_va_arena(self, sizes):
+            assert sizes == [4096, 8192]
             va = self._next_va
-            self._next_va += size
-            return va
+            self._next_va += sum(sizes)
+            return va, [va, va + 4096]
 
         def map_va(self, fd, va, size, allocation_id, tag, layout_slot):
+            raise AssertionError("restore should use map_va_at_reserved()")
+
+        def map_va_at_reserved(
+            self,
+            fd,
+            va,
+            size,
+            allocation_id,
+            tag,
+            layout_slot,
+            *,
+            set_access=True,
+        ):
+            assert set_access is False
             os.close(fd)
             self.mapped.append((va, size, 0, allocation_id, tag, layout_slot))
             return 0
+
+        def set_access_all_vas(self):
+            pass
 
     manifest = SaveManifest(
         version="1.0",

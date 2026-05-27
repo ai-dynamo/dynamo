@@ -176,6 +176,7 @@ class GMSClientMemoryManager:
         #                         prepare_scratch_for_reallocation.
         self._mappings: Dict[int, LocalMapping] = {}
         self._inverse_mapping: Dict[str, int] = {}
+        self._va_arenas: Dict[int, int] = {}
         self._scratch_mappings: Dict[int, _ScratchMapping] = {}
 
         self._unmapped = False
@@ -410,6 +411,49 @@ class GMSClientMemoryManager:
         aligned_size = align_to_granularity(size, self.granularity)
         return cumem_address_reserve(aligned_size, self.granularity)
 
+    def reserve_va_arena(self, sizes: List[int]) -> tuple[int, List[int]]:
+        """Reserve one contiguous VA arena and return per-allocation VAs.
+
+        This is a loader/restore optimization: CUDA graph stability only
+        requires the final virtual addresses to be stable, not one separate
+        `cuMemAddressReserve` call per server allocation. The server still owns
+        independent GMS allocations; this only packs the loader-side virtual
+        address reservations contiguously.
+
+        Args:
+            sizes: Allocation sizes. Each size is aligned to VMM granularity
+                before computing offsets.
+
+        Returns:
+            `(arena_base, vas)`. `arena_base` is the address that must be freed
+            with `free_va_arena()` if the caller does not subsequently register
+            all VAs with `map_va_at_reserved()`. `vas[i]` is the VA for
+            `sizes[i]`.
+        """
+        if not sizes:
+            return 0, []
+
+        aligned_sizes = [
+            align_to_granularity(size, self.granularity) for size in sizes
+        ]
+        total_size = sum(aligned_sizes)
+        arena_base = cumem_address_reserve(total_size, self.granularity)
+        self._va_arenas[arena_base] = total_size
+        vas: list[int] = []
+        offset = 0
+        for aligned_size in aligned_sizes:
+            vas.append(arena_base + offset)
+            offset += aligned_size
+        return arena_base, vas
+
+    def free_va_arena(self, arena_base: int, total_size: int) -> None:
+        """Release an arena reserved by reserve_va_arena()."""
+        if arena_base == 0:
+            return
+        aligned_size = align_to_granularity(total_size, self.granularity)
+        cumem_address_free(arena_base, aligned_size)
+        self._va_arenas.pop(arena_base, None)
+
     def map_va(
         self,
         fd: int,
@@ -441,6 +485,69 @@ class GMSClientMemoryManager:
         )
         return handle
 
+    def map_va_at_reserved(
+        self,
+        fd: int,
+        va: int,
+        size: int,
+        allocation_id: str,
+        tag: str,
+        layout_slot: int,
+        *,
+        set_access: bool = True,
+    ) -> int:
+        """Import FD, map into an already-reserved VA range, and track it.
+
+        Unlike `map_va`, this helper accepts VAs that may be slices of one
+        larger VA reservation. Tracked mappings still use the per-allocation
+        aligned size for unmap/release bookkeeping. Callers that pass
+        `set_access=False` must establish CUDA access over the mapped range
+        separately before using the memory.
+        """
+        assert self._granted_lock_type is not None
+        aligned_size = align_to_granularity(size, self.granularity)
+        handle = cumem_import_from_shareable_handle_close_fd(fd)
+        mapped = False
+        try:
+            cumem_map(va, aligned_size, handle)
+            mapped = True
+            if set_access:
+                cumem_set_access(
+                    va,
+                    aligned_size,
+                    self.device,
+                    self._granted_lock_type,
+                )
+            self._track_mapping(
+                LocalMapping(
+                    allocation_id=allocation_id,
+                    va=va,
+                    size=size,
+                    aligned_size=aligned_size,
+                    handle=handle,
+                    tag=tag,
+                    layout_slot=layout_slot,
+                )
+            )
+        except Exception:
+            if mapped:
+                try:
+                    cumem_unmap(va, aligned_size)
+                except Exception:
+                    pass
+            try:
+                cumem_release(handle)
+            except Exception:
+                pass
+            raise
+        return handle
+
+    def set_va_access(self, va: int, size: int) -> None:
+        """Set access for an already mapped VA range using current lock mode."""
+        assert self._granted_lock_type is not None
+        aligned_size = align_to_granularity(size, self.granularity)
+        cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
+
     def unmap_va(self, va: int) -> None:
         """Unmap a single VA: cuMemUnmap + release handle.
 
@@ -467,9 +574,19 @@ class GMSClientMemoryManager:
             mapping = self._mappings.get(va)
             if mapping is None:
                 return
-        cumem_address_free(va, mapping.aligned_size)
         self._mappings.pop(va, None)
         self._inverse_mapping.pop(mapping.allocation_id, None)
+        arena_base = self._arena_base_for_va(va)
+        if arena_base is None:
+            cumem_address_free(va, mapping.aligned_size)
+            return
+        arena_size = self._va_arenas[arena_base]
+        if not any(
+            arena_base <= other_va < arena_base + arena_size
+            for other_va in self._mappings
+        ):
+            cumem_address_free(arena_base, arena_size)
+            self._va_arenas.pop(arena_base, None)
 
     # ==================== Tier 2: Convenience ====================
 
@@ -570,6 +687,40 @@ class GMSClientMemoryManager:
             total_bytes / (1 << 30),
             len(self._mappings) + len(self._scratch_mappings),
         )
+
+    def set_access_all_vas(self) -> None:
+        """Set CUDA access over all tracked server-backed mappings.
+
+        When mappings live in contiguous arenas, use one `cuMemSetAccess` call
+        per arena and per discontiguous non-arena run. This keeps the general
+        memory-manager contract intact while allowing the GMS loader to avoid
+        thousands of per-allocation access calls.
+        """
+        assert self._granted_lock_type is not None
+        ranges: list[tuple[int, int]] = []
+        for va, mapping in self._mappings.items():
+            if mapping.handle == 0:
+                continue
+            ranges.append((va, va + mapping.aligned_size))
+
+        if not ranges:
+            return
+
+        ranges.sort()
+        merged: list[list[int]] = []
+        for start, end in ranges:
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+
+        for start, end in merged:
+            cumem_set_access(
+                start,
+                end - start,
+                self.device,
+                self._granted_lock_type,
+            )
 
     def remap_all_vas(self) -> None:
         """Re-import existing handles at preserved VAs.
@@ -812,6 +963,7 @@ class GMSClientMemoryManager:
                 pass
             self._mappings.clear()
             self._inverse_mapping.clear()
+            self._va_arenas.clear()
             self._scratch_mappings.clear()
         else:
             cuda_synchronize()
@@ -820,6 +972,9 @@ class GMSClientMemoryManager:
             for va in list(self._mappings.keys()):
                 self.unmap_va(va)
                 self.free_va(va)
+            for arena_base, arena_size in list(self._va_arenas.items()):
+                cumem_address_free(arena_base, arena_size)
+                self._va_arenas.pop(arena_base, None)
             self.abort()
         self._unmapped = False
         self._va_preserved = False
@@ -853,3 +1008,9 @@ class GMSClientMemoryManager:
     def _track_mapping(self, m: LocalMapping) -> None:
         self._mappings[m.va] = m
         self._inverse_mapping[m.allocation_id] = m.va
+
+    def _arena_base_for_va(self, va: int) -> Optional[int]:
+        for arena_base, arena_size in self._va_arenas.items():
+            if arena_base <= va < arena_base + arena_size:
+                return arena_base
+        return None
