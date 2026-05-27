@@ -528,6 +528,210 @@ def logger(request):
     logger.removeHandler(handler)
 
 
+# ---------------------------------------------------------------------------
+# Per-test VRAM + KV-cache snapshot (dynamo-metrics task #30).
+#
+# Lands four Allure labels on every GPU-marked test:
+#   vram_peak_mb        — max VRAM (sum across visible GPUs) during the test
+#   vram_end_mb         — VRAM at teardown (leak detection when paired w/ peak)
+#   kv_cache_tokens_end — KV cache token count at teardown (scraped from
+#                         DYNAMO_METRICS_URL/metrics if the env var is set)
+#   kv_cache_hit_rate   — KV cache hit rate at teardown
+#
+# The dynamo-metrics uploader picks these labels up and writes them to the
+# test index as sparse fields.
+#
+# Gated to GPU-marked tests (gpu_1 / gpu_2 / gpu_4 / gpu_8). Skips cleanly
+# when pynvml or allure is unavailable, or when NVML init fails (no GPU on
+# the runner). Never raises out of the fixture — a flaky measurement must
+# not be allowed to fail a passing test.
+# ---------------------------------------------------------------------------
+
+
+_GPU_MARKERS_REQUIRING_SNAPSHOT = ("gpu_1", "gpu_2", "gpu_4", "gpu_8")
+
+
+def _read_visible_vram_mb_sum(pynvml) -> Optional[float]:
+    """Sum of `memoryInfo.used` across all NVML-visible GPUs, in MiB.
+
+    Returns None on any NVML error so callers can skip the snapshot rather
+    than corrupting a test result with a partial reading.
+    """
+    try:
+        count = pynvml.nvmlDeviceGetCount()
+    except Exception:
+        return None
+    total_bytes = 0
+    for i in range(count):
+        try:
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+            total_bytes += int(mem.used)
+        except Exception:
+            # One bad device — skip it; keep summing the rest.
+            continue
+    return total_bytes / (1024 * 1024)
+
+
+def _scrape_kv_cache_metrics(metrics_url: str) -> dict:
+    """Pull KV-cache token + hit-rate from a Prometheus-text metrics endpoint.
+
+    Returns dict with optional `tokens` (int) and `hit_rate` (float) keys.
+    On any error (network, parse, timeout), returns {} — callers will simply
+    skip the corresponding Allure labels and the OS doc stays sparse-null.
+
+    Metric-name matching is intentionally loose to survive renames across
+    dynamo / vllm / sglang / trtllm variants.
+    """
+    import re
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(metrics_url, timeout=2) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return {}
+
+    out: dict = {}
+    # Loose patterns — match any metric whose name *contains* the substring.
+    # Prometheus text format: `name{labels} value` or `name value`.
+    tokens_re = re.compile(
+        r"^[^#\s][^\s{]*kv_cache_tokens[^\s]*\s+(?:\{[^}]*\}\s+)?([0-9.eE+-]+)\s*$",
+        re.MULTILINE,
+    )
+    hit_re = re.compile(
+        r"^[^#\s][^\s{]*kv_cache_hit_rate[^\s]*\s+(?:\{[^}]*\}\s+)?([0-9.eE+-]+)\s*$",
+        re.MULTILINE,
+    )
+    m_tok = tokens_re.search(body)
+    if m_tok:
+        try:
+            out["tokens"] = int(float(m_tok.group(1)))
+        except (ValueError, TypeError):
+            pass
+    m_hit = hit_re.search(body)
+    if m_hit:
+        try:
+            out["hit_rate"] = float(m_hit.group(1))
+        except (ValueError, TypeError):
+            pass
+    return out
+
+
+@pytest.fixture(autouse=True)
+def _gpu_resource_snapshot(request):
+    """Capture VRAM peak + end, plus optional KV-cache stats, per GPU test.
+
+    Emits values via @allure.dynamic.label so they ride along in the
+    *-result.json artifact and get picked up by the dynamo-metrics
+    uploader. Sparse — no labels emitted when:
+      - test has no `gpu_<N>` (N>=1) marker
+      - pynvml is unavailable / NVML init fails (CPU runners, dev laptops)
+      - allure is not installed
+    The background poller is best-effort: if it can't start (e.g. fork
+    restrictions), the fixture falls back to start/end-only snapshots.
+    """
+    # Marker gate — only run on tests that actually allocate GPU memory.
+    has_gpu_marker = any(
+        request.node.get_closest_marker(m) is not None
+        for m in _GPU_MARKERS_REQUIRING_SNAPSHOT
+    )
+    if not has_gpu_marker:
+        yield
+        return
+
+    # Soft imports — never block test execution on missing deps.
+    try:
+        import allure
+    except ImportError:
+        yield
+        return
+    try:
+        import pynvml
+    except ImportError:
+        yield
+        return
+    try:
+        pynvml.nvmlInit()
+    except Exception:
+        yield
+        return
+
+    import threading
+    import time as _time
+
+    start_mb = _read_visible_vram_mb_sum(pynvml)
+    if start_mb is None:
+        # NVML reported but couldn't read — skip cleanly.
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+        yield
+        return
+
+    # Peak tracker via background thread (100 ms cadence). Cheap and never
+    # blocks — daemon thread, joined with timeout.
+    peak_mb = [start_mb]
+    stop_evt = threading.Event()
+
+    def _poll_peak() -> None:
+        while not stop_evt.is_set():
+            current = _read_visible_vram_mb_sum(pynvml)
+            if current is not None and current > peak_mb[0]:
+                peak_mb[0] = current
+            stop_evt.wait(0.1)
+
+    poller: Optional[threading.Thread] = None
+    try:
+        poller = threading.Thread(target=_poll_peak, daemon=True)
+        poller.start()
+    except Exception:
+        poller = None  # fall back to start/end snapshots; no peak tracking
+
+    try:
+        yield
+    finally:
+        if poller is not None:
+            stop_evt.set()
+            poller.join(timeout=1.0)
+
+        end_mb = _read_visible_vram_mb_sum(pynvml)
+        if end_mb is None:
+            end_mb = peak_mb[0]   # best-effort
+
+        # Emit VRAM labels — int MiB values are sufficient granularity.
+        try:
+            allure.dynamic.label("vram_peak_mb", str(int(peak_mb[0])))
+            allure.dynamic.label("vram_end_mb",  str(int(end_mb)))
+        except Exception:
+            pass
+
+        # Optional KV-cache scrape. Only fires when DYNAMO_METRICS_URL is set
+        # — i.e. tests that actually boot a dynamo server can opt in by
+        # exporting the URL in their fixture chain. Hard 2s timeout, fully
+        # try/except wrapped — a stuck server must not hang teardown.
+        metrics_url = os.environ.get("DYNAMO_METRICS_URL")
+        if metrics_url:
+            kv = _scrape_kv_cache_metrics(metrics_url.rstrip("/") + "/metrics")
+            try:
+                if "tokens" in kv:
+                    allure.dynamic.label(
+                        "kv_cache_tokens_end", str(int(kv["tokens"]))
+                    )
+                if "hit_rate" in kv:
+                    allure.dynamic.label(
+                        "kv_cache_hit_rate", f"{float(kv['hit_rate']):.4f}"
+                    )
+            except Exception:
+                pass
+
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+
+
 def _item_has_marker(item, marker_name):
     """Check if a test item has a marker, including module-level pytestmark."""
     if item.get_closest_marker(marker_name):
