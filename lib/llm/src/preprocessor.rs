@@ -435,15 +435,31 @@ impl OpenAIPreprocessor {
         // directories where the family substring isn't in the path.
         #[cfg(feature = "lightseek-mm")]
         let model_dir_for_routing: Option<std::path::PathBuf> = mdc_model_dir(&mdc);
+        // TODO(mm-routing): fastokens lacks a special-token mutator, so it
+        // can't merge tokenizer_config.json specials and would BPE-shatter
+        // placeholders (e.g. Qwen2-VL `<|image_pad|>`). Disable MM-routing
+        // here; remove once fastokens upstream exposes the mutator.
         #[cfg(feature = "lightseek-mm")]
-        let image_token_inputs: Option<(String, String, std::path::PathBuf)> =
-            model_dir_for_routing.as_ref().map(|p| {
-                (
-                    mdc.source_path().to_string(),
-                    model_info.model_type(),
-                    p.clone(),
-                )
-            });
+        let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
+            let fastokens_active =
+                std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
+            if fastokens_active && model_dir_for_routing.is_some() {
+                tracing::warn!(
+                    target: "mm_routing",
+                    "DYN_TOKENIZER=fastokens is set; MM-aware KV routing disabled. \
+                     Unset DYN_TOKENIZER (or set it to 'default') to re-enable."
+                );
+                None
+            } else {
+                model_dir_for_routing.as_ref().map(|p| {
+                    (
+                        mdc.source_path().to_string(),
+                        model_info.model_type(),
+                        p.clone(),
+                    )
+                })
+            }
+        };
 
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
