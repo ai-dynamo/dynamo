@@ -423,9 +423,15 @@ fn register_calibrate_handler(
                     let request: CalibrationRequest = ctx.input;
                     let resolved = request.resolve(&defaults)?;
 
-                    // Cache hit path — bypass all exclusion gates.
+                    // Cache hit path — bypass all exclusion gates only when
+                    // the new request resolves to the same knobs that
+                    // produced the cached snapshot. A different sweep, OSL,
+                    // seed, or vocab range is a different experiment and
+                    // must trigger a re-run; otherwise the handler would
+                    // silently serve stale results for changed requests.
                     if !request.force
                         && let Some(snap) = cache.read().as_ref().cloned()
+                        && snap.resolved == resolved
                     {
                         return Ok(CalibrationResponse {
                             results: snap.results,
