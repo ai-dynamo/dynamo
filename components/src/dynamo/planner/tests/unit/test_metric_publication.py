@@ -17,7 +17,7 @@ Covers:
 """
 
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -29,6 +29,7 @@ from dynamo.planner.core.types import (
     TickInput,
     WorkerCounts,
 )
+from dynamo.planner.monitoring.planner_metrics import PREFIX, PlannerPrometheusMetrics
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -86,6 +87,7 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
 
 
 def _tick_input(now_s: float, num_p: int = 2, num_d: int = 3) -> TickInput:
+    """Build a TickInput with the given wall-clock time and worker counts."""
     return TickInput(
         now_s=now_s,
         worker_counts=WorkerCounts(ready_num_prefill=num_p, ready_num_decode=num_d),
@@ -100,6 +102,7 @@ class TestPublishInventoryAndGpuHours:
     whether the throughput-scaling path is enabled."""
 
     def test_replica_gauges_set_on_first_call(self):
+        """Prefill and decode replica gauges are written with current counts."""
         planner = _make_planner()
         pm = planner.prometheus_metrics
 
@@ -109,6 +112,7 @@ class TestPublishInventoryAndGpuHours:
         pm.num_decode_replicas.set.assert_called_once_with(3)
 
     def test_first_call_contributes_zero_gpu_hours(self):
+        """First tick has no prior timestamp so the gpu_hours delta is zero."""
         planner = _make_planner()
         pm = planner.prometheus_metrics
 
@@ -119,6 +123,7 @@ class TestPublishInventoryAndGpuHours:
         pm.gpu_hours.set.assert_called_once_with(0.0)
 
     def test_cumulative_gpu_hours_uses_wall_clock_delta(self):
+        """gpu_hours accumulates using wall-clock delta between ticks."""
         planner = _make_planner()
         pm = planner.prometheus_metrics
 
@@ -132,6 +137,7 @@ class TestPublishInventoryAndGpuHours:
         pm.gpu_hours.set.assert_called_with(pytest.approx(0.8))
 
     def test_accumulates_across_multiple_ticks(self):
+        """gpu_hours increases monotonically across successive ticks."""
         planner = _make_planner()
         # Two 5-second ticks with 1 prefill + 1 decode worker each on single GPUs.
         planner.config.prefill_engine_num_gpu = 1
@@ -151,6 +157,7 @@ class TestPublishInventoryAndGpuHours:
         assert planner._cumulative_gpu_hours == pytest.approx(20.0 / 3600.0)
 
     def test_prometheus_disabled_still_accumulates_gpu_hours(self):
+        """gpu_hours accumulates internally even when Prometheus export is off."""
         # Prometheus export off, but the HTML recorder / live dashboard
         # still consumes _cumulative_gpu_hours, so accumulation must
         # continue. Only the gauge publishes should be skipped.
@@ -169,6 +176,7 @@ class TestPublishInventoryAndGpuHours:
         pm.gpu_hours.set.assert_not_called()
 
     def test_handles_none_worker_counts(self):
+        """No gauge writes when worker_counts is None (states not yet available)."""
         planner = _make_planner()
         pm = planner.prometheus_metrics
 
@@ -186,6 +194,7 @@ class TestPublishInventoryAndGpuHours:
 def _diag(
     load_reason: str | None = None, throughput_reason: str | None = None
 ) -> TickDiagnostics:
+    """Build a TickDiagnostics with optional load/throughput decision reasons."""
     return TickDiagnostics(
         load_decision_reason=load_reason,
         throughput_decision_reason=throughput_reason,
@@ -193,6 +202,7 @@ def _diag(
 
 
 def _tick(run_load: bool, run_throughput: bool) -> ScheduledTick:
+    """Build a ScheduledTick with the given load/throughput scaling flags."""
     return ScheduledTick(
         at_s=0.0,
         run_load_scaling=run_load,
@@ -209,6 +219,7 @@ class TestReportDiagnosticsEnumGating:
     throughput Enum (and vice versa)."""
 
     def test_load_only_tick_does_not_touch_throughput_enum(self):
+        """A load-only tick writes the load Enum but leaves the throughput Enum untouched."""
         planner = _make_planner()
         pm = planner.prometheus_metrics
 
@@ -247,6 +258,7 @@ class TestReportDiagnosticsEnumGating:
         )
 
     def test_throughput_only_tick_does_not_touch_load_enum(self):
+        """A throughput-only tick writes the throughput Enum but leaves the load Enum untouched."""
         planner = _make_planner()
         pm = planner.prometheus_metrics
 
@@ -259,6 +271,7 @@ class TestReportDiagnosticsEnumGating:
         pm.load_scaling_decision.state.assert_not_called()
 
     def test_combined_tick_publishes_both(self):
+        """A tick with both paths enabled writes both Enum gauges."""
         planner = _make_planner()
         pm = planner.prometheus_metrics
 
@@ -271,6 +284,7 @@ class TestReportDiagnosticsEnumGating:
         pm.throughput_scaling_decision.state.assert_called_once_with("set_lower_bound")
 
     def test_run_tick_with_no_reason_still_writes_unset(self):
+        """A scaling path that ran without populating a reason writes 'unset'."""
         # Defensive: if a scaling path ran but didn't populate a reason,
         # explicitly write "unset" so stale state from a prior tick
         # doesn't linger.
@@ -283,6 +297,7 @@ class TestReportDiagnosticsEnumGating:
         pm.throughput_scaling_decision.state.assert_not_called()
 
     def test_skipped_when_prometheus_disabled(self):
+        """No Enum writes when prometheus_port=0."""
         planner = _make_planner(prometheus_enabled=False)
         pm = planner.prometheus_metrics
 
@@ -383,13 +398,6 @@ class TestPlannerPrometheusMetricsHasSlaTargetGauges:
 
     def test_metrics_object_has_sla_target_gauge_attributes(self):
         """Instance attributes sla_target_ttft_ms and sla_target_itl_ms must exist."""
-        from unittest.mock import MagicMock
-
-        from dynamo.planner.monitoring.planner_metrics import (
-            PREFIX,
-            PlannerPrometheusMetrics,
-        )
-
         with patch(
             "dynamo.planner.monitoring.planner_metrics.Gauge"
         ) as mock_gauge, patch("dynamo.planner.monitoring.planner_metrics.Enum"):
