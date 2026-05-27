@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 AND CC-BY-4.0
 #
 # Vendored from NVIDIA/skills/.github/workflows/team-request.yml @ 6b92ccf5d498d42394487eab30ef7afbc4206d00
 # Keep aligned with upstream; the supported watched paths are fixed.
