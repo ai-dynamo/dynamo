@@ -21,7 +21,7 @@ metadata:
 spec:
   pvcs:
   - create: false
-    name: model-cache
+    name: shared-model-cache
   services:
     Frontend:
       componentType: frontend
@@ -29,10 +29,17 @@ spec:
         - name: HF_HOME
           value: /shared-models
       extraPodSpec:
+        # vllm-runtime:1.1.1 has a built-in ENTRYPOINT — overriding command crashes the Rust binary.
         mainContainer:
-          command: [python, -m, dynamo.frontend]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
+          # Without this mount, Dynamo runtime fails to register the model card with
+          # "Failed to create cache directory /shared-models/hub: Permission denied"
+          # → /v1/models returns {data:[]} and chat completions 404.
+          volumeMounts:
+          - { name: shared-model-cache, mountPath: /shared-models }
+        volumes:
+        - { name: shared-model-cache, persistentVolumeClaim: { claimName: shared-model-cache } }
       replicas: 1
       resources:
         requests: { cpu: "4" }
@@ -55,21 +62,54 @@ spec:
              {"interfaceName":"eth4","network":"rdma-2"},
              {"interfaceName":"eth5","network":"rdma-3"}]
       extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        imagePullSecrets:
+        - name: nvcr-pull-secret
+        tolerations:
+        - { key: nvidia.com/gpu,                            operator: Exists, effect: NoSchedule }
+        - { key: kubernetes.io/arch,                        operator: Equal, value: arm64, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-0,         operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-1,         operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-2,         operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-3,         operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-0.IP,      operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-1.IP,      operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-2.IP,      operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-3.IP,      operator: Exists, effect: NoSchedule }
         affinity:
           podAntiAffinity:
+            # Two-level anti-affinity:
+            # (1) Hard: different host (basic correctness).
+            # (2) Hard: different GCE topology block (~rack). GB200 NVL72 shares NVLink
+            #     within a rack — without rack-level separation, NIXL would short-circuit
+            #     via cuda_ipc / NVLink at ~900 GB/s, masking the actual RoCE BW we
+            #     want to measure. The gce-topology-block label is per-rack on GKE A4X.
             requiredDuringSchedulingIgnoredDuringExecution:
+            # Operator labels worker pods with sub-component-type=prefill/decode
+            # (component-type itself is "worker", which matches both — too broad).
             - labelSelector:
                 matchExpressions:
-                - key: nvidia.com/dynamo-component-type
+                - key: nvidia.com/dynamo-sub-component-type
                   operator: In
-                  values: [worker]
+                  values: [prefill, decode]
+              topologyKey: cloud.google.com/gce-topology-block
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-sub-component-type
+                  operator: In
+                  values: [prefill, decode]
               topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
           args:
+          # Local snapshot path bypasses ModelExpress + HF rate-limit (model is on lustre).
           - --model
+          - /shared-models/hub/models--Qwen--Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
+          - --served-model-name
           - Qwen/Qwen3-32B
           - --disaggregation-mode
           - prefill
@@ -103,7 +143,10 @@ spec:
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
           - { name: NCCL_CROSS_NIC,     value: "0" }
           # --- GKE NCCL/GIB plugin + driver libs (mounted from host) ---
-          - { name: LD_LIBRARY_PATH,    value: "/usr/local/gib/lib64:/usr/local/nvidia/lib64" }
+          # /opt/nvidia/nvda_nixl/lib64 must come FIRST so NIXL_TELEMETRY_ENABLE=y can
+          # load libcore.so.1.3 (otherwise libtelemetry_exporter_prometheus.so fails
+          # and engine init crashes — same gotcha as the AWS EFA recipe).
+          - { name: LD_LIBRARY_PATH,    value: "/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64" }
           - { name: NCCL_DEBUG,         value: "WARN" }
           # --- Dynamo / vLLM ---
           - { name: DYN_HEALTH_CHECK_ENABLED, value: "false" }
@@ -112,23 +155,38 @@ spec:
           volumeMounts:
           - { name: gib,    mountPath: /usr/local/gib }
           - { name: nvidia, mountPath: /usr/local/nvidia }
+          # Mount model PVC at container level (service-level mount gets overridden).
+          - { name: shared-model-cache, mountPath: /shared-models }
+        volumes:
+        - { name: gib,    hostPath: { path: /home/kubernetes/bin/gib } }
+        - { name: nvidia, hostPath: { path: /home/kubernetes/bin/nvidia } }
+        - { name: shared-model-cache, persistentVolumeClaim: { claimName: shared-model-cache } }
       replicas: 1
       resources:
         limits:
           gpu: '4'
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
         requests:
           gpu: '4'
           custom:
             ephemeral-storage: "2Gi"
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
       subComponentType: prefill
-      volumeMounts:
-      - name: model-cache
-        mountPoint: /shared-models
-      volumes:
-      - name: gib
-        hostPath: { path: /home/kubernetes/bin/gib }
-      - name: nvidia
-        hostPath: { path: /home/kubernetes/bin/nvidia }
 
     VllmDecodeWorker:
       componentType: worker
@@ -146,21 +204,54 @@ spec:
              {"interfaceName":"eth4","network":"rdma-2"},
              {"interfaceName":"eth5","network":"rdma-3"}]
       extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        imagePullSecrets:
+        - name: nvcr-pull-secret
+        tolerations:
+        - { key: nvidia.com/gpu,                            operator: Exists, effect: NoSchedule }
+        - { key: kubernetes.io/arch,                        operator: Equal, value: arm64, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-0,         operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-1,         operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-2,         operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-3,         operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-0.IP,      operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-1.IP,      operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-2.IP,      operator: Exists, effect: NoSchedule }
+        - { key: networking.gke.io.networks/rdma-3.IP,      operator: Exists, effect: NoSchedule }
         affinity:
           podAntiAffinity:
+            # Two-level anti-affinity:
+            # (1) Hard: different host (basic correctness).
+            # (2) Hard: different GCE topology block (~rack). GB200 NVL72 shares NVLink
+            #     within a rack — without rack-level separation, NIXL would short-circuit
+            #     via cuda_ipc / NVLink at ~900 GB/s, masking the actual RoCE BW we
+            #     want to measure. The gce-topology-block label is per-rack on GKE A4X.
             requiredDuringSchedulingIgnoredDuringExecution:
+            # Operator labels worker pods with sub-component-type=prefill/decode
+            # (component-type itself is "worker", which matches both — too broad).
             - labelSelector:
                 matchExpressions:
-                - key: nvidia.com/dynamo-component-type
+                - key: nvidia.com/dynamo-sub-component-type
                   operator: In
-                  values: [worker]
+                  values: [prefill, decode]
+              topologyKey: cloud.google.com/gce-topology-block
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-sub-component-type
+                  operator: In
+                  values: [prefill, decode]
               topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
           args:
+          # Local snapshot path bypasses ModelExpress + HF rate-limit (model is on lustre).
           - --model
+          - /shared-models/hub/models--Qwen--Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
+          - --served-model-name
           - Qwen/Qwen3-32B
           - --disaggregation-mode
           - decode
@@ -192,7 +283,10 @@ spec:
           - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
           - { name: NCCL_CROSS_NIC,     value: "0" }
-          - { name: LD_LIBRARY_PATH,    value: "/usr/local/gib/lib64:/usr/local/nvidia/lib64" }
+          # /opt/nvidia/nvda_nixl/lib64 must come FIRST so NIXL_TELEMETRY_ENABLE=y can
+          # load libcore.so.1.3 (otherwise libtelemetry_exporter_prometheus.so fails
+          # and engine init crashes — same gotcha as the AWS EFA recipe).
+          - { name: LD_LIBRARY_PATH,    value: "/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64" }
           - { name: NCCL_DEBUG,         value: "WARN" }
           - { name: DYN_HEALTH_CHECK_ENABLED, value: "false" }
           - { name: HF_HOME,                  value: /shared-models }
@@ -200,20 +294,35 @@ spec:
           volumeMounts:
           - { name: gib,    mountPath: /usr/local/gib }
           - { name: nvidia, mountPath: /usr/local/nvidia }
+          # Mount model PVC at container level (service-level mount gets overridden).
+          - { name: shared-model-cache, mountPath: /shared-models }
+        volumes:
+        - { name: gib,    hostPath: { path: /home/kubernetes/bin/gib } }
+        - { name: nvidia, hostPath: { path: /home/kubernetes/bin/nvidia } }
+        - { name: shared-model-cache, persistentVolumeClaim: { claimName: shared-model-cache } }
       replicas: 1
       resources:
         limits:
           gpu: '4'
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
         requests:
           gpu: '4'
           custom:
             ephemeral-storage: "2Gi"
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
       subComponentType: decode
-      volumeMounts:
-      - name: model-cache
-        mountPoint: /shared-models
-      volumes:
-      - name: gib
-        hostPath: { path: /home/kubernetes/bin/gib }
-      - name: nvidia
-        hostPath: { path: /home/kubernetes/bin/nvidia }

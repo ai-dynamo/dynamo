@@ -63,14 +63,16 @@ spec:
     - { name: BASE_DIR,      value: /perf-cache }
     - { name: VARIANT_SLUG,  value: gke-roce }
     resources:
-      requests: { cpu: "8",  memory: 16Gi }
-      limits:   { cpu: "16", memory: 32Gi }
+      # GKE customer-cpu nodes are small (8 CPU / 28 GiB allocatable, mostly
+      # already used by daemonsets). Bench client is HTTP-only — modest needs OK.
+      requests: { cpu: "2", memory: 4Gi }
+      limits:   { cpu: "4", memory: 8Gi }
     volumeMounts:
-    - { name: perf-cache,  mountPath: /perf-cache }
-    - { name: model-cache, mountPath: /shared-models }
+    - { name: perf-cache,         mountPath: /perf-cache }
+    - { name: shared-model-cache, mountPath: /shared-models }
     workingDir: /workspace
   volumes:
   - name: perf-cache
     persistentVolumeClaim: { claimName: perf-cache }
-  - name: model-cache
-    persistentVolumeClaim: { claimName: model-cache }
+  - name: shared-model-cache
+    persistentVolumeClaim: { claimName: shared-model-cache }

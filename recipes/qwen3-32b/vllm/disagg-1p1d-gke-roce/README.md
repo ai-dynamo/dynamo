@@ -103,19 +103,68 @@ tsh kubectl cp ${NAMESPACE}/q32b-1p1d-gke-roce-benchmark:/perf-cache/artifacts .
 - **NVL72 NVLink shortcut.** GB200 NVL72 racks expose NVLink across the entire 72-GPU rack. If both pods land in the same rack, NIXL/UCX may pick `cuda_ipc` over RoCE — measured BW will reflect NVLink (~900 GB/s peer-to-peer), not the RoCE fabric (~50 GB/s peak per pod). Cross-rack scheduling is required to measure RoCE; if not achievable, document the result as "intra-rack NVLink, not RoCE".
 - **`networking.gke.io/default-interface: eth0`** must be set or the pod gets a default route through one of the RDMA NICs and TCP traffic (control plane, etcd, NATS, HF download) breaks.
 
-## Results
+## Results — measured 2026-05-26, GKE A4X GB200 + 4-NIC ConnectX-7 RoCE
 
-**Status: BLOCKED** — recipe authoring complete, but deploy/verify/benchmark not executed in this run. The benchmark agent's sandbox disallowed shell execution (no `tsh`, no `kubectl`, no cluster reachability), so the deploy/verify/benchmark steps above could not be run end-to-end. Re-run from a shell with Teleport access to fill in numbers.
+**Topology:** Prefill TP=4 on `customer-gpu-o7v` pool, rack `f01beb15700434ef...`. Decode TP=4 on `customer-gpu-w0e` pool, rack `9fd9a52c852d6f77...`. **Confirmed cross-rack placement** via `cloud.google.com/gce-topology-block` topologyKey — both prefill and decode are in different NVL72 racks, so KV transfer goes over RoCE (not the intra-rack NVLink shortcut). Frontend on a `customer-cpu` node.
+
+**Workload:** Mooncake conversation_trace (12,031 sessions, 3.23 req/s fixed schedule), aiperf v0.6.0.
+
+### Headline (aggregate transport + steady-state)
 
 | Metric | Value |
 |---|---|
-| Mean NIXL KV transfer BW (GB/s) | BLOCKED — see status above |
-| P50 TTFT (ms) | BLOCKED |
-| P99 TTFT (ms) | BLOCKED |
-| P50 ITL (ms) | BLOCKED |
-| Goodput (req/s) | BLOCKED |
-| aiperf artifact | BLOCKED |
+| **Aggregate NIXL KV BW** | **~10.72 GB/s** (8867.66 GiB rank-0 × TP=4 / 3555 s) |
+| Benchmark wall-clock duration | 3555 sec (~59 min — *faster than AWS at 62 min*) |
+| Request throughput | 3.38 req/s (kept pace with 3.23 req/s arrival, no queue buildup) |
+| Successful request count | **12,031 / 12,031 (100%)** |
 
-### Topology note
+### TTFT (NOT queue-bound — first cluster in family to achieve this on 1P1D)
 
-_(record after deploy)_ Did prefill + decode land on different NVL72 racks? If yes, the BW number reflects RoCE-over-CX-7. If no (same rack), it reflects NVLink/cuda_ipc and is NOT comparable to the AWS-EFA / AKS-IB / Nebius-IB / Nscale-IB numbers. The pod anti-affinity in `deploy.yaml` enforces "different host" but not "different NVL72 rack" — on `dynamo-gcp-dev-02` two random nodes may still share an NVL72. Spread across `cloud.google.com/gce-topology-block` (or whatever rack-level label the cluster exposes) if cross-rack measurement is required.
+| Statistic | Value |
+|---|---|
+| Mean TTFT | 3,733 ms (~3.7 s) |
+| P50 TTFT | 2,599 ms |
+| P90 TTFT | 8,975 ms |
+| P99 TTFT | 16,074 ms |
+| Min TTFT | 78 ms |
+| Max TTFT | 21,161 ms |
+
+### ITL + per-user (steady-state decode)
+
+| Statistic | Value |
+|---|---|
+| Mean ITL | 11.38 ms |
+| P50 ITL | 10.09 ms |
+| P99 ITL | 30.45 ms |
+| Mean per-user throughput | 96.53 tok/s |
+| P50 per-user throughput | 99.13 tok/s |
+| Total output throughput (aggregate) | 1140.85 tok/s |
+
+### Goodput
+
+| Metric | Value |
+|---|---|
+| **Goodput @ TTFT<2s, ITL<25ms** | **1.42 req/s** |
+| GoodRequestCount | 5,031 / 12,031 (41.8% met SLA) |
+
+**This is the only cluster in the family with non-zero meaningful goodput on 1P1D Mooncake.** AWS H100 1P+1D had 0.02 req/s goodput (queue-bound).
+
+aiperf artifact: `dynamo-gcp-dev-02 / jihao / perf-cache PVC / artifacts/Qwen3-32B_gke-roce_20260527-0223/`. Includes:
+- `profile_export_aiperf.csv` — full per-percentile stats
+- `profile_export_aiperf.json` — same in JSON
+- `profile_export.jsonl` — per-request records
+- `server_metrics_export.csv` — GPU telemetry
+
+### Comparison across the four measured clusters
+
+| | AWS H100/EFA TP=8 | AKS A100/IB TP=8 (4 NICs) | Nscale B200/TCP TP=4 | **GKE GB200/RoCE TP=4** |
+|---|---|---|---|---|
+| Aggregate KV BW | 10.70 GB/s | 3.23 GB/s | ~1.0 GB/s (TCP) | **10.72 GB/s** |
+| Mean ITL | 12.63 ms | 15.34 ms | 8.45 ms | **11.38 ms** |
+| Mean per-user throughput | 82.75 tok/s | 68.53 tok/s | 133.77 tok/s | **96.53 tok/s** |
+| Mean TTFT | 108 s (queue-bound) | 44 min (queue-bound) | 53 min (queue-bound) | **3.7 s (not queue-bound)** |
+| Goodput @ TTFT<2s | 0.02 req/s | 0 | 0 | **1.42 req/s** |
+| Completion rate | 100% | 58% | 17% | **100%** |
+| TP | 8 | 8 | 4 | 4 |
+
+**Takeaway:** GKE GB200 with TP=4 and 4 ConnectX-7 NICs matched AWS p5/H100 TP=8 / 32-EFA on aggregate transport (10.72 vs 10.70 GB/s), beat it on TTFT/goodput (queue stayed bounded), and on per-user throughput (96 vs 83 tok/s). The combination of: (a) faster B200 compute, (b) Lustre-backed model load, (c) GB200-RoCE multi-rail NIC, (d) cross-rack placement that forced real RoCE traversal — together produced the best-rounded measurement in the family.
