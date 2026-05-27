@@ -162,16 +162,6 @@ class DynamoVllmArgGroup(ArgGroup):
             "See vLLM multi-node data parallel documentation for more details.",
         )
 
-        # ModelExpress P2P
-        add_argument(
-            g,
-            flag_name="--model-express-url",
-            env_var="MODEL_EXPRESS_URL",
-            default=None,
-            help="ModelExpress P2P server URL (e.g., http://mx-server:8080). "
-            "Required when using --load-format=mx-source or --load-format=mx-target.",
-        )
-
         # GMS (GPU Memory Service) shadow mode
         add_negatable_bool_argument(
             g,
@@ -287,9 +277,6 @@ class DynamoVllmConfig(ConfigBase):
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
-
-    # ModelExpress P2P
-    model_express_url: Optional[str] = None
 
     # GMS shadow mode
     gms_shadow_mode: bool = False

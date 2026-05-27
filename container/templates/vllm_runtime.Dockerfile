@@ -23,6 +23,7 @@ ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
+ARG MODELEXPRESS_REF
 
 WORKDIR /workspace
 
@@ -192,6 +193,21 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 RUN uv pip uninstall triton && \
     uv pip install --force-reinstall --no-deps triton-xpu
 {% endif %}
+
+{% if context.vllm.enable_modelexpress == "true" %}
+RUN --mount=type=bind,source=./container/deps/vllm/install_modelexpress.sh,target=/tmp/install_modelexpress.sh \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    export MODELEXPRESS_REF="${MODELEXPRESS_REF}"; \
+    bash /tmp/install_modelexpress.sh
+
+# vLLM discovers out-of-tree load formats through VLLM_PLUGINS. Set the image
+# default so --load-format=modelexpress works out of the box. A deployment that
+# overrides VLLM_PLUGINS for additional plugins must include modelexpress too.
+ENV VLLM_PLUGINS=modelexpress
+{% endif %}
+
 {% endif %}
 
 {% if context.vllm.enable_media_ffmpeg == "true" %}

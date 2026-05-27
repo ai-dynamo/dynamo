@@ -2127,6 +2127,8 @@ async def register_model(
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
     needs: Optional[List[List[WorkerType]]] = None,
+    self_host_metadata: Optional[bool] = None,
+    ignore_weights: bool = False,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2145,6 +2147,9 @@ async def register_model(
         peer dependencies. `needs` is a DNF list — each inner list is an
         AND-set, the outer list is OR. `worker_type` is required; backends
         declare it literally at each call site.
+
+    `ignore_weights` is accepted for backend compatibility. Registration only
+    consumes tokenizer/config metadata; model engines own weight loading.
     """
     ...
 

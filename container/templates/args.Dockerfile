@@ -109,13 +109,12 @@ ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
 
-# ModelExpress for P2P weight transfer (optional)
-ARG ENABLE_MODELEXPRESS_P2P={{ context.vllm.enable_modelexpress_p2p }}
-ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
-
 # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
 ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 {% endif %}
+
+# ModelExpress Python client for model loading (optional)
+ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
 {%- endif -%}
 
 {% if framework == "sglang" and device == "xpu" -%}
