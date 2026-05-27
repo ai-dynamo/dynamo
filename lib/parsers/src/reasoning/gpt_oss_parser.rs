@@ -195,6 +195,25 @@ fn append_current_by_channel(
 }
 
 impl ReasoningParser for GptOssReasoningParser {
+    fn finish_reasoning_stream(&mut self) -> ParserResult {
+        let pending = std::mem::take(&mut self.pending_text);
+        if pending.is_empty() {
+            return ParserResult::default();
+        }
+
+        match self.parser.current_channel().as_deref() {
+            Some("analysis") => ParserResult {
+                normal_text: String::new(),
+                reasoning_text: pending,
+            },
+            Some("final") | Some("commentary") => ParserResult {
+                normal_text: pending,
+                reasoning_text: String::new(),
+            },
+            _ => ParserResult::default(),
+        }
+    }
+
     fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult {
         let encoded_tokens;
         let token_ids = if token_ids.is_empty() {
@@ -495,6 +514,30 @@ mod tests {
         }
         assert_eq!(reasoning_text_incr, "thinking");
         assert_eq!(normal_text_incr, "answer");
+    }
+
+    #[test]
+    fn test_gpt_oss_reasoning_parser_streaming_flushes_pending_suffix_on_finish() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let result = parser.parse_reasoning_streaming_incremental(
+            "<|channel|>analysis<|message|>thinking<|e",
+            &[],
+        );
+        let finish = parser.finish_reasoning_stream();
+        assert_eq!(result.reasoning_text, "thinking");
+        assert_eq!(finish.reasoning_text, "<|e");
+        assert_eq!(finish.normal_text, "");
+        let finish = parser.finish_reasoning_stream();
+        assert_eq!(finish.reasoning_text, "");
+        assert_eq!(finish.normal_text, "");
+
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let result = parser
+            .parse_reasoning_streaming_incremental("<|channel|>final<|message|>answer<|e", &[]);
+        let finish = parser.finish_reasoning_stream();
+        assert_eq!(result.normal_text, "answer");
+        assert_eq!(finish.normal_text, "<|e");
+        assert_eq!(finish.reasoning_text, "");
     }
 
     #[test] // REASONING.stream.2.b
