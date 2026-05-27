@@ -441,8 +441,7 @@ impl OpenAIPreprocessor {
         // here; remove once fastokens upstream exposes the mutator.
         #[cfg(feature = "lightseek-mm")]
         let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
-            let fastokens_active =
-                std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
+            let fastokens_active = std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
             if fastokens_active && model_dir_for_routing.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
