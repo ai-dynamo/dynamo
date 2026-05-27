@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_kv_router::{
@@ -27,9 +26,11 @@ use tracing::Instrument;
 use crate::{
     kv_router::{
         KvRouter,
-        agent_controller::{AgentController, SessionCloseAction, SessionLifecycleOutcome},
         metrics::RouterRequestMetrics,
-        sticky_sessions::{AffinityKind, InMemoryAffinityStore, StickySessionRouter},
+        sticky::{
+            coordinator::{StickySessionCoordinator, sticky_allowed_for_phase},
+            lifecycle::SessionCloseAction,
+        },
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -43,9 +44,7 @@ pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
     /// Sticky session routing. Lazily activated when requests carry session_control.
-    sticky_sessions: Arc<StickySessionRouter>,
-    /// Session lifecycle RPCs (open/close). Client is lazy (OnceCell).
-    agent_controller: Arc<AgentController>,
+    pub(super) sticky: Arc<StickySessionCoordinator>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -266,31 +265,13 @@ impl KvPushRouter {
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        // Agent controller manages session lifecycle RPCs (open/close).
-        // Always created; the event-plane client inside is lazy (OnceCell)
-        // so there is zero cost until a request actually carries session_control.
         let component = chooser.client().endpoint.component().clone();
-        let agent_controller = Arc::new(AgentController::new(component));
-
-        // Sticky sessions share expiry handling with the agent controller so
-        // router-side reap also closes the worker session.
-        let on_expire = {
-            let controller = agent_controller.clone();
-            Arc::new(move |session_id: String, worker_id: u64| {
-                controller
-                    .clone()
-                    .close_expired_session(session_id, worker_id);
-            }) as Arc<dyn Fn(String, u64) + Send + Sync>
-        };
-        let sticky_sessions = Arc::new(StickySessionRouter::new(
-            InMemoryAffinityStore::new_with_on_expire(Some(on_expire)),
-        ));
+        let sticky = Arc::new(StickySessionCoordinator::new(component));
 
         KvPushRouter {
             inner,
             chooser,
-            sticky_sessions,
-            agent_controller,
+            sticky,
         }
     }
 
@@ -574,37 +555,6 @@ impl KvPushRouter {
         })
     }
 
-    pub(crate) fn sticky_worker_for_phase(
-        &self,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-    ) -> Option<WorkerWithDpRank> {
-        let session_id = sticky_session_id_for_phase(request, phase)?;
-        self.sticky_sessions.peek_session(session_id)
-    }
-
-    pub(crate) fn refresh_sticky_worker_for_phase(
-        &self,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-    ) {
-        let Some(session_id) = sticky_session_id_for_phase(request, phase) else {
-            return;
-        };
-        let Some(sc) = request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.session_control.as_ref())
-        else {
-            return;
-        };
-        if sc.action.is_some() {
-            return;
-        }
-
-        self.sticky_sessions.resolve_session(session_id);
-    }
-
     fn sticky_worker_ineligibility_for_phase(
         &self,
         request: &PreprocessedRequest,
@@ -643,7 +593,7 @@ impl KvPushRouter {
             return false;
         };
 
-        let Some(session_id) = sticky_session_id_for_phase(request, phase) else {
+        let Some((session_id, _binding)) = self.sticky.unbind_for_phase(request, phase) else {
             return false;
         };
         tracing::warn!(
@@ -654,7 +604,6 @@ impl KvPushRouter {
             reason = %reason,
             "Sticky worker is no longer eligible; removing session affinity"
         );
-        let _ = self.sticky_sessions.unbind(session_id);
         true
     }
 
@@ -719,7 +668,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let should_record = !is_query_only && self.chooser.indexer().records_routing_decisions();
         let block_size = self.chooser.block_size() as usize;
-        let sticky_worker = match self.sticky_worker_for_phase(&request, phase) {
+        let sticky_worker = match self.sticky.worker_for_phase(&request, phase) {
             Some(worker)
                 if self.unbind_ineligible_sticky_worker_for_phase(
                     &context_id,
@@ -746,7 +695,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         {
             Ok(selection) => {
                 if sticky_worker.is_some() && !is_query_only {
-                    self.refresh_sticky_worker_for_phase(&request, phase);
+                    self.sticky.refresh_worker_for_phase(&request, phase);
                 }
                 selection
             }
@@ -879,37 +828,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
-        // Session lifecycle RPCs via agent controller.
+        // Session lifecycle RPCs.
         // Fails fast if session_control.open is requested but the client can't be created.
-        let route_outcome = self
-            .agent_controller
-            .on_routed(
-                &request,
-                instance_id,
-                &context_id,
-                Some(&*self.sticky_sessions),
-            )
-            .await?;
-        if let Some(kind) = affinity_kind_for_lifecycle(route_outcome.lifecycle)
-            && let Some(sc) = request
-                .routing
-                .as_ref()
-                .and_then(|r| r.session_control.as_ref())
-        {
-            let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-            let ttl = Duration::from_secs(sc.timeout);
-            match kind {
-                AffinityKind::RouterOnly => {
-                    self.sticky_sessions
-                        .bind_router_only(&sc.session_id, worker, ttl);
-                }
-                AffinityKind::EngineBacked => {
-                    // Bind/rebind only after the worker accepted open_session.
-                    self.sticky_sessions
-                        .bind_engine_session(&sc.session_id, worker, ttl);
-                }
-            }
-        }
+        let worker = WorkerWithDpRank::new(instance_id, dp_rank);
+        let route_outcome = self.sticky.on_routed(&request, worker, &context_id).await?;
         let deferred_close = route_outcome.deferred_close;
 
         let (mut backend_input, context) = request.into_parts();
@@ -1035,51 +957,6 @@ fn pinned_worker_hint(
     }
 }
 
-fn sticky_allowed_for_phase(phase: RequestPhase, routing: Option<&RoutingHints>) -> bool {
-    let Some(routing) = routing else {
-        return false;
-    };
-    if routing.session_control.is_none() {
-        return false;
-    }
-
-    match phase {
-        RequestPhase::Prefill => {
-            routing.prefill_worker_id.is_none()
-                && routing.prefill_dp_rank.is_none()
-                && routing.backend_instance_id.is_none()
-        }
-        RequestPhase::Decode => {
-            routing.decode_worker_id.is_none()
-                && routing.dp_rank.is_none()
-                && routing.backend_instance_id.is_none()
-        }
-        RequestPhase::Aggregated => {
-            routing.backend_instance_id.is_none() && routing.dp_rank.is_none()
-        }
-    }
-}
-
-fn affinity_kind_for_lifecycle(lifecycle: SessionLifecycleOutcome) -> Option<AffinityKind> {
-    match lifecycle {
-        SessionLifecycleOutcome::OpenSucceeded => Some(AffinityKind::EngineBacked),
-        SessionLifecycleOutcome::BindRequested => Some(AffinityKind::RouterOnly),
-        _ => None,
-    }
-}
-
-fn sticky_session_id_for_phase(request: &PreprocessedRequest, phase: RequestPhase) -> Option<&str> {
-    let routing = request.routing.as_ref()?;
-    if !sticky_allowed_for_phase(phase, Some(routing)) {
-        return None;
-    }
-
-    routing
-        .session_control
-        .as_ref()
-        .map(|sc| sc.session_id.as_str())
-}
-
 /// A direct routing wrapper for `RouterMode::Direct`.
 ///
 /// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
@@ -1127,19 +1004,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
 #[cfg(test)]
 mod tests {
-    use super::{affinity_kind_for_lifecycle, pinned_worker_hint, sticky_allowed_for_phase};
-    use crate::kv_router::agent_controller::SessionLifecycleOutcome;
-    use crate::kv_router::sticky_sessions::AffinityKind;
+    use super::pinned_worker_hint;
     use crate::protocols::common::{preprocessor::RoutingHints, timing::RequestPhase};
-    use crate::protocols::openai::nvext::SessionControl;
-
-    fn session_control() -> SessionControl {
-        SessionControl {
-            session_id: "sess-1".to_string(),
-            action: None,
-            timeout: 300,
-        }
-    }
 
     #[test]
     fn pinned_worker_hint_prefill_uses_prefill_worker_before_backend() {
@@ -1178,111 +1044,5 @@ mod tests {
 
         let hint = pinned_worker_hint(RequestPhase::Aggregated, Some(&routing));
         assert_eq!(hint, Some((9, Some(7))));
-    }
-
-    #[test]
-    fn sticky_is_noop_without_session_control() {
-        let routing = RoutingHints::default();
-        assert!(!sticky_allowed_for_phase(
-            RequestPhase::Aggregated,
-            Some(&routing)
-        ));
-    }
-
-    #[test]
-    fn sticky_allowed_when_only_session_control_is_present() {
-        let routing = RoutingHints {
-            session_control: Some(session_control()),
-            ..Default::default()
-        };
-        assert!(sticky_allowed_for_phase(
-            RequestPhase::Aggregated,
-            Some(&routing)
-        ));
-        assert!(sticky_allowed_for_phase(
-            RequestPhase::Prefill,
-            Some(&routing)
-        ));
-        assert!(sticky_allowed_for_phase(
-            RequestPhase::Decode,
-            Some(&routing)
-        ));
-    }
-
-    #[test]
-    fn sticky_skips_phase_specific_explicit_pins() {
-        let prefill = RoutingHints {
-            session_control: Some(session_control()),
-            prefill_worker_id: Some(1),
-            ..Default::default()
-        };
-        assert!(!sticky_allowed_for_phase(
-            RequestPhase::Prefill,
-            Some(&prefill)
-        ));
-
-        let prefill_rank = RoutingHints {
-            session_control: Some(session_control()),
-            prefill_dp_rank: Some(2),
-            ..Default::default()
-        };
-        assert!(!sticky_allowed_for_phase(
-            RequestPhase::Prefill,
-            Some(&prefill_rank)
-        ));
-
-        let decode = RoutingHints {
-            session_control: Some(session_control()),
-            decode_worker_id: Some(3),
-            ..Default::default()
-        };
-        assert!(!sticky_allowed_for_phase(
-            RequestPhase::Decode,
-            Some(&decode)
-        ));
-
-        let decode_rank = RoutingHints {
-            session_control: Some(session_control()),
-            dp_rank: Some(4),
-            ..Default::default()
-        };
-        assert!(!sticky_allowed_for_phase(
-            RequestPhase::Decode,
-            Some(&decode_rank)
-        ));
-
-        let aggregated = RoutingHints {
-            session_control: Some(session_control()),
-            backend_instance_id: Some(5),
-            ..Default::default()
-        };
-        assert!(!sticky_allowed_for_phase(
-            RequestPhase::Aggregated,
-            Some(&aggregated)
-        ));
-    }
-
-    #[test]
-    fn open_lifecycle_binds_engine_backed_affinity() {
-        assert_eq!(
-            affinity_kind_for_lifecycle(SessionLifecycleOutcome::OpenSucceeded),
-            Some(AffinityKind::EngineBacked)
-        );
-    }
-
-    #[test]
-    fn bind_lifecycle_binds_router_only_affinity() {
-        assert_eq!(
-            affinity_kind_for_lifecycle(SessionLifecycleOutcome::BindRequested),
-            Some(AffinityKind::RouterOnly)
-        );
-    }
-
-    #[test]
-    fn no_action_lifecycle_does_not_create_affinity() {
-        assert_eq!(
-            affinity_kind_for_lifecycle(SessionLifecycleOutcome::NoAction),
-            None
-        );
     }
 }
