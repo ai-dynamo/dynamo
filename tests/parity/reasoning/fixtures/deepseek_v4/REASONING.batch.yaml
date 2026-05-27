@@ -70,7 +70,7 @@ cases:
   REASONING.batch.2.d:
     description: Normal text around reasoning
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: before <think>thinking</think> after
     expected:
       dynamo:
@@ -147,7 +147,7 @@ cases:
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated by Dynamo
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: <think>first</think> middle <think>second</think> done
     expected:
       dynamo: &d_9
