@@ -39,9 +39,7 @@ pub async fn try_tool_call_parse_aggregate(
 /// Finalize-only variant of [`try_tool_call_parse_aggregate`] that enables
 /// the common EOF recovery paths (missing outer end-token, truncated JSON args).
 /// Use this from non-streaming aggregator paths — never from streaming jail
-/// early-exit logic. Stream-end jail finalization uses
-/// [`try_tool_call_parse_aggregate_stream_finalize`] so DSML can salvage
-/// completed invokes without changing batch/non-streaming behavior.
+/// early-exit logic.
 pub async fn try_tool_call_parse_aggregate_finalize(
     message: &str,
     parser_str: Option<&str>,
@@ -57,9 +55,7 @@ pub async fn try_tool_call_parse_aggregate_finalize(
 
 /// Stream-end variant of [`try_tool_call_parse_aggregate_finalize`].
 ///
-/// It keeps the normal finalize recovery for JSON/XML and additionally lets
-/// DSML recover complete invokes from an unterminated outer wrapper. This is
-/// intentionally not used by batch/non-streaming aggregate paths.
+/// This delegates to the same EOF recovery as non-streaming finalization.
 pub async fn try_tool_call_parse_aggregate_stream_finalize(
     message: &str,
     parser_str: Option<&str>,

@@ -22,7 +22,10 @@ cases:
             type: string
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
         normal_text: ''
       vllm:
         calls: []
@@ -45,15 +48,17 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_b
-        reason: "Dynamo's DSML parser leaves <｜DSML｜…> envelope in normal_text on missing/orphan end marker (impl-defined recovery)"
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: |-
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
           </｜DSML｜invoke>
           </｜DSML｜tool_calls>
-      vllm: *d_5_b
+        reason: "vLLM returns orphan DSML markup as normal text; Dynamo strips protocol markup rather than leaking it"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   TOOLCALLING.batch.5.c:
@@ -94,7 +99,13 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
       sglang:
@@ -126,7 +137,10 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
       sglang:

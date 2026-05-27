@@ -83,6 +83,9 @@ pub fn try_tool_call_parse_dsml(
     // Check if tool call block exists
     let start_idx = trimmed.find(&config.block_start);
     if start_idx.is_none() {
+        if let Some(dsml_idx) = find_first_dsml_markup(trimmed) {
+            return Ok((vec![], Some(trimmed[..dsml_idx].to_string())));
+        }
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
@@ -138,6 +141,13 @@ pub fn try_tool_call_parse_dsml(
     }
 
     Ok((tool_calls, Some(pre_block_text)))
+}
+
+fn find_first_dsml_markup(text: &str) -> Option<usize> {
+    ["<｜DSML｜", "</｜DSML｜"]
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min()
 }
 
 /// Extract all tool calls from DSML formatted text.
@@ -973,10 +983,10 @@ mod tests {
 
     /// `TOOLCALLING.stream.4.a` — missing end-token recovery at stream finalize.
     ///
-    /// Stream finalization flips `allow_eof_recovery=true`, treating an
+    /// Finalization flips `allow_eof_recovery=true`, treating an
     /// unterminated outer block as extending to EOF and recovering complete
-    /// inner invokes. Batch/non-streaming aggregate parsing remains strict.
-    #[test] // TOOLCALLING.stream.4.a — V4 variant
+    /// inner invokes.
+    #[test] // TOOLCALLING.batch.5.a, TOOLCALLING.stream.4.a — V4 variant
     fn test_parse_deepseek_v4_missing_end_token_with_recovery() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"get_weather\">\n\
@@ -1014,6 +1024,45 @@ mod tests {
         assert_eq!(args1["x"], "1");
         assert_eq!(name2, "b");
         assert_eq!(args2["y"], "2");
+    }
+
+    #[test] // TOOLCALLING.batch.5.e — V4 variant
+    fn test_parse_deepseek_v4_recovery_keeps_complete_prior_invoke() {
+        let input = "I'll start by fetching the weather for both Boston and New York at the same time!\n\
+<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">Boston</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">New York";
+
+        let config = get_v4_recovery_test_config();
+        let (calls, normal_text) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            normal_text.as_deref(),
+            Some(
+                "I'll start by fetching the weather for both Boston and New York at the same time!\n"
+            )
+        );
+        let (name, args) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "Boston");
+    }
+
+    #[test] // TOOLCALLING.batch.5.b — V4 variant
+    fn test_parse_deepseek_v4_orphan_dsml_markup_does_not_leak() {
+        let input = "prefix <｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"city\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+
+        let config = get_v4_recovery_test_config();
+        let (calls, normal_text) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert!(calls.is_empty());
+        assert_eq!(normal_text.as_deref(), Some("prefix "));
     }
 
     /// `TOOLCALLING.batch.4` — malformed JSON in a `string="false"` parameter value falls back

@@ -116,25 +116,25 @@ pub async fn try_tool_call_parse(
 }
 
 /// Same as [`detect_and_parse_tool_call`] but flips `allow_eof_recovery=true`
-/// on the JSON / XML configs so finalize / non-streaming aggregate paths
-/// recover from missing-end-token / truncated-JSON instead of silently
-/// dropping the call. Streaming jails MUST keep using the non-recovery
-/// variant — otherwise `should_exit_jail_early` fires before the end-token
-/// has actually arrived (see jail.rs).
+/// on the JSON / XML / DSML configs so finalize / non-streaming aggregate
+/// paths recover from missing-end-token / truncated-JSON instead of silently
+/// dropping the call. Streaming jails MUST keep using the non-recovery variant
+/// — otherwise `should_exit_jail_early` fires before the end-token has
+/// actually arrived (see jail.rs).
 pub async fn detect_and_parse_tool_call_with_recovery(
     message: &str,
     parser_str: Option<&str>,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    detect_and_parse_tool_call_with_recovery_options(message, parser_str, tools, false).await
+    detect_and_parse_tool_call_with_recovery_options(message, parser_str, tools, true).await
 }
 
 /// Stream-end finalize variant of [`detect_and_parse_tool_call_with_recovery`].
 ///
 /// DeepSeek V4's vLLM streaming parser emits a tool call once a complete
 /// `<｜DSML｜invoke>...</｜DSML｜invoke>` arrives, even if the outer
-/// `</｜DSML｜tool_calls>` wrapper never appears before EOS. Keep that recovery
-/// scoped to stream finalization so batch/non-streaming parity remains strict.
+/// `</｜DSML｜tool_calls>` wrapper never appears before EOS. Batch/non-streaming
+/// finalization now uses the same DSML recovery.
 pub async fn detect_and_parse_tool_call_with_stream_finalize_recovery(
     message: &str,
     parser_str: Option<&str>,
@@ -1910,7 +1910,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(args["timezone"], "Asia/Shanghai");
     }
     #[tokio::test]
-    async fn test_deepseek_v4_common_recovery_stays_strict_without_outer_close() {
+    async fn test_deepseek_v4_common_recovery_recovers_without_outer_close() {
         let input = r#"<｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_datetime">
 <｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
@@ -1921,8 +1921,13 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
                 .await
                 .expect("Failed to parse");
 
-        assert!(tool_calls.is_empty());
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_datetime");
         assert_eq!(normal_text, Some("".to_string()));
+
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["timezone"], "Asia/Shanghai");
     }
 
     #[tokio::test]
