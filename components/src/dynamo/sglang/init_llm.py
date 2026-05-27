@@ -12,6 +12,7 @@ from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.gc_control import configure_gc
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
@@ -49,6 +50,7 @@ async def init_decode(
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
 ) -> None:
+    configure_gc("decode")
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
@@ -194,6 +196,7 @@ async def init_prefill(
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
 ) -> None:
+    configure_gc("prefill")
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
