@@ -29,6 +29,11 @@ from dynamo.sglang.health_check import (
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
+try:
+    from dynamo.sglang import register as sglang_register
+except ImportError:
+    sglang_register = None
+
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
 TEST_DIR = REPO_ROOT / "tests"
@@ -513,7 +518,8 @@ def test_should_fetch_model_keeps_default_non_local_fetch():
 
 @pytest.mark.asyncio
 async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeypatch):
-    from dynamo.sglang import register as sglang_register
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
 
     captured: dict = {}
 
