@@ -11,7 +11,10 @@ try:
     from gpu_memory_service.snapshot.backends import nixl_gds
     from gpu_memory_service.snapshot.backends.nixl_common import NixlTransferResources
     from gpu_memory_service.snapshot.backends.nixl_gds import _NixlGDSTransferSession
-    from gpu_memory_service.snapshot.transfer import FileTransferSource, GMSTransferTarget
+    from gpu_memory_service.snapshot.transfer import (
+        FileTransferSource,
+        GMSTransferTarget,
+    )
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",

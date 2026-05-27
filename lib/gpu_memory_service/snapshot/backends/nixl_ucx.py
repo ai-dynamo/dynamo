@@ -362,9 +362,7 @@ class _NixlUCXTransferSession:
                 continue
             try:
                 if state == "ERR":
-                    raise RuntimeError(
-                        f"NIXL UCX transfer failed: {transfer.label}"
-                    )
+                    raise RuntimeError(f"NIXL UCX transfer failed: {transfer.label}")
                 if state != "DONE":
                     raise RuntimeError(
                         f"NIXL UCX transfer ended in unexpected state {state!r}: "

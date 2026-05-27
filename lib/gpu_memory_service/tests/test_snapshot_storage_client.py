@@ -76,7 +76,9 @@ def test_load_to_gms_streams_targets_in_manifest_order(monkeypatch):
         name = "fake-streaming"
 
         def start_restore(self, sources):
-            events.append(("start_restore", [source.allocation_id for source in sources]))
+            events.append(
+                ("start_restore", [source.allocation_id for source in sources])
+            )
             return session
 
         def close(self):

@@ -155,7 +155,9 @@ def test_ucx_streaming_starts_ready_allocation_before_all_targets(monkeypatch):
             label=source.allocation_id,
         )
 
-    monkeypatch.setattr(session, "_prepare_source_transfer", fake_prepare_source_transfer)
+    monkeypatch.setattr(
+        session, "_prepare_source_transfer", fake_prepare_source_transfer
+    )
 
     try:
         session.submit_targets({"alloc-a": targets["alloc-a"]})
