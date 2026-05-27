@@ -560,16 +560,17 @@ fn default_session_timeout() -> u64 {
 ///
 /// Always requires `session_id`. The `action` field is optional:
 /// - `action: "open"` on the first turn creates a streaming session on the worker
+/// - `action: "bind"` creates router-only sticky affinity without worker RPCs
 /// - `action: "close"` on the last turn frees session KV after generation
 /// - No `action` on intermediate turns -- just provides `session_id` for sticky routing
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SessionControl {
     /// Unique session identifier. Present on every turn for sticky routing.
     pub session_id: String,
-    /// Lifecycle action: `"open"` or `"close"`. Omit on intermediate turns.
+    /// Lifecycle action: `"open"`, `"bind"`, or `"close"`. Omit on intermediate turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<SessionAction>,
-    /// Inactivity timeout in seconds (default 300, only used with `action: "open"`).
+    /// Inactivity timeout in seconds (default 300, used with `action: "open"` and `action: "bind"`).
     #[serde(default = "default_session_timeout")]
     pub timeout: u64,
 }
@@ -579,6 +580,7 @@ pub struct SessionControl {
 #[serde(rename_all = "snake_case")]
 pub enum SessionAction {
     Open,
+    Bind,
     Close,
 }
 
@@ -701,6 +703,12 @@ mod tests {
         let sc_close = r#"{"session_id": "sub-1", "action": "close"}"#;
         let sc: SessionControl = serde_json::from_str(sc_close).unwrap();
         assert_eq!(sc.action, Some(SessionAction::Close));
+        assert_eq!(sc.timeout, 300);
+
+        // Bind action creates router-only affinity
+        let sc_bind = r#"{"session_id": "sub-1", "action": "bind"}"#;
+        let sc: SessionControl = serde_json::from_str(sc_bind).unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Bind));
         assert_eq!(sc.timeout, 300);
 
         // Continue (no action, just session_id for sticky routing)

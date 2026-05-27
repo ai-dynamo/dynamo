@@ -74,7 +74,7 @@ def _normalize_normal_text(v: Any) -> Any:
 
     Engines disagree on the carrier for "no narration":
       * Dynamo emits ``""`` (or ``"\\n"`` carried through between back-to-back
-        tool-call envelopes — see DSML PARSER.batch.2.b).
+        tool-call envelopes — see DSML TOOLCALLING.batch.2.b).
       * vLLM emits ``None``.
       * SGLang emits ``""``.
 

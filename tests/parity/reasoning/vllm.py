@@ -14,7 +14,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 
 from tests.parity.common import ReasoningResult
 
-# Harmony text-level fallback regexes. Mirror tests/parity/parser/vllm.py so the
+# Harmony text-level fallback regexes. Mirror tests/parity/toolcalling/vllm.py so the
 # behavior matches when get_encoding() can't load the tiktoken vocab (e.g. CI
 # runners with no reach to openaipublic.blob.core.windows.net).
 _HARMONY_MESSAGE_RE = re.compile(
@@ -36,7 +36,7 @@ class _HarmonyEncodingUnavailable(RuntimeError):
     from openaipublic.blob.core.windows.net on first use. CI runners without
     reach to that CDN fail with HarmonyError. The reasoning fixtures fall back
     to a text-level harmony state machine when this happens — mirrors what
-    tests/parity/parser/vllm.py already does for the tool-calling parity path.
+    tests/parity/toolcalling/vllm.py already does for the tool-calling parity path.
     """
 
 

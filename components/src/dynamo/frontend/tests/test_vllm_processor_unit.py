@@ -410,3 +410,81 @@ class TestSchemaAwareToolParser:
             f"got {type(args['profile']).__name__}: {args['profile']!r}"
         )
         assert args["profile"] == {"name": "Alice", "age": 30}
+
+
+# ---------------------------------------------------------------------------
+# _prepare_request: chat_template_kwargs forwarding
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.core
+class TestChatTemplateKwargsForwarding:
+    """chat_template_kwargs from the request are forwarded to ChatParams.
+
+    Uses Qwen3 which supports enable_thinking: False to suppress <think> blocks.
+    """
+
+    @staticmethod
+    def _messages():
+        return [{"role": "user", "content": "Hello"}]
+
+    def _prepare(self, request, tokenizer):
+        """Return (chat_params, messages) from _prepare_request."""
+        _, _, _, messages, chat_params = _prepare_request(
+            request,
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        return chat_params, messages
+
+    def _render(self, tokenizer, chat_params) -> str:
+        """Render prompt text using the chat_params template kwargs."""
+        kwargs = {**chat_params.chat_template_kwargs, "tokenize": False}
+        return tokenizer.apply_chat_template(self._messages(), **kwargs)
+
+    def test_qwen3_enable_thinking_true_no_closed_think_block(self, tokenizer):
+        """enable_thinking=True leaves reasoning open (model generates <think> itself)."""
+        chat_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
+        )
+        prompt = self._render(tokenizer, chat_params)
+        assert "</think>" not in prompt
+
+    def test_qwen3_thinking_flag_changes_tokens(self, tokenizer):
+        """enable_thinking=True vs False produces different rendered prompts."""
+        think_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
+        )
+        no_think_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer,
+        )
+        assert self._render(tokenizer, think_params) != self._render(
+            tokenizer, no_think_params
+        )
+
+    def test_reasoning_effort_forwarded_to_template_kwargs(self, tokenizer):
+        """reasoning_effort is always present in chat_params.chat_template_kwargs."""
+        chat_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "reasoning_effort": "low",
+            },
+            tokenizer,
+        )
+        assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
