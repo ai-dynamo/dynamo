@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Torch integration coverage for GMS-backed tensors and modules.
@@ -16,8 +16,7 @@ import time
 from typing import cast
 
 import pytest
-
-from conftest import HAS_CUDA, HAS_GMS, HAS_TORCH
+from _deps import HAS_CUDA, HAS_GMS, HAS_TORCH
 
 if not HAS_GMS:
     pytest.skip(

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """GMS runtime flow coverage.
@@ -22,8 +22,7 @@ import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import pytest
-
-from conftest import HAS_GMS, HAS_PYNVML
+from _deps import HAS_GMS, HAS_PYNVML
 
 if not HAS_GMS:
     pytest.skip(
