@@ -13,6 +13,8 @@ from typing import Callable, Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
+    AllocateManyRequest,
+    AllocateManyResponse,
     AllocateRequest,
     AllocateResponse,
     CommitRequest,
@@ -270,6 +272,36 @@ class GMS:
                     size=info.size,
                     aligned_size=info.aligned_size,
                     layout_slot=info.layout_slot,
+                ),
+                -1,
+                False,
+            )
+
+        if msg_type is AllocateManyRequest:
+            if self.state != ServerState.RW:
+                raise AssertionError("RW state is not active")
+
+            infos = await self._allocations.allocate_many(
+                [(int(spec.size), str(spec.tag)) for spec in msg.allocations],
+                is_connected=is_connected,
+                on_oom=lambda: self._events.append(
+                    GMSRuntimeEvent(
+                        kind="allocation_oom",
+                        allocation_count=self._allocations.allocation_count,
+                    )
+                ),
+            )
+            return (
+                AllocateManyResponse(
+                    allocations=[
+                        AllocateResponse(
+                            allocation_id=info.allocation_id,
+                            size=info.size,
+                            aligned_size=info.aligned_size,
+                            layout_slot=info.layout_slot,
+                        )
+                        for info in infos
+                    ]
                 ),
                 -1,
                 False,

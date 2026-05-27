@@ -51,7 +51,12 @@ from gpu_memory_service.common.cuda_utils import (
     cumem_unmap,
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.common.protocol.messages import (
+    AllocateManyRequest,
+    AllocateResponse,
+    AllocationSpec,
+    GetAllocationResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +300,39 @@ class GMSClientMemoryManager:
                 f"{aligned_size} vs {response.aligned_size}"
             )
         return response.allocation_id, int(response.layout_slot)
+
+    def allocate_handles(self, specs: List[tuple[int, str]]) -> List[AllocateResponse]:
+        """Allocate multiple cuMem handles on the server in one RPC."""
+        self._require_rw()
+        if not specs:
+            return []
+
+        aligned_specs = [
+            (align_to_granularity(size, self.granularity), tag) for size, tag in specs
+        ]
+        response = self._client_rpc.allocate_many_info(
+            AllocateManyRequest(
+                allocations=[
+                    AllocationSpec(size=aligned_size, tag=tag)
+                    for aligned_size, tag in aligned_specs
+                ]
+            )
+        )
+        if len(response.allocations) != len(aligned_specs):
+            raise RuntimeError(
+                "GMS allocate_many response count mismatch: "
+                f"{len(response.allocations)} vs {len(aligned_specs)}"
+            )
+
+        for alloc, (aligned_size, _tag) in zip(
+            response.allocations, aligned_specs, strict=True
+        ):
+            if int(alloc.aligned_size) != aligned_size:
+                raise RuntimeError(
+                    "GMS allocation alignment mismatch: "
+                    f"{aligned_size} vs {alloc.aligned_size}"
+                )
+        return response.allocations
 
     def export_handle(self, allocation_id: str) -> int:
         """Export allocation as POSIX FD."""

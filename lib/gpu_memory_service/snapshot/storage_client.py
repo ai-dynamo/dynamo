@@ -265,10 +265,37 @@ class GMSStorageClient:
         t0 = time.monotonic()
         id_map: Dict[str, str] = {}
         targets: Dict[str, GMSTransferTarget] = {}
-        for entry in manifest.allocations:
+
+        allocations = mm.allocate_handles(
+            [(int(entry.size), str(entry.tag)) for entry in manifest.allocations]
+        )
+        if len(allocations) != len(manifest.allocations):
+            raise RuntimeError(
+                "GMS batch allocation count mismatch: "
+                f"{len(allocations)} vs {len(manifest.allocations)}"
+            )
+
+        for entry, allocation in zip(
+            manifest.allocations, allocations, strict=True
+        ):
+            if int(allocation.aligned_size) != int(entry.aligned_size):
+                raise RuntimeError(
+                    "GMS restore allocation size mismatch for "
+                    f"{entry.allocation_id}: {allocation.aligned_size} vs "
+                    f"{entry.aligned_size}"
+                )
             old_id = entry.allocation_id
-            va = mm.create_mapping(size=entry.size, tag=entry.tag)
-            id_map[old_id] = mm.mappings[va].allocation_id
+            fd = mm.export_handle(allocation.allocation_id)
+            va = mm.reserve_va(allocation.aligned_size)
+            mm.map_va(
+                fd,
+                va,
+                entry.size,
+                allocation.allocation_id,
+                entry.tag,
+                allocation.layout_slot,
+            )
+            id_map[old_id] = allocation.allocation_id
             targets[old_id] = GMSTransferTarget(
                 allocation_id=old_id,
                 va=va,
@@ -276,7 +303,7 @@ class GMSStorageClient:
                 byte_count=entry.aligned_size,
             )
         logger.info(
-            "Phase A complete: allocated %d GMS VAs in %.3fs",
+            "Phase A complete: batch allocated and mapped %d GMS VAs in %.3fs",
             len(targets),
             time.monotonic() - t0,
         )

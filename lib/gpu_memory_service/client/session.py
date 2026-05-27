@@ -11,6 +11,8 @@ from typing import List, Optional, Tuple
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
+    AllocateManyRequest,
+    AllocateManyResponse,
     AllocateRequest,
     AllocateResponse,
     CommitRequest,
@@ -143,6 +145,11 @@ class _GMSClientSession:
     def allocate(self, size: int, tag: str = "default") -> Tuple[str, int]:
         response = self.allocate_info(size=size, tag=tag)
         return response.allocation_id, response.aligned_size
+
+    def allocate_many_info(
+        self, request: AllocateManyRequest
+    ) -> AllocateManyResponse:
+        return self._transport.request(request, AllocateManyResponse)
 
     def export(self, allocation_id: str) -> int:
         response, fd = self._transport.request_with_fd(

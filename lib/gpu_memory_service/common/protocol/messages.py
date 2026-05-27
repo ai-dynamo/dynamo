@@ -61,6 +61,19 @@ class AllocateResponse(msgspec.Struct, tag="allocate_response"):
     layout_slot: int
 
 
+class AllocationSpec(msgspec.Struct):
+    size: int
+    tag: str = "default"
+
+
+class AllocateManyRequest(msgspec.Struct, tag="allocate_many_request"):
+    allocations: List[AllocationSpec]
+
+
+class AllocateManyResponse(msgspec.Struct, tag="allocate_many_response"):
+    allocations: List[AllocateResponse]
+
+
 class ExportAllocationRequest(msgspec.Struct, tag="export_allocation_request"):
     allocation_id: str
 
@@ -191,6 +204,8 @@ Message = Union[
     GetAllocationStateResponse,
     AllocateRequest,
     AllocateResponse,
+    AllocateManyRequest,
+    AllocateManyResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
     GetAllocationRequest,

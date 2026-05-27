@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Callable, Optional
 from uuid import uuid4
@@ -170,6 +171,36 @@ class GMSAllocationManager:
             info.layout_slot,
         )
         return info
+
+    async def allocate_many(
+        self,
+        specs: Sequence[tuple[int, str]],
+        *,
+        is_connected: Optional[Callable[[], bool]] = None,
+        on_oom: Optional[Callable[[], None]] = None,
+    ) -> list[AllocationInfo]:
+        """Allocate multiple independent CUDA handles in one server request."""
+        infos: list[AllocationInfo] = []
+        t0 = time.monotonic()
+        for size, tag in specs:
+            infos.append(
+                await self.allocate(
+                    size,
+                    tag,
+                    is_connected=is_connected,
+                    on_oom=on_oom,
+                )
+            )
+
+        if infos:
+            total_bytes = sum(info.aligned_size for info in infos)
+            logger.info(
+                "Allocated %d GMS handles in %.3fs (%.2f GiB)",
+                len(infos),
+                time.monotonic() - t0,
+                total_bytes / (1 << 30),
+            )
+        return infos
 
     def export_allocation(self, allocation_id: str) -> int:
         info = self.get_allocation(allocation_id)
