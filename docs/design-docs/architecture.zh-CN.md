@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Overall Architecture
-subtitle: Architecture and components of the Dynamo inference runtime
+title: 总体架构
+subtitle: Dynamo 推理运行时的架构与组件
 ---
 
 <p align="left">
@@ -149,7 +149,7 @@ Fault tolerance 嵌入在各层中：
 
 ## 性能依据
 
-### Disaggregated Serving
+### 分离式服务
 
 分离 prefill 和 decode 可以提升利用率，并支持按阶段扩缩容。
 

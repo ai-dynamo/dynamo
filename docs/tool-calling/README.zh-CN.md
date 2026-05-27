@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Tool Calling
-subtitle: Parse tool calls from model output and surface them as OpenAI-compatible tool_calls
+title: 工具调用
+subtitle: 从模型输出中解析 tool call，并以兼容 OpenAI 的 tool_calls 形式呈现
 ---
 
 <p align="left">

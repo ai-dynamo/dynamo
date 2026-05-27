@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Planner Guide
+title: Planner 指南
 ---
 
 <p align="left">
@@ -14,16 +14,18 @@ Dynamo Planner 是一个自动扩缩容控制器，会在运行时调整 prefill
 
 ## 扩缩容模式
 
-planner 支持三个优化目标，这些目标决定扩缩容决策的方式：
+planner 支持四个优化目标，这些目标决定扩缩容决策的方式：
 
 - **`throughput`**（默认）：基于队列深度和 KV cache 利用率使用静态阈值。不需要 SLA 目标或 profiling。开箱即用。
 - **`latency`**：与 `throughput` 采用相同方法，但使用更激进的阈值，即更早扩容并容忍更少排队。适合对延迟敏感的工作负载。
+- **`load`**：使用用户定义的 prefill 队列 token 阈值和 decode KV 利用率阈值，进行反应式的基于负载扩缩容。
 - **`sla`**：使用基于回归的性能模型，并指定 TTFT/ITL 目标。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
 
 **何时使用哪种模式：**
 
 - 从 **`throughput`**（默认）开始，它无需配置即可立即工作。
 - 如果工作负载有严格的延迟要求，并且你更倾向于过度预配置而不是排队，请切换到 **`latency`**。
+- 当你希望通过 prefill 队列和 decode KV 利用率阈值直接控制扩缩容时，请使用 **`load`**。
 - 当你有部署前 profiling 数据，并希望以特定 TTFT/ITL 值为目标时，请使用 **`sla`**。
 
 ## PlannerConfig 参考
@@ -65,9 +67,9 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`sla`：基于回归的扩缩容，并使用 ttft_ms/itl_ms 目标。 |
+| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：基于回归的扩缩容，并使用 ttft_ms/itl_ms 目标。 |
 
-当 `optimization_target` 为 `throughput` 或 `latency` 时，会自动启用基于负载的扩缩容，并禁用基于吞吐量的扩缩容。`ttft_ms`/`itl_ms` 字段会被忽略。
+当 `optimization_target` 为 `throughput`、`latency` 或 `load` 时，会自动启用基于负载的扩缩容，并禁用基于吞吐量的扩缩容。`ttft_ms`/`itl_ms` 字段会被忽略。
 
 ### 扩缩容模式字段（SLA 模式）
 

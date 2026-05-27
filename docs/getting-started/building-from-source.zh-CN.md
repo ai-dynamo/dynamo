@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-sidebar-title: Building from Source
-description: Build Dynamo from source for development and contributions
+sidebar-title: 从源代码构建
+description: 从源代码构建 Dynamo，用于开发和贡献
 ---
 
 <p align="left">

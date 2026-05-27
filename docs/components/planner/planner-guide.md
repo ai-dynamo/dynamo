@@ -14,16 +14,18 @@ For a quick overview, see the [Planner overview](README.md). For architecture in
 
 ## Scaling Modes
 
-The planner supports three optimization targets that determine how scaling decisions are made:
+The planner supports four optimization targets that determine how scaling decisions are made:
 
 - **`throughput`** (default): Uses static thresholds on queue depth and KV cache utilization. No SLA targets or profiling needed. Works out of the box.
 - **`latency`**: Same approach as `throughput` but with more aggressive thresholds — scales up earlier and tolerates less queuing. Ideal for latency-sensitive workloads.
+- **`load`**: Uses user-defined prefill queue token thresholds and decode KV utilization thresholds for reactive load-based scaling.
 - **`sla`**: Uses regression-based performance models with specific TTFT/ITL targets. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
 
 **When to use which:**
 
 - Start with **`throughput`** (the default) — it works immediately with no configuration.
 - Switch to **`latency`** if your workload has strict latency requirements and you prefer to over-provision rather than queue.
+- Use **`load`** when you want direct control through prefill queue and decode KV utilization thresholds.
 - Use **`sla`** when you have pre-deployment profiling data and want to target specific TTFT/ITL values.
 
 ## PlannerConfig Reference
@@ -65,9 +67,9 @@ Advisory mode is suggestion-only. The Planner computes recommended replica count
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `sla`: regression-based scaling with ttft_ms/itl_ms targets. |
+| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: regression-based scaling with ttft_ms/itl_ms targets. |
 
-When `optimization_target` is `throughput` or `latency`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft_ms`/`itl_ms` fields are ignored.
+When `optimization_target` is `throughput`, `latency`, or `load`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft_ms`/`itl_ms` fields are ignored.
 
 ### Scaling Mode Fields (SLA mode)
 

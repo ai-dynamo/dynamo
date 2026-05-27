@@ -238,9 +238,9 @@ Dynamo 使用 TCP 进行组件间通信。在 Kubernetes 上，原生资源（[C
 | **本地开发** | ❌ 不需要 | ❌ 不需要 | 传入 `--discovery-backend file`；vLLM 还需要 `--kv-events-config '{"enable_kv_cache_events": false}'` |
 | **Kubernetes** | ❌ 不需要 | ❌ 不需要 | K8s 原生服务发现；TCP 请求平面 |
 
-> **注意：** KV 感知路由需要 NATS 来协调前缀缓存。
+> **注意：** KV 感知路由不需要 NATS。需要基于事件的 cache 状态跟踪时可以启用 KV event；如果不需要外部事件基础设施，可以使用 `--no-router-kv-events` 进行基于预测的路由。
 
-对于 Slurm 或其他分布式部署（以及 KV 感知路由）：
+对于选择使用 etcd 或 NATS JetStream 模式的 Slurm 或其他分布式部署：
 
 - [etcd](https://etcd.io/) 可以直接以 `./etcd` 运行。
 - [nats](https://nats.io/) 需要启用 JetStream：`nats-server -js`。

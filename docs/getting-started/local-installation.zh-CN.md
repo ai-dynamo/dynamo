@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-sidebar-title: Local Installation
-description: Install and run Dynamo on a local machine or VM with containers or PyPI
+sidebar-title: 本地安装
+description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynamo
 ---
 
 <p align="left">
@@ -178,7 +178,7 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
 - **SGLang：** 无需标志（默认禁用 KV events）
 - **TensorRT-LLM：** 无需标志（默认禁用 KV events）
 
-所有后端默认都禁用 KV events。仅当你想启用 KV event 发布时，才显式添加 `--kv-events-config`。
+所有后端默认都禁用 KV events。对于 vLLM 和 SGLang，仅当你想启用 KV event 发布时，才添加后端专用的 `--kv-events-config`。对于 TensorRT-LLM，请使用 `--publish-events-and-metrics` 启用事件发布。
 
 ## 测试你的部署
 
@@ -227,6 +227,6 @@ docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
 ## 后续步骤
 
 - [后端指南](../backends/sglang/README.md) -- 后端特定配置和功能
-- [分解式服务](../features/disaggregated-serving/README.md) -- 独立扩展 prefill 和 decode
+- [分离式服务](../features/disaggregated-serving/README.md) -- 独立扩展 prefill 和 decode
 - [KV Cache 感知路由](../components/router/router-guide.md) -- 智能请求路由
 - [Kubernetes 部署](../kubernetes/README.md) -- 生产环境多节点部署

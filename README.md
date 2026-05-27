@@ -238,9 +238,9 @@ Dynamo uses TCP for inter-component communication. On Kubernetes, native resourc
 | **Local Development** | ❌ Not required | ❌ Not required | Pass `--discovery-backend file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
 | **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
 
-> **Note:** KV-Aware Routing requires NATS for prefix caching coordination.
+> **Note:** KV-aware routing does not require NATS. Enable KV events when you need event-backed cache-state tracking, or use `--no-router-kv-events` for prediction-based routing without external event infrastructure.
 
-For Slurm or other distributed deployments (and KV-aware routing):
+For Slurm or other distributed deployments that choose etcd or NATS JetStream-backed modes:
 
 - [etcd](https://etcd.io/) can be run directly as `./etcd`.
 - [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.

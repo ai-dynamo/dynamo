@@ -180,7 +180,7 @@ For dependency-free local development, disable KV event publishing (avoids NATS)
 - **SGLang:** No flag needed (KV events disabled by default)
 - **TensorRT-LLM:** No flag needed (KV events disabled by default)
 
-KV events are disabled by default for all backends. Add `--kv-events-config` explicitly only when you want KV event publishing enabled.
+KV events are disabled by default for all backends. For vLLM and SGLang, add backend-specific `--kv-events-config` only when you want KV event publishing enabled. For TensorRT-LLM, enable event publishing with `--publish-events-and-metrics`.
 
 ## Test Your Deployment
 
