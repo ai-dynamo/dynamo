@@ -46,6 +46,7 @@ fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
 pub struct GptOssReasoningParser {
     parser: StreamableParser,
     pending_text: String,
+    pending_tool_call_text: String,
     emitted_reasoning_text: bool,
     insert_reasoning_separator: bool,
     emitted_normal_text: bool,
@@ -81,6 +82,7 @@ impl GptOssReasoningParser {
         Ok(Self {
             parser,
             pending_text: String::new(),
+            pending_tool_call_text: String::new(),
             emitted_reasoning_text: false,
             insert_reasoning_separator: false,
             emitted_normal_text: false,
@@ -207,8 +209,13 @@ fn is_visible_normal_channel(channel: Option<&str>, recipient: Option<&str>) -> 
         || (matches!(channel, Some("commentary")) && recipient.is_none())
 }
 
+fn starts_directed_harmony_tool_call(text: &str) -> bool {
+    text.contains("<|channel|>commentary to=functions.")
+}
+
 impl ReasoningParser for GptOssReasoningParser {
     fn finish_reasoning_stream(&mut self) -> ParserResult {
+        self.pending_tool_call_text.clear();
         let pending = std::mem::take(&mut self.pending_text);
         if pending.is_empty() {
             return ParserResult::default();
@@ -403,15 +410,37 @@ impl ReasoningParser for GptOssReasoningParser {
             }
         }
 
-        if input_contains_call_marker(text, token_ids, caller_supplied_token_ids) {
+        let has_call_marker =
+            input_contains_call_marker(text, token_ids, caller_supplied_token_ids);
+        let raw_input_text = if has_call_marker
+            || !self.pending_tool_call_text.is_empty()
+            || starts_directed_harmony_tool_call(text)
+        {
+            Some(raw_input_text_for_tool_parser(
+                text,
+                token_ids,
+                caller_supplied_token_ids,
+            ))
+        } else {
+            None
+        };
+
+        if let Some(raw_input_text) = raw_input_text {
             // Streaming currently feeds the downstream Harmony tool parser through
             // `normal_text`. This is an internal handoff, not visible-content
             // semantics: directed commentary tool payloads must become tool calls,
             // not assistant `content`. Batch parsing does not use this handoff and
             // keeps directed commentary out of `normal_text`.
-            let raw_input_text =
-                raw_input_text_for_tool_parser(text, token_ids, caller_supplied_token_ids);
-            normal_delta.push_str(&raw_input_text);
+            if !self.pending_tool_call_text.is_empty() {
+                self.pending_tool_call_text.push_str(&raw_input_text);
+                if has_call_marker {
+                    normal_delta.push_str(&std::mem::take(&mut self.pending_tool_call_text));
+                }
+            } else if starts_directed_harmony_tool_call(&raw_input_text) && !has_call_marker {
+                self.pending_tool_call_text.push_str(&raw_input_text);
+            } else if has_call_marker {
+                normal_delta.push_str(&raw_input_text);
+            }
         }
 
         if !normal_delta.is_empty() || !reasoning_delta.is_empty() {
@@ -642,6 +671,27 @@ mod tests {
         }
         assert_eq!(reasoning_text_incr, "");
         assert_eq!(normal_text_incr, "I will check that.\nDone.");
+    }
+
+    #[test]
+    fn test_gpt_oss_reasoning_parser_streaming_split_directed_commentary() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let chunks = vec![
+            "<|channel|>commentary to=functions.get_",
+            "weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|>",
+        ];
+        let mut reasoning_text_incr = String::new();
+        let mut normal_text_incr = String::new();
+        for chunk in chunks {
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
+            normal_text_incr.push_str(&result.normal_text);
+            reasoning_text_incr.push_str(&result.reasoning_text);
+        }
+        assert_eq!(reasoning_text_incr, "");
+        assert_eq!(
+            normal_text_incr,
+            "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|>"
+        );
     }
 
     #[test] // REASONING.stream.2.a, REASONING.batch.2.c, TOOLCALLING.harmony.1

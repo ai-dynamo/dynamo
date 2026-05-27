@@ -116,7 +116,8 @@ cases:
     expected:
       dynamo:
         reasoning_text: ''
-        normal_text: weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
+        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
+        reason: Dynamo's streaming reasoning parser uses `normal_text` as the internal handoff to the downstream Harmony tool-call parser. The full directed commentary envelope remains parseable as a tool call, so this is a reasoning-layer divergence from vLLM rather than a final response leak.
       vllm:
         reasoning_text: ''
         normal_text: ''
@@ -132,6 +133,7 @@ cases:
       dynamo:
         reasoning_text: ''
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{"tz":"PST"}<|call|>
+        reason: Dynamo's streaming reasoning parser uses `normal_text` as the internal handoff to the downstream Harmony tool-call parser. The full directed commentary envelopes remain parseable as tool calls, so this is a reasoning-layer divergence from vLLM rather than a final response leak.
       vllm:
         reasoning_text: ''
         normal_text: ''
