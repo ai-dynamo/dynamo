@@ -48,8 +48,16 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "serve_indexer",
     "shared_cache_multiplier",
     "shared_cache_type",
+    "conditional_prefill_enabled",
+    "conditional_prefill_policy",
+    "conditional_prefill_eff_isl_threshold",
+    "conditional_prefill_eff_isl_ratio_threshold",
     "router_predicted_ttl_secs",
 )
+
+# Accepted values for `--router-conditional-prefill-policy`. Kept in lock-step
+# with the Rust enum at `lib/kv-router/src/scheduling/config.rs::ConditionalPrefillPolicyKind`.
+CONDITIONAL_PREFILL_POLICY_CHOICES: tuple[str, ...] = ("isl_bounding",)
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
     "router KV overlap score weight is deprecated; use "
@@ -128,6 +136,10 @@ class KvRouterConfigBase(ConfigBase):
     serve_indexer: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
+    conditional_prefill_enabled: bool = False
+    conditional_prefill_policy: str = "isl_bounding"
+    conditional_prefill_eff_isl_threshold: int = 2048
+    conditional_prefill_eff_isl_ratio_threshold: float = 0.7
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
 
@@ -380,6 +392,60 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=str,
             choices=["fcfs", "wspt"],
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-conditional-prefill",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: Enable conditional prefill. When enabled, "
+                "the frontend may skip remote prefill and route a request directly "
+                "to the cache-hot decode worker (run prefill+decode as AGG) when the "
+                "configured policy decides it's cheaper than DISAGG."
+            ),
+            dest="conditional_prefill_enabled",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-policy",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_POLICY",
+            default="isl_bounding",
+            help=(
+                "KV Router: Which conditional-prefill bypass policy to use. v1 ships "
+                "'isl_bounding' (default): bypass when net-new prompt tokens are below "
+                "--router-conditional-prefill-eff-isl-threshold AND the eff_isl/prompt ratio "
+                "is below --router-conditional-prefill-eff-isl-ratio-threshold."
+            ),
+            arg_type=str,
+            choices=list(CONDITIONAL_PREFILL_POLICY_CHOICES),
+            dest="conditional_prefill_policy",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-eff-isl-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_EFF_ISL_THRESHOLD",
+            default=2048,
+            help=(
+                "KV Router: Absolute effective-ISL cutoff (tokens) for the "
+                "'isl_bounding' policy. A request bypasses to AGG only if "
+                "`prompt_tokens - decode_overlap * block_size` is strictly less than this."
+            ),
+            arg_type=int,
+            dest="conditional_prefill_eff_isl_threshold",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-eff-isl-ratio-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_EFF_ISL_RATIO_THRESHOLD",
+            default=0.7,
+            help=(
+                "KV Router: Effective-ISL/prompt-tokens ratio cutoff for the "
+                "'isl_bounding' policy. A request bypasses to AGG only if "
+                "`eff_isl / prompt_tokens` is strictly less than this (smaller = stricter)."
+            ),
+            arg_type=float,
+            dest="conditional_prefill_eff_isl_ratio_threshold",
         )
         add_negatable_bool_argument(
             g,

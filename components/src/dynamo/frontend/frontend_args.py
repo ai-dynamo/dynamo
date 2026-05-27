@@ -13,6 +13,7 @@ from dynamo.common.configuration.groups.aic_perf_args import (
     AicPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
+    CONDITIONAL_PREFILL_POLICY_CHOICES,
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
@@ -149,6 +150,21 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
+        if self.conditional_prefill_policy not in CONDITIONAL_PREFILL_POLICY_CHOICES:
+            raise ValueError(
+                "--router-conditional-prefill-policy must be one of "
+                + ", ".join(f"'{c}'" for c in CONDITIONAL_PREFILL_POLICY_CHOICES)
+            )
+        if self.conditional_prefill_eff_isl_threshold < 0:
+            raise ValueError(
+                "--router-conditional-prefill-eff-isl-threshold must be >= 0"
+            )
+        if not 0.0 <= self.conditional_prefill_eff_isl_ratio_threshold <= 1.0:
+            raise ValueError(
+                "--router-conditional-prefill-eff-isl-ratio-threshold must be in [0.0, 1.0]"
+            )
+        if self.conditional_prefill_enabled and self.router_mode != "kv":
+            raise ValueError("--router-conditional-prefill requires --router-mode=kv")
         self.apply_admission_control()
 
 

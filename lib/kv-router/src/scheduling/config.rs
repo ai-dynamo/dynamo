@@ -327,6 +327,40 @@ impl RouterPrefillLoadModel {
     }
 }
 
+/// Which conditional-prefill bypass policy to run. Kept as an enum (rather
+/// than a single struct) so future policies (queue-aware, regression-backed)
+/// can be added without changing the public API.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionalPrefillPolicyKind {
+    /// v1 production policy: bypass to AGG when `eff_isl < threshold` AND
+    /// `eff_isl / prompt_tokens < ratio_threshold`. See
+    /// `lib/kv-router/src/conditional_prefill.rs::IslBoundingPolicy`.
+    #[default]
+    IslBounding,
+}
+
+impl fmt::Display for ConditionalPrefillPolicyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IslBounding => f.write_str("isl_bounding"),
+        }
+    }
+}
+
+impl FromStr for ConditionalPrefillPolicyKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "isl_bounding" => Ok(Self::IslBounding),
+            _ => Err(format!(
+                "unknown conditional_prefill_policy: {s:?}, expected 'isl_bounding'"
+            )),
+        }
+    }
+}
+
 impl FromStr for RouterQueuePolicy {
     type Err = String;
 
@@ -442,6 +476,10 @@ struct KvRouterConfigSerde {
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
+    conditional_prefill_enabled: bool,
+    conditional_prefill_policy: ConditionalPrefillPolicyKind,
+    conditional_prefill_eff_isl_threshold: usize,
+    conditional_prefill_eff_isl_ratio_threshold: f64,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -475,6 +513,11 @@ impl Default for KvRouterConfigSerde {
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
+            conditional_prefill_enabled: config.conditional_prefill_enabled,
+            conditional_prefill_policy: config.conditional_prefill_policy,
+            conditional_prefill_eff_isl_threshold: config.conditional_prefill_eff_isl_threshold,
+            conditional_prefill_eff_isl_ratio_threshold: config
+                .conditional_prefill_eff_isl_ratio_threshold,
         }
     }
 }
@@ -623,6 +666,37 @@ pub struct KvRouterConfig {
     #[serde(default)]
     #[validate(range(min = 0.0))]
     pub router_predicted_ttl_secs: Option<f64>,
+
+    /// Enable conditional-prefill bypass. When true, the `PrefillRouter`
+    /// consults `conditional_prefill_policy` before routing each request and
+    /// may short-circuit to AGG (bypass remote prefill, run prefill+decode on
+    /// the cache-hot decode worker).
+    #[serde(default)]
+    pub conditional_prefill_enabled: bool,
+
+    /// Which conditional-prefill policy to run when
+    /// `conditional_prefill_enabled = true`. v1 ships only `isl_bounding`.
+    #[serde(default)]
+    pub conditional_prefill_policy: ConditionalPrefillPolicyKind,
+
+    /// `IslBoundingPolicy` knob: absolute effective-ISL cutoff (tokens).
+    /// Bypass only if `eff_isl < this`.
+    #[serde(default = "default_conditional_prefill_eff_isl_threshold")]
+    pub conditional_prefill_eff_isl_threshold: usize,
+
+    /// `IslBoundingPolicy` knob: effective-ISL/prompt-tokens ratio cutoff.
+    /// Bypass only if `eff_isl / prompt_tokens < this`.
+    #[serde(default = "default_conditional_prefill_eff_isl_ratio_threshold")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub conditional_prefill_eff_isl_ratio_threshold: f64,
+}
+
+fn default_conditional_prefill_eff_isl_threshold() -> usize {
+    crate::conditional_prefill::DEFAULT_CONDITIONAL_PREFILL_EFF_ISL_THRESHOLD
+}
+
+fn default_conditional_prefill_eff_isl_ratio_threshold() -> f64 {
+    crate::conditional_prefill::DEFAULT_CONDITIONAL_PREFILL_EFF_ISL_RATIO_THRESHOLD
 }
 
 impl Default for KvRouterConfig {
@@ -654,6 +728,11 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
+            conditional_prefill_enabled: false,
+            conditional_prefill_policy: ConditionalPrefillPolicyKind::default(),
+            conditional_prefill_eff_isl_threshold: default_conditional_prefill_eff_isl_threshold(),
+            conditional_prefill_eff_isl_ratio_threshold:
+                default_conditional_prefill_eff_isl_ratio_threshold(),
         }
     }
 }
@@ -700,6 +779,11 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
+            conditional_prefill_enabled: compat.conditional_prefill_enabled,
+            conditional_prefill_policy: compat.conditional_prefill_policy,
+            conditional_prefill_eff_isl_threshold: compat.conditional_prefill_eff_isl_threshold,
+            conditional_prefill_eff_isl_ratio_threshold: compat
+                .conditional_prefill_eff_isl_ratio_threshold,
         })
     }
 }

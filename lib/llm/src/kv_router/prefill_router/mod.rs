@@ -8,6 +8,7 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::PrefillLoadEstimator;
+use dynamo_kv_router::conditional_prefill::ConditionalPrefillPolicy;
 use dynamo_runtime::{
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, RouterMode, ServerStreamingEngine,
@@ -33,6 +34,13 @@ use inner::InnerPrefillRouter;
 pub use types::{PrefillError, PrefillQueryOutcome};
 use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override};
 
+/// Annotation marker the conditional-prefill bypass path sets on a request before
+/// dispatching it to a DECODE-mode worker. The worker's Python wrapper checks for
+/// this annotation and skips its "disaggregated_params is required" validation,
+/// running the request as AGG instead. Kept in sync with the Python constant in
+/// `components/src/dynamo/trtllm/request_handlers/handler_base.py`.
+const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefill";
+
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
@@ -43,11 +51,18 @@ use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override
 /// - Normal: Worker IDs determined by router based on KV cache state
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
+    /// Reference to the decode-side `KvRouter` so the conditional-prefill
+    /// peek can pick the cache-hot decode worker. `None` for the
+    /// non-KV-routing modes and for `disabled()` routers.
+    decode_router: Option<Arc<super::KvRouter>>,
     model_manager: Arc<ModelManager>,
     endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
+    /// Conditional-prefill bypass policy. Immutable after construction.
+    /// `disabled()` initializes to a no-op `IslBoundingPolicy::disabled()`.
+    conditional_prefill_policy: Box<dyn ConditionalPrefillPolicy>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
@@ -101,6 +116,54 @@ impl
                 return Err(anyhow::anyhow!(PrefillError::NotActivated));
             }
             return next.generate(context.map(|_| req)).await;
+        }
+
+        if self.conditional_prefill_policy.is_enabled() {
+            match self
+                .select_decode_worker_for_conditional_prefill(&req, &request_id)
+                .await
+            {
+                Ok(Some(decision)) => {
+                    tracing::info!(
+                        request_id = %request_id,
+                        worker_id = decision.worker.worker_id,
+                        dp_rank = decision.worker.dp_rank,
+                        net_new_tokens = decision.net_new_tokens,
+                        overlap_tokens = decision.overlap_tokens,
+                        "Conditional prefill routing to decode worker"
+                    );
+
+                    if req.tracker.is_none() {
+                        req.tracker = Some(Arc::new(RequestTracker::new()));
+                    }
+                    if let Some(ref tracker) = req.tracker {
+                        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+                    }
+
+                    let routing = req.routing_mut();
+                    routing.decode_worker_id = Some(decision.worker.worker_id);
+                    routing.dp_rank = Some(decision.worker.dp_rank);
+
+                    // Mark the request so the DECODE-mode worker's Python wrapper
+                    // accepts disaggregated_params=None and runs the request as AGG.
+                    // Without this, handler_base.py raises
+                    // "Disaggregated params are required for decode mode".
+                    if !req.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION) {
+                        req.annotations
+                            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+                    }
+
+                    return next.generate(context.map(|_| req)).await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        error = %error,
+                        "Conditional prefill decision failed; falling back to remote prefill"
+                    );
+                }
+            }
         }
 
         // Ensure tracker exists for routing decisions in disaggregated mode.
