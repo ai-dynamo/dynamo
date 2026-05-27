@@ -225,11 +225,13 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
+        stream_response: bool = True,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
+        self.stream_response = stream_response
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
         # the reasoning open/close tags live in the prompt and the generated
@@ -270,6 +272,14 @@ class StreamingPostProcessor:
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+
+    def _should_buffer_for_non_streaming_tool_parse(self) -> bool:
+        return (
+            not self.stream_response
+            and self.tool_parser is not None
+            and self.reasoning_parser is None
+            and self.request_for_sampling.tool_choice != "none"
+        )
 
     @staticmethod
     def _merge_tool_call(
@@ -420,7 +430,37 @@ class StreamingPostProcessor:
             "logprobs": output.logprobs,
         }
 
+    def _process_non_streaming_tool_output(self, output: Any) -> dict[str, Any] | None:
+        delta_token_ids = list(output.token_ids or [])
+        delta_text = output.text or ""
+        current_text = self.previous_text + delta_text
+        current_token_ids = self.previous_token_ids + delta_token_ids
+
+        self.previous_text = current_text
+        self.previous_token_ids = current_token_ids
+        if not output.finish_reason:
+            return None
+
+        delta_message = self._extract_tool_calls_from_text(current_text)
+        if delta_message is None:
+            if self.in_progress_tool_calls:
+                return self._emit_tool_calls_choice(output)
+            return self._build_choice(output, {})
+
+        delta: dict[str, Any] = {"role": "assistant"}
+        if delta_message.content:
+            delta["content"] = delta_message.content
+        if self.in_progress_tool_calls:
+            delta["tool_calls"] = self._dump_in_progress_tool_calls()
+            self.in_progress_tool_calls.clear()
+        if len(delta) == 1:
+            delta = {}
+        return self._build_choice(output, delta)
+
     def process_output(self, output: Any) -> dict[str, Any] | None:
+        if self._should_buffer_for_non_streaming_tool_parse():
+            return self._process_non_streaming_tool_output(output)
+
         delta_token_ids = list(output.token_ids or [])
         # vLLM output_processor already applies stop-token/stop-string trimming
         # to text. Re-detokenizing from token_ids can reintroduce stop markers.
