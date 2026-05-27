@@ -211,22 +211,33 @@ def extract_logprobs(
     if isinstance(new_logprobs[0], float):
         return [float(lp) for lp in new_logprobs], None
 
+    new_token_ids = list(output.token_ids or [])[num_output_tokens_so_far:]
+    new_token_ids = new_token_ids[: len(new_logprobs)]
+
     selected: list[float] = []
     top_per_position: list[list[TopLogprob]] = []
     for token_idx, token_logprobs_dict in enumerate(new_logprobs):
         if token_logprobs_dict is None:
             continue
-        actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
-        info = token_logprobs_dict.get(actual_token_id)
+        actual_token_id = (
+            new_token_ids[token_idx] if token_idx < len(new_token_ids) else None
+        )
+        info = (
+            token_logprobs_dict.get(actual_token_id)
+            if actual_token_id is not None
+            else None
+        )
         if info is None:
             info = next(iter(token_logprobs_dict.values()), None)
-        if info is not None:
-            selected.append(float(info.logprob))
-
+        if info is None:
+            # Position has no logprob entries at all; skip so the
+            # selected/top arrays stay aligned.
+            continue
+        selected.append(float(info.logprob))
         top_per_position.append(
             [
                 TopLogprob(
-                    rank=getattr(entry, "rank", 0) or 0,
+                    rank=getattr(entry, "rank", None) or 0,
                     token_id=tok_id,
                     token=getattr(entry, "decoded_token", None),
                     logprob=float(entry.logprob),

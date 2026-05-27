@@ -122,8 +122,13 @@ pub const REQUEST_FIELDS: &[FieldDescriptor] = &[
     supported!("request_timestamp_ms", |r| r.request_timestamp_ms.is_some()),
     // Routing / disaggregation.
     supported!("routing", |r| r.routing.is_some()),
+    supported!("router", |r| r.router.is_some()),
     supported!("prefill_result", |r| r.prefill_result.is_some()),
     supported!("bootstrap_info", |r| r.bootstrap_info.is_some()),
+    // Framework-owned trace plumbing (engines neither read nor write).
+    supported!("migration_link", |r| r.migration_link.is_some()),
+    // Canary marker. Skips the gate entirely (see `check_request`).
+    supported!("_HEALTH_CHECK", |r| r.is_probe),
     // Forwarded — engine must declare the matching Capability variant.
     forwarded!("prompt_embeds", Capability::PromptEmbeds, |r| r
         .prompt_embeds
@@ -166,11 +171,18 @@ pub enum UnsupportedFieldPolicy {
 
 /// Apply `policy` to every `Forwarded` field set on `request` whose
 /// [`Capability`] is not in `engine_capabilities`.
+///
+/// Health-check probes (`request.is_probe`) bypass the gate so an
+/// operator-defined canary payload can exercise engine-specific
+/// fields without tripping `Reject`.
 pub fn check_request(
     request: &PreprocessedRequest,
     policy: UnsupportedFieldPolicy,
     engine_capabilities: &HashSet<Capability>,
 ) -> Result<(), DynamoError> {
+    if request.is_probe {
+        return Ok(());
+    }
     for field in REQUEST_FIELDS {
         let Some(cap) = field.capability else {
             continue;

@@ -268,7 +268,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> tuple:
         """Compat shim — see :func:`dynamo.common.backend.sglang_logprobs.extract_logprobs`."""
         return _shared_extract_logprobs(
-            meta_info, num_output_logprobs_so_far, return_tokens_as_token_ids
+            meta_info,
+            num_output_logprobs_so_far,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
     async def generate(

@@ -16,7 +16,8 @@ use dynamo_backend_common::schema::REQUEST_FIELDS;
 use dynamo_kv_router::scheduling::config::RouterConfigOverride;
 use dynamo_llm::agents::context::AgentContextBuilder;
 use dynamo_llm::protocols::common::preprocessor::{
-    BootstrapInfo, MmRoutingInfo, PrefillResult, PreprocessedRequest, RoutingHints,
+    BootstrapInfo, MmRoutingInfo, PrefillResult, PreprocessedRequest, RouterParams, RoutingHints,
+    TraceLink,
 };
 use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
@@ -50,11 +51,17 @@ fn fully_populated_request() -> PreprocessedRequest {
         .routing(Some(RoutingHints::default()))
         .router_config_override(Some(RouterConfigOverride::default()))
         .prefill_result(Some(prefill_result))
+        .migration_link(Some(TraceLink {
+            trace_id: "0".repeat(32),
+            span_id: "0".repeat(16),
+        }))
         .bootstrap_info(Some(BootstrapInfo::default()))
         .extra_args(Some(serde_json::Value::Null))
+        .router(Some(RouterParams::default()))
         .agent_context(Some(agent_context))
         .mm_processor_kwargs(Some(serde_json::Value::Null))
         .request_timestamp_ms(Some(0.0))
+        .is_probe(true)
         .build()
         .expect("fully-populated PreprocessedRequest builds")
 }
@@ -76,7 +83,7 @@ fn every_serializable_request_field_is_classified() {
     assert!(
         missing_from_registry.is_empty(),
         "PreprocessedRequest has fields missing from schema::REQUEST_FIELDS: {missing_from_registry:?}. \
-         Add each with a FieldStatus (Supported / Experimental / Forwarded) in lib/backend-common/src/schema.rs."
+         Add each with a FieldStatus (Supported / Forwarded) in lib/backend-common/src/schema.rs."
     );
     assert!(
         stale_in_registry.is_empty(),

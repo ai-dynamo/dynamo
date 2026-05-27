@@ -122,16 +122,24 @@ def extract_logprobs(
     if not output_token_logprobs:
         return None, None, num_output_logprobs_so_far
 
-    new_logprobs = output_token_logprobs[num_output_logprobs_so_far:]
+    output_top = meta_info.get("output_top_logprobs")
+    # SGLang normally grows the two arrays in lockstep, but if a version
+    # regression ever desynchronises them advance only by the shorter
+    # array so the next slice doesn't read ahead of either side.
+    safe_len = (
+        min(len(output_token_logprobs), len(output_top))
+        if output_top
+        else len(output_token_logprobs)
+    )
+    new_logprobs = output_token_logprobs[num_output_logprobs_so_far:safe_len]
     if not new_logprobs:
         return None, None, num_output_logprobs_so_far
 
     selected = [float(entry[0]) for entry in new_logprobs]
 
     top_per_position: list[list[TopLogprob]] | None = None
-    output_top = meta_info.get("output_top_logprobs")
     if output_top:
-        new_top = output_top[num_output_logprobs_so_far:]
+        new_top = output_top[num_output_logprobs_so_far:safe_len]
         if new_top:
             top_per_position = []
             for position in new_top:
@@ -155,4 +163,4 @@ def extract_logprobs(
                 )
 
     log_probs, top_logprobs = build_chunk(selected, top_per_position)
-    return log_probs, top_logprobs, len(output_token_logprobs)
+    return log_probs, top_logprobs, safe_len

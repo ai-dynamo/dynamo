@@ -332,16 +332,18 @@ class VllmLLMEngine(LLMEngine):
             for output in res.outputs:
                 output_idx = getattr(output, "index", 0) or 0
                 token_ids = list(output.token_ids or [])
-                previous_total = total_output_tokens_by_index.get(output_idx, 0)
-                total_output_tokens_by_index[output_idx] = previous_total + len(
-                    token_ids
+                total_output_tokens_by_index[output_idx] = (
+                    total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
                 )
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
-                # vLLM pre-decodes top-k strings on CompletionOutput so we
-                # don't need a tokenizer here.
-                log_probs, top_logprobs = extract_logprobs(output, previous_total)
+                # vLLM streams in DELTA mode (see build_sampling_params), so
+                # output.logprobs/token_ids carry only the per-chunk delta;
+                # pass offset=0 rather than the running cumulative tally.
+                log_probs, top_logprobs = extract_logprobs(output, 0)
+                # Pre-extract `cumulative_logprob` so the emit-loop below
+                # doesn't reach back into the engine-side type.
                 cum_logprob = getattr(output, "cumulative_logprob", None)
                 prepared_outputs.append(
                     (
@@ -370,11 +372,14 @@ class VllmLLMEngine(LLMEngine):
                     out["log_probs"] = log_probs
                 if top_logprobs is not None:
                     out["top_logprobs"] = top_logprobs
-                if cum_logprob is not None:
-                    out["cum_log_probs"] = float(cum_logprob)
 
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
+                    # `cumulative_logprob` is a single per-completion summary;
+                    # emit it on the terminal chunk only (mirrors how
+                    # `completion_usage` is attached below).
+                    if cum_logprob is not None:
+                        out["cum_log_probs"] = float(cum_logprob)
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )

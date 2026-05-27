@@ -580,10 +580,23 @@ def _request_reasoning_metadata(
 def extract_logprobs(
     output, num_output_tokens_so_far: int, tokenizer=None
 ) -> tuple[list[float] | None, list[list[dict]] | None]:
-    """Slice vLLM ``CompletionOutput.logprobs`` into Dynamo's wire shape."""
+    """Slice vLLM ``CompletionOutput.logprobs`` into Dynamo's wire shape.
+
+    Callers using vLLM's ``RequestOutputKind.DELTA`` stream should pass
+    ``num_output_tokens_so_far=0`` because each chunk already carries
+    only the new logprobs/token_ids. Callers reading the cumulative
+    ``output.logprobs`` view pass the prior tally.
+    """
     if output.logprobs is None:
         return None, None
+    token_ids = list(output.token_ids or [])
+    if not token_ids or num_output_tokens_so_far >= len(token_ids):
+        return None, None
     new_logprobs = output.logprobs[num_output_tokens_so_far:]
+    new_token_ids = token_ids[num_output_tokens_so_far:]
+    # Clamp logprobs to the token_ids length; vLLM may emit a longer
+    # logprobs slice than token_ids on finish-reason terminals.
+    new_logprobs = new_logprobs[: len(new_token_ids)]
     if not new_logprobs:
         return None, None
 
@@ -592,23 +605,33 @@ def extract_logprobs(
     for token_idx, token_logprobs_dict in enumerate(new_logprobs):
         if token_logprobs_dict is None:
             continue
-        actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
-        selected.append(float(token_logprobs_dict[actual_token_id].logprob))
+        actual_token_id = new_token_ids[token_idx]
+        # `.get()` fallback: skip the position rather than KeyError if
+        # the engine ever yields a per-position dict without the
+        # selected token (vLLM normally guarantees inclusion, but
+        # speculative-decoding paths have been observed to drop it).
+        info = token_logprobs_dict.get(actual_token_id)
+        if info is None:
+            continue
+        selected.append(float(info.logprob))
 
         entries: list[TopLogprob] = []
-        for tok_id, info in token_logprobs_dict.items():
-            token_str = getattr(info, "decoded_token", None)
+        for tok_id, entry_info in token_logprobs_dict.items():
+            token_str = getattr(entry_info, "decoded_token", None)
             if not token_str and tokenizer:
                 try:
                     token_str = tokenizer.decode([tok_id])
                 except Exception:
                     token_str = None
+            rank = getattr(entry_info, "rank", None)
+            if rank is None:
+                rank = 0
             entries.append(
                 TopLogprob(
-                    rank=getattr(info, "rank", 0) or 0,
+                    rank=rank,
                     token_id=tok_id,
                     token=token_str,
-                    logprob=float(info.logprob),
+                    logprob=float(entry_info.logprob),
                     bytes_=list(token_str.encode("utf-8")) if token_str else None,
                 )
             )

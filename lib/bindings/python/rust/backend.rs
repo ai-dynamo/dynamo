@@ -48,9 +48,9 @@ use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::to_pyerr;
 
 /// Snapshot of the unified-backend schema registry: `(field_name, status)`
-/// pairs where status is one of `"supported"`, `"experimental"`,
-/// `"forwarded"`. Used by Python tests/tooling to introspect the
-/// contract without re-encoding the list.
+/// pairs where status is one of `"supported"` or `"forwarded"`. Used by
+/// Python tests/tooling to introspect the contract without re-encoding
+/// the list.
 #[pyfunction]
 fn list_request_fields() -> Vec<(String, String)> {
     rs_list_request_fields()
@@ -325,6 +325,10 @@ impl EngineConfig {
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
     }
+    /// Returns a fresh dict each access — mutations to the returned object
+    /// do NOT propagate back to the inner `RsEngineConfig.runtime_data`.
+    /// Engines that need to add keys must pass the full dict at
+    /// construction time (the `runtime_data=` kwarg).
     #[getter]
     fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
         pythonize(py, &self.inner.runtime_data)
@@ -779,15 +783,19 @@ impl LLMEngine for PyLLMEngine {
             // attribute or `None` → empty. Accept any iterable yielding
             // typed `Capability` enum values (list, tuple, set, frozenset);
             // the Python ABC's `EngineConfig.capabilities` is a `set`.
-            let capabilities: HashSet<RsCapability> = match bound.getattr("capabilities") {
-                Ok(value) if !value.is_none() => value
+            // Only AttributeError is treated as "absent"; any other error
+            // (e.g. a property raising RuntimeError) propagates so the
+            // engine fails to start rather than silently registering with
+            // empty capabilities.
+            let capabilities: HashSet<RsCapability> = match opt_attr_value(bound, "capabilities")? {
+                Some(value) => value
                     .try_iter()?
                     .map(|item| item.and_then(|c| c.extract::<Capability>()))
                     .collect::<PyResult<Vec<Capability>>>()?
                     .into_iter()
                     .map(Into::into)
                     .collect(),
-                _ => HashSet::new(),
+                None => HashSet::new(),
             };
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
@@ -801,9 +809,9 @@ impl LLMEngine for PyLLMEngine {
                 data_parallel_start_rank: opt_attr::<u32>(bound, "data_parallel_start_rank")?,
                 bootstrap_host: opt_attr::<String>(bound, "bootstrap_host")?,
                 bootstrap_port: opt_attr::<u16>(bound, "bootstrap_port")?,
-                runtime_data: match bound.getattr("runtime_data") {
-                    Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
-                    _ => HashMap::new(),
+                runtime_data: match opt_attr_value(bound, "runtime_data")? {
+                    Some(value) => depythonize(&value).map_err(to_pyerr)?,
+                    None => HashMap::new(),
                 },
                 capabilities,
             })
@@ -959,11 +967,19 @@ impl LLMEngine for PyLLMEngine {
             .get(ctx.id())
             .cloned()
             .or_else(get_distributed_tracing_context);
+        // Clone-don't-remove: leave eviction to `RequestStateGuard::drop`
+        // so the abort path doesn't need to coordinate with the natural
+        // stream-completion path. If abort fires AFTER the guard already
+        // dropped (a late cancellation arriving when the stream had just
+        // emitted its terminal), `metadata` is the empty default — engine
+        // authors using metadata for log correlation inside `abort` should
+        // tolerate that absence.
         let metadata = self
             .request_metadata
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(ctx.id())
+            .get(ctx.id())
+            .cloned()
             .unwrap_or_default();
 
         let res: Result<(), PyErr> = async move {
@@ -1246,6 +1262,20 @@ fn opt_attr<T>(bound: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<T>>
 where
     T: for<'py> FromPyObject<'py>,
 {
+    match opt_attr_value(bound, name)? {
+        Some(value) => Ok(Some(value.extract()?)),
+        None => Ok(None),
+    }
+}
+
+/// Variant of [`opt_attr`] that returns the raw `Bound<PyAny>` instead of
+/// extracting a typed value — callers that need to drive `try_iter()` or
+/// `depythonize()` consume the bound object directly. Distinguishes
+/// `AttributeError` (treated as absent) from every other error (propagated).
+fn opt_attr_value<'py>(
+    bound: &Bound<'py, PyAny>,
+    name: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     let attr = match bound.getattr(name) {
         Ok(v) => v,
         Err(err) if err.is_instance_of::<pyo3::exceptions::PyAttributeError>(bound.py()) => {
@@ -1256,7 +1286,7 @@ where
     if attr.is_none() {
         return Ok(None);
     }
-    Ok(Some(attr.extract()?))
+    Ok(Some(attr))
 }
 
 /// Map a Python exception to a `BackendError` variant. `DynamoException`
