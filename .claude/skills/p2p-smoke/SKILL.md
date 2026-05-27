@@ -1,6 +1,6 @@
 ---
 name: p2p-smoke
-description: Hub-mediated P2P G2 block transfer smoke. Two same-model vLLMs + hub. R1 warms A's G2, hub /control/transfer/{open,pull,close} primitives copy blocks A→B via velo, R2 verifies B's G2 cache hit. Catches regressions in the leader transfer surface and the cross-instance pull plumbing.
+description: Hub-mediated P2P G2 block transfer smoke. Two same-model vLLMs + hub. R1 warms A's G2, hub /control/transfer/{open,pull,close} primitives copy blocks A→B via velo, the indexer verifies B owns pulled blocks, and R2 exercises B through chat streaming. Catches regressions in the leader transfer surface and the cross-instance pull plumbing.
 user-invocable: true
 disable-model-invocation: true
 ---
@@ -30,16 +30,22 @@ A future iteration may collapse these into one hub orchestration endpoint (`/v1/
 
 ## What it asserts
 
-- **R1 fired G1→G2 offload on A.** Greps A's audit log for `event="offload_register_complete"` with `dst=…G2`. This is the new audit event in `kvbm-engine/src/offload/pipeline.rs` (emitted on every batch register into the destination tier).
-- **The hashes from A's audit are findable on A.** `open_session(find_mode=sync)` returns a `committed` list — must be non-empty for the same hashes A just registered.
+- **R1 fired G1→G2 offload on A.** The harness polls the hub indexer for A's
+  published `hash_u128` values after the streaming chat warmup.
+- **The hashes from A's index entries are findable on A.** `open_session(find_mode=sync)` returns a `committed` list — must be non-empty for the same hashes A just registered.
 - **B pulled the blocks.** `pull_from_session` returns a `pulled` list matching what was committed.
-- **B's G2 now serves them.** R2 issues the same prompt to B; vLLM's `Cache Hit Rates` line surfaces a non-zero prefix cache match. The same `offload_register_complete` event should appear in B's audit log with B's hashes matching A's.
+- **B's G2 now owns them.** The hub index lists B as an owner for the pulled
+  block, and R2 issues the same prompt to B through the chat streaming endpoint.
+- **The run leaves a useful trace.** `trace.html` must render from audit events,
+  and `trace-gate.env` must report `trace_useful=true` before the smoke prints
+  PASS.
 
 ## Prerequisites
 
-- A current Dynamo/KVBM environment with `kvbm` importable. In a dev
-  container use `/opt/dynamo/venv`; in a local sandbox use
-  `/dynamo:kvbm:sandbox-venv` + `/dynamo:kvbm:maturin-dev`.
+- A current Dynamo/KVBM runtime with `kvbm` importable. In the runtime image,
+  `/opt/dynamo/venv` is used automatically. For local manual work, set
+  `PYTHON_BIN` or `KVBM_VENV`; the smoke does not assume a worktree-local
+  sandbox exists.
 - `target/debug/kvbm_hub` built: `cargo build --bin kvbm_hub`. The hub
   launcher rebuilds it incrementally unless `KVBM_HUB_SKIP_BUILD=1`.
 - Hardware profile selected via `P2P_HARDWARE_PROFILE`. The default
@@ -64,14 +70,19 @@ Outputs an experiment directory under `$KVBM_EXPERIMENTS_DIR/<ts>-p2p-smoke/` co
 | `instance_a.log` | A's vLLM + kvbm_audit stream |
 | `instance_b.log` | B's vLLM + kvbm_audit stream |
 | `trace.html` | three-lane visualization (A | Hub | B) via `p2p-trace.py` |
+| `trace-gate.env` | machine-readable trace gate and pin/pull counts |
+| `p2p-trace.log` | renderer stdout/stderr |
 
-The script prints a validation report at the end and the trace.html path.
+The script prints a validation report at the end only after the trace gate
+passes.
 
 ## Env vars
 
 | Var | Default | What |
 |---|---|---|
 | `KVBM_REPO` | inferred from script location | Repo root for sibling skill scripts + hub binary |
+| `PYTHON_BIN` | resolved | Explicit Python for vLLM and harness helpers |
+| `KVBM_VENV` | unset | Optional Python environment used before `/opt/dynamo/venv`, and for NIXL lib discovery |
 | `P2P_HARDWARE_PROFILE` | `h100-a100` | Hardware sizing profile: `h100-a100`, `spark-gb10`, or `custom` |
 | `P2P_MODEL` | profile-specific | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` for `h100-a100`; `Qwen/Qwen3-0.6B` for `spark-gb10` unless overridden |
 | `P2P_GMU` | profile-specific | vLLM `--gpu-memory-utilization` for each instance |
@@ -79,7 +90,9 @@ The script prints a validation report at the end and the trace.html path.
 | `P2P_A_CUDA_VISIBLE_DEVICES` | profile-specific | GPU for instance A |
 | `P2P_B_CUDA_VISIBLE_DEVICES` | profile-specific | GPU for instance B |
 | `P2P_MAX_MODEL_LEN` | profile-specific | vLLM `--max-model-len` |
+| `P2P_ENFORCE_EAGER` | `1` | Functional smoke guard that passes vLLM `--enforce-eager`; set `0` only when explicitly debugging compiled startup, not for transfer-path validation |
 | `P2P_BLOCKS` | `16` | Number of full G2 blocks the prompt should fill (advisory — prompt is hand-tuned) |
+| `P2P_CLEANUP_STALE_PROCESSES` | `1` | Clears stale vLLM, hub, EngineCore, GPU compute PIDs, and velo sockets before the smoke. Set `0` only in shared sessions where broad cleanup could affect another allocation; smoke-owned PIDs are still cleaned on failure. |
 | `KVBM_BLOCK_LAYOUT` | `operational` | Threaded through `kv_connector_extra_config.default.block_layout`; both instances use the same value (P2P feature compat is enforced by the hub) |
 | `KVBM_EXPERIMENT_LABEL` | `p2p-smoke` | Suffix on the experiment directory name |
 
@@ -112,9 +125,10 @@ Profile defaults:
 | File | Purpose |
 |---|---|
 | `p2p-smoke.sh` | Orchestrator. Tears down, brings up hub + 2 vLLMs, drives the 3-call chain, runs R2, prints report. |
-| `launch-instance.sh` | Parameterized single-instance launcher. `P2P_PORT` + `P2P_ROLE` chosen by the orchestrator. |
+| `launch-instance.sh` | Parameterized single-instance launcher. `P2P_PORT` and GPU placement are chosen by the orchestrator. |
 | `SKILL.md` | This file. |
 | `../disagg-trace/p2p-trace.py` | HTML render of the kvbm_audit timeline across the three logs. Lanes are `Instance A | Hub | Instance B`. |
+| `../disagg-bringup/hardware-profiles.sh` | Shared model, GPU, cache, and max-length defaults. |
 
 ## See also
 

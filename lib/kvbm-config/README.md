@@ -213,7 +213,6 @@ Omit entire `[disagg]` section to run in aggregated (non-disagg) mode.
 | Config Path | Type | Default | Description |
 |---|---|---|---|
 | `disagg` | `Option<DisaggConfig>` | None | None = aggregated mode (no hub coordination) |
-| `disagg.hub_url` | `String` | `"http://127.0.0.1:1337"` | kvbm-hub control-plane URL |
 | `disagg.role` | `DisaggregationRole` | required | `prefill` or `decode` |
 
 Typical leader-only JSON (worker ignores `disagg`):
@@ -221,7 +220,8 @@ Typical leader-only JSON (worker ignores `disagg`):
 ```json
 {
   "leader": {
-    "disagg": { "hub_url": "http://127.0.0.1:1337", "role": "prefill" }
+    "hub": { "url": "http://127.0.0.1:1337", "features": ["disagg"] },
+    "disagg": { "role": "prefill" }
   }
 }
 ```

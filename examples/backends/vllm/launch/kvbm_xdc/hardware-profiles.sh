@@ -23,8 +23,10 @@ kvbm_xdc_apply_hardware_profile() {
       : "${MAX_MODEL_LEN:=2048}"
       : "${MAX_NUM_SEQS:=8}"
       : "${CPU_CACHE_GB:=16}"
-      : "${DECODE_CUDA_VISIBLE_DEVICES:=0}"
-      : "${PREFILL_CUDA_VISIBLE_DEVICES:=1}"
+      if [ "$scope" != "worker" ]; then
+        : "${DECODE_CUDA_VISIBLE_DEVICES:=0}"
+        : "${PREFILL_CUDA_VISIBLE_DEVICES:=1}"
+      fi
       : "${GPU_CLASS:=H100-or-A100}"
       ;;
     spark-gb10)
