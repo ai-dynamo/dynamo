@@ -1133,4 +1133,61 @@ mod tests {
         );
         cancellation_token.cancel();
     }
+
+    /// DIS-2105: verify try_send rejects overflowing work with TrySendError::Full
+    /// instead of blocking. This is the unit-level guarantee that the receive
+    /// loop's new Full branch is reachable; the integration assertion (FE sees
+    /// a 503) is exercised by the addressed_router-side test on the egress side.
+    #[tokio::test]
+    async fn test_try_send_rejects_when_channel_full() {
+        crate::logging::init();
+
+        // Tiny channel — capacity 2, no receiver draining, so the third send
+        // hits the full branch deterministically.
+        let (work_tx, _work_rx) = tokio::sync::mpsc::channel::<WorkItem>(2);
+
+        let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(50)));
+        let inflight = Arc::new(AtomicU64::new(0));
+        let notify = Arc::new(Notify::new());
+
+        let mk_item = |i: u32| WorkItem {
+            service_handler: handler.clone() as Arc<dyn PushWorkHandler>,
+            payload: Bytes::from(format!("request {i}")),
+            headers: std::collections::HashMap::new(),
+            inflight: inflight.clone(),
+            notify: notify.clone(),
+            instance_id: 1,
+            namespace: "test".to_string(),
+            component_name: "test".to_string(),
+            endpoint_name: "test".to_string(),
+        };
+
+        // First 2 should succeed (fill the channel)
+        assert!(
+            work_tx.try_send(mk_item(0)).is_ok(),
+            "first send should succeed"
+        );
+        assert!(
+            work_tx.try_send(mk_item(1)).is_ok(),
+            "second send should succeed"
+        );
+
+        // Third should hit Full — this is the new admission-rejection branch
+        let result = work_tx.try_send(mk_item(2));
+        assert!(
+            matches!(result, Err(tokio::sync::mpsc::error::TrySendError::Full(_))),
+            "third send should be rejected with Full, got: {result:?}"
+        );
+
+        // Dropping the work_rx should make subsequent sends fail with Closed
+        drop(_work_rx);
+        let result = work_tx.try_send(mk_item(3));
+        assert!(
+            matches!(
+                result,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+            ),
+            "send to closed channel should be rejected with Closed, got: {result:?}"
+        );
+    }
 }
