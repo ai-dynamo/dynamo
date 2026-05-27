@@ -86,23 +86,29 @@
 //!
 //! - [`ControlMessage::Sentinel`] — per-direction clean end-of-stream; the producing side emits
 //!   it before closing the socket. Used on both the request and response sockets.
-//! - [`ControlMessage::Stop`] — caller asks the producer to cancel; the receiving side calls
-//!   `context.stop()`. The reader stays alive so a later [`ControlMessage::Kill`] can upgrade.
+//! - [`ControlMessage::Stop`] — sender asks the receiver to cancel; the receiving side calls
+//!   `context.stop()`.
 //! - [`ControlMessage::Kill`] — hard cancel; `context.kill()` and break out.
 //!
-//! Today `Stop` and `Kill` are only emitted on the **response** socket (frontend → worker). This
-//! is an expected asymmetry: the response stream is always enabled while the request stream is
-//! optional, so the response socket is the single channel used to propagate cancellation across
-//! processes. Within a single process the shared `AsyncEngineContext` then fans the cancellation
-//! out to the request-stream half — e.g. the worker's request-stream reader watches
-//! `context.killed()` / `context.stopped()` and exits when the response-stream reader flips the
-//! context. The request-stream handlers do decode `Stop` / `Kill` defensively, but no current
-//! code path writes them on that socket.
+//! `Stop` and `Kill` only flow from upstream to downstream (i.e. frontend → worker). This is an
+//! expected asymmetry: the upstream can cancel the downstream operation for various reasons,
+//! but the downstream cannot cancel the upstream operation. A downstream that cannot consume
+//! the stream simply drops its socket, which the upstream surfaces as a write error and
+//! interprets as a hint for recovery or failure propagation.
 //!
-//! A killed or stopped context **skips** the sentinel so a crash isn't signalled as clean
-//! closure. Read errors, decode errors, and protocol violations (e.g. a [`ControlMessage::Sentinel`]
-//! arriving on the wrong direction, or a data frame where a control frame is expected) kill only
-//! the offending stream rather than aborting the process.
+//! The cancellation direction is fixed, but the two streams carry **data** in opposite
+//! directions, so the practical handling differs per stream:
+//!
+//! ## Response stream (downstream → upstream) — bidirectional
+//!
+//! - Upstream writes: `Stop` / `Kill` (any time, to cancel).
+//! - Downstream writes: data frames, then `Sentinel` on clean close (skipped on kill/stop).
+//!
+//! ## Request stream (upstream → downstream) — unidirectional after the handshake
+//!
+//! - Upstream writes: data frames, then exactly one closing frame — `Sentinel` (clean drain)
+//!   / `Stop` (`context.stopped()`) / `Kill` (`context.killed()`).
+//! - Downstream writes: nothing. Its TCP write half is closed right after the CallHome handshake.
 
 pub mod client;
 pub mod server;
