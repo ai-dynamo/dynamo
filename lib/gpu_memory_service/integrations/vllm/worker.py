@@ -222,9 +222,8 @@ class GMSWorker(Worker):
         torch_peak = torch.cuda.max_memory_allocated()
 
         cudagraph_memory_estimate = 0
-        if (
-            not self.model_config.enforce_eager
-            and hasattr(self.model_runner, "profile_cudagraph_memory")
+        if not self.model_config.enforce_eager and hasattr(
+            self.model_runner, "profile_cudagraph_memory"
         ):
             from vllm.platforms import current_platform
 

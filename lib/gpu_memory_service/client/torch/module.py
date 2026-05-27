@@ -259,7 +259,9 @@ def _materialize_zero_size_meta_tensors(
                     and value.is_meta
                     and _is_zero_size_tensor(value)
                 ):
-                    replacement = _empty_like_on_device(value, device_index=device_index)
+                    replacement = _empty_like_on_device(
+                        value, device_index=device_index
+                    )
                     _set_tensor_alias(alias_map, value, replacement)
                     updated[i] = replacement
                     materialized.append(f"{qualified}.{i}")
@@ -275,7 +277,9 @@ def _materialize_zero_size_meta_tensors(
                     and value.is_meta
                     and _is_zero_size_tensor(value)
                 ):
-                    replacement = _empty_like_on_device(value, device_index=device_index)
+                    replacement = _empty_like_on_device(
+                        value, device_index=device_index
+                    )
                     _set_tensor_alias(alias_map, value, replacement)
                     updated_tuple.append(replacement)
                     materialized.append(f"{qualified}.{i}")
