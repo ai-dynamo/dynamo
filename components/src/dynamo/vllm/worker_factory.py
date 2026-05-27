@@ -286,14 +286,6 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
         )
 
-        # Canary payload for the runtime's periodic /health check. The
-        # chat-path payload (token_ids + sampling_options) is rejected by
-        # the embedding handler ("missing required 'input' field") so
-        # without an embedding-shaped probe the worker's /health stays
-        # at 503 forever -- which makes K8s readiness probes and the
-        # test harness's health_check_workers=True path race against
-        # startup. A real pooling pass through "probe" is cheap and
-        # actually verifies the engine works end-to-end.
         embedding_health_check_payload = VllmEmbeddingHealthCheckPayload(
             model_name=config.served_model_name or config.model
         ).to_dict()
