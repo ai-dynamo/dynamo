@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/dynamo/deploy/snapshot
 
-go 1.25.0
+go 1.26.3
 
 require (
 	github.com/checkpoint-restore/go-criu/v8 v8.2.0

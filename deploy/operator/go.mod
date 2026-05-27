@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/dynamo/deploy/operator
 
-go 1.25.0
+go 1.26.3
 
 require (
 	emperror.dev/errors v0.8.1
