@@ -7,6 +7,7 @@ tags:
   - rdma
   - disagg
   - validation
+license: Apache-2.0
 ---
 
 # Dynamo Interconnect Check

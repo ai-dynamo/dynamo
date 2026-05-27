@@ -6,6 +6,7 @@ tags:
   - kubernetes
   - troubleshooting
   - day-2
+license: Apache-2.0
 ---
 
 # Dynamo Troubleshoot

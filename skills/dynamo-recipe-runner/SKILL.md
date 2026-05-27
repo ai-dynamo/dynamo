@@ -6,6 +6,7 @@ tags:
   - kubernetes
   - recipes
   - bring-up
+license: Apache-2.0
 ---
 
 # Dynamo Recipe Runner

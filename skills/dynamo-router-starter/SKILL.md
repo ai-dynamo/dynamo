@@ -6,6 +6,7 @@ tags:
   - router
   - smoke-test
   - bring-up
+license: Apache-2.0
 ---
 
 # Dynamo Router Starter
