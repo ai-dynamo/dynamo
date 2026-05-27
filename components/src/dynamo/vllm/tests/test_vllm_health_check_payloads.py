@@ -70,7 +70,9 @@ def test_embedding_payload_shape_matches_handler_contract():
     would be rejected by that handler with "missing required 'input'
     field" and leave the canary stuck unhealthy forever -- regression
     pin for the bug PR #9765's canary readiness fix targets."""
-    payload = VllmEmbeddingHealthCheckPayload(model_name="Qwen/Qwen3-Embedding-0.6B").to_dict()
+    payload = VllmEmbeddingHealthCheckPayload(
+        model_name="Qwen/Qwen3-Embedding-0.6B"
+    ).to_dict()
     assert payload["model"] == "Qwen/Qwen3-Embedding-0.6B"
     assert payload["input"] == "probe"
     assert payload[HEALTH_CHECK_KEY] is True
