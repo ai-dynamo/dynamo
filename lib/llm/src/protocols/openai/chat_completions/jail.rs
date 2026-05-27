@@ -23,6 +23,14 @@ use crate::utils::{MarkerMatcher, MatchResult};
 
 use super::NvCreateChatCompletionStreamResponse;
 
+fn is_harmony_parser(parser: Option<&str>) -> bool {
+    parser == Some("harmony")
+}
+
+fn contains_harmony_protocol(text: &str) -> bool {
+    text.contains("<|channel|>")
+}
+
 /// Represents what a choice wants to emit after processing content
 #[derive(Debug, Clone)]
 pub enum ChoiceEmission {
@@ -219,8 +227,12 @@ impl ChoiceJailState {
                     suffix,
                     ..
                 } => {
+                    let prefix_has_harmony_protocol =
+                        is_harmony_parser(jail_stream.tool_call_parser.as_deref())
+                            && contains_harmony_protocol(&prefix);
+
                     // Emit prefix if any
-                    if !prefix.is_empty() {
+                    if !prefix.is_empty() && !prefix_has_harmony_protocol {
                         #[allow(deprecated)]
                         let prefix_choice = create_choice_stream(
                             choice.index,
@@ -235,7 +247,11 @@ impl ChoiceJailState {
                     }
 
                     // Build the potential full content
-                    let full_content = format!("{}{}", marker, suffix);
+                    let full_content = if prefix_has_harmony_protocol {
+                        format!("{}{}{}", prefix, marker, suffix)
+                    } else {
+                        format!("{}{}", marker, suffix)
+                    };
 
                     // Check if this already contains the end marker
                     let (should_end, split_pos) = jail_stream.should_end_jail(&full_content).await;
@@ -301,6 +317,16 @@ impl ChoiceJailState {
                     partial,
                     possible_patterns,
                 } => {
+                    if is_harmony_parser(jail_stream.tool_call_parser.as_deref())
+                        && contains_harmony_protocol(&prefix)
+                    {
+                        self.is_jailed = true;
+                        self.accumulated_content = format!("{}{}", prefix, partial);
+                        self.accumulated_logprobs = choice.logprobs.clone();
+                        self.partial_match_buffer.clear();
+                        return emissions;
+                    }
+
                     // Emit the safe prefix
                     if !prefix.is_empty() {
                         #[allow(deprecated)]
@@ -1010,8 +1036,8 @@ impl JailedStream {
                         )
                     }
                     Ok((_, normal_text)) => {
-                        // Parser succeeded but extracted no structured tool calls. The parser
-                        // signals which sub-case via normal_text:
+                        // Parser succeeded but extracted no structured tool calls. Most parsers
+                        // signal which sub-case via normal_text:
                         //   - Some(""):  parser detected markers but couldn't form a complete
                         //                call (e.g. kimi truncated mid-arg, or start token with
                         //                no valid JSON). Drop the buffer — accumulated_content
@@ -1022,8 +1048,17 @@ impl JailedStream {
                         //                accumulated_content through verbatim — it's regular text
                         //                and may carry leading/trailing whitespace the parser
                         //                would have trimmed.
+                        //
+                        // Harmony is different because its tool parser is also responsible for
+                        // stripping Harmony envelopes when no reasoning parser is configured.
+                        // In zero-call Harmony marker cases, emit the stripped normal_text rather
+                        // than accumulated_content, which still contains raw protocol markers.
                         let content = if normal_text.as_deref() == Some("") {
                             ""
+                        } else if is_harmony_parser(self.tool_call_parser.as_deref())
+                            && contains_harmony_protocol(accumulated_content)
+                        {
+                            normal_text.as_deref().unwrap_or("")
                         } else {
                             accumulated_content
                         };
