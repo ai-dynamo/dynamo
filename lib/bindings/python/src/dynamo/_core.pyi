@@ -669,6 +669,18 @@ class ModelRuntimeConfig:
         """Get an engine-specific runtime configuration value"""
         ...
 
+    def set_structural_tag_mode(self, mode: str) -> None:
+        """Set structural tag mode ("off" or "on")."""
+        ...
+
+    def set_structural_tag_scope(self, scope: str) -> None:
+        """Set structural tag scope ("auto" or "always")."""
+        ...
+
+    def set_structural_tag_schema(self, schema: str) -> None:
+        """Set structural tag schema mode ("auto" or "strict")."""
+        ...
+
     def set_disaggregated_endpoint(
             self,
             bootstrap_host: str | None = None,
@@ -2698,6 +2710,9 @@ class backend:
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
             health_check_payload: Optional[Dict[str, Any]] = None,
+            structural_tag_mode: str = ...,
+            structural_tag_scope: str = ...,
+            structural_tag_schema: str = ...,
         ) -> None: ...
 
     class Worker:
