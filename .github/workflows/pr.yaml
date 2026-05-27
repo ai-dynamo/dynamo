@@ -106,7 +106,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     name: Operator
     runs-on: prod-default-v2
     outputs:
@@ -137,7 +137,7 @@ jobs:
 
   helm-chart-tests:
     needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     name: Helm Chart Tests
     runs-on: ubuntu-latest
     steps:
@@ -156,7 +156,7 @@ jobs:
 
   snapshot-agent:
     needs: changed-files
-    if: needs.changed-files.outputs.snapshot == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     name: Snapshot Agent
     runs-on: prod-default-v2
     steps:
@@ -197,7 +197,7 @@ jobs:
   vllm-dev-build:
     name: vllm-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -212,7 +212,7 @@ jobs:
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -226,7 +226,7 @@ jobs:
   sglang-dev-build:
     name: sglang-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -241,7 +241,7 @@ jobs:
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -255,7 +255,7 @@ jobs:
   trtllm-dev-build:
     name: trtllm-dev
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -270,7 +270,7 @@ jobs:
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -284,7 +284,7 @@ jobs:
   frontend-build:
     name: frontend
     needs: [changed-files]
-    if: needs.changed-files.outputs.frontend == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -313,6 +313,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0
+      # TEMP(allure-timeout-validation): 3-min step timeout → pytest_timeout_minutes=1
+      # forces the timeout wrapper to fire on the deliberately slow test in
+      # tests/test_allure_timeout_validation.py. Revert before merge.
+      cpu_only_test_timeout_minutes: 3
       gpu_test_markers: pre_merge and vllm and gpu_1
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
@@ -324,7 +328,7 @@ jobs:
   vllm-multi-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -341,7 +345,7 @@ jobs:
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -363,7 +367,7 @@ jobs:
   sglang-multi-gpu-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -380,7 +384,7 @@ jobs:
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -402,7 +406,7 @@ jobs:
   trtllm-multi-gpu-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -419,7 +423,7 @@ jobs:
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: planner
@@ -443,14 +447,7 @@ jobs:
   dynamo-pipeline:
     name: dynamo-runtime
     needs: [changed-files]
-    if: |
-      needs.changed-files.outputs.core == 'true' ||
-      needs.changed-files.outputs.planner == 'true' ||
-      needs.changed-files.outputs.frontend == 'true' ||
-      needs.changed-files.outputs.vllm == 'true' ||
-      needs.changed-files.outputs.sglang == 'true' ||
-      needs.changed-files.outputs.trtllm == 'true' ||
-      needs.changed-files.outputs.benchmarks == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
@@ -466,7 +463,7 @@ jobs:
   vllm-compliance:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: vllm
@@ -479,7 +476,7 @@ jobs:
   sglang-compliance:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: sglang
@@ -492,7 +489,7 @@ jobs:
   trtllm-compliance:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: trtllm
@@ -505,7 +502,7 @@ jobs:
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: dynamo
@@ -518,7 +515,7 @@ jobs:
   frontend-compliance:
     name: frontend # This name overlaps with other frontend jobs to group them in the UI
     needs: [changed-files, frontend-build]
-    if: needs.changed-files.outputs.frontend == 'true'
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: dynamo
@@ -535,11 +532,7 @@ jobs:
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build, vllm-test]
-    if: |
-      always() && !cancelled() &&
-      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.vllm-build.result == 'success' &&
-      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -551,11 +544,7 @@ jobs:
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build, sglang-test]
-    if: |
-      always() && !cancelled() &&
-      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.sglang-build.result == 'success' &&
-      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -567,11 +556,7 @@ jobs:
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build, trtllm-test]
-    if: |
-      always() && !cancelled() &&
-      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.trtllm-build.result == 'success' &&
-      (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -585,13 +570,7 @@ jobs:
   # ============================================================================
 
   deploy-operator:
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' ||
-       needs.changed-files.outputs.sglang == 'true' ||
-       needs.changed-files.outputs.trtllm == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     needs: [changed-files, operator]
     runs-on: prod-default-small-v2
     outputs:
@@ -614,9 +593,7 @@ jobs:
   deploy-test-vllm:
     name: vllm Deploy Test
     needs: [changed-files, deploy-operator, vllm-copy-to-acr]
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
@@ -630,9 +607,7 @@ jobs:
   deploy-test-sglang:
     name: sglang Deploy Test
     needs: [changed-files, deploy-operator, sglang-copy-to-acr]
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
@@ -646,9 +621,7 @@ jobs:
   deploy-test-trtllm:
     name: trtllm Deploy Test
     needs: [changed-files, deploy-operator, trtllm-copy-to-acr]
-    if: |
-      !cancelled() && !failure() &&
-      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+    if: false # TEMP(allure-timeout-validation): scoped down to vllm-test CPU only
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
