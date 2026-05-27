@@ -232,6 +232,13 @@ impl NvExtResponseFieldSelection {
                 }
             }
         }
+        if ext
+            .metadata_upload
+            .as_ref()
+            .is_some_and(|upload| upload.enabled != Some(false))
+        {
+            selection.engine_data = true;
+        }
         if ext.has_query_instance_id_annotation() {
             selection.worker_id = true;
             selection.token_ids = true;
@@ -389,6 +396,28 @@ pub struct RoutingConstraintsSchema {
     pub preferred_taints: std::collections::HashMap<String, f32>,
 }
 
+/// Destination for large backend metadata uploaded out of band.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct MetadataUpload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3_url: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_url: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3_path: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
 /// NVIDIA LLM extensions to the OpenAI API
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
@@ -455,6 +484,11 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Upload large backend metadata and return a reference in `nvext.engine_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub metadata_upload: Option<MetadataUpload>,
 
     /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
     /// When set, the request will be routed to this specific prefill worker.
@@ -642,6 +676,7 @@ mod tests {
         assert_eq!(nv_ext.max_thinking_tokens, None);
         assert_eq!(nv_ext.cache_salt, None);
         assert_eq!(nv_ext.extra_fields, None);
+        assert_eq!(nv_ext.metadata_upload, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
@@ -802,6 +837,32 @@ mod tests {
         assert!(!selection.timing);
         assert!(!selection.token_ids);
         assert!(selection.routed_experts);
+    }
+
+    #[test]
+    fn test_metadata_upload_selects_engine_data_unless_disabled() {
+        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+            "metadata_upload": {
+                "s3_url": "s3://bucket/root",
+                "s3_path": "rollouts",
+                "request_id": "rollout-123"
+            }
+        }))
+        .unwrap();
+
+        let upload = nvext.metadata_upload.as_ref().unwrap();
+        assert_eq!(upload.s3_url.as_deref(), Some("s3://bucket/root"));
+        assert!(NvExtResponseFieldSelection::from_nvext(Some(&nvext)).engine_data);
+
+        let disabled: NvExt = serde_json::from_value(serde_json::json!({
+            "metadata_upload": {
+                "enabled": false,
+                "s3_url": "s3://bucket/root"
+            }
+        }))
+        .unwrap();
+
+        assert!(!NvExtResponseFieldSelection::from_nvext(Some(&disabled)).engine_data);
     }
 
     #[test]

@@ -14,6 +14,10 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _openai_stop_sampling_params,
     _user_stop_token_ids,
 )
+from dynamo.sglang.metadata_upload import (
+    MetadataUploadConfig,
+    MetadataUploader,
+)
 from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
@@ -23,6 +27,12 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
+
+
+def _read_zstd_json(path):
+    import zstandard as zstd
+
+    return json.loads(zstd.ZstdDecompressor().decompress(path.read_bytes()))
 
 
 def test_extract_media_urls_supports_string_and_wire_items():
@@ -227,6 +237,27 @@ def test_extract_logprobs_formats_top_tokens_as_token_ids():
     assert total == 1
 
 
+def test_metadata_upload_config_parses_extra_args_nvext():
+    config = MetadataUploadConfig.from_request(
+        {
+            "extra_args": {
+                "request_id": "rollout-extra",
+                "nvext": {
+                    "metadata_upload": {
+                        "s3_url": "s3://bucket/root",
+                        "s3_path": "rollouts",
+                    }
+                }
+            }
+        }
+    )
+
+    assert config is not None
+    assert config.fs_url == "s3://bucket/root"
+    assert config.base_path == "rollouts"
+    assert config.request_id == "rollout-extra"
+
+
 @pytest.mark.asyncio
 async def test_process_token_stream_tracks_logprobs_per_choice_index():
     handler = _new_decode_handler()
@@ -274,6 +305,75 @@ async def test_process_token_stream_tracks_logprobs_per_choice_index():
     assert [chunk["index"] for chunk in chunks] == [0, 1, 0]
     assert [chunk["token_ids"] for chunk in chunks] == [[101], [201], [102]]
     assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.2], [-0.3]]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_uploads_large_metadata(tmp_path):
+    handler = _new_decode_handler()
+    recorded = {}
+
+    class RecordingUploader(MetadataUploader):
+        async def upload_choice(self, choice):
+            recorded["choice"] = choice
+            return await super().upload_choice(choice)
+
+    uploader = RecordingUploader(
+        fs_url=tmp_path.as_uri(),
+        base_path="metadata",
+        request_id="rollout-7",
+        context_id="ctx-1",
+    )
+    meta_info = {
+        "id": "sglang-1",
+        "finish_reason": {"type": "stop"},
+        "output_token_logprobs": [(-0.1, 101, "a")],
+        "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
+        "routed_experts": "base64-experts",
+        "prompt_tokens": 2,
+        "completion_tokens": 1,
+        "cached_tokens": 0,
+    }
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": meta_info,
+                    }
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert "log_probs" not in chunk
+    assert "top_logprobs" not in chunk
+    assert "disaggregated_params" not in chunk
+    metadata_ref = chunk["engine_data"]["sglang_metadata"]
+    assert metadata_ref["path"] == "metadata/rollout-7/choice_0.json.zst"
+    assert metadata_ref["compression"] == "zstd"
+
+    payload = _read_zstd_json(tmp_path / metadata_ref["path"])
+    assert payload["request_id"] == "rollout-7"
+    assert payload["context_id"] == "ctx-1"
+    assert payload["choice_index"] == 0
+    assert payload["sglang_request_id"] == "sglang-1"
+    assert payload["metadata"]["log_probs"] == [-0.1]
+    assert payload["metadata"]["top_logprobs"][0][1]["token_id"] == 102
+    assert payload["metadata"]["routed_experts"] == "base64-experts"
+    assert "output_token_logprobs" not in meta_info
+    assert "output_top_logprobs" not in meta_info
+    assert "routed_experts" not in meta_info
+
+    assert recorded["choice"].log_probs == []
+    assert recorded["choice"].top_logprobs == []
+    assert recorded["choice"].routed_experts is None
 
 
 @pytest.mark.asyncio
@@ -371,6 +471,46 @@ async def test_process_text_stream_stop_reason_requires_nvext_extra_field():
 
     assert "stop_reason" not in chunks[0]["choices"][0]
     assert "nvext" not in chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_uploads_routed_experts(tmp_path):
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+    uploader = MetadataUploader(
+        fs_url=tmp_path.as_uri(),
+        base_path="metadata",
+        request_id="rollout-8",
+        context_id="ctx-2",
+    )
+    meta_info = {
+        "id": "sglang-2",
+        "finish_reason": {"type": "stop"},
+        "routed_experts": "base64-experts",
+    }
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": meta_info,
+                    }
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert "routed_experts" not in chunks[0]["nvext"]
+    metadata_ref = chunks[0]["nvext"]["engine_data"]["sglang_metadata"]
+    assert metadata_ref["compression"] == "zstd"
+    payload = _read_zstd_json(tmp_path / metadata_ref["path"])
+    assert payload["request_id"] == "rollout-8"
+    assert payload["metadata"]["routed_experts"] == "base64-experts"
+    assert "routed_experts" not in meta_info
 
 
 @pytest.mark.asyncio

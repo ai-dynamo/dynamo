@@ -45,6 +45,7 @@ class GenerateRequest(TypedDict, total=False):
     output_options: dict[str, Any]
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
+    extra_args: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):
@@ -62,6 +63,7 @@ class GenerateChunk(TypedDict, total=False):
     finish_reason: str
     completion_usage: dict[str, int]
     disaggregated_params: dict[str, Any]
+    engine_data: dict[str, Any]
 
 
 @dataclass
