@@ -72,7 +72,7 @@ sglang = [
 
 mocker = [
     # No direct URL: it blocks the wheel release (PyPI/Warehouse rejects direct references).
-    "aiconfigurator>=0.8.0",
+    "aiconfigurator>=0.9.0",
 ]
 
 [project.entry-points.pytest11]
