@@ -83,9 +83,6 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
 
-        # ``encoding_format`` is validated by pydantic via the
-        # ``Literal["float", "base64"]`` annotation on ``EmbeddingRequest``;
-        # an invalid value is already rejected upstream as HTTP 400.
         encoding_format = embedding_request.encoding_format
 
         trace_header = context.trace_headers() if self.enable_trace else None
