@@ -49,9 +49,7 @@ spec:
           prometheus.io/path: "/metrics"
       extraPodSpec:
         tolerations:
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -94,13 +92,12 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
-          # --- UCX TCP fallback (Nscale IB SR-IOV blocks cross-pod RDMA — see README) ---
-          # Cluster denies ALLOW_OTHER_VHCA_ACCESS so rc/rc_mlx5 cross-pod handshake fails.
-          # Falling back to TCP over eth0 to get a working cross-node disagg measurement.
-          # Expected throughput: ~eth0 line rate (single Gbps range), not IB.
+          # --- UCX TCP fallback (Nscale: IB path exhausted, see README) ---
+          # 2026-05-26 measured 1.0 GB/s aggregate via TCP. Session 1 May-21 IB config
+          # was tried again 2026-05-27 + 3 variants (PROTO_ENABLE/LIBFABRIC/RNDV_HOST/
+          # bare-minimum) — all fail at UCX backend init under current cluster state.
           - { name: UCX_TLS,         value: "tcp,cuda_copy,cuda_ipc" }
           - { name: UCX_NET_DEVICES, value: "eth0" }
-          # NCCL keeps using IB for TP within a pod (that path works fine intra-pod).
           - { name: NCCL_IB_HCA,     value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
           - { name: NCCL_DEBUG,      value: "WARN" }
           # --- Dynamo / vLLM ---
@@ -141,9 +138,7 @@ spec:
           prometheus.io/path: "/metrics"
       extraPodSpec:
         tolerations:
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -186,11 +181,17 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
-          # --- UCX TCP fallback (Nscale IB SR-IOV blocks cross-pod RDMA — see README) ---
+          # --- UCX over NDR IB (8 HCAs) — see prefill block ---
           - { name: UCX_TLS,         value: "tcp,cuda_copy,cuda_ipc" }
           - { name: UCX_NET_DEVICES, value: "eth0" }
-          - { name: NCCL_IB_HCA,     value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
-          - { name: NCCL_DEBUG,      value: "WARN" }
+          - { name: UCX_IB_GID_INDEX,       value: "3" }
+          - { name: UCX_PROTO_ENABLE,       value: "y" }
+          - { name: UCX_RC_TIMEOUT,         value: "600s" }
+          - { name: UCX_KEEPALIVE_INTERVAL, value: "300s" }
+          - { name: UCX_LOG_LEVEL,          value: "debug" }
+          - { name: NCCL_IB_HCA,            value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
+          - { name: NCCL_IB_GID_INDEX,      value: "3" }
+          - { name: NCCL_DEBUG,             value: "WARN" }
           - { name: DYN_HEALTH_CHECK_ENABLED,  value: "false" }
           - { name: HF_HOME,                   value: /shared-models }
           - { name: VLLM_LOGGING_LEVEL,        value: "INFO" }
