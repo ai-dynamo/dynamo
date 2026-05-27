@@ -52,9 +52,9 @@ from gpu_memory_service.common.cuda_utils import (
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
-    CreatePackedLayoutRequest,
-    CreatePackedLayoutResponse,
-    ExportAllocationResponse,
+    AllocateManyRequest,
+    AllocateResponse,
+    AllocationSpec,
     GetAllocationResponse,
 )
 
@@ -122,7 +122,6 @@ class LocalMapping:
     handle: int  # 0 if unmapped but VA reserved
     tag: str
     layout_slot: int
-    mapping_offset: int = 0
 
     def with_handle(self, handle: int) -> "LocalMapping":
         return LocalMapping(
@@ -133,7 +132,6 @@ class LocalMapping:
             handle,
             self.tag,
             self.layout_slot,
-            self.mapping_offset,
         )
 
     def with_server_identity(
@@ -149,19 +147,6 @@ class LocalMapping:
             self.handle,
             self.tag,
             layout_slot,
-            self.mapping_offset,
-        )
-
-    def with_mapping_offset(self, mapping_offset: int) -> "LocalMapping":
-        return LocalMapping(
-            self.allocation_id,
-            self.va,
-            self.size,
-            self.aligned_size,
-            self.handle,
-            self.tag,
-            self.layout_slot,
-            mapping_offset,
         )
 
 
@@ -316,15 +301,42 @@ class GMSClientMemoryManager:
             )
         return response.allocation_id, int(response.layout_slot)
 
+    def allocate_handles(self, specs: List[tuple[int, str]]) -> List[AllocateResponse]:
+        """Allocate multiple cuMem handles on the server in one RPC."""
+        self._require_rw()
+        if not specs:
+            return []
+
+        aligned_specs = [
+            (align_to_granularity(size, self.granularity), tag) for size, tag in specs
+        ]
+        response = self._client_rpc.allocate_many_info(
+            AllocateManyRequest(
+                allocations=[
+                    AllocationSpec(size=aligned_size, tag=tag)
+                    for aligned_size, tag in aligned_specs
+                ]
+            )
+        )
+        if len(response.allocations) != len(aligned_specs):
+            raise RuntimeError(
+                "GMS allocate_many response count mismatch: "
+                f"{len(response.allocations)} vs {len(aligned_specs)}"
+            )
+
+        for alloc, (aligned_size, _tag) in zip(
+            response.allocations, aligned_specs, strict=True
+        ):
+            if int(alloc.aligned_size) != aligned_size:
+                raise RuntimeError(
+                    "GMS allocation alignment mismatch: "
+                    f"{aligned_size} vs {alloc.aligned_size}"
+                )
+        return response.allocations
+
     def export_handle(self, allocation_id: str) -> int:
         """Export allocation as POSIX FD."""
         return self._client_rpc.export(allocation_id)
-
-    def export_handle_info(
-        self, allocation_id: str
-    ) -> tuple[ExportAllocationResponse, int]:
-        """Export allocation as POSIX FD plus placement metadata."""
-        return self._client_rpc.export_info(allocation_id)
 
     def get_handle_info(self, allocation_id: str):
         """Query allocation info from server."""
@@ -371,12 +383,6 @@ class GMSClientMemoryManager:
     def list_handles(self, tag: Optional[str] = None) -> List[GetAllocationResponse]:
         return self._client_rpc.list_allocations(tag)
 
-    def create_packed_layout(
-        self, request: CreatePackedLayoutRequest
-    ) -> CreatePackedLayoutResponse:
-        self._require_rw()
-        return self._client_rpc.create_packed_layout(request)
-
     # ==================== Tier 1: Metadata ====================
 
     def metadata_put(
@@ -408,7 +414,6 @@ class GMSClientMemoryManager:
         allocation_id: str,
         tag: str,
         layout_slot: int,
-        mapping_offset: int = 0,
     ) -> int:
         """Import FD + cuMemMap + set access + track.
 
@@ -417,7 +422,7 @@ class GMSClientMemoryManager:
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
         handle = cumem_import_from_shareable_handle_close_fd(fd)
-        cumem_map(va, aligned_size, handle, mapping_offset)
+        cumem_map(va, aligned_size, handle)
         cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
         self._track_mapping(
             LocalMapping(
@@ -428,7 +433,6 @@ class GMSClientMemoryManager:
                 handle=handle,
                 tag=tag,
                 layout_slot=layout_slot,
-                mapping_offset=mapping_offset,
             )
         )
         return handle
@@ -497,35 +501,19 @@ class GMSClientMemoryManager:
             alloc_tag = str(getattr(info, "tag", "default"))
             layout_slot = int(info.layout_slot)
 
-            export_info, fd = self.export_handle_info(allocation_id)
+            fd = self.export_handle(allocation_id)
             va = self.reserve_va(aligned_size)
-            self.map_va(
-                fd,
-                va,
-                alloc_size,
-                allocation_id,
-                alloc_tag,
-                layout_slot,
-                int(export_info.mapping_offset),
-            )
+            self.map_va(fd, va, alloc_size, allocation_id, alloc_tag, layout_slot)
             return va
 
         # Allocate path
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
         alloc_id, layout_slot = self.allocate_handle(size, tag)
-        export_info, fd = self.export_handle_info(alloc_id)
+        fd = self.export_handle(alloc_id)
         aligned_size = align_to_granularity(size, self.granularity)
         va = self.reserve_va(aligned_size)
-        self.map_va(
-            fd,
-            va,
-            size,
-            alloc_id,
-            tag,
-            layout_slot,
-            int(export_info.mapping_offset),
-        )
+        self.map_va(fd, va, size, alloc_id, tag, layout_slot)
         return va
 
     def destroy_mapping(self, va: int) -> None:
@@ -626,10 +614,9 @@ class GMSClientMemoryManager:
                     f"{mapping.tag} vs {alloc_info.tag}"
                 )
 
-            export_info, fd = self.export_handle_info(alloc_info.allocation_id)
+            fd = self.export_handle(alloc_info.allocation_id)
             handle = cumem_import_from_shareable_handle_close_fd(fd)
-            mapping_offset = int(export_info.mapping_offset)
-            cumem_map(va, mapping.aligned_size, handle, mapping_offset)
+            cumem_map(va, mapping.aligned_size, handle)
             cumem_set_access(
                 va, mapping.aligned_size, self.device, self._granted_lock_type
             )
@@ -640,7 +627,7 @@ class GMSClientMemoryManager:
             self._mappings[va] = mapping.with_server_identity(
                 alloc_info.allocation_id,
                 int(alloc_info.layout_slot),
-            ).with_mapping_offset(mapping_offset).with_handle(handle)
+            ).with_handle(handle)
             self._inverse_mapping[alloc_info.allocation_id] = va
             remapped_count += 1
             total_bytes += mapping.aligned_size
@@ -773,7 +760,6 @@ class GMSClientMemoryManager:
                 handle=0,
                 tag=scratch.tag,
                 layout_slot=0,
-                mapping_offset=0,
             )
         migrated = len(self._scratch_mappings)
         self._scratch_mappings.clear()

@@ -11,12 +11,12 @@ from typing import List, Optional, Tuple
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
+    AllocateManyRequest,
+    AllocateManyResponse,
     AllocateRequest,
     AllocateResponse,
     CommitRequest,
     CommitResponse,
-    CreatePackedLayoutRequest,
-    CreatePackedLayoutResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
     FreeAllocationRequest,
@@ -146,12 +146,12 @@ class _GMSClientSession:
         response = self.allocate_info(size=size, tag=tag)
         return response.allocation_id, response.aligned_size
 
-    def create_packed_layout(
-        self, request: CreatePackedLayoutRequest
-    ) -> CreatePackedLayoutResponse:
-        return self._transport.request(request, CreatePackedLayoutResponse)
+    def allocate_many_info(
+        self, request: AllocateManyRequest
+    ) -> AllocateManyResponse:
+        return self._transport.request(request, AllocateManyResponse)
 
-    def export_info(self, allocation_id: str) -> tuple[ExportAllocationResponse, int]:
+    def export(self, allocation_id: str) -> int:
         response, fd = self._transport.request_with_fd(
             ExportAllocationRequest(allocation_id=allocation_id),
             ExportAllocationResponse,
@@ -160,10 +160,6 @@ class _GMSClientSession:
             raise RuntimeError(
                 f"GMS export returned no FD for allocation_id={allocation_id}"
             )
-        return response, fd
-
-    def export(self, allocation_id: str) -> int:
-        _, fd = self.export_info(allocation_id)
         return fd
 
     def get_allocation(self, allocation_id: str) -> GetAllocationResponse:

@@ -11,9 +11,9 @@ from typing import Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
+    AllocateManyRequest,
     AllocateRequest,
     CommitRequest,
-    CreatePackedLayoutRequest,
     ExportAllocationRequest,
     FreeAllocationRequest,
     GetAllocationRequest,
@@ -36,8 +36,8 @@ class OperationNotAllowed(Exception):
 
 RW_REQUIRED: frozenset[type] = frozenset(
     {
+        AllocateManyRequest,
         AllocateRequest,
-        CreatePackedLayoutRequest,
         FreeAllocationRequest,
         MetadataPutRequest,
         MetadataDeleteRequest,

@@ -61,23 +61,17 @@ class AllocateResponse(msgspec.Struct, tag="allocate_response"):
     layout_slot: int
 
 
-class PackedRestorePlacement(msgspec.Struct):
+class AllocationSpec(msgspec.Struct):
     size: int
-    aligned_size: int
-    tag: str
-    backing_index: int
-    backing_offset: int
+    tag: str = "default"
 
 
-class CreatePackedLayoutRequest(msgspec.Struct, tag="create_packed_layout_request"):
-    backing_sizes: List[int]
-    placements: List[PackedRestorePlacement]
+class AllocateManyRequest(msgspec.Struct, tag="allocate_many_request"):
+    allocations: List[AllocationSpec]
 
 
-class CreatePackedLayoutResponse(msgspec.Struct, tag="create_packed_layout_response"):
+class AllocateManyResponse(msgspec.Struct, tag="allocate_many_response"):
     allocations: List[AllocateResponse]
-    backing_count: int
-    backing_bytes: int
 
 
 class ExportAllocationRequest(msgspec.Struct, tag="export_allocation_request"):
@@ -90,7 +84,6 @@ class ExportAllocationResponse(msgspec.Struct, tag="export_allocation_response")
     aligned_size: int
     tag: str
     layout_slot: int
-    mapping_offset: int = 0
 
 
 class GetAllocationRequest(msgspec.Struct, tag="get_allocation_request"):
@@ -103,7 +96,6 @@ class GetAllocationResponse(msgspec.Struct, tag="get_allocation_response"):
     aligned_size: int
     tag: str
     layout_slot: int
-    mapping_offset: int = 0
 
 
 class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):
@@ -212,8 +204,8 @@ Message = Union[
     GetAllocationStateResponse,
     AllocateRequest,
     AllocateResponse,
-    CreatePackedLayoutRequest,
-    CreatePackedLayoutResponse,
+    AllocateManyRequest,
+    AllocateManyResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
     GetAllocationRequest,

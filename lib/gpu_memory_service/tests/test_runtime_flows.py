@@ -276,7 +276,7 @@ def running_gms(monkeypatch, tmp_path):
         lambda va, size: None,
     )
     monkeypatch.setattr(
-        client_memory_manager, "cumem_map", lambda va, size, handle, offset=0: None
+        client_memory_manager, "cumem_map", lambda va, size, handle: None
     )
     monkeypatch.setattr(
         client_memory_manager,
