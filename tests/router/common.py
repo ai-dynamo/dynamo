@@ -2275,8 +2275,16 @@ def _test_disagg_background_prefill_sticky_routing(
             prefill_endpoint = runtime.endpoint(
                 f"{prefill_workers.namespace}.prefill.generate"
             )
+            prefill_session_control_endpoint = runtime.endpoint(
+                f"{prefill_workers.namespace}.prefill.session_control"
+            )
             await poll_for_worker_instances(
                 prefill_endpoint,
+                prefill_workers.num_workers,
+                max_wait_time=120,
+            )
+            await poll_for_worker_instances(
+                prefill_session_control_endpoint,
                 prefill_workers.num_workers,
                 max_wait_time=120,
             )
