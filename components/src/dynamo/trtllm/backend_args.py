@@ -419,9 +419,9 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
 
     def _add_diffusion_request_arguments(self, parser: argparse.ArgumentParser) -> None:
-        # Check TRTLLM's DiffusionRequest for list of fields, note that
+        # Check TRT-LLM's public VisualGenParams for the list of fields. Note that
         # we only add the fields that can be set in request, otherwise we use
-        # TRTLLM's default values by not setting them at all.
+        # TRT-LLM's default values by not setting them at all.
         diffusion_request_group = parser.add_argument_group(
             "Diffusion Request Options [Experimental]",
             "Options to set default values for video/image generation requests",
