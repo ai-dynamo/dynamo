@@ -7,7 +7,7 @@ use crate::ParserResult;
 use crate::ReasoningParser;
 
 use openai_harmony::StreamableParser;
-use openai_harmony::chat::TextContent;
+use openai_harmony::chat::{Content, Message, TextContent};
 use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, chat::Role, load_harmony_encoding};
 
 ///// Static initialization of harmony encoder to not affect performance every time a parser is created
@@ -18,6 +18,15 @@ static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::
     OnceLock::new();
 static HARMONY_CALL_TOKEN_IDS: OnceLock<Vec<u32>> = OnceLock::new();
 const HARMONY_CALL_MARKER: &str = "<|call|>";
+const HARMONY_SPECIAL_TOKENS: &[&str] = &[
+    "<|start|>",
+    "<|end|>",
+    "<|return|>",
+    "<|channel|>",
+    "<|constrain|>",
+    "<|message|>",
+    "<|call|>",
+];
 
 fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
     GLOBAL_HARMONY_GPTOSS_ENCODING.get_or_init(|| {
@@ -36,6 +45,9 @@ fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
 
 pub struct GptOssReasoningParser {
     parser: StreamableParser,
+    pending_text: String,
+    emitted_reasoning_text: bool,
+    insert_reasoning_separator: bool,
 }
 
 /// Implement Debug for GptOssReasoningParser separately because StreamableParser does not implement Debug
@@ -64,7 +76,12 @@ impl GptOssReasoningParser {
                 return Err(anyhow::anyhow!("Failed to load Harmony encoding: {e}"));
             }
         };
-        Ok(Self { parser })
+        Ok(Self {
+            parser,
+            pending_text: String::new(),
+            emitted_reasoning_text: false,
+            insert_reasoning_separator: false,
+        })
     }
 }
 
@@ -126,18 +143,70 @@ fn raw_input_text_for_tool_parser(
     text.to_string()
 }
 
+fn split_incomplete_harmony_suffix(text: &str) -> (&str, &str) {
+    let hold_len = HARMONY_SPECIAL_TOKENS
+        .iter()
+        .flat_map(|token| (1..token.len()).map(|idx| &token[..idx]))
+        .filter(|prefix| text.ends_with(*prefix))
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+
+    text.split_at(text.len() - hold_len)
+}
+
+fn append_separated(target: &mut String, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if !target.is_empty() {
+        target.push('\n');
+    }
+    target.push_str(text);
+}
+
+fn append_text_content(target: &mut String, content: &[Content]) {
+    for item in content {
+        if let Content::Text(TextContent { text }) = item {
+            append_separated(target, text);
+        }
+    }
+}
+
+fn append_message_by_channel(reasoning_text: &mut String, normal_text: &mut String, msg: &Message) {
+    match msg.channel.as_deref() {
+        Some("analysis") => append_text_content(reasoning_text, &msg.content),
+        Some("final") | Some("commentary") => append_text_content(normal_text, &msg.content),
+        _ => {}
+    }
+}
+
+fn append_current_by_channel(
+    reasoning_text: &mut String,
+    normal_text: &mut String,
+    channel: Option<String>,
+    current: String,
+) {
+    match channel.as_deref() {
+        Some("analysis") => append_separated(reasoning_text, &current),
+        Some("final") | Some("commentary") => append_separated(normal_text, &current),
+        _ => {}
+    }
+}
+
 impl ReasoningParser for GptOssReasoningParser {
     fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult {
+        let encoded_tokens;
         let token_ids = if token_ids.is_empty() {
             // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
-            let encoded_tokens = match encode_text_to_tokens(text) {
+            encoded_tokens = match encode_text_to_tokens(text) {
                 Ok(tokens) => tokens,
                 Err(err) => {
                     tracing::warn!("Failed to encode Harmony tokens: {err}");
                     return ParserResult::default();
                 }
             };
-            &encoded_tokens.to_vec()
+            encoded_tokens.as_slice()
         } else {
             token_ids
         };
@@ -160,70 +229,29 @@ impl ReasoningParser for GptOssReasoningParser {
         let output_msgs = parser.messages();
         tracing::debug!("Parser has {} output messages", output_msgs.len());
 
-        match output_msgs.len() {
-            0 => {
-                tracing::debug!("No output messages, using current content");
-                let current = parser.current_content().unwrap_or_default();
-                tracing::debug!("Current content length: {}", current.len());
-                ParserResult {
-                    normal_text: String::new(),
-                    reasoning_text: current,
-                }
-            }
-            1 => {
-                tracing::debug!("Single output message detected");
-                let mut reasoning_text = String::new();
-                if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
-                    output_msgs[0].content.first()
-                {
-                    reasoning_text.push_str(text);
-                    tracing::debug!("Extracted reasoning text length: {}", reasoning_text.len());
-                }
-                let current = parser.current_content().unwrap_or_default();
-                tracing::debug!("Current content length: {}", current.len());
-                ParserResult {
-                    normal_text: current,
-                    reasoning_text,
-                }
-            }
-            _ => {
-                tracing::debug!("Multiple output messages detected: {}", output_msgs.len());
-                let mut reasoning_text = String::new();
-                let mut normal_text = String::new();
+        let mut reasoning_text = String::new();
+        let mut normal_text = String::new();
+        for msg in output_msgs {
+            append_message_by_channel(&mut reasoning_text, &mut normal_text, msg);
+        }
 
-                // Loop until second last message
-                for (i, parse_msg) in output_msgs.iter().take(output_msgs.len() - 1).enumerate() {
-                    tracing::debug!("Processing reasoning message {}", i + 1);
-                    if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
-                        parse_msg.content.first()
-                    {
-                        reasoning_text.push_str(text);
-                        tracing::debug!("Added {} chars to reasoning text", text.len());
-                    }
-                }
+        let current = parser.current_content().unwrap_or_default();
+        append_current_by_channel(
+            &mut reasoning_text,
+            &mut normal_text,
+            parser.current_channel(),
+            current,
+        );
 
-                let last_msg = &output_msgs[output_msgs.len() - 1];
-                tracing::debug!("Processing final message");
+        tracing::debug!(
+            "Final result - normal_text: {} chars, reasoning_text: {} chars",
+            normal_text.len(),
+            reasoning_text.len()
+        );
 
-                // Handle the last message
-                if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
-                    last_msg.content.first()
-                {
-                    normal_text.push_str(text);
-                    tracing::debug!("Added {} chars to normal text", text.len());
-                }
-
-                tracing::debug!(
-                    "Final result - normal_text: {} chars, reasoning_text: {} chars",
-                    normal_text.len(),
-                    reasoning_text.len()
-                );
-
-                ParserResult {
-                    normal_text,
-                    reasoning_text,
-                }
-            }
+        ParserResult {
+            normal_text,
+            reasoning_text,
         }
     }
 
@@ -233,16 +261,33 @@ impl ReasoningParser for GptOssReasoningParser {
         token_ids: &[u32],
     ) -> ParserResult {
         let caller_supplied_token_ids = !token_ids.is_empty();
+        let text_to_process;
+        let text = if caller_supplied_token_ids {
+            text
+        } else {
+            self.pending_text.push_str(text);
+            let combined = std::mem::take(&mut self.pending_text);
+            let (ready, pending) = split_incomplete_harmony_suffix(&combined);
+            self.pending_text.push_str(pending);
+            text_to_process = ready.to_string();
+            text_to_process.as_str()
+        };
+
+        if text.is_empty() && token_ids.is_empty() {
+            return ParserResult::default();
+        }
+
+        let encoded_tokens;
         let token_ids = if token_ids.is_empty() {
             // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
-            let encoded_tokens = match encode_text_to_tokens(text) {
+            encoded_tokens = match encode_text_to_tokens(text) {
                 Ok(tokens) => tokens,
                 Err(err) => {
                     tracing::warn!("Failed to encode Harmony tokens: {err}");
                     return ParserResult::default();
                 }
             };
-            &encoded_tokens.to_vec()
+            encoded_tokens.as_slice()
         } else {
             token_ids
         };
@@ -258,21 +303,37 @@ impl ReasoningParser for GptOssReasoningParser {
                 token_ids.len(),
                 token_id
             );
+            let previous_channel = parser.current_channel();
             if let Err(e) = parser.process(*token_id) {
                 tracing::warn!("Harmony parse error for token_id {token_id}: {e}");
                 return ParserResult::default();
             }
+            let current_channel = parser.current_channel();
+
+            if previous_channel.as_deref() != Some("analysis")
+                && current_channel.as_deref() == Some("analysis")
+                && self.emitted_reasoning_text
+            {
+                self.insert_reasoning_separator = true;
+            }
 
             if let (Some(delta), Some(channel)) = (
                 parser.last_content_delta().unwrap_or_default(),
-                parser.current_channel(),
+                current_channel,
             ) {
                 // `last_content_delta` only exposes the newest token slice, so we forward
                 // `final`/`analysis` chunks immediately; commentary is reconstructed in the
                 // fallback path below because it needs the stripped metadata.
                 match channel.as_str() {
                     "final" => normal_delta.push_str(&delta),
-                    "analysis" => reasoning_delta.push_str(&delta),
+                    "analysis" => {
+                        if self.insert_reasoning_separator {
+                            reasoning_delta.push('\n');
+                            self.insert_reasoning_separator = false;
+                        }
+                        reasoning_delta.push_str(&delta);
+                        self.emitted_reasoning_text = true;
+                    }
                     "commentary" => {}
                     _ => {}
                 }
@@ -377,6 +438,23 @@ mod tests {
         );
     }
 
+    #[test] // REASONING.batch.4
+    fn test_gpt_oss_final_channel_without_analysis_is_normal_text() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let result = parser.detect_and_parse_reasoning("<|channel|>final<|message|>answer", &[]);
+        assert_eq!(result.reasoning_text, "");
+        assert_eq!(result.normal_text, "answer");
+    }
+
+    #[test] // REASONING.batch.6.a
+    fn test_gpt_oss_multiple_analysis_spans_join_before_final() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let text = "<|channel|>analysis<|message|>first<|end|><|start|>assistant<|channel|>analysis<|message|>second<|end|><|start|>assistant<|channel|>final<|message|>done";
+        let result = parser.detect_and_parse_reasoning(text, &[]);
+        assert_eq!(result.reasoning_text, "first\nsecond");
+        assert_eq!(result.normal_text, "done");
+    }
+
     #[test] // REASONING.stream.2.a, REASONING.batch.2.c, TOOLCALLING.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
@@ -399,6 +477,43 @@ mod tests {
             reasoning_text_incr
                 == "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed."
         );
+    }
+
+    #[test] // REASONING.stream.3.b
+    fn test_gpt_oss_reasoning_parser_streaming_split_end_marker() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let chunks = vec![
+            "<|channel|>analysis<|message|>thinking<|e",
+            "nd|><|start|>assistant<|channel|>final<|message|>answer",
+        ];
+        let mut reasoning_text_incr = String::new();
+        let mut normal_text_incr = String::new();
+        for chunk in chunks {
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
+            normal_text_incr.push_str(&result.normal_text);
+            reasoning_text_incr.push_str(&result.reasoning_text);
+        }
+        assert_eq!(reasoning_text_incr, "thinking");
+        assert_eq!(normal_text_incr, "answer");
+    }
+
+    #[test] // REASONING.stream.2.b
+    fn test_gpt_oss_reasoning_parser_streaming_multiple_analysis_spans() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let chunks = vec![
+            "<|channel|>analysis<|message|>first<|end|><|start|>assistant",
+            "<|channel|>analysis<|message|>second<|end|><|start|>assistant",
+            "<|channel|>final<|message|>done",
+        ];
+        let mut reasoning_text_incr = String::new();
+        let mut normal_text_incr = String::new();
+        for chunk in chunks {
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
+            normal_text_incr.push_str(&result.normal_text);
+            reasoning_text_incr.push_str(&result.reasoning_text);
+        }
+        assert_eq!(reasoning_text_incr, "first\nsecond");
+        assert_eq!(normal_text_incr, "done");
     }
 
     #[test] // REASONING.stream.2.a, REASONING.batch.2.c, TOOLCALLING.harmony.1

@@ -58,16 +58,13 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
   REASONING.batch.4:
     description: Final channel without prior analysis channel
-    dynamo_leak: true
     ref: *upstream_ref
     model_text: <|channel|>final<|message|>answer
     expected:
       dynamo: &d_4
-        reasoning_text: answer
-        normal_text: ''
-      vllm:
         reasoning_text: ''
         normal_text: answer
+      vllm: *d_4
       sglang:
         unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
   REASONING.batch.5:
@@ -122,18 +119,15 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
   REASONING.batch.6.a:
     description: Multiple Harmony analysis spans
-    dynamo_leak: true
     ref: *upstream_ref
     model_text: <|channel|>analysis<|message|>first<|end|><|start|>assistant<|channel|>analysis<|message|>second<|end|><|start|>assistant<|channel|>final<|message|>done
     expected:
       dynamo: &d_9
-        reasoning_text: first
-        normal_text: second
-      vllm:
         reasoning_text: |-
           first
           second
         normal_text: done
+      vllm: *d_9
       sglang:
         unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
   REASONING.batch.2.d:
