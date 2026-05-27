@@ -13,6 +13,7 @@ import threading
 import time
 from typing import Any, Mapping, Optional, Sequence
 
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.snapshot.backends.nixl_common import (
     NIXL_UCX_BACKEND,
     VRAM_MEM_TYPE,
@@ -51,6 +52,7 @@ class NixlUCXTransferBackend:
         self._device = config.device
         self._max_workers = config.max_workers
         self._agent_name = f"gms_ucx_loader_{self._device}_{os.getpid()}"
+        cuda_utils.cuda_runtime_set_device(self._device)
         self._agent = create_nixl_agent(
             api,
             agent_name=self._agent_name,
@@ -285,6 +287,7 @@ class _NixlUCXTransferSession:
     def _run_streaming_scheduler(self) -> None:
         inflight: list[NixlTransferResources] = []
         try:
+            cuda_utils.cuda_runtime_set_device(self._device)
             while True:
                 self._raise_error()
                 while len(inflight) < self._max_workers:

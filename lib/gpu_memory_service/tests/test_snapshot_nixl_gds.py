@@ -55,6 +55,7 @@ def test_gds_streaming_starts_ready_file_before_all_targets(monkeypatch):
     }
 
     started = []
+    cuda_context_calls = []
     first_started = threading.Event()
 
     class FakeAgent:
@@ -74,6 +75,13 @@ def test_gds_streaming_starts_ready_file_before_all_targets(monkeypatch):
 
     monkeypatch.setattr(nixl_gds, "start_transfer", fake_start_transfer)
     monkeypatch.setattr(
+        nixl_gds.cuda_utils,
+        "cuda_runtime_set_device",
+        lambda device: cuda_context_calls.append(
+            (device, threading.current_thread().name)
+        ),
+    )
+    monkeypatch.setattr(
         nixl_gds,
         "wait_for_transfer_done",
         lambda *_args, **_kwargs: None,
@@ -89,6 +97,7 @@ def test_gds_streaming_starts_ready_file_before_all_targets(monkeypatch):
     next_handle = iter(["handle-a", "handle-b"])
 
     def fake_prepare_file_transfer(file_group, _targets):
+        assert cuda_context_calls == [(0, "nixl-gds-streaming-scheduler")]
         file_path, _sources = file_group
         return NixlTransferResources(handle=next(next_handle), label=file_path)
 
@@ -105,5 +114,6 @@ def test_gds_streaming_starts_ready_file_before_all_targets(monkeypatch):
             "/checkpoint/shard-a.bin",
             "/checkpoint/shard-b.bin",
         ]
+        assert cuda_context_calls == [(0, "nixl-gds-streaming-scheduler")]
     finally:
         session.close()

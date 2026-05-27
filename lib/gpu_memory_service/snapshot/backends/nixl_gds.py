@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.snapshot.backends.nixl_common import (
     FILE_MEM_TYPE,
     NIXL_GDS_BACKEND,
@@ -48,6 +49,7 @@ class NixlGDSTransferBackend:
         self._device = config.device
         self._max_workers = config.max_workers
         self._agent_name = f"gms_gds_{self._device}_{os.getpid()}"
+        cuda_utils.cuda_runtime_set_device(self._device)
         self._agent = create_nixl_agent(
             api,
             agent_name=self._agent_name,
@@ -163,6 +165,7 @@ class _NixlGDSTransferSession:
 
     def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
         validate_transfer_targets(self._sources, targets, device=self._device)
+        cuda_utils.cuda_runtime_set_device(self._device)
         t0 = time.monotonic()
 
         def prepare_transfer(
@@ -285,6 +288,7 @@ class _NixlGDSTransferSession:
     def _run_streaming_scheduler(self) -> None:
         inflight: list[NixlTransferResources] = []
         try:
+            cuda_utils.cuda_runtime_set_device(self._device)
             while True:
                 self._raise_error()
                 while len(inflight) < self._max_workers:

@@ -116,6 +116,7 @@ def test_ucx_streaming_starts_ready_allocation_before_all_targets(monkeypatch):
     }
 
     started = []
+    cuda_context_calls = []
     first_started = threading.Event()
 
     class FakeAgent:
@@ -135,6 +136,13 @@ def test_ucx_streaming_starts_ready_allocation_before_all_targets(monkeypatch):
 
     monkeypatch.setattr(nixl_ucx, "start_transfer", fake_start_transfer)
     monkeypatch.setattr(
+        nixl_ucx.cuda_utils,
+        "cuda_runtime_set_device",
+        lambda device: cuda_context_calls.append(
+            (device, threading.current_thread().name)
+        ),
+    )
+    monkeypatch.setattr(
         nixl_ucx,
         "wait_for_transfer_done",
         lambda *_args, **_kwargs: None,
@@ -150,6 +158,7 @@ def test_ucx_streaming_starts_ready_allocation_before_all_targets(monkeypatch):
     next_handle = iter(["handle-a", "handle-b"])
 
     def fake_prepare_source_transfer(source, _target):
+        assert cuda_context_calls == [(0, "nixl-ucx-streaming-scheduler")]
         return NixlTransferResources(
             handle=next(next_handle),
             label=source.allocation_id,
@@ -170,5 +179,6 @@ def test_ucx_streaming_starts_ready_allocation_before_all_targets(monkeypatch):
             ("handle-a", "alloc-a"),
             ("handle-b", "alloc-b"),
         ]
+        assert cuda_context_calls == [(0, "nixl-ucx-streaming-scheduler")]
     finally:
         session.close()
