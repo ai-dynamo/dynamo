@@ -2356,6 +2356,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseWithCondition(
 	}
 
 	dgdr.AddStatusCondition(condition)
+	setSucceededCondition(dgdr, phase)
 
 	if err := r.Status().Update(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
