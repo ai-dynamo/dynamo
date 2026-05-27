@@ -21,6 +21,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Global state flags
+MANAGED_GPU_DETECTED=false
+
 # Function to print colored output
 print_status() {
     local color=$1
@@ -122,54 +125,101 @@ check_default_storage_class() {
 check_cluster_resources() {
     print_section "Checking cluster GPU resources"
 
-    local node_count
-    node_count=$(kubectl get nodes -l nvidia.com/gpu.present=true -o name 2>/dev/null | wc -l || echo "0")
+    # Primary detection: GPU Feature Discovery label
+    local labeled_gpu_nodes
+    labeled_gpu_nodes=$(kubectl get nodes \
+        -l nvidia.com/gpu.present=true \
+        -o name 2>/dev/null || true)
 
-    if [[ $node_count -eq 0 ]]; then
-        print_status $RED "❌ No GPU nodes found in the cluster"
-        print_status $YELLOW "Dynamo requires nodes with nvidia.com/gpu.present=true label."
-        print_status $BLUE "Please ensure your cluster has GPU-enabled nodes properly labeled."
-        return 1
-    else
-        print_status $GREEN "✅ Found ${node_count} GPU node(s) in the cluster"
+    local labeled_count
+    labeled_count=$(echo "$labeled_gpu_nodes" | grep -c . || true)
+
+    if [[ $labeled_count -gt 0 ]]; then
+        print_status $GREEN "✅ Found ${labeled_count} GPU node(s) via GFD labels"
         return 0
     fi
 
-    # Show basic node information (commented out for cleaner output)
-    # print_status $BLUE "GPU Node information:"
-    # kubectl get nodes -l nvidia.com/gpu.present=true -o custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type,ROLES:.metadata.labels.'node-role\.kubernetes\.io/.*',VERSION:.status.nodeInfo.kubeletVersion 2>/dev/null || true
+    # Fallback detection: allocatable GPU resources
+    local allocatable_gpu_nodes
+    allocatable_gpu_nodes=$(kubectl get nodes \
+        -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.allocatable.nvidia\.com/gpu}{"\n"}{end}' \
+        2>/dev/null || true)
+
+    local allocatable_count
+    allocatable_count=$(echo "$allocatable_gpu_nodes" | awk '$2 != "" && $2 != "0"' | wc -l | tr -d ' ')
+
+    if [[ $allocatable_count -gt 0 ]]; then
+        MANAGED_GPU_DETECTED=true
+
+        print_status $GREEN "✅ Found ${allocatable_count} GPU node(s) via allocatable GPU resources"
+        print_status $BLUE "Managed GPU environment detected (GPU Operator labels not present)"
+
+        echo "$allocatable_gpu_nodes" | awk '$2 != "" && $2 != "0"' | while read -r node gpu_count; do
+            print_status $GREEN "  - ${node}: ${gpu_count} GPU(s)"
+        done
+
+        return 0
+    fi
+
+    print_status $RED "❌ No GPU nodes found in the cluster"
+    print_status $YELLOW "No nodes detected with either:"
+    print_status $YELLOW "  - nvidia.com/gpu.present=true label"
+    print_status $YELLOW "  - allocatable nvidia.com/gpu resources"
+
+    print_status $BLUE "Please ensure your cluster has GPU-enabled nodes configured."
+
+    return 1
 }
 
 check_gpu_operator() {
     print_section "Checking GPU operator"
 
-    # Check if GPU operator pods exist and are running
+    # Managed GPU environments may not use GPU Operator
+    if [[ "$MANAGED_GPU_DETECTED" == "true" ]]; then
+        print_status $YELLOW "⚠️  GPU Operator not required in managed GPU environments"
+        print_status $GREEN "✅ Managed GPU support detected via allocatable GPU resources"
+        return 0
+    fi
+
+    # Check for GPU operator pods
     local gpu_operator_pods
-    gpu_operator_pods=$(kubectl get pods -A -lapp=gpu-operator --no-headers 2>/dev/null || echo "")
+    gpu_operator_pods=$(kubectl get pods -A \
+        -l app.kubernetes.io/name=gpu-operator \
+        --no-headers 2>/dev/null || true)
+
+    # Fallback to legacy label
+    if [[ -z "$gpu_operator_pods" ]]; then
+        gpu_operator_pods=$(kubectl get pods -A \
+            -l app=gpu-operator \
+            --no-headers 2>/dev/null || true)
+    fi
 
     if [[ -z "$gpu_operator_pods" ]]; then
         print_status $RED "❌ GPU operator not found in the cluster"
-        print_status $YELLOW "Dynamo requires GPU operator to be installed and running."
-        print_status $BLUE "Please install GPU operator before proceeding with deployment."
+        print_status $YELLOW "Dynamo requires either:"
+        print_status $YELLOW "  - NVIDIA GPU Operator"
+        print_status $YELLOW "  - Managed GPU support with allocatable GPUs"
+
         return 1
     fi
 
-    # Check if any GPU operator pods are running
     local running_pods
-    running_pods=$(echo "$gpu_operator_pods" | grep -c "Running" || echo "0")
+    running_pods=$(echo "$gpu_operator_pods" | awk '$4 == "Running"' | wc -l | tr -d ' ')
+
     local total_pods
-    total_pods=$(echo "$gpu_operator_pods" | wc -l)
+    total_pods=$(echo "$gpu_operator_pods" | wc -l | tr -d ' ')
 
     if [[ $running_pods -eq 0 ]]; then
         print_status $RED "❌ GPU operator pods are not running"
-        print_status $YELLOW "Found $total_pods GPU operator pod(s) but none are in Running state:"
         echo "$gpu_operator_pods"
         return 1
+
     elif [[ $running_pods -lt $total_pods ]]; then
         print_status $YELLOW "⚠️  GPU operator partially running: $running_pods/$total_pods pods running"
         echo "$gpu_operator_pods"
         print_status $GREEN "✅ GPU operator is available (with warnings)"
         return 0
+
     else
         print_status $GREEN "✅ GPU operator is running ($running_pods/$total_pods pods)"
         return 0
