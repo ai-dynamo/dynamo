@@ -498,7 +498,13 @@ where
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let instance_id = {
-            let instance_ids = self.client.instance_ids_avail();
+            // DIS-2105: select among free workers (excludes over-threshold
+            // workers flagged by the worker load monitor) rather than just
+            // alive workers. When the monitor isn't configured this is
+            // equivalent to the discovered set; with thresholds it excludes
+            // busy workers from candidate pools. The all-busy gate in
+            // generate_with_fault_detection surfaces ResourceExhausted/503.
+            let instance_ids = self.client.instance_ids_free();
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
@@ -517,7 +523,8 @@ where
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let instance_id = {
-            let instance_ids = self.client.instance_ids_avail();
+            // DIS-2105: select among free workers — see round_robin for rationale.
+            let instance_ids = self.client.instance_ids_free();
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
@@ -539,9 +546,10 @@ where
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
         let instance_id = {
+            // DIS-2105: select among free workers — see round_robin for rationale.
             let instance_ids = self
                 .client
-                .instance_ids_avail()
+                .instance_ids_free()
                 .iter()
                 .copied()
                 .collect::<Vec<_>>();
@@ -601,9 +609,10 @@ where
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
+        // DIS-2105: select among free workers — see round_robin for rationale.
         let instance_ids = self
             .client
-            .instance_ids_avail()
+            .instance_ids_free()
             .iter()
             .copied()
             .collect::<Vec<_>>();
@@ -672,9 +681,10 @@ where
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
+        // DIS-2105: select among free workers — see round_robin for rationale.
         let instance_ids = self
             .client
-            .instance_ids_avail()
+            .instance_ids_free()
             .iter()
             .copied()
             .collect::<Vec<_>>();
@@ -706,7 +716,8 @@ where
     /// Increments round-robin counter if applicable.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn select_next_worker(&self) -> Option<u64> {
-        let instance_ids = self.client.instance_ids_avail();
+        // DIS-2105: select among free workers — see round_robin for rationale.
+        let instance_ids = self.client.instance_ids_free();
         let count = instance_ids.len();
         if count == 0 {
             return None;
@@ -738,7 +749,8 @@ where
     /// Useful for checking if a worker is suitable before committing to it.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn peek_next_worker(&self) -> Option<u64> {
-        let instance_ids = self.client.instance_ids_avail();
+        // DIS-2105: select among free workers — see round_robin for rationale.
+        let instance_ids = self.client.instance_ids_free();
         let count = instance_ids.len();
         if count == 0 {
             return None;
