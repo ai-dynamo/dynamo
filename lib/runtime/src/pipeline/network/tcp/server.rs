@@ -616,14 +616,22 @@ async fn tcp_listener(
     /// Symmetric to [`process_response_stream`] for the upstream→downstream
     /// data direction: deliver the [`StreamSender`] half registered by the
     /// upstream to whoever awaits it, then pump every frame the upstream pushes
-    /// into the now-connected TCP socket and pump any control message coming
-    /// back from the downstream side into the engine context.
+    /// into the now-connected TCP socket.
+    ///
+    /// One difference is that the request stream is **unidirectional**:
+    /// the upstream writes data + one closing control message, and the
+    /// downstream is not expected to reply: downstream response or inference
+    /// error should be returned through response stream. We therefore drop the
+    /// read half, on fatal error, downstream should drop the request stream.
     async fn process_request_stream(
         subject: String,
         state: Arc<Mutex<State>>,
         reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
         writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
     ) -> Result<()> {
+        // Request stream is unidirectional; we don't read from the downstream.
+        drop(reader);
+
         let request_stream = {
             let mut guard = state.lock().await;
             let conn = guard.tx_subjects.remove(&subject).ok_or(error!(
@@ -664,17 +672,7 @@ async fn tcp_listener(
             ));
         }
 
-        let send_task = tokio::spawn(request_stream_send_handler(
-            writer,
-            request_rx,
-            context.clone(),
-        ));
-        let recv_task = tokio::spawn(request_stream_recv_handler(reader, context));
-
-        let (send_result, recv_result) = tokio::join!(send_task, recv_task);
-        send_result?;
-        recv_result?;
-
+        request_stream_send_handler(writer, request_rx, context).await;
         Ok(())
     }
 
@@ -737,66 +735,6 @@ async fn tcp_listener(
         let mut inner = framed_writer.into_inner();
         let _ = inner.flush().await;
         let _ = inner.shutdown().await;
-    }
-
-    /// Read the downstream's control messages. The only expected message is
-    /// [`ControlMessage::Sentinel`] — the downstream acknowledging it has
-    /// finished consuming the request stream. `Stop` / `Kill` on this
-    /// direction is a protocol violation (the downstream is the consumer, not
-    /// the cancel-initiator); the handler closes the stream rather than
-    /// honouring the cancel, matching the response-path policy.
-    async fn request_stream_recv_handler(
-        mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        context: Arc<dyn AsyncEngineContext>,
-    ) {
-        // Only one legitimate frame is expected on this direction (Sentinel),
-        // so the handler exits after a single read or on context kill.
-        tokio::select! {
-            biased;
-
-            _ = context.killed() => {
-                tracing::trace!("context kill received in request-stream recv handler");
-            }
-
-            msg = framed_reader.next() => {
-                match msg {
-                    Some(Ok(two_part_msg)) => match two_part_msg.into_message_type() {
-                        TwoPartMessageType::HeaderOnly(header) => {
-                            match serde_json::from_slice::<ControlMessage>(&header) {
-                                Ok(ControlMessage::Sentinel) => {
-                                    tracing::trace!("downstream acknowledged request-stream close");
-                                }
-                                Ok(other) => {
-                                    tracing::warn!(
-                                        ?other,
-                                        "unexpected control message on request-stream recv direction, closing stream"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "invalid control message on request-stream recv: {}",
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                        _ => {
-                            tracing::error!(
-                                "unexpected non-control frame on request-stream recv direction"
-                            );
-                        }
-                    },
-                    Some(Err(e)) => {
-                        tracing::error!(
-                            "decode error on request-stream recv handler: {e:?}"
-                        );
-                    }
-                    None => {
-                        tracing::trace!("request-stream recv socket closed by downstream");
-                    }
-                }
-            }
-        }
     }
 
     async fn process_response_stream(

@@ -222,11 +222,14 @@ impl TcpClient {
             .await
             .map_err(|e| error!("failed to send request-stream handshake: {:?}", e))?;
 
+        // Request stream is unidirectional after the handshake: the downstream
+        // never writes again, so close the write half immediately.
+        drop(framed_writer);
+
         let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
 
         tokio::spawn(handle_request_reader(
             framed_reader,
-            framed_writer,
             bytes_tx,
             context,
             cancellation_counter,
@@ -238,25 +241,23 @@ impl TcpClient {
 
 async fn handle_request_reader(
     mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
-    mut framed_writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
     bytes_tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
     context: Arc<dyn AsyncEngineContext>,
     cancellation_counter: Option<IntCounter>,
 ) {
-    let mut send_sentinel = true;
-
+    // Only mark cancellation on fatal errors or explicit upstream cancellation.
+    let mut cancellation_seen = false;
     loop {
         tokio::select! {
             biased;
 
             _ = context.killed() => {
                 tracing::trace!("context kill signal received on request stream; shutting down");
-                send_sentinel = false;
                 break;
             }
 
             _ = context.stopped() => {
-                tracing::trace!("context stop signal received on request stream; draining and shutting down");
+                tracing::trace!("context stop signal received on request stream; shutting down");
                 break;
             }
 
@@ -266,28 +267,25 @@ async fn handle_request_reader(
                         TwoPartMessageType::HeaderOnly(header) => {
                             let ctrl = match serde_json::from_slice::<ControlMessage>(&header) {
                                 Ok(c) => c,
-                                Err(_) => {
-                                    // TODO(#171) - address fatal errors
-                                    panic!("fatal error - invalid control message on request stream");
+                                Err(e) => {
+                                    tracing::warn!(
+                                        err = ?e,
+                                        "invalid control message, closing connection"
+                                    );
+                                    cancellation_seen = true;
+                                    context.kill();
+                                    break;
                                 }
                             };
                             match ctrl {
                                 ControlMessage::Stop => {
-                                    if let Some(counter) = &cancellation_counter {
-                                        counter.inc();
-                                    }
+                                    cancellation_seen = true;
                                     context.stop();
-                                    // Upstream has stopped producing; ack with
-                                    // Sentinel so the server-side recv handler
-                                    // can exit cleanly.
                                     break;
                                 }
                                 ControlMessage::Kill => {
-                                    if let Some(counter) = &cancellation_counter {
-                                        counter.inc();
-                                    }
+                                    cancellation_seen = true;
                                     context.kill();
-                                    send_sentinel = false;
                                     break;
                                 }
                                 ControlMessage::Sentinel => {
@@ -303,17 +301,20 @@ async fn handle_request_reader(
                             }
                         }
                         _ => {
-                            // TODO(#171) - address fatal errors
-                            panic!("fatal error - unexpected message shape on request stream");
+                            tracing::warn!("fatal error - unexpected message shape on request stream");
+                            cancellation_seen = true;
+                            context.kill();
+                            break;
                         }
                     }
                     Some(Err(e)) => {
-                        // TODO(#171) - address fatal errors
-                        panic!("fatal error - failed to decode message on request stream: {e:?}");
+                        tracing::warn!("fatal error - failed to decode message on request stream: {e:?}");
+                        cancellation_seen = true;
+                        context.kill();
+                        break;
                     }
                     None => {
                         tracing::debug!("request stream closed by upstream");
-                        send_sentinel = false;
                         break;
                     }
                 }
@@ -321,11 +322,10 @@ async fn handle_request_reader(
         }
     }
 
-    if send_sentinel && let Ok(bytes) = serde_json::to_vec(&ControlMessage::Sentinel) {
-        let _ = framed_writer
-            .send(TwoPartMessage::from_header(bytes.into()))
-            .await;
+    if cancellation_seen && let Some(counter) = &cancellation_counter {
+        counter.inc();
     }
+
     // Dropping bytes_tx closes the receiver side, signaling end-of-stream to the
     // engine consumer.
     drop(bytes_tx);
