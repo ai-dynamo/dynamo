@@ -1,3 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Vendored from NVIDIA/skills/.github/workflows/team-request.yml @ 6b92ccf5d498d42394487eab30ef7afbc4206d00
+# Keep aligned with upstream; the supported watched paths are fixed.
+
 name: Team Request NVSkills CI
 
 on:
@@ -15,14 +21,16 @@ jobs:
     if: >
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
-        startsWith(github.event.comment.body, '/nvskills-ci')) ||
+        (github.event.comment.body == '/nvskills-ci' ||
+          startsWith(github.event.comment.body, '/nvskills-ci ') ||
+          startsWith(github.event.comment.body, format('/nvskills-ci{0}', '\n')))) ||
       (github.event_name == 'push' &&
         github.actor == (vars.NVSKILLS_SIGNATURE_PUSH_ACTOR || 'nv-nvskill-ci[bot]') &&
         startsWith(github.event.head_commit.message, vars.NVSKILLS_SIGNATURE_COMMIT_TITLE || 'Attach NVSkills validation signatures'))
     runs-on: ubuntu-latest
     concurrency:
-      group: nvskills-ci-request-${{ github.repository }}-${{ github.event.issue.number || github.sha }}
-      cancel-in-progress: true
+      group: nvskills-ci-request-${{ github.repository }}-${{ github.event_name }}-${{ github.event.issue.number || github.sha }}
+      cancel-in-progress: ${{ github.event_name == 'issue_comment' }}
     steps:
       - name: Validate requester permission
         if: ${{ github.event_name == 'issue_comment' }}
@@ -104,7 +112,7 @@ jobs:
 
           has_watched_change=false
           page=1
-          while true; do
+          while [ "${page}" -le 30 ]; do
             files_json="$(curl -fsSL \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
