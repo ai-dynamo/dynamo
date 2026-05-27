@@ -256,6 +256,29 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="lmcache"),
         ],
     ),
+    "aggregated_lmcache_mp": VLLMConfig(
+        name="aggregated_lmcache_mp",
+        directory=vllm_dir,
+        script_name="agg_lmcache_mp.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.lmcache,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(3.8),
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={"LMCACHE_L1_SIZE_GB": "8"},
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+        ],
+    ),
     "agg-request-plane-tcp": VLLMConfig(
         name="agg-request-plane-tcp",
         directory=vllm_dir,
