@@ -413,7 +413,7 @@ def test_request_cancellation_vllm_prefill_cancel(
     (rather than leaking on a torn-down NIXL transfer), and decode routing
     still proceeds so the KV-transfer-complete guard can free the blocks.
 
-    Reference: PR ai-dynamo/dynamo#7489 / NVBugs 5969206.
+    Reference: PR ai-dynamo/dynamo#7489
 
     Timing (Last Run: 2026-05-26): ~219s total (requires 2 GPUs)
     - Engine initialization: ~23s (decode + prefill workers)
