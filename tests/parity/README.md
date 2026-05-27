@@ -26,14 +26,14 @@ tests/parity/
 ├── parity_table.html.j2            ← shared HTML template
 ├── parser/
 │   ├── fixtures/                   ← static YAML, generated from Dynamo as oracle
-│   │   └── <family>/PARSER.batch.yaml
-│   │       (and per-case files like PARSER.batch.4.yaml; see Fixture file schema)
-│   ├── capture_parser_outputs.py   ← drift-check or merge impl output into expected.*
+│   │   └── <family>/TOOLCALLING.batch.yaml
+│   │       (and per-case files like TOOLCALLING.batch.4.yaml; see Fixture file schema)
+│   ├── capture_toolcalling_outputs.py   ← drift-check or merge impl output into expected.*
 │   ├── table.py                    ← parser table adapter
 │   ├── dynamo.py                   ← M2 in-process wrapper (PyO3 binding)
 │   ├── vllm.py                     ← M2 in-process wrapper (ToolParserManager)
 │   ├── sglang.py                   ← M2 in-process wrapper (per-module detectors)
-│   ├── test_parity_parser.py       ← M2 harness (parser-class parity)
+│   ├── test_parity_toolcalling.py       ← M2 harness (parser-class parity)
 │   ├── server.py                   ← M3 subprocess boot helper
 │   ├── client.py                   ← M3 HTTP client (vLLM + SGLang)
 │   └── test_parity_e2e.py          ← M3 harness (server-stack parity over HTTP)
@@ -105,7 +105,7 @@ Reasoning uses the same M2 boundary once the reasoning harness is present:
 
 **What it surfaces:** parser-logic divergences between Dynamo's Rust parser class and upstream's Python parser classes. The bug class is isolated from everything else in the request lifecycle.
 
-**File:** Tool calling uses `tests/parity/parser/test_parity_parser.py`.
+**File:** Tool calling uses `tests/parity/toolcalling/test_parity_toolcalling.py`.
 Reasoning uses the same M2 boundary, but the runnable harness lands in
 the follow-up code PR as `tests/parity/reasoning/test_parity_reasoning.py`.
 
@@ -142,7 +142,7 @@ Both servers receive identical chat-completion requests with `structured_outputs
 
 **What it surfaces:** server-stack divergences between vLLM's and SGLang's HTTP pipelines — request preprocessing, tokenizer round-trip, streaming chunk boundaries, response shaping — that class-level testing (M2) can't see.
 
-**File:** `tests/parity/parser/test_parity_e2e.py`.
+**File:** `tests/parity/toolcalling/test_parity_e2e.py`.
 
 ### Comparison
 
@@ -176,7 +176,7 @@ Each row is one **parser** (one family of input wire format). Each row
 also names the **model(s)** that parser is wired up for — many parsers
 serve more than one model (e.g. `mistral` covers the Mistral series,
 `hermes` covers Hermes-3 + various Llama variants). Columns are the
-sub-case IDs from [`PARSER_CASES.md`](../../lib/parsers/PARSER_CASES.md):
+sub-case IDs from [`TOOLCALLING_CASES.md`](../../lib/parsers/TOOLCALLING_CASES.md):
 top-level buckets (`1`, `3`, `9`, `10`) have no sub-cases and use a
 single column; the other buckets (`2`, `4`, `5`, `6`, `7`, `8`) split
 into `.a`–`.d` sub-cases per the per-bucket axes documented in the
@@ -237,20 +237,20 @@ somewhere you can browse:
 
 ```bash
 # Markdown — paste into a PR description or browse in any editor.
-python3 tests/parity/generate_parity_table.py parser
+python3 tests/parity/generate_parity_table.py toolcalling
 
 # HTML table — clickable cells link to the source fixture YAML; hover over any
 # non-= cell to see the case description and the divergence reason.
-python3 tests/parity/generate_parity_table.py parser --html > tests/parity/parser/PARITY.html
+python3 tests/parity/generate_parity_table.py toolcalling --html > tests/parity/toolcalling/PARITY.html
 ```
 
 Run from the repo root so the HTML's relative `<a href=...>` links to
-fixture YAMLs resolve when you open `tests/parity/parser/PARITY.html`
+fixture YAMLs resolve when you open `tests/parity/toolcalling/PARITY.html`
 in a browser. Generated table output is for local viewing only — don't
 check it in; the generator is the contract. Rows are the 19 parsers
 (Top-N first, then Others, alphabetical within each). Columns are the
-sub-case IDs from [`PARSER_CASES.md`](../../lib/parsers/PARSER_CASES.md).
-The generator reads every `fixtures/<family>/PARSER.*.yaml` and emits
+sub-case IDs from [`TOOLCALLING_CASES.md`](../../lib/parsers/TOOLCALLING_CASES.md).
+The generator reads every `fixtures/<family>/TOOLCALLING.*.yaml` and emits
 one cell per `(family, sub-case)` using the legend above.
 
 **Example output** (illustrative — cell values are made up, **not** a
@@ -305,7 +305,7 @@ to add it and regenerate the `llama3_json` SGLang fixtures.
 **Neither upstream has a peer parser for 2 families (`†§` in matrix):**
 `nemotron_deci`, `nemotron_nano`. Rows are fully `n/a`.
 
-Wrapper enumeration: `tests/parity/parser/sglang.py::_FAMILY_TO_SGLANG_DETECTOR`
+Wrapper enumeration: `tests/parity/toolcalling/sglang.py::_FAMILY_TO_SGLANG_DETECTOR`
 (missing keys = missing detectors). Adding an SGLang detector for any
 `§`-marked family above (either upstream-shipped in a newer SGLang release,
 or by us standing up a Dynamo-side stub) would let the harness surface
@@ -313,10 +313,10 @@ or by us standing up a Dynamo-side stub) would let the harness surface
 (vLLM-side).
 
 **Hot columns:**
-- `PARSER.batch.4` (malformed JSON) and `PARSER.batch.5` (missing
-  end-token) — recovery is impl-defined per `PARSER_CASES.md`;
+- `TOOLCALLING.batch.4` (malformed JSON) and `TOOLCALLING.batch.5` (missing
+  end-token) — recovery is impl-defined per `TOOLCALLING_CASES.md`;
   divergences are documented rather than asserted-against.
-- `PARSER.batch.1.{b,c,d}` / `PARSER.batch.2.e` (simple normal-text
+- `TOOLCALLING.batch.1.{b,c,d}` / `TOOLCALLING.batch.2.e` (simple normal-text
   placement) — vLLM and SGLang often drop trailing text after the
   wrapper across XML-style families.
 - `harmony/sglang` — 8 of 10 cases divergent because SGLang's
@@ -325,8 +325,8 @@ or by us standing up a Dynamo-side stub) would let the harness surface
   accepts bare commentary.
 
 What's **not** fully covered yet: format-specific surfaces such as
-`PARSER.fmt.*`, `PARSER.xml.*`, and `PARSER.harmony.*` still have
-Rust-only coverage in places. `PARSER.stream.*` fixtures exist, but
+`TOOLCALLING.fmt.*`, `TOOLCALLING.xml.*`, and `TOOLCALLING.harmony.*` still have
+Rust-only coverage in places. `TOOLCALLING.stream.*` fixtures exist, but
 coverage is still being expanded family by family.
 
 ## Run the parity harness
@@ -334,7 +334,7 @@ coverage is still being expanded family by family.
 One-liner from inside a Dynamo devcontainer:
 
 ```bash
-PYTHONPATH=lib/bindings/python/src python3 -m pytest tests/parity/parser/test_parity_parser.py
+PYTHONPATH=lib/bindings/python/src python3 -m pytest tests/parity/toolcalling/test_parity_toolcalling.py
 ```
 
 `PYTHONPATH=lib/bindings/python/src` is required — that's where the
@@ -349,10 +349,10 @@ to run (otherwise they skip cleanly).
 ... -k "kimi_k2"
 
 # One sub-case across every family + every impl
-... -k "PARSER.batch.1.c"
+... -k "TOOLCALLING.batch.1.c"
 
 # Exactly one (family, sub-case, impl)
-... "tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.1.c#vllm]"
+... "tests/parity/toolcalling/test_parity_toolcalling.py::test_parity[kimi_k2/TOOLCALLING.batch.1.c#vllm]"
 ```
 
 **From the host** (outside the container), wrap the command in
@@ -375,7 +375,7 @@ in the family's YAML fixture (concrete `calls` + `normal_text`, or
 `{error: <substring>}`, or `{unavailable: <reason>}`). Cells that
 match Dynamo are stored as anchor refs `*d_<case>` to the dynamo
 block. Goal: drive the non-`=` count toward zero by fixing whichever
-side is wrong. Worked example: `kimi_k2 / PARSER.batch.1.c → V`
+side is wrong. Worked example: `kimi_k2 / TOOLCALLING.batch.1.c → V`
 (vLLM drops trailing text after the wrapper).
 
 ### 1. Pick a cell
@@ -386,14 +386,14 @@ if you are intentionally changing an already-classified behavior.
 
 ### 2. Look up the side-by-side diff in the YAML
 
-Open `tests/parity/parser/fixtures/kimi_k2/PARSER.batch.8.yaml`
+Open `tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.8.yaml`
 (legacy filename for the text-placement cases) and find the
-`PARSER.batch.1.c:` block. The `expected:` block carries all
+`TOOLCALLING.batch.1.c:` block. The `expected:` block carries all
 three engines' actual recorded output, so the diff is right there —
 **no harness run needed to read it.**
 
 ```yaml
-PARSER.batch.1.c:
+TOOLCALLING.batch.1.c:
   description: Narration after tool call only
   ref: originated from https://github.com/vllm-project/vllm/.../test_kimi_k2_tool_parser.py#L435
   model_text: |-
@@ -421,7 +421,7 @@ upstream vLLM/SGLang test the shape was derived from (useful context).
 
 ```bash
 PYTHONPATH=lib/bindings/python/src python3 -m pytest \
-  "tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.1.c#vllm]" \
+  "tests/parity/toolcalling/test_parity_toolcalling.py::test_parity[kimi_k2/TOOLCALLING.batch.1.c#vllm]" \
   -v --tb=short
 ```
 
@@ -482,7 +482,7 @@ rule wins, and the chosen target is recorded in
 ### 5. Fix the parser
 
 Edit `lib/parsers/src/tool_calling/<family>/...rs`. Rebuild the PyO3
-binding so `capture_parser_outputs --impl dynamo --merge --overwrite-if-exists`
+binding so `capture_toolcalling_outputs --impl dynamo --merge --overwrite-if-exists`
 runs against your change:
 
 ```bash
@@ -498,7 +498,7 @@ Step 1 — refresh Dynamo's oracle output (your fix changed it):
 
 ```bash
 PYTHONPATH=lib/bindings/python/src python3 \
-  -m tests.parity.parser.capture_parser_outputs \
+  -m tests.parity.toolcalling.capture_toolcalling_outputs \
   --impl dynamo --merge --overwrite-if-exists
 ```
 
@@ -508,9 +508,9 @@ each engine's container:
 
 ```bash
 # vllm container — drift check (default, read-only)
-python3 -m tests.parity.parser.capture_parser_outputs --impl vllm
+python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl vllm
 # sglang container — drift check (default, read-only)
-python3 -m tests.parity.parser.capture_parser_outputs --impl sglang
+python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl sglang
 ```
 
 The default (no flag) drift-check reports which cases have engine
@@ -523,7 +523,7 @@ divergent ones become concrete blocks).
 
 ```bash
 PYTHONPATH=lib/bindings/python/src python3 -m pytest \
-  tests/parity/parser/test_parity_parser.py -q --tb=no
+  tests/parity/toolcalling/test_parity_toolcalling.py -q --tb=no
 ```
 
 The test asserts each engine's actual output equals its recorded
@@ -532,7 +532,7 @@ but didn't re-capture peer outputs), the test fails with a diff
 pointing at the YAML edit needed:
 
 ```text
-FAILED tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.1.c#vllm]
+FAILED tests/parity/toolcalling/test_parity_toolcalling.py::test_parity[kimi_k2/TOOLCALLING.batch.1.c#vllm]
        expected: {'calls': [...], 'normal_text': ''}
        got:      {'calls': [...], 'normal_text': 'Let me know if you need more.'}
 ```
@@ -541,7 +541,7 @@ FAILED tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.bat
 
 When an engine now matches Dynamo, the concrete peer block becomes
 an anchor reference (`*d_<case>`) to dynamo's block. The Step 6
-`capture_parser_outputs.py` re-run with merge does this
+`capture_toolcalling_outputs.py` re-run with merge does this
 automatically; if you're editing by hand, replace the concrete block
 verbatim:
 
@@ -559,7 +559,7 @@ the paper trail survives — point at whatever made V/S right (spec
 section, model card, GH issue, upstream PR, or the team-decision doc):
 
 ```yaml
-PARSER.batch.1.c:
+TOOLCALLING.batch.1.c:
   description: Narration after tool call only
   ref: originated from https://github.com/vllm-project/vllm/.../test_kimi_k2_tool_parser.py#L435
   spec_ref: https://platform.moonshot.ai/docs/tool-call-spec#L42  # or GH issue / PR url
@@ -572,7 +572,7 @@ PARSER.batch.1.c:
 Then regenerate the table so the cell flips:
 
 ```bash
-python3 tests/parity/generate_parity_table.py parser --html > tests/parity/parser/PARITY.html
+python3 tests/parity/generate_parity_table.py toolcalling --html > tests/parity/toolcalling/PARITY.html
 ```
 
 Pytest should now be fully green; the table cell flips to `=`.
@@ -585,9 +585,9 @@ parser fix and fixture refresh.
 The set of concrete divergent blocks should shrink, not grow. But a
 few classes stay recorded forever (intentional, by design):
 
-- **`PARSER.batch.4` (malformed args) and `PARSER.batch.5`
+- **`TOOLCALLING.batch.4` (malformed args) and `TOOLCALLING.batch.5`
   (missing end-token)** — impl-defined recovery per
-  `PARSER_CASES.md`. Each parser picks its own behavior (drop,
+  `TOOLCALLING_CASES.md`. Each parser picks its own behavior (drop,
   recover, fall back to string, error). Parity not expected.
 - **Schema-driven coercion vs parser-layer preservation** —
   e.g. `{"celsius": "20"}` against `celsius: integer`. Some
@@ -603,13 +603,13 @@ table shows `V`/`S`, not `V?`/`S?`).
 Two file layouts coexist per family. The loader merges them:
 
 ```
-<family>/PARSER.batch.yaml          ← legacy flat: holds top-level cases (1, 2, ..., 10)
-<family>/PARSER.batch.<n>.yaml      ← per-top-level-case: holds sub-cases <n>.a, <n>.b, ...
+<family>/TOOLCALLING.batch.yaml          ← legacy flat: holds top-level cases (1, 2, ..., 10)
+<family>/TOOLCALLING.batch.<n>.yaml      ← per-top-level-case: holds sub-cases <n>.a, <n>.b, ...
 ```
 
 The per-case file is only created when a top-level case grows sub-cases.
-Once any sub-case `PARSER.batch.<n>.<sub>` is introduced, the bare
-`PARSER.batch.<n>` key migrates out of the flat file into the per-case
+Once any sub-case `TOOLCALLING.batch.<n>.<sub>` is introduced, the bare
+`TOOLCALLING.batch.<n>` key migrates out of the flat file into the per-case
 file. Case-ID uniqueness across the two files is the merge invariant.
 
 Both file shapes use the same Variant A schema (per-case `expected:`
@@ -620,7 +620,7 @@ blocks when diverging):
 family: kimi_k2
 mode: batch
 cases:
-  PARSER.batch.1.a:
+  TOOLCALLING.batch.1.a:
     description: Single tool call (happy path)
     model_text: |-
       <|tool_calls_section_begin|>...
@@ -635,7 +635,7 @@ cases:
         normal_text: ''
       vllm: *d_1           # vLLM matches Dynamo
       sglang: *d_1         # SGLang matches Dynamo
-  PARSER.batch.1.b:        # sub-case keys also valid
+  TOOLCALLING.batch.1.b:        # sub-case keys also valid
     description: Narration before tool call only
     ref: originated from https://github.com/vllm-project/vllm/blob/<sha>/tests/tool_parsers/test_<family>_tool_parser.py#L<line>
     model_text: |-
@@ -690,7 +690,7 @@ it when valid downstream tool call text is preserved in `normal_text`;
 that is the intended handoff to the tool call parser.
 
 The `ref` field is required on per-sub-case files
-(`PARSER.<mode>.<n>.yaml`) and takes one of three forms:
+(`TOOLCALLING.<mode>.<n>.yaml`) and takes one of three forms:
 
 - **`ref: originated from <url>`** — there's an upstream test exercising
   this same shape on this same family. The fixture's `model_text` may
@@ -701,10 +701,10 @@ The `ref` field is required on per-sub-case files
 - **`ref: dynamo`** — authored fresh in this repo, no upstream peer.
   Most sub-case taxonomy fillers (`.b` post-only, `.d` between-calls)
   land here because vLLM/SGLang don't test those shapes.
-- **`ref: derived from PARSER.<mode>.<n>[.<sub>]`** — authored in this repo by transforming an existing parity case into a new surface. Streaming fixtures commonly use this when the same `model_text` shape is split into `chunks` or truncated at a stream boundary.
+- **`ref: derived from TOOLCALLING.<mode>.<n>[.<sub>]`** — authored in this repo by transforming an existing parity case into a new surface. Streaming fixtures commonly use this when the same `model_text` shape is split into `chunks` or truncated at a stream boundary.
 
 Every sub-case carries one of these three states; there's no "no
-provenance" state. The legacy flat `PARSER.<mode>.yaml` (cases without
+provenance" state. The legacy flat `TOOLCALLING.<mode>.yaml` (cases without
 sub-cases) does NOT carry `ref` — those entries predate the convention.
 
 #### Legacy: `TODO(research)` comments
@@ -722,10 +722,10 @@ their reasoning in the `reason:` field of the peer block, not in a
 comment.
 
 Case keys are the full IDs from
-[`lib/parsers/PARSER_CASES.md`](../../lib/parsers/PARSER_CASES.md)
-(`PARSER.batch.1.a` … `PARSER.batch.31.b`, including sub-cases like
-`PARSER.batch.1.b`). They match the pytest
-parametrize IDs directly, so a single `grep PARSER.batch.1.b` finds the
+[`lib/parsers/TOOLCALLING_CASES.md`](../../lib/parsers/TOOLCALLING_CASES.md)
+(`TOOLCALLING.batch.1.a` … `TOOLCALLING.batch.31.b`, including sub-cases like
+`TOOLCALLING.batch.1.b`). They match the pytest
+parametrize IDs directly, so a single `grep TOOLCALLING.batch.1.b` finds the
 case across docs, fixtures, and Rust source comments.
 
 `model_text` uses YAML's literal block scalar (`|-`) so multi-line
@@ -758,11 +758,11 @@ its canonical form; the header looks cryptic but it's just `"\n"`.
 
 Open any two family files side-by-side and the case shells look
 nearly identical: same `description` strings, same `tools` schemas,
-same case keys `"PARSER.batch.1"`–`"PARSER.batch.10"`. **That's by
-design** — `PARSER.batch.N` is the same logical scenario across every
+same case keys `"TOOLCALLING.batch.1"`–`"TOOLCALLING.batch.10"`. **That's by
+design** — `TOOLCALLING.batch.N` is the same logical scenario across every
 family (run `generate_parity_table.py` for the full list).
 
-So a reviewer can grep `PARSER.batch.4` across all 10 families and
+So a reviewer can grep `TOOLCALLING.batch.4` across all 10 families and
 immediately see how each parser handles the same scenario. The
 repetition *is* the diff: it's what makes per-case cross-family
 comparison trivial.
@@ -817,29 +817,29 @@ same thing everywhere.
 ## Regenerating fixtures
 
 Run from the repo root inside a container with `dynamo._core` built
-(M2's PyO3 binding). The same `capture_parser_outputs` script handles
+(M2's PyO3 binding). The same `capture_toolcalling_outputs` script handles
 all three impls — pass `--impl dynamo|vllm|sglang`:
 
 ```bash
 # Default: drift-check (read-only). Reports cases where the recorded
 # `expected.<impl>` disagrees with what the parser now produces.
-python3 -m tests.parity.parser.capture_parser_outputs --impl dynamo
+python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl dynamo
 
 # Non-destructive populate: fill `expected.<impl>` only for cases that
 # don't have it yet (newly authored cases).
-python3 -m tests.parity.parser.capture_parser_outputs --impl dynamo --merge
+python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl dynamo --merge
 
 # Refresh: re-run the parser for every case on disk and overwrite the
 # recorded block. Use this only when parser behavior intentionally changed.
-python3 -m tests.parity.parser.capture_parser_outputs \
+python3 -m tests.parity.toolcalling.capture_toolcalling_outputs \
   --impl dynamo --merge --overwrite-if-exists
 ```
 
 (The `-m` invocation is required — running the script directly puts
-`tests/parity/parser/` on `sys.path`, which makes the local
+`tests/parity/toolcalling/` on `sys.path`, which makes the local
 `dynamo.py` wrapper shadow the real `dynamo` package.)
 
-After regenerating, run `git diff tests/parity/parser/fixtures/` to
+After regenerating, run `git diff tests/parity/toolcalling/fixtures/` to
 review the change before staging. Any peer blocks (`expected.vllm`,
 `expected.sglang`) attached to a case are preserved across
 `--overwrite-if-exists` runs, so refreshing `expected.dynamo` won't
@@ -858,7 +858,7 @@ tests/parity/
 Each stage has its own fixtures, wrappers, and test file but
 reuses the shared `common.py` (`ParseResult`-style shape) and
 `conftest.py` (session-scoped server boots) at this level. Out of
-scope today; see `lib/parsers/PARSER_CASES.md`,
+scope today; see `lib/parsers/TOOLCALLING_CASES.md`,
 `components/src/dynamo/frontend/tests/FRONTEND_CASES.md`, and
 `lib/parsers/PIPELINE_CASES.md` for the surrounding taxonomy that
 will guide which stages are worth adding when.
@@ -875,7 +875,7 @@ The intended end state is **one set of fixtures, multiple thin
 harnesses**, in subsequent PRs:
 
 ```
-tests/parity/parser/fixtures/<family>/PARSER.batch.yaml
+tests/parity/toolcalling/fixtures/<family>/TOOLCALLING.batch.yaml
         │
         ├── Python harness (M2 / M3) — already reads it
         └── Rust harness (future)    — would read it too,
@@ -906,7 +906,7 @@ What stays in Rust-only tests after the migration:
 
 Effort sketch (separate PRs after M2 + M3 land):
 
-- **PR-X:** Rust harness that reads `PARSER.batch.yaml`, dispatches
+- **PR-X:** Rust harness that reads `TOOLCALLING.batch.yaml`, dispatches
   to `try_tool_call_parse_<family>(...)`, asserts on `expected`.
   ~1-2 days.
 - **PR-Y:** Mechanical migration — delete the ~70 hand-written
@@ -914,7 +914,7 @@ Effort sketch (separate PRs after M2 + M3 land):
   ~6 hours.
 - **PR-Z:** Same shape extended to format-conditional and
   customer-incident regressions (~150 more cases). ~2-3 days.
-- (deferred) Streaming variant. Needs new `PARSER.stream.*`
+- (deferred) Streaming variant. Needs new `TOOLCALLING.stream.*`
   schema + streaming PyO3 + streaming Rust harness. Roughly
   the size of the original M3 work.
 
@@ -926,14 +926,14 @@ real value-add is the cross-implementation half (vLLM and SGLang).
 
 1. Add the family name to Dynamo's parser registry (Rust side).
 2. Author a fixture YAML at
-   `tests/parity/parser/fixtures/<family>/PARSER.batch.yaml` covering
-   the `PARSER.batch.<n>` cases that apply (mirror an existing
-   family's case shape — see `fixtures/kimi_k2/PARSER.batch.yaml`).
+   `tests/parity/toolcalling/fixtures/<family>/TOOLCALLING.batch.yaml` covering
+   the `TOOLCALLING.batch.<n>` cases that apply (mirror an existing
+   family's case shape — see `fixtures/kimi_k2/TOOLCALLING.batch.yaml`).
    Each case minimally needs `description`, `ref`, `model_text`,
    and `tools`. Author by hand or copy-edit from an upstream test.
    AI can draft case shells, but humans must review them against
-   `PARSER_CASES.md` and the model format before merging.
-3. Run `python3 -m tests.parity.parser.capture_parser_outputs --impl dynamo --merge`
+   `TOOLCALLING_CASES.md` and the model format before merging.
+3. Run `python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl dynamo --merge`
    to fill in each case's `expected.dynamo` by running Dynamo against
    `model_text` + `tools`. Cases that already have `expected.dynamo`
    are left alone.
@@ -941,7 +941,7 @@ real value-add is the cross-implementation half (vLLM and SGLang).
    `_FAMILY_TO_VLLM_KEY` (`vllm.py`) and
    `_FAMILY_TO_SGLANG_DETECTOR` (`sglang.py`).
 5. Populate vLLM and SGLang outputs for the new family by running
-   `python3 -m tests.parity.parser.capture_parser_outputs --impl <vllm|sglang> --merge`
+   `python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl <vllm|sglang> --merge`
    inside each engine's container. The merge writes anchor refs to
    dynamo for matching engines, concrete `{calls, normal_text}` for
    divergent ones, and `{unavailable: <reason>}` when the wrapper marks
@@ -951,4 +951,4 @@ real value-add is the cross-implementation half (vLLM and SGLang).
    rather than the full volatile message. Add a `reason:` field to
    intentional divergences so they show as `V`/`S` not `V?`/`S?` in the
    table.
-6. Regenerate the table: `python3 tests/parity/generate_parity_table.py parser --html > tests/parity/parser/PARITY.html`.
+6. Regenerate the table: `python3 tests/parity/generate_parity_table.py toolcalling --html > tests/parity/toolcalling/PARITY.html`.

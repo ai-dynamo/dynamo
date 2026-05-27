@@ -9,7 +9,6 @@ incremental detokenization, error handling, and deprecation warnings.
 Parallels test_vllm_unit.py for the vLLM backend.
 """
 
-
 import asyncio
 import json
 import sys
@@ -1941,3 +1940,64 @@ class TestDeprecationWarning:  # FRONTEND.8 — legacy/deprecated field warnings
         assert "use_sglang_tokenizer" in source
         assert "FutureWarning" in source
         assert "--dyn-chat-processor sglang" in source
+
+
+# ---------------------------------------------------------------------------
+# chat_template_kwargs forwarding
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.core
+class TestChatTemplateKwargsForwarding:
+    """chat_template_kwargs from the request are forwarded to apply_chat_template.
+
+    Uses Qwen3 which supports enable_thinking: False to suppress <think> blocks.
+    """
+
+    @staticmethod
+    def _messages():
+        return [{"role": "user", "content": "Hello"}]
+
+    def _preprocess(self, request, tokenizer):
+        return preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+    def _decode(self, tokenizer, token_ids: list[int]) -> str:
+        return tokenizer.decode(token_ids, skip_special_tokens=False)
+
+    def test_qwen3_enable_thinking_true_no_closed_think_block(self, tokenizer):
+        """enable_thinking=True leaves reasoning open (model generates <think> itself)."""
+        result = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
+        )
+        prompt = self._decode(tokenizer, result.prompt_token_ids)
+        assert "</think>" not in prompt
+
+    def test_qwen3_thinking_flag_changes_tokens(self, tokenizer):
+        """enable_thinking=True vs False produces different token sequences."""
+        think = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
+        )
+        no_think = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer,
+        )
+        assert think.prompt_token_ids != no_think.prompt_token_ids

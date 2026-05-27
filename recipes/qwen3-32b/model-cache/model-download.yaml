@@ -26,6 +26,7 @@ spec:
               value: "Qwen/Qwen3-32B"
             - name: HF_HOME
               value: /home/dynamo/.cache/huggingface
+            # Uses up to 64 GB RAM for XET buffers; set "0" on low-memory nodes (8 GB cap): https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             - name: MODEL_REVISION
@@ -35,6 +36,13 @@ spec:
               set -eux
               pip install --no-cache-dir huggingface_hub==1.11.0
               hf download $MODEL_NAME --revision $MODEL_REVISION
+          resources:
+            requests:
+              cpu: "2"
+              memory: "64Gi"
+            limits:
+              cpu: "8"
+              memory: "64Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /home/dynamo/.cache/huggingface

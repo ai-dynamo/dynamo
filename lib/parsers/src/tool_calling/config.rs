@@ -155,6 +155,11 @@ pub struct DsmlParserConfig {
     pub parameter_prefix: String,
     /// End token for parameter (e.g., "</｜DSML｜parameter>")
     pub parameter_end: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for DsmlParserConfig {
@@ -166,6 +171,7 @@ impl Default for DsmlParserConfig {
             invoke_end: "</｜DSML｜invoke>".to_string(),
             parameter_prefix: "<｜DSML｜parameter name=".to_string(),
             parameter_end: "</｜DSML｜parameter>".to_string(),
+            allow_eof_recovery: false,
         }
     }
 }
