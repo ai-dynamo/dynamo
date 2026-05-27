@@ -18,16 +18,14 @@ pub mod responses;
 pub use chat::*;
 pub use completion::*;
 
-// Embeddings: request side + EmbeddingInput / EmbeddingUsage /
-// EncodingFormat re-exported from async-openai inside the local module;
-// the response side (Embedding, CreateEmbeddingResponse) is owned so
-// the per-input embedding can be either a float vector or a base64
-// string per the OpenAI `encoding_format` spec.
+// Embeddings: `Embedding` and `CreateEmbeddingResponse` are owned
+// locally (in the `embeddings` submodule) so a per-input embedding
+// can be either a float vector or a base64 string per the OpenAI
+// `encoding_format` spec. Every other embedding type is still
+// re-exported from `async_openai::types::embeddings::*`.
 pub use embeddings::*;
 
-// --- Upstream re-exports (types-only, no HTTP client) ---
-
-// Images
+// Images: re-exported wholesale from async-openai (no Dynamo overrides).
 pub use async_openai::types::images::*;
 
 // --- Convenience impls for locally-defined types ---
