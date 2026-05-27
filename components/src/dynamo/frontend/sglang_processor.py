@@ -19,7 +19,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
-from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
+from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
 
 from .sglang_prepost import (
@@ -623,12 +623,11 @@ class SglangEngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
-        # instead of re-running fetch_model. The MDC cache already has
-        # blake3-verified copies; this path duplicates the download.
-        source_path = mdc.source_path()
-        if not os.path.exists(source_path):
-            source_path = await fetch_model(source_path, ignore_weights=True)
+        # download_config has already resolved every MDC file into
+        # mdc.local_dir() with blake3-verified copies (and harvested
+        # extra siblings — preprocessor_config.json, special_tokens_map.json,
+        # …). Point native-preprocessor mode at that dir directly.
+        source_path = mdc.local_dir()
 
         logger.info("Loading SGLang tokenizer from %s", source_path)
         tokenizer = _load_tokenizer(source_path, self.trust_remote_code)

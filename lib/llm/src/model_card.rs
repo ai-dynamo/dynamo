@@ -837,6 +837,20 @@ impl ModelDeploymentCard {
         Ok(serde_json::to_string(self)?)
     }
 
+    /// On-disk directory where this MDC's resolved metadata files
+    /// live. After `download_config` runs, this dir contains symlinks
+    /// to every typed file + harvested extra_file, ready for
+    /// `from_pretrained(local_dir)` consumers (native preprocessors,
+    /// tokenizer loaders). Pure path computation — does not create
+    /// the directory; callers needing it created should go through
+    /// the resolve pipeline.
+    pub fn local_dir(&self) -> PathBuf {
+        mdc_cache_root()
+            .join("by-slug")
+            .join(self.slug.to_string())
+            .join(self.mdcsum())
+    }
+
     pub fn mdcsum(&self) -> &str {
         self.checksum
             .get_or_init(|| {
@@ -2234,6 +2248,21 @@ mod tests {
             got,
             url::Url::from_file_path(&local_cfg).unwrap().to_string()
         );
+    }
+
+    #[test]
+    fn local_dir_matches_resolve_pipeline_path() {
+        // local_dir must compute the same path that resolve_metadata_files
+        // writes into, so vllm/sglang factories can use it directly
+        // instead of re-running fetch_model.
+        let card = super::ModelDeploymentCard::with_name_only("Qwen/Qwen3-0.6B");
+        let dir = card.local_dir();
+
+        let expected = super::mdc_cache_root()
+            .join("by-slug")
+            .join(card.slug().to_string())
+            .join(card.mdcsum());
+        assert_eq!(dir, expected);
     }
 
     /// Rung 4: when worker path is missing and `--model-path` doesn't

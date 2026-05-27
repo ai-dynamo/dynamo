@@ -36,7 +36,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
-from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
+from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import (
@@ -771,12 +771,11 @@ class EngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
-        # instead of re-running fetch_model. The MDC cache already has
-        # blake3-verified copies; this path duplicates the download.
-        source_path = mdc.source_path()
-        if not os.path.exists(source_path):
-            source_path = await fetch_model(source_path, ignore_weights=True)
+        # download_config has already resolved every MDC file into
+        # mdc.local_dir() with blake3-verified copies (and harvested
+        # extra siblings — preprocessor_config.json, special_tokens_map.json,
+        # …). Point native-preprocessor mode at that dir directly.
+        source_path = mdc.local_dir()
 
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"

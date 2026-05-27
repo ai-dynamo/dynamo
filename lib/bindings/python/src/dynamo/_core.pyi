@@ -708,6 +708,12 @@ class ModelDeploymentCard:
         """Return the source path of this deployment card."""
         ...
 
+    def local_dir(self) -> str:
+        """Return the on-disk directory where this card's resolved metadata files
+        live (post-`download_config`). Use this in engine factories instead of
+        re-running `fetch_model` on the worker URI."""
+        ...
+
     def runtime_config(self) -> Any:
         """Return the runtime configuration as a dict."""
         ...
