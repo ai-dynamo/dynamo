@@ -58,6 +58,11 @@ pub mod paths {
     /// `GET /counters` — per-worker `inflight` and `load_net_new`
     /// snapshot (debug/observability).
     pub const COUNTERS: &str = "/counters";
+
+    /// `POST /calibrate/:instance_id?force=bool` — forward the body
+    /// (a `CalibrationRequest`) to the named worker's velo calibrate
+    /// handler and return the `CalibrationResponse` it produces.
+    pub const CALIBRATE: &str = "/calibrate/{instance_id}";
 }
 
 /// HTTP frontend endpoint a prefill worker advertises so the hub can POST

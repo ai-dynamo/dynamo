@@ -40,6 +40,11 @@ dashmap      = { workspace = true }
 rmp-serde    = { workspace = true }
 tmq          = { workspace = true }
 
+# Prefill-router calibration: OLS two-line performance-model fit
+# (TTFT vs ISL, ITL vs sequence position) over per-request traces
+# emitted by the worker bindings' Python calibrate-lambda.
+linregress   = "0.5"
+
 # Async / core
 anyhow       = { workspace = true }
 async-trait  = { workspace = true }

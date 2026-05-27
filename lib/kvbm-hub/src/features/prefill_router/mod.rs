@@ -16,6 +16,7 @@
 //! Execution sits behind [`PrefillExecutionBackend`] so a worker can be
 //! reached over different transports — HTTP today, velo unary later.
 
+pub mod calibration;
 pub mod dispatcher;
 pub mod execution;
 pub mod manager;
@@ -23,6 +24,11 @@ pub mod protocol;
 pub mod router;
 pub mod selection;
 
+pub use calibration::{
+    CALIBRATE_HANDLER, CalibrationDefaults, CalibrationRequest, CalibrationResponse,
+    CalibrationResults, CalibrationSnapshot, PerformanceModel, RawCalibrationPayload, RawTrace,
+    ResolvedCalibrationRequest, ScatterData, analyze as analyze_calibration,
+};
 pub use dispatcher::{DispatchOutcome, PrefillRequestDispatcher, RecordingDispatcher};
 pub use execution::{HttpExecutionBackend, PrefillExecutionBackend, VeloExecutionBackend};
 pub use manager::PrefillRouterManager;

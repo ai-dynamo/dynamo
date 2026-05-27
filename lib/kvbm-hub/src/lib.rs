@@ -77,9 +77,12 @@ pub use features::indexer::{
 pub use features::p2p::cli::{p2p_command, run_p2p};
 pub use features::p2p::{P2pClient, P2pManager};
 pub use features::prefill_router::{
-    DispatchOutcome, HttpExecutionBackend, PREFILL_DISPATCH_HANDLER, PrefillDispatchRequest,
-    PrefillDispatchResponse, PrefillExecutionBackend, PrefillRequestDispatcher, PrefillRouter,
-    PrefillRouterManager, RecordingDispatcher, Selector, SelectorConfig, VeloExecutionBackend,
+    CALIBRATE_HANDLER, CalibrationDefaults, CalibrationRequest, CalibrationResponse,
+    CalibrationResults, CalibrationSnapshot, DispatchOutcome, HttpExecutionBackend,
+    PREFILL_DISPATCH_HANDLER, PerformanceModel, PrefillDispatchRequest, PrefillDispatchResponse,
+    PrefillExecutionBackend, PrefillRequestDispatcher, PrefillRouter, PrefillRouterManager,
+    RawCalibrationPayload, RawTrace, RecordingDispatcher, ResolvedCalibrationRequest, ScatterData,
+    Selector, SelectorConfig, VeloExecutionBackend, analyze_calibration,
 };
 pub use features::{FeatureConfigRequirements, FeatureError, FeatureManager, HubContext};
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};

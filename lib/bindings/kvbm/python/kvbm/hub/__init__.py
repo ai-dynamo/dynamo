@@ -14,6 +14,10 @@ each request. `try_wrap_engine` is the auto-detect entry point both
 # kvbm._core is a Rust extension module, so `hub` lives on it as an attribute
 # rather than a true submodule path; mirror the v2 import pattern.
 from kvbm._core import hub as _hub
+from kvbm.hub.calibrate_lambda import (
+    capture_calibration_defaults,
+    make_calibrate_lambda,
+)
 from kvbm.hub.detect import try_wrap_engine
 from kvbm.hub.dispatch_lambda import make_dispatch_lambda
 
@@ -23,6 +27,8 @@ PrefillRouterHandler = _hub.PrefillRouterHandler
 __all__ = [
     "CompletionEvent",
     "PrefillRouterHandler",
+    "capture_calibration_defaults",
+    "make_calibrate_lambda",
     "make_dispatch_lambda",
     "try_wrap_engine",
 ]

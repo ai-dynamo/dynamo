@@ -11,12 +11,20 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    routing::{get, post},
+};
 use futures::future::BoxFuture;
 use parking_lot::RwLock;
+use serde::Deserialize;
 use velo_ext::InstanceId;
 
+use super::calibration::{CALIBRATE_HANDLER, CalibrationRequest, CalibrationResponse};
 use super::dispatcher::PrefillRequestDispatcher;
 use super::execution::{HttpExecutionBackend, PrefillExecutionBackend, VeloExecutionBackend};
 use super::protocol::{
@@ -27,6 +35,12 @@ use super::router::PrefillRouter;
 use super::selection::{Selector, SelectorConfig};
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::protocol::{Feature, FeatureKey};
+
+/// Wall-clock guard on a single calibration unary call. Generous because
+/// a full sweep up to 32k tokens can take several minutes; the worker
+/// runs single-stream and produces an OSL of typically 64 tokens per
+/// ISL step.
+const CALIBRATE_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// FeatureManager for the prefill router. Owns the [`PrefillRouter`] +
 /// [`Selector`]; exposes the router via [`Self::dispatcher`] so the hub
@@ -211,6 +225,7 @@ fn routes(manager: Arc<PrefillRouterManager>) -> Router {
     Router::new()
         .route(protocol::paths::TARGETS, get(get_targets))
         .route(protocol::paths::COUNTERS, get(get_counters))
+        .route(protocol::paths::CALIBRATE, post(post_calibrate))
         .with_state(manager)
 }
 
@@ -220,6 +235,96 @@ async fn get_targets(State(mgr): State<Arc<PrefillRouterManager>>) -> Json<Targe
 
 async fn get_counters(State(mgr): State<Arc<PrefillRouterManager>>) -> Json<CountersResponse> {
     Json(mgr.counters())
+}
+
+/// Query params for `POST /calibrate/:instance_id`. `force` is the only
+/// query knob; everything else is body fields on the JSON request.
+#[derive(Debug, Default, Deserialize)]
+struct CalibrateQuery {
+    #[serde(default)]
+    force: Option<bool>,
+}
+
+/// HTTP proxy that forwards a `CalibrationRequest` to the worker's velo
+/// `CALIBRATE_HANDLER` and returns the `CalibrationResponse` body.
+///
+/// Error mapping:
+/// - 400 if the instance_id path segment isn't a valid UUID.
+/// - 404 if the named worker isn't registered with the prefill router.
+/// - 409 if the worker is already calibrating or has in-flight prefill
+///   requests (the worker raises `already_calibrating` / `prefill_busy`).
+/// - 504 on velo unary timeout.
+/// - 500 on every other transport / handler failure (body carries the
+///   formatted reason).
+async fn post_calibrate(
+    State(mgr): State<Arc<PrefillRouterManager>>,
+    Path(instance_id_str): Path<String>,
+    Query(query): Query<CalibrateQuery>,
+    Json(mut body): Json<CalibrationRequest>,
+) -> Result<Json<CalibrationResponse>, (StatusCode, String)> {
+    let uuid = uuid::Uuid::parse_str(&instance_id_str).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("instance_id is not a valid uuid: {e}"),
+        )
+    })?;
+    let instance_id = InstanceId::from(uuid);
+
+    if !mgr.advertisements.read().contains_key(&instance_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no prefill target registered for instance_id={instance_id}"),
+        ));
+    }
+
+    if let Some(force) = query.force {
+        body.force = force;
+    }
+
+    let velo = mgr.velo.get().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "hub has no velo transport; calibrate proxy requires a velo-equipped hub \
+             (start kvbm_hub with --velo-port)"
+                .to_string(),
+        )
+    })?;
+
+    let call = velo
+        .messenger()
+        .typed_unary::<CalibrationResponse>(CALIBRATE_HANDLER)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("typed_unary({CALIBRATE_HANDLER}) builder: {e}"),
+            )
+        })?
+        .payload(&body)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("encode CalibrationRequest: {e}"),
+            )
+        })?
+        .instance(instance_id)
+        .send();
+
+    match tokio::time::timeout(CALIBRATE_TIMEOUT, call).await {
+        Ok(Ok(resp)) => Ok(Json(resp)),
+        Ok(Err(err)) => {
+            let msg = err.to_string();
+            let code = if msg.contains("already_calibrating") || msg.contains("prefill_busy") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            Err((code, msg))
+        }
+        Err(_) => Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            format!("velo unary to {instance_id} timed out after {CALIBRATE_TIMEOUT:?}"),
+        )),
+    }
 }
 
 #[cfg(test)]
