@@ -26,8 +26,15 @@ class KvConnectorProtocol(ABC):
         self._vllm_config = vllm_config
 
     @abstractmethod
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
-        """``kv_transfer_params`` for the prefill request to vLLM."""
+    def prefill_request_kv_transfer_params(
+        self, caller_kv_transfer_params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """``kv_transfer_params`` for the prefill request to vLLM.
+
+        ``caller_kv_transfer_params`` is the request-supplied value, when
+        present. Most protocols synthesize their own prefill-side payload and
+        ignore it; KVBM hub conditional-disagg preserves the hub payload.
+        """
 
     @abstractmethod
     def decode_request_kv_transfer_params(
@@ -41,7 +48,9 @@ class KvConnectorProtocol(ABC):
 class NixlConnectorProtocol(KvConnectorProtocol):
     """Pull-based: decode-side params come straight off the engine response."""
 
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+    def prefill_request_kv_transfer_params(
+        self, caller_kv_transfer_params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         return {
             "do_remote_decode": True,
             "do_remote_prefill": False,
@@ -84,7 +93,9 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         self._get_bootstrap_addr = get_mooncake_bootstrap_addr
         self._transfer_id: str = str(uuid.uuid4())
 
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+    def prefill_request_kv_transfer_params(
+        self, caller_kv_transfer_params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         return {
             "do_remote_decode": True,
             "do_remote_prefill": False,
@@ -105,8 +116,46 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         }
 
 
+class DynamoConnectorProtocol(KvConnectorProtocol):
+    """KVBM hub conditional-disagg preserves dispatcher transfer params.
+
+    The hub posts a tokenized prefill request whose ``kv_transfer_params`` is a
+    ``kvbm_protocols::disagg::TransferParams`` JSON object. The KVBM
+    ``DynamoConnector`` reads that object directly from the vLLM request, so
+    the Dynamo prefill handler must not replace it with NIXL-style fields.
+    """
+
+    def prefill_request_kv_transfer_params(
+        self, caller_kv_transfer_params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        if caller_kv_transfer_params is None:
+            raise ValueError(
+                "DynamoConnector PD prefill requires caller-provided "
+                "kv_transfer_params with top-level remote_prefill"
+            )
+        if not isinstance(caller_kv_transfer_params, dict):
+            raise ValueError(
+                "DynamoConnector PD prefill requires kv_transfer_params to be a dict"
+            )
+        remote_prefill = caller_kv_transfer_params.get("remote_prefill")
+        if not isinstance(remote_prefill, dict):
+            raise ValueError(
+                "DynamoConnector PD prefill requires kv_transfer_params.remote_prefill"
+            )
+        return caller_kv_transfer_params
+
+    def decode_request_kv_transfer_params(
+        self, prefill_response: Any
+    ) -> Optional[Dict[str, Any]]:
+        # KVBM hub conditional-disagg owns the transfer/session lifecycle. The
+        # Dynamo frontend must not synthesize a NIXL decode handoff for this
+        # path.
+        return None
+
+
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
+    "DynamoConnector": DynamoConnectorProtocol,
     "NixlConnector": NixlConnectorProtocol,
     # KVBM's PdConnector wraps DynamoConnector with NixlConnector. The Dynamo
     # frontend/decode handoff still uses the NIXL child connector's pull-based

@@ -2631,9 +2631,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
+        caller_kv_transfer_params = sampling_params.extra_args.get("kv_transfer_params")
+        if caller_kv_transfer_params is None:
+            request_extra_args = request.get("extra_args")
+            if isinstance(request_extra_args, dict):
+                caller_kv_transfer_params = request_extra_args.get("kv_transfer_params")
         sampling_params.extra_args[
             "kv_transfer_params"
-        ] = kv_protocol.prefill_request_kv_transfer_params()
+        ] = kv_protocol.prefill_request_kv_transfer_params(caller_kv_transfer_params)
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
@@ -2681,7 +2686,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 os._exit(1)
 
             async for res in gen:
-                logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+                logger.debug(
+                    "prefill response has kv_transfer_params=%s",
+                    res.kv_transfer_params is not None,
+                )
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 

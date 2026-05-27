@@ -21,6 +21,7 @@ import pytest
 
 from dynamo.vllm.kv_connector_protocols import (
     KV_CONNECTOR_PROTOCOLS,
+    DynamoConnectorProtocol,
     KvConnectorProtocol,
     MooncakeConnectorProtocol,
     NixlConnectorProtocol,
@@ -70,7 +71,7 @@ def _install_fake_mooncake(monkeypatch, host: str, port: int) -> None:
 @pytest.fixture
 def fake_mooncake(monkeypatch):
     """Default fake bootstrap helper returning a fixed (host, port)."""
-    _install_fake_mooncake(monkeypatch, "10.0.0.5", 8998)
+    _install_fake_mooncake(monkeypatch, "192.0.2.5", 8998)
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +147,7 @@ def test_mooncake_distinct_instances_get_distinct_transfer_ids(fake_mooncake):
 def test_mooncake_decode_uses_vllm_bootstrap_helper_and_prefixes_http(monkeypatch):
     """Decode bootstrap addr comes from vLLM's helper; ``http://`` is
     non-optional because the decode side does ``addr + "/query"``."""
-    _install_fake_mooncake(monkeypatch, "192.168.0.110", 8998)
+    _install_fake_mooncake(monkeypatch, "192.0.2.110", 8998)
     cfg = _config("MooncakeConnector", engine_id="eng-prefill-0")
     proto = MooncakeConnectorProtocol(cfg)
     params = proto.decode_request_kv_transfer_params(
@@ -156,7 +157,7 @@ def test_mooncake_decode_uses_vllm_bootstrap_helper_and_prefixes_http(monkeypatc
         "do_remote_decode": False,
         "do_remote_prefill": True,
         "transfer_id": params["transfer_id"],
-        "remote_bootstrap_addr": "http://192.168.0.110:8998",
+        "remote_bootstrap_addr": "http://192.0.2.110:8998",
         "remote_engine_id": "eng-prefill-0",
     }
 
@@ -210,6 +211,47 @@ def test_mooncake_decode_does_not_reimport_per_call(fake_mooncake):
 
 
 # ---------------------------------------------------------------------------
+# DynamoConnectorProtocol
+# ---------------------------------------------------------------------------
+
+
+def test_dynamo_connector_preserves_hub_remote_prefill_payload():
+    """KVBM hub dispatch already emits the protocol payload KVBM needs."""
+    proto = DynamoConnectorProtocol(_config("DynamoConnector"))
+    payload = {
+        "remote_prefill": {
+            "protocol_version": 1,
+            "session_id": "54b12bb2-7b73-43cb-b70d-4db3796f174a",
+            "initiator_instance_id": "1339456a-a960-420c-9860-e64702fa692f",
+            "sequence_hashes": ["10", "11"],
+            "num_computed_tokens": 32,
+        }
+    }
+    assert proto.prefill_request_kv_transfer_params(payload) is payload
+
+
+def test_dynamo_connector_returns_no_decode_handoff():
+    proto = DynamoConnectorProtocol(_config("DynamoConnector"))
+    response = SimpleNamespace(kv_transfer_params={"remote_prefill": {}})
+    assert proto.decode_request_kv_transfer_params(response) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"remote_prefill": None},
+        {"remote_prefill": "not-a-dict"},
+    ],
+)
+def test_dynamo_connector_requires_hub_remote_prefill_payload(payload):
+    proto = DynamoConnectorProtocol(_config("DynamoConnector"))
+    with pytest.raises(ValueError, match="DynamoConnector PD prefill"):
+        proto.prefill_request_kv_transfer_params(payload)
+
+
+# ---------------------------------------------------------------------------
 # Factory + registry
 # ---------------------------------------------------------------------------
 
@@ -227,6 +269,11 @@ def test_make_kv_connector_protocol_dispatches_pdconnector_as_nixl():
 def test_make_kv_connector_protocol_dispatches_mooncake(fake_mooncake):
     proto = make_kv_connector_protocol(_config("MooncakeConnector"))
     assert isinstance(proto, MooncakeConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_dispatches_dynamo_connector():
+    proto = make_kv_connector_protocol(_config("DynamoConnector"))
+    assert isinstance(proto, DynamoConnectorProtocol)
 
 
 def test_make_kv_connector_protocol_falls_back_to_nixl_for_missing_config():
@@ -256,6 +303,7 @@ def test_registry_keys_match_vllm_connector_names():
     """Wire-format guard: KV_CONNECTOR_PROTOCOLS keys must match the strings
     vLLM uses in ``KVTransferConfig.kv_connector``."""
     assert set(KV_CONNECTOR_PROTOCOLS) == {
+        "DynamoConnector",
         "NixlConnector",
         "PdConnector",
         "MooncakeConnector",
