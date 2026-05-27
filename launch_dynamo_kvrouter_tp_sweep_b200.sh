@@ -1,8 +1,8 @@
 #!/bin/bash
-# Launch the 16 TP-variant dynamo_kvrouter sbatch scripts × REPS reps.
+# Launch the 12 TP-variant dynamo_kvrouter sbatch scripts × REPS reps.
 #
 # Sweep grid:
-#   Prefill (TP1):  CTX_LIST  ∈ {1, 2, 3, 4}
+#   Prefill (TP1):  CTX_LIST  ∈ {1, 2, 3}
 #   Decode:         DECODE_LIST ∈ {1x2, 2x2, 3x2, 1x4}     (i.e. DxTP)
 #
 # Each sbatch script internally sweeps the full concurrency list, so the outer
@@ -14,8 +14,8 @@
 # Submitted job IDs are appended to launch_tp_<timestamp>.log next to this script.
 #
 # Override defaults with env:
-#   SCRIPTS="..."                  # space-separated absolute paths; default = all 16
-#   CTX_LIST="1 2 3 4"             # filter prefill counts
+#   SCRIPTS="..."                  # space-separated absolute paths; default = all 12
+#   CTX_LIST="1 2 3"               # filter prefill counts
 #   DECODE_LIST="1x2 2x2 3x2 1x4"  # filter (decode-count x decode-TP) pairs
 #   REPS=1
 #   CONCURRENCY="48"               # override sbatch's internal sweep with a single value
@@ -24,8 +24,8 @@
 #   WORKER_METRICS=0               # 1 = enable --publish-events-and-metrics + capture_metrics sidecar
 #
 # Examples:
-#   ./launch_dynamo_kvrouter_tp_sweep.sh                        # all 16
-#   DECODE_LIST="1x4" ./launch_dynamo_kvrouter_tp_sweep.sh      # only the 4 TP4 configs
+#   ./launch_dynamo_kvrouter_tp_sweep.sh                        # all 12
+#   DECODE_LIST="1x4" ./launch_dynamo_kvrouter_tp_sweep.sh      # only the 3 TP4 configs
 #   CTX_LIST="1 2" DECODE_LIST="2x2 3x2" REPS=2 ./launch_dynamo_kvrouter_tp_sweep.sh
 
 set -euo pipefail
@@ -35,7 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "${SCRIPTS:-}" ]; then
   read -r -a SCRIPTS_ARR <<<"$SCRIPTS"
 else
-  read -r -a CTX_ARR <<<"${CTX_LIST:-1 2 3 4}"
+  read -r -a CTX_ARR <<<"${CTX_LIST:-1 2 3}"
   read -r -a DEC_ARR <<<"${DECODE_LIST:-1x2 2x2 3x2 1x4}"
   SCRIPTS_ARR=()
   for n in "${CTX_ARR[@]}"; do

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch all dynamo_kvrouter sbatch scripts (ctx{1..4} × gen{1..4} = 16) × REPS reps.
+# Launch all dynamo_kvrouter sbatch scripts (ctx{1..3} × gen{1..4} = 12) × REPS reps.
 # Each sbatch script internally sweeps the full concurrency list, so the outer
 # loop here is (script, rep) only.
 #
@@ -9,8 +9,8 @@
 # Submitted job IDs are appended to launch_<timestamp>.log next to this script.
 #
 # Override defaults with env:
-#   SCRIPTS="..."              # space-separated absolute paths; default = all 16
-#   CTX_LIST="1 2 3 4"         # filter ctx counts (default 1 2 3 4)
+#   SCRIPTS="..."              # space-separated absolute paths; default = all 12
+#   CTX_LIST="1 2 3"           # filter ctx counts (default 1 2 3)
 #   GEN_LIST="1 2 3 4"         # filter gen counts (default 1 2 3 4)
 #   REPS=1
 #   CONCURRENCY="48"           # override sbatch's internal sweep with a single value
@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "${SCRIPTS:-}" ]; then
   read -r -a SCRIPTS_ARR <<<"$SCRIPTS"
 else
-  read -r -a CTX_ARR <<<"${CTX_LIST:-1 2 3 4}"
+  read -r -a CTX_ARR <<<"${CTX_LIST:-1 2 3}"
   read -r -a GEN_ARR <<<"${GEN_LIST:-1 2 3 4}"
   SCRIPTS_ARR=()
   for n in "${CTX_ARR[@]}"; do

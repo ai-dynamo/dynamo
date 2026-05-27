@@ -37,7 +37,7 @@
 
 set -uo pipefail
 
-CONCURRENCY="${CONCURRENCY:-1,2,3,6,8,10,16,32,48,64,80,96,112,128,144,160}"
+CONCURRENCY="${CONCURRENCY:-1,2,3,6,8,10,16,32,40,44,48,64,80,96,112,128,144,160,176,192}"
 C_TAG=$(echo "$CONCURRENCY" | tr ',' '-')
 HOSTCACHE="${HOSTCACHE:-0}"
 WORKER_METRICS="${WORKER_METRICS:-0}"
@@ -74,7 +74,7 @@ DYN_SYS_PORT_CTX=8081
 DYN_SYS_PORT_GEN=8085
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="$REPO_DIR/bench/results/dynamo-b200-cachefix/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
+RESULTS_DIR="$REPO_DIR/bench/results/dynamo-b200-0527/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
 mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
 cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 
@@ -426,6 +426,7 @@ tool_calls_args_only: true
 send_conversation_routing_headers: true
 exp_prefix: ${EXP_NAME}
 results_dir: $RESULTS_DIR/rwlt_results
+request_log_path: $RESULTS_DIR/requests.jsonl
 RWLTEOF
 
 echo "Snapshotting frontend metrics (pre-bench)..."
