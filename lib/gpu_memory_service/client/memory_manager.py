@@ -31,6 +31,7 @@ This module uses cuda-python bindings for CUDA driver API calls:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -436,6 +437,53 @@ class GMSClientMemoryManager:
             )
         )
         return handle
+
+    def map_va_with_breakdown(
+        self,
+        fd: int,
+        va: int,
+        size: int,
+        allocation_id: str,
+        tag: str,
+        layout_slot: int,
+    ) -> tuple[int, float, float, float, float]:
+        """Import, map, set access, and track while timing each substep.
+
+        This is intentionally a thin diagnostic wrapper around ``map_va``'s
+        primitive operations.  It exists so restore Phase A can distinguish
+        CUDA FD import, ``cuMemMap``, ``cuMemSetAccess``, and Python-side
+        tracking/bookkeeping in end-to-end logs without changing allocation
+        semantics.
+        """
+        assert self._granted_lock_type is not None
+        aligned_size = align_to_granularity(size, self.granularity)
+
+        step_t0 = time.monotonic()
+        handle = cumem_import_from_shareable_handle_close_fd(fd)
+        import_elapsed = time.monotonic() - step_t0
+
+        step_t0 = time.monotonic()
+        cumem_map(va, aligned_size, handle)
+        map_elapsed = time.monotonic() - step_t0
+
+        step_t0 = time.monotonic()
+        cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
+        access_elapsed = time.monotonic() - step_t0
+
+        step_t0 = time.monotonic()
+        self._track_mapping(
+            LocalMapping(
+                allocation_id=allocation_id,
+                va=va,
+                size=size,
+                aligned_size=aligned_size,
+                handle=handle,
+                tag=tag,
+                layout_slot=layout_slot,
+            )
+        )
+        track_elapsed = time.monotonic() - step_t0
+        return handle, import_elapsed, map_elapsed, access_elapsed, track_elapsed
 
     def unmap_va(self, va: int) -> None:
         """Unmap a single VA: cuMemUnmap + release handle.

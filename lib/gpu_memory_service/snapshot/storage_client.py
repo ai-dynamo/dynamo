@@ -278,7 +278,11 @@ class GMSStorageClient:
 
         export_elapsed = 0.0
         reserve_elapsed = 0.0
-        map_elapsed = 0.0
+        import_elapsed = 0.0
+        cuda_map_elapsed = 0.0
+        access_elapsed = 0.0
+        track_elapsed = 0.0
+        import_map_access_elapsed = 0.0
         target_elapsed = 0.0
         for entry, allocation in zip(
             manifest.allocations, allocations, strict=True
@@ -300,15 +304,36 @@ class GMSStorageClient:
             reserve_elapsed += time.monotonic() - step_t0
 
             step_t0 = time.monotonic()
-            mm.map_va(
-                fd,
-                va,
-                entry.size,
-                allocation.allocation_id,
-                entry.tag,
-                allocation.layout_slot,
-            )
-            map_elapsed += time.monotonic() - step_t0
+            map_with_breakdown = getattr(mm, "map_va_with_breakdown", None)
+            if map_with_breakdown is None:
+                mm.map_va(
+                    fd,
+                    va,
+                    entry.size,
+                    allocation.allocation_id,
+                    entry.tag,
+                    allocation.layout_slot,
+                )
+                import_map_access_elapsed += time.monotonic() - step_t0
+            else:
+                (
+                    _handle,
+                    step_import_elapsed,
+                    step_map_elapsed,
+                    step_access_elapsed,
+                    step_track_elapsed,
+                ) = map_with_breakdown(
+                    fd,
+                    va,
+                    entry.size,
+                    allocation.allocation_id,
+                    entry.tag,
+                    allocation.layout_slot,
+                )
+                import_elapsed += step_import_elapsed
+                cuda_map_elapsed += step_map_elapsed
+                access_elapsed += step_access_elapsed
+                track_elapsed += step_track_elapsed
 
             step_t0 = time.monotonic()
             id_map[old_id] = allocation.allocation_id
@@ -324,19 +349,29 @@ class GMSStorageClient:
         logger.info(
             "Phase A breakdown: allocations=%d bytes=%.2f GiB "
             "allocate_many=%.3fs export=%.3fs reserve_va=%.3fs "
-            "import_map_access=%.3fs target_build=%.3fs other=%.3fs",
+            "cuda_import=%.3fs cu_mem_map=%.3fs cu_mem_set_access=%.3fs "
+            "track_mapping=%.3fs import_map_access=%.3fs "
+            "target_build=%.3fs other=%.3fs",
             len(targets),
             sum(int(entry.aligned_size) for entry in manifest.allocations) / (1 << 30),
             allocate_elapsed,
             export_elapsed,
             reserve_elapsed,
-            map_elapsed,
+            import_elapsed,
+            cuda_map_elapsed,
+            access_elapsed,
+            track_elapsed,
+            import_map_access_elapsed,
             target_elapsed,
             total_elapsed
             - allocate_elapsed
             - export_elapsed
             - reserve_elapsed
-            - map_elapsed
+            - import_elapsed
+            - cuda_map_elapsed
+            - access_elapsed
+            - track_elapsed
+            - import_map_access_elapsed
             - target_elapsed,
         )
         logger.info(

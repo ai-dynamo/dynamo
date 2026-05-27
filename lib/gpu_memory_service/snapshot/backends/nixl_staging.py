@@ -43,8 +43,15 @@ logger = logging.getLogger(__name__)
 _PINNED_COPY_BUFFERS_PER_WORKER = 2
 POSIX_IOS_POOL_SIZE_CONFIG_KEY = "nixl_posix_ios_pool_size"
 POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY = "nixl_posix_kernel_queue_size"
+NIXL_PREP_MODE_CONFIG_KEY = "nixl_prep_mode"
+NIXL_PREP_WORKERS_CONFIG_KEY = "nixl_prep_workers"
+NIXL_PREP_GROUP_LOGGING_CONFIG_KEY = "nixl_prep_group_logging"
 DEFAULT_POSIX_IOS_POOL_SIZE = 1024
 DEFAULT_POSIX_KERNEL_QUEUE_SIZE = 128
+DEFAULT_NIXL_PREP_MODE = "async"
+NIXL_PREP_MODE_ASYNC = "async"
+NIXL_PREP_MODE_DEFERRED = "deferred"
+_NIXL_PREP_MODES = (NIXL_PREP_MODE_ASYNC, NIXL_PREP_MODE_DEFERRED)
 
 NixlFileGroup = Tuple[str, Sequence[FileTransferSource]]
 NixlWorkGroup = Tuple[str, Sequence[NixlFileGroup]]
@@ -82,6 +89,100 @@ def _positive_int_config(
     if value <= 0:
         raise ValueError(f"{key} must be a positive integer, got {raw_value!r}")
     return value
+
+
+def _optional_nonnegative_int_config(
+    config: Mapping[str, object],
+    key: str,
+) -> Optional[int]:
+    raw_value = config.get(key)
+    if raw_value is None or raw_value == "":
+        return None
+
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{key} must be a non-negative integer, got {raw_value!r}"
+        ) from exc
+    if value < 0:
+        raise ValueError(f"{key} must be a non-negative integer, got {raw_value!r}")
+    return value
+
+
+def _env_or_config(
+    config: Mapping[str, object],
+    key: str,
+    env_name: str,
+) -> Optional[object]:
+    value = config.get(key)
+    if value is not None and value != "":
+        return value
+    return os.environ.get(env_name)
+
+
+def _prep_mode_from_config(config: Mapping[str, object]) -> str:
+    raw_value = _env_or_config(
+        config,
+        NIXL_PREP_MODE_CONFIG_KEY,
+        "GMS_NIXL_PREP_MODE",
+    )
+    if raw_value is None or raw_value == "":
+        return DEFAULT_NIXL_PREP_MODE
+    mode = str(raw_value).strip().lower()
+    if mode not in _NIXL_PREP_MODES:
+        raise ValueError(
+            f"{NIXL_PREP_MODE_CONFIG_KEY} must be one of "
+            f"{', '.join(_NIXL_PREP_MODES)}, got {raw_value!r}"
+        )
+    return mode
+
+
+def _prep_workers_from_config(config: Mapping[str, object]) -> Optional[int]:
+    raw_value = _env_or_config(
+        config,
+        NIXL_PREP_WORKERS_CONFIG_KEY,
+        "GMS_NIXL_PREP_WORKERS",
+    )
+    if raw_value is None or raw_value == "":
+        return None
+    return _optional_nonnegative_int_config(
+        {NIXL_PREP_WORKERS_CONFIG_KEY: raw_value},
+        NIXL_PREP_WORKERS_CONFIG_KEY,
+    )
+
+
+def _bool_config(
+    config: Mapping[str, object],
+    key: str,
+    env_name: str,
+    default: bool,
+) -> bool:
+    raw_value = _env_or_config(config, key, env_name)
+    if raw_value is None or raw_value == "":
+        return default
+    value = str(raw_value).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{key} must be a boolean, got {raw_value!r}")
+
+
+def _configure_nixl_python_logging_from_env() -> None:
+    """Optionally quiet Python-side NIXL logging for contention experiments."""
+    raw_level = os.environ.get("GMS_NIXL_PY_LOG_LEVEL")
+    if not raw_level:
+        return
+    level_name = raw_level.strip().upper()
+    level = getattr(logging, level_name, None)
+    if not isinstance(level, int):
+        raise ValueError(
+            "GMS_NIXL_PY_LOG_LEVEL must be a logging level, "
+            f"got {raw_level!r}"
+        )
+    logging.getLogger("nixl").setLevel(level)
+    logging.getLogger("nixl._api").setLevel(level)
 
 
 def _posix_backend_params_from_config(
@@ -189,18 +290,29 @@ class NixlPosixStagingTransferBackend:
         self._posix_backend_params = _posix_backend_params_from_config(
             config.backend_config
         )
+        self._prep_mode = _prep_mode_from_config(config.backend_config)
+        self._prep_worker_limit = _prep_workers_from_config(config.backend_config)
+        self._log_prepared_groups = _bool_config(
+            config.backend_config,
+            NIXL_PREP_GROUP_LOGGING_CONFIG_KEY,
+            "GMS_NIXL_PREP_GROUP_LOGGING",
+            True,
+        )
+        _configure_nixl_python_logging_from_env()
         self._group_sources = group_sources
         self._group_kind = group_kind
         self._warn_under_parallelized = warn_under_parallelized
         logger.info(
             "%s configured for device %d with %d workers using NIXL POSIX "
-            "staging backend_params=%s; NIXL import is running in the "
-            "background and agent setup starts in start_restore() so it can "
-            "overlap manifest planning, RW connect, and Phase A allocation",
+            "staging backend_params=%s prep_mode=%s prep_workers=%s "
+            "group_logging=%s; NIXL import is running in the background",
             backend_name,
             self._device,
             self._max_workers,
             self._posix_backend_params,
+            self._prep_mode,
+            self._prep_worker_limit if self._prep_worker_limit is not None else "auto",
+            self._log_prepared_groups,
         )
 
     def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
@@ -212,6 +324,9 @@ class NixlPosixStagingTransferBackend:
             group_kind=self._group_kind,
             warn_under_parallelized=self._warn_under_parallelized,
             posix_backend_params=self._posix_backend_params,
+            prep_mode=self._prep_mode,
+            prep_worker_limit=self._prep_worker_limit,
+            log_prepared_groups=self._log_prepared_groups,
             sources=sources,
             api_future=self._api_future,
         )
@@ -232,6 +347,9 @@ class _NixlPosixStagingTransferSession:
         warn_under_parallelized: bool,
         posix_backend_params: Mapping[str, str],
         sources: Sequence[FileTransferSource],
+        prep_mode: str = DEFAULT_NIXL_PREP_MODE,
+        prep_worker_limit: Optional[int] = None,
+        log_prepared_groups: bool = True,
         api_future: Optional[Future[object]] = None,
     ) -> None:
         self._backend_name = backend_name
@@ -239,6 +357,14 @@ class _NixlPosixStagingTransferSession:
         self._max_workers = max(1, int(max_workers))
         self._group_kind = group_kind
         self._posix_backend_params = dict(posix_backend_params)
+        self._prep_mode = prep_mode
+        if self._prep_mode not in _NIXL_PREP_MODES:
+            raise ValueError(
+                f"{NIXL_PREP_MODE_CONFIG_KEY} must be one of "
+                f"{', '.join(_NIXL_PREP_MODES)}, got {prep_mode!r}"
+            )
+        self._prep_worker_limit = prep_worker_limit
+        self._log_prepared_groups = log_prepared_groups
         self._sources = list(sources)
         self._api_future = api_future
         self._agent_name_base = (
@@ -246,7 +372,8 @@ class _NixlPosixStagingTransferSession:
         )
         self._cancel_event = threading.Event()
         self._active = True
-        self._prep_started_at = time.monotonic()
+        self._session_created_at = time.monotonic()
+        self._prep_started_at: Optional[float] = None
         grouped = group_sources(self._sources)
         self._logical_group_count = len(grouped)
         work_groups: List[NixlWorkGroup] = [
@@ -264,31 +391,61 @@ class _NixlPosixStagingTransferSession:
             )
         self._work_groups = _split_work_groups(work_groups, self._worker_count)
         self._total_bytes = sum(source.byte_count for source in self._sources)
+        if self._prep_worker_limit is None or self._prep_worker_limit == 0:
+            self._prep_worker_count = self._worker_count
+        else:
+            self._prep_worker_count = max(
+                1,
+                min(int(self._prep_worker_limit), self._worker_count),
+            )
         self._prep_pool: Optional[ThreadPoolExecutor] = None
         self._prep_futures: dict[Future[_PreparedNixlGroup], str] = {}
-        if self._work_groups:
-            self._prep_pool = ThreadPoolExecutor(max_workers=self._worker_count)
-            self._prep_futures = {
-                self._prep_pool.submit(
-                    self._prepare_group,
-                    worker_index,
-                    group_name,
-                    file_groups,
-                ): group_name
-                for worker_index, (group_name, file_groups) in enumerate(
-                    self._work_groups
-                )
-            }
+        if self._work_groups and self._prep_mode == NIXL_PREP_MODE_ASYNC:
+            self._start_prep()
+        elif self._work_groups:
             logger.info(
-                "%s staging prep started: work_groups=%d logical_%s_groups=%d "
-                "workers=%d bytes=%.2f GiB",
+                "%s staging prep deferred until restore targets are ready: "
+                "work_groups=%d logical_%s_groups=%d workers=%d prep_workers=%d "
+                "bytes=%.2f GiB",
                 self._backend_name,
                 len(self._work_groups),
                 self._group_kind,
                 self._logical_group_count,
                 self._worker_count,
+                self._prep_worker_count,
                 self._total_bytes / (1024**3),
             )
+
+    def _start_prep(self) -> None:
+        if not self._work_groups or self._prep_futures:
+            return
+        self._prep_started_at = time.monotonic()
+        self._prep_pool = ThreadPoolExecutor(max_workers=self._prep_worker_count)
+        self._prep_futures = {
+            self._prep_pool.submit(
+                self._prepare_group,
+                worker_index,
+                group_name,
+                file_groups,
+            ): group_name
+            for worker_index, (group_name, file_groups) in enumerate(
+                self._work_groups
+            )
+        }
+        logger.info(
+            "%s staging prep started: work_groups=%d logical_%s_groups=%d "
+            "workers=%d prep_workers=%d prep_mode=%s bytes=%.2f GiB "
+            "session_age=%.3fs",
+            self._backend_name,
+            len(self._work_groups),
+            self._group_kind,
+            self._logical_group_count,
+            self._worker_count,
+            self._prep_worker_count,
+            self._prep_mode,
+            self._total_bytes / (1024**3),
+            self._prep_started_at - self._session_created_at,
+        )
 
     def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
         validate_transfer_targets(self._sources, targets, device=self._device)
@@ -297,12 +454,18 @@ class _NixlPosixStagingTransferSession:
             return
 
         t0 = time.monotonic()
-        prep_overlap_s = t0 - self._prep_started_at
+        prep_was_started = self._prep_started_at is not None
+        if not prep_was_started:
+            self._start_prep()
+        assert self._prep_started_at is not None
+        prep_overlap_s = t0 - self._prep_started_at if prep_was_started else 0.0
         logger.info(
             "%s restore targets ready after %.3fs of background staging prep; "
-            "starting transfers",
+            "starting transfers (prep_mode=%s prep_workers=%d)",
             self._backend_name,
             prep_overlap_s,
+            self._prep_mode,
+            self._prep_worker_count,
         )
         try:
             assert self._prep_pool is not None
@@ -378,6 +541,7 @@ class _NixlPosixStagingTransferSession:
         group_name: str,
         file_groups: Sequence[NixlFileGroup],
     ) -> _PreparedNixlGroup:
+        assert self._prep_started_at is not None
         prep_started_after_s = time.monotonic() - self._prep_started_at
         prep_t0 = time.monotonic()
         slots: List[PinnedCopySlot] = []
@@ -404,16 +568,17 @@ class _NixlPosixStagingTransferSession:
                 raise CancelledError(f"{self._backend_name} cancelled")
             slots = make_pinned_copy_slots(_PINNED_COPY_BUFFERS_PER_WORKER)
             prep_elapsed_s = time.monotonic() - prep_t0
-            logger.info(
-                "%s prepared %s=%s files=%d prep_elapsed=%.3fs "
-                "prep_started_after=%.3fs",
-                self._backend_name,
-                self._group_kind,
-                group_name,
-                len(file_groups),
-                prep_elapsed_s,
-                prep_started_after_s,
-            )
+            if self._log_prepared_groups:
+                logger.info(
+                    "%s prepared %s=%s files=%d prep_elapsed=%.3fs "
+                    "prep_started_after=%.3fs",
+                    self._backend_name,
+                    self._group_kind,
+                    group_name,
+                    len(file_groups),
+                    prep_elapsed_s,
+                    prep_started_after_s,
+                )
             return _PreparedNixlGroup(
                 worker_index=worker_index,
                 group_name=group_name,

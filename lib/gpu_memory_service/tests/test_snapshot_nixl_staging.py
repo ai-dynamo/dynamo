@@ -11,12 +11,18 @@ try:
     from gpu_memory_service.snapshot.backends.nixl_staging import (
         DEFAULT_POSIX_IOS_POOL_SIZE,
         DEFAULT_POSIX_KERNEL_QUEUE_SIZE,
+        NIXL_PREP_GROUP_LOGGING_CONFIG_KEY,
+        NIXL_PREP_MODE_CONFIG_KEY,
+        NIXL_PREP_WORKERS_CONFIG_KEY,
         NixlFileGroup,
         POSIX_IOS_POOL_SIZE_CONFIG_KEY,
         POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY,
         NixlWorkGroup,
         _NixlPosixStagingTransferSession,
+        _bool_config,
         _posix_backend_params_from_config,
+        _prep_mode_from_config,
+        _prep_workers_from_config,
         _split_work_groups,
     )
     from gpu_memory_service.snapshot.transfer import FileTransferSource, GMSTransferTarget
@@ -116,6 +122,71 @@ def test_posix_backend_params_allow_override():
 def test_posix_backend_params_reject_invalid_values(key, value):
     with pytest.raises(ValueError, match=key):
         _posix_backend_params_from_config({key: value})
+
+
+def test_prep_mode_defaults_to_async_and_allows_deferred(monkeypatch):
+    monkeypatch.delenv("GMS_NIXL_PREP_MODE", raising=False)
+
+    assert _prep_mode_from_config({}) == "async"
+    assert _prep_mode_from_config({NIXL_PREP_MODE_CONFIG_KEY: "deferred"}) == "deferred"
+
+
+def test_prep_mode_can_be_set_by_env(monkeypatch):
+    monkeypatch.setenv("GMS_NIXL_PREP_MODE", "deferred")
+
+    assert _prep_mode_from_config({}) == "deferred"
+    assert _prep_mode_from_config({NIXL_PREP_MODE_CONFIG_KEY: "async"}) == "async"
+
+
+def test_prep_mode_rejects_invalid_values(monkeypatch):
+    monkeypatch.delenv("GMS_NIXL_PREP_MODE", raising=False)
+
+    with pytest.raises(ValueError, match=NIXL_PREP_MODE_CONFIG_KEY):
+        _prep_mode_from_config({NIXL_PREP_MODE_CONFIG_KEY: "later"})
+
+
+def test_prep_workers_allows_config_or_env(monkeypatch):
+    monkeypatch.delenv("GMS_NIXL_PREP_WORKERS", raising=False)
+
+    assert _prep_workers_from_config({}) is None
+    assert _prep_workers_from_config({NIXL_PREP_WORKERS_CONFIG_KEY: "0"}) == 0
+    assert _prep_workers_from_config({NIXL_PREP_WORKERS_CONFIG_KEY: 4}) == 4
+
+    monkeypatch.setenv("GMS_NIXL_PREP_WORKERS", "2")
+    assert _prep_workers_from_config({}) == 2
+    assert _prep_workers_from_config({NIXL_PREP_WORKERS_CONFIG_KEY: "3"}) == 3
+
+
+def test_prep_workers_rejects_invalid_values(monkeypatch):
+    monkeypatch.delenv("GMS_NIXL_PREP_WORKERS", raising=False)
+
+    with pytest.raises(ValueError, match=NIXL_PREP_WORKERS_CONFIG_KEY):
+        _prep_workers_from_config({NIXL_PREP_WORKERS_CONFIG_KEY: "-1"})
+
+
+def test_bool_config_allows_config_or_env(monkeypatch):
+    monkeypatch.delenv("GMS_NIXL_PREP_GROUP_LOGGING", raising=False)
+
+    assert _bool_config(
+        {},
+        NIXL_PREP_GROUP_LOGGING_CONFIG_KEY,
+        "GMS_NIXL_PREP_GROUP_LOGGING",
+        True,
+    )
+    assert not _bool_config(
+        {NIXL_PREP_GROUP_LOGGING_CONFIG_KEY: "false"},
+        NIXL_PREP_GROUP_LOGGING_CONFIG_KEY,
+        "GMS_NIXL_PREP_GROUP_LOGGING",
+        True,
+    )
+
+    monkeypatch.setenv("GMS_NIXL_PREP_GROUP_LOGGING", "0")
+    assert not _bool_config(
+        {},
+        NIXL_PREP_GROUP_LOGGING_CONFIG_KEY,
+        "GMS_NIXL_PREP_GROUP_LOGGING",
+        True,
+    )
 
 
 def test_posix_backend_params_are_forwarded_to_nixl_agent(monkeypatch):
@@ -259,4 +330,79 @@ def test_staging_prep_starts_before_restore(monkeypatch):
         assert prep_started.wait(timeout=1.0)
     finally:
         allow_finish.set()
+        session.close()
+
+
+def test_deferred_staging_prep_waits_until_restore(monkeypatch):
+    from gpu_memory_service.snapshot.backends import nixl_staging
+
+    source = FileTransferSource(
+        allocation_id="alloc-0",
+        file_path="/checkpoint/shard.bin",
+        file_offset=0,
+        byte_count=4096,
+    )
+    target = GMSTransferTarget(
+        allocation_id="alloc-0",
+        va=0x1000,
+        device=0,
+        byte_count=4096,
+    )
+    prep_started = threading.Event()
+    restored = threading.Event()
+
+    class FakeApi:
+        @staticmethod
+        def agent_config_type(*, backends):
+            return {"backends": backends}
+
+        @staticmethod
+        def agent_type(_agent_name, _config):
+            return FakeAgent()
+
+    class FakeAgent:
+        def create_backend(self, _backend_name, backend_params=None):
+            self.backend_params = backend_params
+
+    def group_sources(_sources):
+        return {"file": [(source.file_path, [source])]}
+
+    def fake_load_nixl_api():
+        prep_started.set()
+        return FakeApi()
+
+    def fake_restore_file_groups_with_nixl_staging(**_kwargs):
+        restored.set()
+        return source.byte_count
+
+    monkeypatch.setattr(
+        nixl_staging.cuda_utils,
+        "cuda_runtime_set_device",
+        lambda _device: None,
+    )
+    monkeypatch.setattr(nixl_staging, "load_nixl_api", fake_load_nixl_api)
+    monkeypatch.setattr(nixl_staging, "make_pinned_copy_slots", lambda _count: [])
+    monkeypatch.setattr(
+        nixl_staging,
+        "restore_file_groups_with_nixl_staging",
+        fake_restore_file_groups_with_nixl_staging,
+    )
+
+    session = _NixlPosixStagingTransferSession(
+        backend_name="test-backend",
+        device=0,
+        max_workers=1,
+        group_sources=group_sources,
+        group_kind="file",
+        warn_under_parallelized=False,
+        posix_backend_params={"ios_pool_size": "64", "kernel_queue_size": "16"},
+        prep_mode="deferred",
+        sources=[source],
+    )
+    try:
+        assert not prep_started.is_set()
+        session.restore({"alloc-0": target})
+        assert prep_started.is_set()
+        assert restored.is_set()
+    finally:
         session.close()
