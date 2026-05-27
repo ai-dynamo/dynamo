@@ -445,7 +445,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
 }
 
-impl<Req: PipelineIO, Resp: PipelineIO> Ingress<Req, Resp> {
+impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             segment: OnceLock::new(),
