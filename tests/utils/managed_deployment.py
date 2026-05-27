@@ -15,11 +15,84 @@ from typing import Any, List, Literal, Optional
 import kr8s
 import requests
 import yaml
-from kr8s.objects import Pod, Service
+from kr8s.objects import APIObject, Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
 from tests.utils.test_output import resolve_test_output_path
+
+
+class DynamoWorkerMetadata(APIObject):
+    """kr8s wrapper for the Dynamo k8s-discovery worker metadata CR.
+
+    Each Dynamo worker pod publishes one CR named after its pod (single-
+    component pods) under ``nvidia.com/v1alpha1`` group, kind
+    ``DynamoWorkerMetadata``. ``spec.data.endpoints`` maps an endpoint
+    key to a dict whose ``instance_id`` is the u64 the FE uses for
+    nvext.worker_id pinning. See ``lib/runtime/src/discovery/kube/crd.rs``
+    for the source-of-truth schema.
+
+    Only populated when the worker runs with
+    ``DYN_DISCOVERY_BACKEND=kubernetes``; etcd-mode workers don't write
+    this CR.
+    """
+
+    version = "nvidia.com/v1alpha1"
+    endpoint = "dynamoworkermetadatas"
+    kind = "DynamoWorkerMetadata"
+    plural = "dynamoworkermetadatas"
+    singular = "dynamoworkermetadata"
+    namespaced = True
+
+    @property
+    def endpoints(self) -> dict:
+        """``spec.data.endpoints`` mapping, or ``{}`` if missing."""
+        spec = self.raw.get("spec", {}) or {}
+        data = spec.get("data", {}) or {}
+        return data.get("endpoints", {}) or {}
+
+    def instance_id(self, *, endpoint: Optional[str] = None) -> int:
+        """Return the Dynamo ``instance_id`` for this worker pod.
+
+        Dynamo workers register one ``instance_id`` per process and
+        expose multiple endpoint names against it (e.g. ``generate``,
+        ``clear_kv_blocks``, ``get_perf_metrics`` on a vLLM worker).
+        Since the (pod, instance_id) mapping is 1:1 for the
+        single-component-per-pod case, dedupe by value across all
+        endpoints and return the unique id.
+
+        Pass ``endpoint=`` (e.g. ``"generate"``) when a single pod hosts
+        multiple components, each with its own instance_id, and you
+        want a specific one. The endpoint-key path shape is
+        ``<namespace>/<dynamo-component>/<endpoint-name>/<id>``; the
+        ``endpoint-name`` is what this filter matches.
+        """
+        eps = self.endpoints
+        if not eps:
+            raise ValueError(
+                f"DynamoWorkerMetadata {self.name!r}: spec.data.endpoints "
+                f"is empty — is the worker fully started?"
+            )
+
+        if endpoint is not None:
+            matches = [v for k, v in eps.items() if f"/{endpoint}/" in str(k)]
+            if not matches:
+                raise ValueError(
+                    f"DynamoWorkerMetadata {self.name!r}: no endpoint "
+                    f"named {endpoint!r}; keys are {sorted(eps.keys())}"
+                )
+            unique_ids = {int(v["instance_id"]) for v in matches}
+        else:
+            unique_ids = {int(v["instance_id"]) for v in eps.values()}
+
+        if len(unique_ids) != 1:
+            raise ValueError(
+                f"DynamoWorkerMetadata {self.name!r}: expected one unique "
+                f"instance_id across endpoints, found {len(unique_ids)} "
+                f"({sorted(unique_ids)}); pass endpoint= to disambiguate. "
+                f"Keys: {sorted(eps.keys())}"
+            )
+        return unique_ids.pop()
 
 
 def _get_workspace_dir() -> str:
@@ -222,11 +295,50 @@ class ServiceSpec:
 
     # ----- Volume mounts and env vars -----
     def _add_volume_mount(self, name: str, mount_point: str):
-        """Add a volume mount if not already present."""
-        if "volumeMounts" not in self._spec:
-            self._spec["volumeMounts"] = []
-        if not any(m.get("name") == name for m in self._spec["volumeMounts"]):
-            self._spec["volumeMounts"].append({"name": name, "mountPoint": mount_point})
+        """Mount a PVC purely via ``extraPodSpec`` — both the
+        ``volumeMount`` and the matching pod-level ``volume`` are
+        written into ``extraPodSpec.mainContainer`` and
+        ``extraPodSpec.volumes`` directly.
+
+        Why not just set ``service.volumeMounts`` (the dedicated
+        v1alpha1 field)?
+
+        On dynamo-operator v1.2.0 the alpha→beta spec conversion runs
+        ``mergo.Merge(mainBase, extraPodSpec.MainContainer, mergo.WithOverride)``
+        in ``api/v1alpha1/shared_spec_conversion.go`` →
+        ``mergeExtraPodSpecMainContainer``. ``WithOverride`` REPLACES
+        slice fields like ``VolumeMounts`` rather than appending — so
+        any mount declared via the dedicated ``service.volumeMounts``
+        gets clobbered by ``extraPodSpec.mainContainer.volumeMounts``
+        if the latter is present. The operator's
+        ``appendMissingPVCVolumesForMounts`` then only sees the
+        survivors and never auto-adds the PVC volume for the dropped
+        names → pod-create fails with
+        ``spec.initContainers[N].volumeMounts[0].name: Not found``.
+
+        v1.1.0 worked (different merge semantics). Aligning everything
+        on ``extraPodSpec`` bypasses the operator-version dependency.
+
+        We declare ``extraPodSpec.volumes`` explicitly (instead of
+        relying on the operator's auto-add) for the same reason the
+        ``dyn-log-wrapper`` emptyDir handles its own volume — the
+        ``service.volumeMounts`` auto-add path is the layer that
+        breaks; this path doesn't go through it.
+        """
+        main_container = self._ensure_path("extraPodSpec", "mainContainer")
+        main_vmounts = main_container.setdefault("volumeMounts", [])
+        if not any(m.get("name") == name for m in main_vmounts):
+            main_vmounts.append({"name": name, "mountPath": mount_point})
+
+        extra_pod_spec = self._ensure_path("extraPodSpec")
+        volumes = extra_pod_spec.setdefault("volumes", [])
+        if not any(v.get("name") == name for v in volumes):
+            volumes.append(
+                {
+                    "name": name,
+                    "persistentVolumeClaim": {"claimName": name},
+                }
+            )
 
     def _add_env_var(self, name: str, value=None, value_from=None):
         """Add an env var if not already present."""
@@ -287,15 +399,14 @@ class ServiceSpec:
         prefix = f"{run_id}/" if run_id else ""
         service_log_dir = f"{log_dir}/{prefix}service_logs/{self._name.lower()}"
 
-        # The log PVC is operator-managed: service-level volumeMounts
-        # tells the operator to provision the corresponding volume on
-        # our behalf.
+        # The log PVC is declared via extraPodSpec (mount + volume) by
+        # _add_volume_mount. We deliberately do NOT use the
+        # service-level volumeMounts shortcut because on operator
+        # v1.2.0 mergo.WithOverride drops it — see the docstring on
+        # _add_volume_mount.
         self._add_volume_mount(pvc_name, log_dir)
-        # The wrapper-staging emptyDir is NOT operator-managed: we
-        # mount it directly on mainContainer (kubelet-level) and
-        # declare the volume in extraPodSpec.volumes ourselves. Mixing
-        # the two layers causes the operator to also generate a volume
-        # of the same name → "Duplicate value" error on Deployment apply.
+        # The wrapper-staging emptyDir mount + volume both live in
+        # extraPodSpec too, same pattern as the PVC above.
         main_vmounts = main_container.setdefault("volumeMounts", [])
         if not any(m.get("name") == self._WRAPPER_VOLUME for m in main_vmounts):
             main_vmounts.append(
@@ -1398,6 +1509,68 @@ class ManagedDeployment:
             result[original_name] = pods
 
         return result
+
+    def get_worker_metadata(
+        self, service_name: str, replica_index: int
+    ) -> DynamoWorkerMetadata:
+        """Return the ``DynamoWorkerMetadata`` CR for the ``replica_index``-th
+        pod of ``service_name``.
+
+        Pods are sorted by name for deterministic replica indexing — the
+        operator's pod-name suffix is hash-based, so name-sort is the
+        closest stable proxy for "replica 0, replica 1, ...". This will
+        change if the operator ever exposes an explicit replica-index
+        label; switch to that label here when it does.
+
+        The CR's name equals the pod name (single-component pods); see
+        ``lib/runtime/src/discovery/kube/crd.rs``. Requires
+        ``DYN_DISCOVERY_BACKEND=kubernetes`` on the worker.
+        """
+        pods = self.get_pods([service_name]).get(service_name) or []
+        if not pods:
+            raise ValueError(
+                f"get_worker_metadata: no pods for service {service_name!r} "
+                f"in namespace {self.namespace!r}"
+            )
+        pods = sorted(pods, key=lambda p: p.name)
+        if replica_index < 0 or replica_index >= len(pods):
+            raise IndexError(
+                f"get_worker_metadata: replica_index={replica_index} out of "
+                f"range for {service_name!r} ({len(pods)} pods)"
+            )
+        pod_name = pods[replica_index].name
+        crs = list(
+            kr8s.get(
+                DynamoWorkerMetadata,
+                pod_name,
+                namespace=self.namespace,
+            )
+        )
+        if not crs:
+            raise ValueError(
+                f"get_worker_metadata: no DynamoWorkerMetadata CR named "
+                f"{pod_name!r} in namespace {self.namespace!r} "
+                f"(is DYN_DISCOVERY_BACKEND=kubernetes set on the worker?)"
+            )
+        return crs[0]
+
+    def get_instance_id(
+        self,
+        service_name: str,
+        replica_index: int,
+        *,
+        endpoint: Optional[str] = None,
+    ) -> int:
+        """Look up the Dynamo ``instance_id`` for one worker replica.
+
+        Convenience wrapper around :py:meth:`get_worker_metadata` for the
+        ``WorkerPin`` flow: returns the integer ``instance_id`` that goes
+        into a request's ``nvext.worker_id`` field. ``endpoint`` (e.g.
+        ``"generate"``) disambiguates only on multi-component-per-pod
+        workers; the common single-component case ignores it.
+        """
+        cr = self.get_worker_metadata(service_name, replica_index)
+        return cr.instance_id(endpoint=endpoint)
 
     def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
         """Capture per-pod artifacts at a point in time.

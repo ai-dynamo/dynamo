@@ -33,6 +33,27 @@ def _get_template_dir() -> str:
 
 
 @dataclass
+class WorkerPin:
+    """Pin every request to a specific (service, replica_index) pair.
+
+    The role+index tuple is resolved at StartLoad.execute() time against
+    the live ManagedDeployment — the framework reads the matching pod's
+    ``DynamoWorkerMetadata`` CR (nvidia.com/v1alpha1) and injects the
+    discovered ``instance_id`` into the request's ``nvext.worker_id``
+    block. Either or both phases may be pinned; an unpinned phase is
+    chosen by the FE's normal routing.
+
+    Requires ``DYN_DISCOVERY_BACKEND=kubernetes`` on the workers so the
+    DynamoWorkerMetadata CRs exist; with the etcd backend they don't.
+    """
+
+    decode_service: Optional[str] = None
+    decode_replica_index: Optional[int] = None
+    prefill_service: Optional[str] = None
+    prefill_replica_index: Optional[int] = None
+
+
+@dataclass
 class LoadConfig:
     """Configuration for load test parameters.
 
@@ -143,6 +164,11 @@ class LoadConfig:
 
     # Extra inference parameters
     extra_inputs: Optional[Dict[str, Any]] = None
+
+    # Pin every request to a specific (service, replica_index) pair via
+    # nvext.worker_id. Resolved at StartLoad.execute() time by reading
+    # the matching pod's DynamoWorkerMetadata CR. None = no pinning.
+    worker_pin: Optional[WorkerPin] = None
 
     def __post_init__(self):
         if self.warmup_requests is None:
@@ -422,7 +448,19 @@ class ManagedLoad:
             extra_inputs.update(cfg.extra_inputs)
 
         for key, value in extra_inputs.items():
-            args.extend(["--extra-inputs", f"{key}:{value}"])
+            # Two AIPerf wire formats for --extra-inputs:
+            #   - flat scalar: `key:value` (e.g. `max_tokens:200`)
+            #   - JSON object: `{"key": <value>}` (e.g.
+            #     `{"nvext":{"prefill_worker_id":123,"decode_worker_id":456}}`)
+            # The JSON form is required to express nested objects like
+            # `nvext.*` — see components/src/dynamo/profiler/utils/aiperf.py:65
+            # for the canonical example. Detect dicts and route them to
+            # the JSON path so `extra_inputs={"nvext": {...}}` works as
+            # the caller expects.
+            if isinstance(value, dict):
+                args.extend(["--extra-inputs", json.dumps({key: value})])
+            else:
+                args.extend(["--extra-inputs", f"{key}:{value}"])
 
         # shlex.join quotes args that contain whitespace (e.g. --goodput's
         # 'request_latency:30000 ttft:5000' string) so they survive the

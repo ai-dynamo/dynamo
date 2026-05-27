@@ -609,22 +609,32 @@ class ServiceLogPatternRate(Check):
 @dataclass
 class KvCacheUsagePeak(Check):
     """Assert at least one pod's ``vllm:kv_cache_usage_perc`` reaches
-    ``threshold`` (e.g. 0.9) within ``within_seconds`` of the pod's
-    server_metrics first-sample timestamp.
+    ``threshold`` within ``within_seconds`` of the **specified load's**
+    first-sample timestamp.
 
-    Used by the R4 replacement-KV-saturation test: after a decode pod is
-    deleted, the replacement pod schedules with a fresh KV pool; if
-    upstream prefill has a queue of pending KV transfers, that pool can
-    saturate (~99%) within minutes of the pod becoming Ready. We assert
-    that exact pattern.
+    ``load_name``: anchor for ``within_seconds``. When set (e.g. "cliff"),
+    the elapsed-time clock starts at the named load's first metric
+    sample for that pod — not the FIRST load's first sample. This is
+    the right semantic for cliff-rung tests where the warmup rung
+    runs first and would otherwise push the cliff KV peak past the
+    ``within_seconds`` ceiling even when the cliff itself pegged in
+    seconds. Per observe-agent NEXT_STEPS_FOR_TEST_AGENT P1.2 (prior
+    sanity-suite-1) — S0b false-failed without this anchor.
+
+    Default behaviour (``load_name=None``) preserves the original
+    R4-replacement-KV semantics: anchor on each pod's first sample
+    across all loads.
     """
 
     services: list
     threshold: float = 0.9
     within_seconds: float = 240.0
+    load_name: Optional[str] = None
 
     def validate(self, ctx) -> None:
         load_dirs = _find_load_dirs(ctx)
+        if self.load_name:
+            load_dirs = [d for d in load_dirs if self.load_name in _os.path.basename(d)]
         observed: dict = {}
         for ldir in load_dirs:
             jsonl = _os.path.join(ldir, "server_metrics_export.jsonl")
@@ -642,33 +652,57 @@ class KvCacheUsagePeak(Check):
                         observed[pod] = {
                             "first_ts_ns": ts_ns,
                             "max": float(val),
-                            "max_ts_ns": ts_ns,
+                            # Time of FIRST crossing of threshold — what
+                            # within_seconds measures against. Stays
+                            # None until threshold is first reached.
+                            "first_cross_ts_ns": (
+                                ts_ns if float(val) >= self.threshold else None
+                            ),
                         }
                     else:
                         observed[pod]["max"] = max(observed[pod]["max"], float(val))
-                        if float(val) >= self.threshold:
-                            observed[pod]["max_ts_ns"] = ts_ns
+                        if (
+                            float(val) >= self.threshold
+                            and observed[pod]["first_cross_ts_ns"] is None
+                        ):
+                            observed[pod]["first_cross_ts_ns"] = ts_ns
 
+        anchor_desc = (
+            f"load '{self.load_name}' start"
+            if self.load_name
+            else "first sample across all loads"
+        )
         ctx.logger.info(
             f"KvCacheUsagePeak: per-pod observations={observed} "
-            f"threshold={self.threshold} within={self.within_seconds}s"
+            f"threshold={self.threshold} within={self.within_seconds}s "
+            f"anchor={anchor_desc}"
         )
+        # Pass condition: at least one pod's FIRST crossing of the
+        # threshold happened within ``within_seconds`` of the anchor's
+        # first sample. The prior implementation tracked the LAST sample
+        # ≥ threshold (effectively the end of the sustained cliff
+        # plateau) → for any sustained cliff, elapsed = full duration →
+        # false-fail. Per observe-agent NEXT_STEPS P1.2-v2 (round 2).
         winners = []
         for pod, rec in observed.items():
-            elapsed_s = (rec["max_ts_ns"] - rec["first_ts_ns"]) / 1e9
-            if rec["max"] >= self.threshold and elapsed_s <= self.within_seconds:
+            if rec["first_cross_ts_ns"] is None:
+                continue
+            elapsed_s = (rec["first_cross_ts_ns"] - rec["first_ts_ns"]) / 1e9
+            if elapsed_s <= self.within_seconds:
                 winners.append((pod, rec["max"], elapsed_s))
         assert winners, (
             f"KvCacheUsagePeak: no pod in {self.services} reached "
             f"kv_cache_usage_perc >= {self.threshold} within "
-            f"{self.within_seconds}s. Observed: {observed}"
+            f"{self.within_seconds}s of {anchor_desc}. Observed: {observed}"
         )
 
     @property
     def description(self) -> str:
+        anchor = f" (within '{self.load_name}')" if self.load_name else ""
         return (
             f"KV cache usage peak ≥ {self.threshold} within "
             f"{self.within_seconds}s on some {', '.join(self.services)} pod"
+            f"{anchor}"
         )
 
 
@@ -697,6 +731,13 @@ class PodMemoryGrowth(Check):
     # (OOMKill-correlated). "pid1_rss" = per-process attribution.
     # Default to working_set since that's the kubelet-side signal.
     source: str = "working_set"
+    # "min": assert ``max_rate >= growth_bytes_per_min`` (leak detection —
+    # original behaviour, used by fault-tolerance leak-shape tests).
+    # "max": assert ``max_rate <= growth_bytes_per_min`` (bounded-growth
+    # assertion — used by memory-stability tests to prove a recommended
+    # config doesn't leak; the field name still says ``growth`` but
+    # functions as a ceiling).
+    assert_mode: str = "min"
 
     def validate(self, ctx) -> None:
         log_dir = getattr(ctx, "log_dir", None)
@@ -758,15 +799,28 @@ class PodMemoryGrowth(Check):
                         max_rate = rate_per_min
                         max_rate_pod = pod
                     break  # take the longest span; faster
+        threshold_label = "floor" if self.assert_mode == "min" else "ceiling"
         ctx.logger.info(
-            f"PodMemoryGrowth: max_rate={max_rate:.0f} bytes/min "
-            f"on pod={max_rate_pod}; floor={self.growth_bytes_per_min}"
+            f"PodMemoryGrowth({self.assert_mode}): max_rate={max_rate:.0f} bytes/min "
+            f"on pod={max_rate_pod}; {threshold_label}={self.growth_bytes_per_min}"
         )
-        assert max_rate >= self.growth_bytes_per_min, (
-            f"PodMemoryGrowth: peak RSS growth {max_rate:.0f}/min < "
-            f"{self.growth_bytes_per_min:.0f}/min floor on services "
-            f"{self.services}"
-        )
+        if self.assert_mode == "min":
+            assert max_rate >= self.growth_bytes_per_min, (
+                f"PodMemoryGrowth: peak RSS growth {max_rate:.0f}/min < "
+                f"{self.growth_bytes_per_min:.0f}/min floor on services "
+                f"{self.services}"
+            )
+        elif self.assert_mode == "max":
+            assert max_rate <= self.growth_bytes_per_min, (
+                f"PodMemoryGrowth: peak RSS growth {max_rate:.0f}/min > "
+                f"{self.growth_bytes_per_min:.0f}/min ceiling on services "
+                f"{self.services} (worst pod: {max_rate_pod})"
+            )
+        else:
+            assert False, (
+                f"PodMemoryGrowth: invalid assert_mode {self.assert_mode!r} "
+                f"(want 'min' or 'max')"
+            )
 
     @property
     def description(self) -> str:
@@ -1069,7 +1123,7 @@ class RestartCountIncreased(Check):
 
 
 # =============================================================================
-# 2026-05-13 decode-overload-disagg repro verifiers
+# decode-overload-disagg repro verifiers
 # =============================================================================
 #
 # Five checks added for the decode-worker overload campaign that reproduces
@@ -1114,10 +1168,19 @@ class LoadApplied(Check):
                     data = _json.load(fh)
             except (_json.JSONDecodeError, OSError):
                 continue
-            # Schema is flat: top-level "request_count": {"unit": ..., "avg": N}.
+            # AIPerf summary schema:
+            #   request_count.avg        — successful requests
+            #   error_request_count.avg  — errored requests (AIPerf 0.8+)
+            # We want the TOTAL requests issued (success + error) — that's
+            # what "did the load actually reach the cluster?" boils down to.
+            # AIPerf 0.7.x omits error_request_count; AIPerf 0.8 omits
+            # request_count when all-error. Sum both nodes so either layout
+            # is counted correctly.
             rc_node = data.get("request_count") or {}
+            ec_node = data.get("error_request_count") or {}
             rc = int(rc_node.get("avg") or rc_node.get("count") or 0)
-            observed.append((ldir, rc))
+            ec = int(ec_node.get("avg") or ec_node.get("count") or 0)
+            observed.append((ldir, rc + ec))
         total = sum(rc for _, rc in observed)
         ctx.logger.info(
             f"LoadApplied: per-load-dir={observed} total={total} "
@@ -1436,3 +1499,616 @@ class SlaViolation(Check):
             f"At least one run breaches e2e p99 > {self.e2e_p99_ms}ms "
             f"or TTFT p99 > {self.ttft_p99_ms}ms"
         )
+
+
+# =============================================================================
+# Cascade-signature checks (prior cascade-repro suite)
+# =============================================================================
+#
+# Each check below reads server_metrics_export.jsonl from one named load
+# rung and asserts one piece of the cascade signature:
+#
+#   1. KvCacheUsagePeak (already above)                — KV peg
+#   2. WaitingForKVTransferExceeds                     — smoking gun (leads collapse ~60s)
+#   3. NixlXferTimeMultiplied                          — transport blow-up
+#   4. GenerationThroughputDropped                     — throughput collapse
+#   5. CliffContained                                  — S0a-only: pin stays on target
+#
+# Full mechanism context lives in the FRAMEWORK_TASK / PLAN docs in
+# dynamo-observe (the cascade-small-pool reproducer scenarios).
+
+
+def _load_dirs_for(ctx, load_name: Optional[str]) -> list:
+    """Like ``_find_load_dirs`` but optionally filters to a single load
+    name (matches the AIPerf load-dir naming convention ``load-<name>-*``).
+    """
+    dirs = _find_load_dirs(ctx)
+    if not load_name:
+        return dirs
+    return [d for d in dirs if load_name in _os.path.basename(d)]
+
+
+def _iter_named_metric(
+    ctx,
+    metric: str,
+    load_name: Optional[str] = None,
+):
+    """Yield ``(ts_ns, pod, val)`` for ``metric`` from the JSONL of one
+    named load (or all loads if ``load_name`` is None).
+
+    Pod identity follows the same convention as ``_iter_server_metric``:
+    prefer ``labels.pod``, fall back to ``<dynamo_component>@<endpoint_url>``
+    so two workers of the same role stay distinguishable when the vLLM
+    surface omits the ``pod`` label.
+    """
+    for ldir in _load_dirs_for(ctx, load_name):
+        jsonl = _os.path.join(ldir, "server_metrics_export.jsonl")
+        for rec in _iter_jsonl(jsonl):
+            ts_ns = rec.get("timestamp_ns")
+            endpoint = rec.get("endpoint_url", "")
+            metrics = rec.get("metrics", {}) or {}
+            samples = metrics.get(metric) or []
+            for s in samples:
+                labels = s.get("labels", {}) or {}
+                pod = labels.get("pod")
+                if not pod:
+                    comp = labels.get("dynamo_component") or ""
+                    pod = f"{comp}@{endpoint}" if comp else endpoint
+                val = s.get("value")
+                if val is None or ts_ns is None:
+                    continue
+                yield int(ts_ns), str(pod), float(val)
+
+
+def _per_pod_timeseries(ctx, metric: str, load_name: Optional[str] = None) -> dict:
+    """Return ``{pod: [(ts_ns, val), ...sorted]}`` for one metric."""
+    series: dict = {}
+    for ts_ns, pod, val in _iter_named_metric(ctx, metric, load_name=load_name):
+        series.setdefault(pod, []).append((ts_ns, val))
+    for pod in series:
+        series[pod].sort()
+    return series
+
+
+def _iter_histogram(ctx, metric: str, load_name: Optional[str] = None):
+    """Yield ``(ts_ns, pod, sum_val, count_val)`` for a Prometheus histogram
+    stored single-key in the server_metrics_export.
+
+    The export schema is:
+      ``metrics[<base_name>] = [{"labels": {...}, "buckets": {...},
+                                 "sum": <float>, "count": <float>}, ...]``
+
+    NOT the on-the-wire Prometheus form with ``_sum`` / ``_count`` suffix
+    keys — the Dynamo metric exporter writes a single key carrying both
+    sum and count fields per sample. Use this iterator for histograms;
+    use ``_iter_named_metric`` for counters/gauges with a ``value`` field.
+    """
+    for ldir in _load_dirs_for(ctx, load_name):
+        jsonl = _os.path.join(ldir, "server_metrics_export.jsonl")
+        for rec in _iter_jsonl(jsonl):
+            ts_ns = rec.get("timestamp_ns")
+            endpoint = rec.get("endpoint_url", "")
+            metrics = rec.get("metrics", {}) or {}
+            samples = metrics.get(metric) or []
+            for s in samples:
+                if not isinstance(s, dict):
+                    continue
+                if "sum" not in s or "count" not in s:
+                    continue
+                labels = s.get("labels", {}) or {}
+                pod = labels.get("pod")
+                if not pod:
+                    comp = labels.get("dynamo_component") or ""
+                    pod = f"{comp}@{endpoint}" if comp else endpoint
+                try:
+                    sum_val = float(s["sum"])
+                    count_val = float(s["count"])
+                except (TypeError, ValueError):
+                    continue
+                if ts_ns is None:
+                    continue
+                yield int(ts_ns), str(pod), sum_val, count_val
+
+
+def _window_average_histogram(
+    ctx,
+    metric: str,
+    load_name: Optional[str],
+    window_start_s: float,
+    window_end_s: Optional[float],
+) -> dict:
+    """Per-pod average of a Prometheus histogram (sum / count delta) over
+    a wall-clock window measured from the first sample of the named load.
+    ``window_end_s=None`` means "to end of load".
+
+    Returns ``{pod: avg_seconds}`` for pods that recorded ≥ 2 samples in
+    the window with non-zero count delta. Pods without enough data are
+    omitted, not zero-defaulted, so the caller can decide policy.
+
+    Reads via ``_iter_histogram`` which expects the single-key histogram
+    schema (``{labels, buckets, sum, count}`` per sample under one
+    metric key). The on-the-wire ``_sum`` / ``_count`` split that
+    Prometheus uses is NOT how Dynamo's exporter writes JSONL.
+    """
+    series: dict = {}
+    for ts_ns, pod, sum_val, count_val in _iter_histogram(
+        ctx, metric, load_name=load_name
+    ):
+        series.setdefault(pod, []).append((ts_ns, sum_val, count_val))
+    for pod in series:
+        series[pod].sort()
+
+    out: dict = {}
+    for pod, samples in series.items():
+        if not samples:
+            continue
+        t0 = samples[0][0]
+        win_lo = t0 + int(window_start_s * 1e9)
+        win_hi = t0 + int(window_end_s * 1e9) if window_end_s is not None else None
+        lo = hi = None
+        for ts, sm, cnt in samples:
+            if ts < win_lo:
+                continue
+            if win_hi is not None and ts > win_hi:
+                break
+            if lo is None:
+                lo = (sm, cnt)
+            hi = (sm, cnt)
+        if lo is None or hi is None:
+            continue
+        d_sum = hi[0] - lo[0]
+        d_cnt = hi[1] - lo[1]
+        if d_cnt <= 0:
+            continue
+        out[pod] = d_sum / d_cnt
+    return out
+
+
+def _counter_rate(
+    ctx,
+    metric: str,
+    load_name: Optional[str],
+    window_start_s: float,
+    window_end_s: Optional[float],
+) -> float:
+    """Aggregate per-second rate of a counter across all pods over the
+    named load's wall-clock window. Returns 0.0 if no data.
+    """
+    per_pod = _per_pod_timeseries(ctx, metric, load_name=load_name)
+    total_delta = 0.0
+    total_span_s = 0.0
+    for pod, series in per_pod.items():
+        if len(series) < 2:
+            continue
+        t0 = series[0][0]
+        lo = t0 + int(window_start_s * 1e9)
+        hi = t0 + int(window_end_s * 1e9) if window_end_s is not None else None
+        clipped = [(ts, v) for ts, v in series if ts >= lo and (hi is None or ts <= hi)]
+        if len(clipped) < 2:
+            continue
+        d_val = clipped[-1][1] - clipped[0][1]
+        d_t = (clipped[-1][0] - clipped[0][0]) / 1e9
+        if d_t <= 0:
+            continue
+        total_delta += max(0.0, d_val)
+        total_span_s = max(total_span_s, d_t)
+    if total_span_s <= 0:
+        return 0.0
+    return total_delta / total_span_s
+
+
+@dataclass
+class WaitingForKVTransferExceeds(Check):
+    """Assert the derived gauge ``inflight − running − waiting`` exceeds
+    ``threshold`` on at least one decode pod during the named load.
+
+    This is the **smoking-gun** cascade signal — it climbs from baseline
+    single-digits to hundreds-or-thousands ~60s before throughput
+    collapse, so it leads every other signature metric.
+    """
+
+    services: list
+    threshold: int = 100
+    load_name: Optional[str] = "default"
+
+    def validate(self, ctx) -> None:
+        # Join three metrics on (pod, ts_ns). Each JSONL record carries
+        # all three at the same timestamp, so per-record arithmetic
+        # works without alignment heuristics.
+        per_pod_max: dict = {}
+        for ldir in _load_dirs_for(ctx, self.load_name):
+            jsonl = _os.path.join(ldir, "server_metrics_export.jsonl")
+            for rec in _iter_jsonl(jsonl):
+                metrics = rec.get("metrics", {}) or {}
+                inflight = metrics.get("dynamo_component_inflight_requests") or []
+                running = metrics.get("vllm:num_requests_running") or []
+                waiting = metrics.get("vllm:num_requests_waiting") or []
+
+                # Index by pod for this record. ``dynamo_component_inflight_requests``
+                # has one sample per (component × ``dynamo_endpoint``) — for a
+                # single prefill worker that's ``generate`` + ``clear_kv_blocks``
+                # + ``get_perf_metrics`` (3 samples), all with the same
+                # dynamo_component label. Sum across those sub-dimensions to
+                # produce one value per pod (non-``generate`` endpoints are
+                # always 0 in practice so sum equals the ``generate``-only value).
+                def _by_pod(samples):
+                    out = {}
+                    for s in samples:
+                        labels = s.get("labels", {}) or {}
+                        pod = labels.get("pod") or (
+                            (labels.get("dynamo_component") or "")
+                            + "@"
+                            + rec.get("endpoint_url", "")
+                        )
+                        v = s.get("value")
+                        if v is not None:
+                            out[pod] = out.get(pod, 0.0) + float(v)
+                    return out
+
+                infl_by_pod = _by_pod(inflight)
+                run_by_pod = _by_pod(running)
+                wait_by_pod = _by_pod(waiting)
+                # Compute derived for every pod that has all three
+                for pod in infl_by_pod.keys() & run_by_pod.keys() & wait_by_pod.keys():
+                    derived = infl_by_pod[pod] - run_by_pod[pod] - wait_by_pod[pod]
+                    cur = per_pod_max.get(pod, float("-inf"))
+                    if derived > cur:
+                        per_pod_max[pod] = derived
+
+        winners = {p: v for p, v in per_pod_max.items() if v >= self.threshold}
+        ctx.logger.info(
+            f"WaitingForKVTransferExceeds: per-pod max={per_pod_max} "
+            f"winners={winners} threshold={self.threshold}"
+        )
+        assert winners, (
+            f"WaitingForKVTransferExceeds: no pod reached "
+            f"derived (inflight − running − waiting) ≥ {self.threshold} "
+            f"during load {self.load_name!r}; observed per-pod max: {per_pod_max}"
+        )
+
+    @property
+    def description(self) -> str:
+        return (
+            f"WaitingForKVTransfer derived gauge ≥ {self.threshold} on some "
+            f"{','.join(self.services)} pod during {self.load_name!r}"
+        )
+
+
+@dataclass
+class NixlXferTimeMultiplied(Check):
+    """Assert ``vllm:nixl_xfer_time_seconds`` per-handle average climbs
+    by ≥ ``min_multiplier``× from the warmup window to the cliff window,
+    on at least one pod.
+
+    Healthy ~50ms → cliff ~250ms+ → 5×; sanity tests run with 3× because
+    the compressed warmup window is shorter and noisier.
+    """
+
+    services: list
+    min_multiplier: float = 5.0
+    warmup_seconds: float = 300.0
+    cliff_load_name: Optional[str] = "default"
+
+    def validate(self, ctx) -> None:
+        warmup_avg = _window_average_histogram(
+            ctx,
+            "vllm:nixl_xfer_time_seconds",
+            self.cliff_load_name,
+            window_start_s=0.0,
+            window_end_s=self.warmup_seconds,
+        )
+        cliff_avg = _window_average_histogram(
+            ctx,
+            "vllm:nixl_xfer_time_seconds",
+            self.cliff_load_name,
+            window_start_s=self.warmup_seconds,
+            window_end_s=None,
+        )
+        max_ratio = 0.0
+        per_pod_ratio: dict = {}
+        for pod, w in warmup_avg.items():
+            c = cliff_avg.get(pod)
+            if c is None or w <= 0:
+                continue
+            ratio = c / w
+            per_pod_ratio[pod] = ratio
+            if ratio > max_ratio:
+                max_ratio = ratio
+        ctx.logger.info(
+            f"NixlXferTimeMultiplied: warmup_avg={warmup_avg} cliff_avg={cliff_avg} "
+            f"per_pod_ratio={per_pod_ratio} max_ratio={max_ratio:.2f}× "
+            f"threshold={self.min_multiplier:.2f}×"
+        )
+        assert max_ratio >= self.min_multiplier, (
+            f"NixlXferTimeMultiplied: max per-pod ratio {max_ratio:.2f}× < "
+            f"required {self.min_multiplier:.2f}× on load {self.cliff_load_name!r}; "
+            f"per-pod ratios: {per_pod_ratio}"
+        )
+
+    @property
+    def description(self) -> str:
+        return (
+            f"NIXL xfer_time avg grows ≥ {self.min_multiplier}× on some "
+            f"{','.join(self.services)} pod during {self.cliff_load_name!r}"
+        )
+
+
+@dataclass
+class GenerationThroughputDropped(Check):
+    """Assert ``vllm:generation_tokens`` aggregate rate drops by
+    ≥ ``min_drop_frac`` from the warmup window to the last
+    ``cliff_window_seconds`` of the named load.
+    """
+
+    services: list
+    min_drop_frac: float = 0.30
+    warmup_seconds: float = 300.0
+    cliff_window_seconds: float = 300.0
+    cliff_load_name: Optional[str] = "default"
+
+    def validate(self, ctx) -> None:
+        # Find the total load span to compute "last N seconds" window.
+        per_pod = _per_pod_timeseries(
+            ctx, "vllm:generation_tokens", load_name=self.cliff_load_name
+        )
+        if not per_pod:
+            assert False, (
+                f"GenerationThroughputDropped: no samples for "
+                f"vllm:generation_tokens on load {self.cliff_load_name!r}"
+            )
+        # Earliest first-sample and latest last-sample across pods.
+        first_ts = min(s[0][0] for s in per_pod.values() if s)
+        last_ts = max(s[-1][0] for s in per_pod.values() if s)
+        total_span_s = (last_ts - first_ts) / 1e9
+
+        warmup_rate = _counter_rate(
+            ctx,
+            "vllm:generation_tokens",
+            self.cliff_load_name,
+            window_start_s=0.0,
+            window_end_s=self.warmup_seconds,
+        )
+        cliff_start = max(self.warmup_seconds, total_span_s - self.cliff_window_seconds)
+        cliff_rate = _counter_rate(
+            ctx,
+            "vllm:generation_tokens",
+            self.cliff_load_name,
+            window_start_s=cliff_start,
+            window_end_s=None,
+        )
+        drop_frac = (warmup_rate - cliff_rate) / warmup_rate if warmup_rate > 0 else 0.0
+        ctx.logger.info(
+            f"GenerationThroughputDropped: warmup_rate={warmup_rate:.1f} tok/s "
+            f"cliff_rate={cliff_rate:.1f} tok/s drop={drop_frac:.1%} "
+            f"threshold={self.min_drop_frac:.0%} span={total_span_s:.0f}s"
+        )
+        assert drop_frac >= self.min_drop_frac, (
+            f"GenerationThroughputDropped: only {drop_frac:.1%} drop "
+            f"(warmup {warmup_rate:.1f} → cliff {cliff_rate:.1f} tok/s); "
+            f"required ≥ {self.min_drop_frac:.0%}"
+        )
+
+    @property
+    def description(self) -> str:
+        return (
+            f"Generation throughput drops ≥ {self.min_drop_frac:.0%} on "
+            f"load {self.cliff_load_name!r}"
+        )
+
+
+@dataclass
+class CliffPropagated(Check):
+    """Assert the cliff spreads to ≥ ``min_pods`` decode pods.
+
+    Counterpart to ``CliffContained``: where containment asserts the
+    pinned target alone hit the cliff, propagation asserts that under
+    natural LeastLoaded routing the cliff peer-infects multiple decodes
+    within the load window — the signature of the cross-FE blind spot.
+
+    Reads ``vllm:kv_cache_usage_perc`` per pod and counts pods whose
+    peak reached ``kv_threshold`` during the named load.
+    """
+
+    services: list
+    min_pods: int = 2
+    kv_threshold: float = 0.85
+    load_name: Optional[str] = "default"
+
+    def validate(self, ctx) -> None:
+        per_pod_max: dict = {}
+        for _ts, pod, val in _iter_named_metric(
+            ctx, "vllm:kv_cache_usage_perc", load_name=self.load_name
+        ):
+            cur = per_pod_max.get(pod, float("-inf"))
+            if val > cur:
+                per_pod_max[pod] = val
+        saturated = [p for p, v in per_pod_max.items() if v >= self.kv_threshold]
+        ctx.logger.info(
+            f"CliffPropagated: per_pod_max={per_pod_max} "
+            f"saturated_pods={saturated} min_pods={self.min_pods} "
+            f"kv_threshold={self.kv_threshold}"
+        )
+        assert len(saturated) >= self.min_pods, (
+            f"CliffPropagated: only {len(saturated)} pods reached KV ≥ "
+            f"{self.kv_threshold}; required ≥ {self.min_pods}. "
+            f"Per-pod max: {per_pod_max}"
+        )
+
+    @property
+    def description(self) -> str:
+        return (
+            f"≥ {self.min_pods} pods reach KV ≥ {self.kv_threshold} "
+            f"during {self.load_name!r}"
+        )
+
+
+@dataclass
+class CliffContained(Check):
+    """Assert the cliff stays on the nvext-pinned target replica during
+    the named load.
+
+    Looks up the pod for ``(pinned_service, pinned_replica_index)`` via
+    the same name-sorted ordering used by
+    ``ManagedDeployment.get_instance_id``, then asserts:
+      - the pinned pod's max KV ≥ ``kv_threshold``
+      - every other pod in ``services`` stays ≤ ``peer_max_kv``
+
+    Proves the WorkerPin flow actually concentrated load on the intended
+    pod (no leakage from FE fallback / non-honored nvext).
+    """
+
+    services: list
+    pinned_service: str
+    pinned_replica_index: int
+    kv_threshold: float = 0.85
+    peer_max_kv: float = 0.50
+    load_name: Optional[str] = "default"
+
+    def validate(self, ctx) -> None:
+        # Resolve the pinned pod name the same way get_instance_id does:
+        # sort by name, pick replica_index. Use only the pinned_service's
+        # pods — the cliff metric is per-pod, so we identify the pinned
+        # one by its pod name suffix appearing in the metric's pod label.
+        pods_by_svc = ctx.deployment.get_pods([self.pinned_service])
+        pods = pods_by_svc.get(self.pinned_service) or []
+        if not pods:
+            assert False, f"CliffContained: no pods for {self.pinned_service!r}"
+        pods_sorted = sorted(pods, key=lambda p: p.name)
+        if self.pinned_replica_index >= len(pods_sorted):
+            assert False, (
+                f"CliffContained: pinned_replica_index="
+                f"{self.pinned_replica_index} >= {len(pods_sorted)} pods"
+            )
+        pinned_pod_name = pods_sorted[self.pinned_replica_index].name
+
+        # Compute per-pod max KV from the metric stream. The metric's
+        # pod label sometimes carries the full pod name; sometimes it's
+        # `decode@<endpoint>`. Match the pinned name as a substring to
+        # cover both cases.
+        per_pod_max: dict = {}
+        for _ts, pod, val in _iter_named_metric(
+            ctx, "vllm:kv_cache_usage_perc", load_name=self.load_name
+        ):
+            cur = per_pod_max.get(pod, float("-inf"))
+            if val > cur:
+                per_pod_max[pod] = val
+
+        target_pods = [p for p in per_pod_max if pinned_pod_name in p]
+        target_hit = any(per_pod_max[p] >= self.kv_threshold for p in target_pods)
+        peer_violations = [
+            (p, v)
+            for p, v in per_pod_max.items()
+            if (pinned_pod_name not in p) and v > self.peer_max_kv
+        ]
+
+        ctx.logger.info(
+            f"CliffContained: pinned_pod={pinned_pod_name!r} "
+            f"target_pods_in_metrics={target_pods} per_pod_max={per_pod_max} "
+            f"target_hit={target_hit} peer_violations={peer_violations}"
+        )
+        assert target_hit, (
+            f"CliffContained: pinned pod {pinned_pod_name!r} did not reach "
+            f"KV ≥ {self.kv_threshold} (max per pod: {per_pod_max})"
+        )
+        assert not peer_violations, (
+            f"CliffContained: peer pod(s) exceeded peer_max_kv "
+            f"{self.peer_max_kv} — {peer_violations}. Pinning leaked."
+        )
+
+    @property
+    def description(self) -> str:
+        return (
+            f"Cliff stays on {self.pinned_service}#{self.pinned_replica_index} "
+            f"(KV ≥ {self.kv_threshold}); peers ≤ {self.peer_max_kv}"
+        )
+
+
+@dataclass
+class PinningContained(Check):
+    """Assert request-routing pinning kept the load on one replica only.
+
+    Generalization of ``CliffContained`` for arbitrary activity metrics
+    (not just KV pressure). Resolves the pinned pod the same way —
+    name-sorted, ``replica_index``-th — then asserts:
+
+      - peak(``metric``) on the pinned pod ≥ ``active_threshold``
+        (proves the pinned pod actually saw traffic)
+      - peak(``metric``) on every other pod of ``pinned_service``
+        ≤ ``peer_max`` (proves nvext.worker_id actually concentrated
+        the load, no leakage via FE fallback or non-honored nvext)
+
+    For prefill containment use ``vllm:num_requests_running`` —
+    a running > 0 anywhere on a prefill replica is proof it served
+    at least one prefill, so an idle peer's peak is genuinely 0.
+    """
+
+    services: list
+    pinned_service: str
+    pinned_replica_index: int
+    metric: str = "vllm:num_requests_running"
+    active_threshold: float = 1.0
+    peer_max: float = 0.0
+    load_name: Optional[str] = "default"
+
+    def validate(self, ctx) -> None:
+        pods_by_svc = ctx.deployment.get_pods([self.pinned_service])
+        pods = pods_by_svc.get(self.pinned_service) or []
+        if not pods:
+            assert False, f"PinningContained: no pods for {self.pinned_service!r}"
+        pods_sorted = sorted(pods, key=lambda p: p.name)
+        if self.pinned_replica_index >= len(pods_sorted):
+            assert False, (
+                f"PinningContained: pinned_replica_index="
+                f"{self.pinned_replica_index} >= {len(pods_sorted)} pods"
+            )
+        pinned_pod_name = pods_sorted[self.pinned_replica_index].name
+
+        per_pod_peak: dict = {}
+        for _ts, pod, val in _iter_named_metric(
+            ctx, self.metric, load_name=self.load_name
+        ):
+            cur = per_pod_peak.get(pod, float("-inf"))
+            if val > cur:
+                per_pod_peak[pod] = val
+
+        target_pods = [p for p in per_pod_peak if pinned_pod_name in p]
+        peer_pods = {p: v for p, v in per_pod_peak.items() if pinned_pod_name not in p}
+        target_active = any(
+            per_pod_peak[p] >= self.active_threshold for p in target_pods
+        )
+        peer_violations = [(p, v) for p, v in peer_pods.items() if v > self.peer_max]
+        ctx.logger.info(
+            f"PinningContained({self.metric}): pinned_pod={pinned_pod_name!r} "
+            f"per_pod_peak={per_pod_peak} active_threshold={self.active_threshold} "
+            f"peer_max={self.peer_max} target_active={target_active} "
+            f"peer_violations={peer_violations}"
+        )
+        assert target_active, (
+            f"PinningContained: pinned pod {pinned_pod_name!r} never reached "
+            f"{self.metric} ≥ {self.active_threshold} — pinning hit a dead "
+            f"replica or AIPerf isn't scraping it (peaks: {per_pod_peak})"
+        )
+        assert not peer_violations, (
+            f"PinningContained: peer pod(s) saw {self.metric} > "
+            f"{self.peer_max} — pinning leaked. Violations: {peer_violations}"
+        )
+
+    @property
+    def description(self) -> str:
+        return (
+            f"{self.metric} concentrated on "
+            f"{self.pinned_service}#{self.pinned_replica_index} "
+            f"(≥ {self.active_threshold}); peers ≤ {self.peer_max}"
+        )
+
+
+from tests.fault_tolerance.deploy._checks_rejection import (  # noqa: E402, F401
+    RejectionFired,
+)
+
+# Re-export sub-module check classes so they're visible to the auto-discovered
+# Check registry in scenario_lib/_runtime.py (which walks Check.__subclasses__()
+# after importing this module).
+from tests.fault_tolerance.deploy._checks_workload_shape import (  # noqa: E402, F401
+    WorkloadShapeVerified,
+)

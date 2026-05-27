@@ -16,7 +16,9 @@ To create a custom event, subclass Event and implement execute() and description
 """
 
 import asyncio
+import json
 import random
+import re
 import secrets
 from datetime import datetime, timezone
 
@@ -39,6 +41,7 @@ __all__ = [
     "RstInjection",
     "RstFromInsidePod",
     "PodMemoryPoller",
+    "PeriodicSnapshot",
     "RANDOM",
     "ALL",
 ]
@@ -224,6 +227,9 @@ class Event(ABC):
 # =============================================================================
 
 
+_LOAD_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+
 @dataclass
 class StartLoad(Event):
     """Start a load test.
@@ -239,8 +245,79 @@ class StartLoad(Event):
     results: dict[str, Any] | None = field(default=None, init=False)
     _managed_load: ManagedLoad | None = field(default=None, init=False, repr=False)
 
+    def __post_init__(self) -> None:
+        # k8s Job name = `load-{name}-{8hex}`; the user-controlled `name`
+        # must itself match RFC 1123 subdomain rules so the resulting
+        # Job name is valid. Underscores, uppercase, leading/trailing
+        # hyphens — all rejected by the k8s API at submit time with a
+        # 422. Failing here at scenario-definition time turns a 7-min-in
+        # deployment failure into an immediate AssertionError.
+        # Per observe-agent NEXT_STEPS_FOR_TEST_AGENT E.1 (post-sanity-1).
+        if not _LOAD_NAME_PATTERN.match(self.name):
+            raise ValueError(
+                f"StartLoad.name={self.name!r} violates k8s RFC 1123 "
+                "subdomain rules. Allowed: lowercase alphanumeric + "
+                "hyphens, must start and end with alphanumeric. "
+                "(Underscores and uppercase are common pitfalls.)"
+            )
+        # The full Job name (load-{name}-{8hex}) must fit in k8s's
+        # 63-char DNS label limit. Reserved: len('load-') + len('-XXXXXXXX') = 14.
+        if len(self.name) > 49:
+            raise ValueError(
+                f"StartLoad.name={self.name!r} is too long ({len(self.name)} "
+                "chars). Max 49 to fit the framework's `load-<name>-<hex>` "
+                "Job-name template within k8s's 63-char DNS label limit."
+            )
+
     async def execute(self, ctx: "ScenarioContext") -> None:
         ctx.logger.info(f"Creating load '{self.name}'...")
+
+        # WorkerPin resolution: turn (service, replica_index) into the
+        # live Dynamo instance_id(s) and stuff them into ``nvext`` via
+        # ``extra_inputs``. Done here (not at config time) because
+        # WaitForModelReady must have populated discovery state before
+        # instance_ids exist in the DynamoWorkerMetadata CRs.
+        #
+        # Wire shape: Dynamo's NvExt struct
+        # (lib/llm/src/protocols/openai/nvext.rs) has ``prefill_worker_id``
+        # and ``decode_worker_id`` as top-level u64 fields — there is no
+        # ``worker_id`` sub-object wrapper. push_router resolves
+        # ``prefill_worker_id`` for the prefill phase and
+        # ``decode_worker_id`` for decode, each falling back to
+        # ``backend_instance_id`` if unset (push_router.rs:746/751).
+        #
+        # Pass nvext as a Python dict on ``extra_inputs``; managed_load
+        # serializes the *whole* key+value as a JSON-object
+        # ``--extra-inputs '{"nvext":{...}}'`` arg (the form used by
+        # components/src/dynamo/profiler/utils/aiperf.py).
+        if self.load_config.worker_pin is not None:
+            pin = self.load_config.worker_pin
+            nvext_pin: dict = {}
+            if pin.decode_service is not None and pin.decode_replica_index is not None:
+                nvext_pin["decode_worker_id"] = await asyncio.to_thread(
+                    ctx.deployment.get_instance_id,
+                    pin.decode_service,
+                    pin.decode_replica_index,
+                )
+            if (
+                pin.prefill_service is not None
+                and pin.prefill_replica_index is not None
+            ):
+                nvext_pin["prefill_worker_id"] = await asyncio.to_thread(
+                    ctx.deployment.get_instance_id,
+                    pin.prefill_service,
+                    pin.prefill_replica_index,
+                )
+            if nvext_pin:
+                merged = dict(self.load_config.extra_inputs or {})
+                # If a caller already set nvext.* fields, layer on top
+                # rather than clobbering them.
+                existing_nvext = merged.get("nvext")
+                if isinstance(existing_nvext, dict):
+                    nvext_pin = {**existing_nvext, **nvext_pin}
+                merged["nvext"] = nvext_pin
+                self.load_config.extra_inputs = merged
+                ctx.logger.info(f"StartLoad '{self.name}': pinned nvext={nvext_pin}")
 
         # Auto-populate per-pod /metrics URLs. Workers expose dynamo_*
         # + vllm:* on system_port (9090). Frontends expose dynamo_frontend_*
@@ -446,8 +523,6 @@ class SetBusyThreshold(Event):
     results: dict[str, Any] | None = field(default=None, init=False)
 
     async def execute(self, ctx) -> None:
-        import json
-
         pods = (await asyncio.to_thread(ctx.deployment.get_pods, ["Frontend"])).get(
             "Frontend"
         ) or []
@@ -2268,3 +2343,147 @@ class PodMemoryPoller(Event):
     @property
     def description(self) -> str:
         return f"PodMemoryPoller {self.services} every {self.interval_s}s"
+
+
+@dataclass
+class PeriodicSnapshot(Event):
+    """Background event that, on a fixed interval, copies key artifacts
+    from ``ctx.log_dir`` into a timestamped subdirectory under
+    ``ctx.log_dir/snapshots/``. Designed for long-running endurance
+    scenarios where a slow drift (memory leak, queue backlog) only
+    surfaces after hours — periodic snapshots let analysis start while
+    the run is still in flight.
+
+    Snapshot directory format: ``t{minutes_since_start:04d}m_<iso>/``
+    e.g. ``t0030m_2026-05-26T22-15-03Z/``. The wall-time-minutes prefix
+    sorts naturally; the ISO suffix is human-readable.
+
+    What gets copied each tick (best-effort; missing files are skipped):
+      - ``pod_memory_growth.tsv`` — full snapshot of the PodMemoryPoller
+        TSV up to that moment
+      - ``load/load-*/profile_export*.{json,jsonl}`` — any in-progress
+        AIPerf metrics files
+      - ``load/load-*/server_metrics_export.jsonl``
+      - Last 2000 lines of each pod log under ``frontend/`` and worker
+        service directories (tail; full logs are captured at teardown)
+
+    Safety:
+      - Skips silently if ``ctx.log_dir`` is None or the snapshots dir
+        can't be created
+      - Each tick is wrapped in try/except; a copy failure on one
+        artifact doesn't abort the loop
+      - Stops cleanly on scenario teardown via the same Event ``stop()``
+        pattern as PodMemoryPoller
+
+    Hard ceiling: honors ``DYN_ENDURANCE_MAX_HOURS`` env var (default 8).
+    After that wall-time the snapshot loop stops emitting new dirs but
+    the scenario keeps running until the rung's duration completes —
+    the goal is to keep disk usage bounded, not to terminate the test.
+    """
+
+    interval_minutes: float = 30.0
+    name: str = ""
+    results: dict | None = field(default=None, init=False)
+    _task: object = field(default=None, init=False, repr=False)
+    _stop: object = field(default=None, init=False, repr=False)
+
+    async def execute(self, ctx: "ScenarioContext") -> None:
+        import glob
+        import os
+        import shutil
+        import time
+
+        log_dir = getattr(ctx, "log_dir", None)
+        if not log_dir:
+            ctx.logger.warning("PeriodicSnapshot: no ctx.log_dir; skipping")
+            return
+        snapshots_root = os.path.join(log_dir, "snapshots")
+        os.makedirs(snapshots_root, exist_ok=True)
+
+        max_hours = float(os.environ.get("DYN_ENDURANCE_MAX_HOURS", "8"))
+        max_secs = max_hours * 3600.0
+        interval_s = self.interval_minutes * 60.0
+
+        self._stop = asyncio.Event()
+        started = time.time()
+
+        def _snapshot_once(snapshot_dir: str) -> None:
+            os.makedirs(snapshot_dir, exist_ok=True)
+
+            # 1. pod_memory_growth.tsv
+            pmg = os.path.join(log_dir, "pod_memory_growth.tsv")
+            if os.path.exists(pmg):
+                try:
+                    shutil.copy2(
+                        pmg, os.path.join(snapshot_dir, "pod_memory_growth.tsv")
+                    )
+                except Exception as e:
+                    ctx.logger.warning(f"PeriodicSnapshot: copy pmg failed: {e}")
+
+            # 2. in-progress AIPerf metrics
+            for src in glob.glob(
+                os.path.join(log_dir, "load", "load-*", "profile_export*")
+            ):
+                rel = os.path.relpath(src, log_dir)
+                dst = os.path.join(snapshot_dir, rel)
+                try:
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                except Exception as e:
+                    ctx.logger.warning(f"PeriodicSnapshot: copy {src} failed: {e}")
+            for src in glob.glob(
+                os.path.join(log_dir, "load", "load-*", "server_metrics_export.jsonl")
+            ):
+                rel = os.path.relpath(src, log_dir)
+                dst = os.path.join(snapshot_dir, rel)
+                try:
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                except Exception as e:
+                    ctx.logger.warning(f"PeriodicSnapshot: copy {src} failed: {e}")
+
+        async def loop():
+            while not self._stop.is_set():
+                try:
+                    elapsed = time.time() - started
+                    if elapsed > max_secs:
+                        ctx.logger.warning(
+                            f"PeriodicSnapshot: hit DYN_ENDURANCE_MAX_HOURS "
+                            f"({max_hours}h); ceasing new snapshots."
+                        )
+                    else:
+                        minutes = int(elapsed / 60.0)
+                        iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+                        snapshot_dir = os.path.join(
+                            snapshots_root, f"t{minutes:04d}m_{iso}"
+                        )
+                        await asyncio.to_thread(_snapshot_once, snapshot_dir)
+                        ctx.logger.info(
+                            f"PeriodicSnapshot: wrote {os.path.basename(snapshot_dir)}"
+                        )
+                except Exception as e:
+                    ctx.logger.warning(f"PeriodicSnapshot loop err: {e}")
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval_s)
+                except asyncio.TimeoutError:
+                    pass
+
+        self._task = asyncio.create_task(loop())
+        ctx.logger.info(
+            f"PeriodicSnapshot: interval={self.interval_minutes}min, "
+            f"ceiling={max_hours}h, root={snapshots_root}"
+        )
+
+    async def stop(self, ctx: "ScenarioContext") -> None:
+        if self._stop is not None:
+            self._stop.set()
+        if self._task is not None:
+            try:
+                await asyncio.wait_for(self._task, timeout=15.0)
+            except asyncio.TimeoutError:
+                self._task.cancel()
+        ctx.logger.info("PeriodicSnapshot: stopped")
+
+    @property
+    def description(self) -> str:
+        return f"PeriodicSnapshot every {self.interval_minutes}min"

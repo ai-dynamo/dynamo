@@ -3,7 +3,7 @@
 #
 # Close mirror of the production Qwen3-30B-A3B disagg deployment that
 # exhibits the cascade in field. Differences from prod (see
-# dynamo-observe/.../incidents/ads_dgd.yaml) and rationale:
+# dynamo-observe production deployment scenarios) and rationale:
 #
 # - Hardware: prod runs A100-40GB (P4D); we run on H100-80GB and cap to
 #   ~36 GB / GPU via --gpu-memory-utilization=0.45 (= 0.9 * 40 GB).
@@ -83,6 +83,15 @@ spec:
           value: "0"
         - name: NCCL_DEBUG
           value: "WARN"
+        # NIXL telemetry gate: nixl/src/core/nixl_agent.cpp:128-150 only
+        # records xfer/post/bytes_transferred/num_descriptors histograms
+        # when this env is set. The vLLM bundled in vllm-runtime:1.1.1
+        # predates the unconditional capture_telemetry=True path
+        # (nixl_connector.py:1082-1087 in newer vLLM), so the env var is
+        # required for `vllm:nixl_*` to be non-zero. Per observe-agent
+        # NEXT_STEPS_FOR_TEST_AGENT P0.1 (sanity-suite work).
+        - name: NIXL_TELEMETRY_ENABLE
+          value: "y"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
@@ -155,6 +164,15 @@ spec:
           value: "0"
         - name: NCCL_DEBUG
           value: "WARN"
+        # NIXL telemetry gate: nixl/src/core/nixl_agent.cpp:128-150 only
+        # records xfer/post/bytes_transferred/num_descriptors histograms
+        # when this env is set. The vLLM bundled in vllm-runtime:1.1.1
+        # predates the unconditional capture_telemetry=True path
+        # (nixl_connector.py:1082-1087 in newer vLLM), so the env var is
+        # required for `vllm:nixl_*` to be non-zero. Per observe-agent
+        # NEXT_STEPS_FOR_TEST_AGENT P0.1 (sanity-suite work).
+        - name: NIXL_TELEMETRY_ENABLE
+          value: "y"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1

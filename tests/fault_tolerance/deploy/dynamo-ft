@@ -73,6 +73,14 @@ LIST=0
 # Add new scenarios here as the file grows.
 declare -A ALIASES=(
     [decode_overload]="test_overload.py::test_decode_overload"
+    [cascade_sanity_pinned]="test_overload.py::test_overload_cascade_sanity_pinned"
+    [cascade_sanity_natural]="test_overload.py::test_overload_cascade_sanity_natural"
+    [cascade]="test_overload.py::test_overload_cascade"
+    [kv_router_memory_stability]="test_overload.py::test_kv_router_memory_stability"
+    [kv_router_memory_stability_a4]="test_overload.py::test_kv_router_memory_stability[a4-recommended-2-2.0-3.0-18.0-3.0-2.0]"
+    [kv_router_memory_stability_ll]="test_overload.py::test_kv_router_memory_stability[least-loaded-baseline-2-2.0-3.0-18.0-3.0-2.0]"
+    [kv_router_memory_stability_a4_no_replica_sync]="test_overload.py::test_kv_router_memory_stability[a4-no-replica-sync-2-2.0-3.0-18.0-3.0-2.0]"
+    [cascade_pinned_with_bg]="test_overload.py::test_overload_cascade_pinned_with_bg"
 )
 
 print_aliases() {
@@ -147,6 +155,34 @@ if ((BG)) && [[ -z "$LOG_FILE" ]]; then
 fi
 
 cd "$SCRIPT_DIR"
+
+# ─── venv resolution (host vs container) ─────────────────────────────
+# If the in-tree .venv exists but isn't writable by the current user — the
+# typical case when the container created it as root and we're now invoking
+# from the host as a regular user — point uv at a per-user venv instead so
+# `uv run` doesn't try to refresh the root-owned tree and fail with EACCES.
+# Container runs (where the running user owns .venv) and explicit
+# UV_PROJECT_ENVIRONMENT overrides both bypass this path.
+# Detect "host running against container-touched tree": .venv exists but
+# wasn't created by us. Use as the one signal for redirecting both the
+# uv venv and the per-test outputs dir — the latter's per-test subdirs
+# are typically root-owned even when the parent looks writable, so check
+# the venv (single root-owned file) is the most reliable test.
+HOST_OVERRIDE=0
+if [[ -d "$SCRIPT_DIR/.venv" && ! -w "$SCRIPT_DIR/.venv" ]]; then
+    HOST_OVERRIDE=1
+fi
+
+if ((HOST_OVERRIDE)) && [[ -z "${UV_PROJECT_ENVIRONMENT:-}" ]]; then
+    export UV_PROJECT_ENVIRONMENT="${HOME}/.venv-dynamo-ft"
+    echo "info: in-tree .venv not writable by $(id -un); using UV_PROJECT_ENVIRONMENT=$UV_PROJECT_ENVIRONMENT" >&2
+fi
+
+if ((HOST_OVERRIDE)) && [[ -z "${DYN_TEST_OUTPUT_PATH:-}" ]]; then
+    export DYN_TEST_OUTPUT_PATH="${HOME}/.dynamo-ft/test_outputs"
+    mkdir -p "$DYN_TEST_OUTPUT_PATH"
+    echo "info: redirecting test outputs to DYN_TEST_OUTPUT_PATH=$DYN_TEST_OUTPUT_PATH" >&2
+fi
 
 if ((DRY_RUN)); then
     echo "(cd $SCRIPT_DIR && uv run pytest ${ARGS[*]@Q})"

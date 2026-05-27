@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import secrets
+import shutil
 import tarfile
 from pathlib import Path
 from typing import Optional
@@ -71,8 +72,8 @@ class PvcExtractor:
         local_output_dir: str,
         job_prefix: str = "pvc-extract",
         ready_timeout: int = 60,
-        tar_timeout: int = 30,
-        cat_timeout: int = 60,
+        tar_timeout: int = 600,
+        cat_timeout: int = 120,
     ) -> dict:
         """Extract files from a PVC to a local directory.
 
@@ -87,7 +88,10 @@ class PvcExtractor:
             local_output_dir: Local directory to extract files into
             job_prefix: Prefix for the job name
             ready_timeout: Seconds to wait for job pod to be ready
-            tar_timeout: Seconds to wait for tar creation
+            tar_timeout: Upper bound (cap) on tar-creation timeout. The actual
+                wait is computed dynamically from observed source size
+                (see _GZIP_BYTES_PER_SEC); ``tar_timeout`` is the safety cap so
+                a runaway gzip can't hang the test indefinitely.
             cat_timeout: Seconds to wait for tar download
 
         Returns:
@@ -119,40 +123,112 @@ class PvcExtractor:
                     "output_dir": local_output_dir,
                 }
 
-            # Step 4: Create tar archive on-demand
+            # Step 4: Two-phase tar creation.
+            #
+            # Phase A — discover (fast, fixed 30s budget): list matching
+            # files + measure their total size, write the list to a temp
+            # file so phase B can reuse it without re-running find. We
+            # deliberately keep this phase small so we don't burn the
+            # cap before we even know what we're dealing with.
+            #
+            # Phase B — tar+gzip with a *computed* timeout based on the
+            # observed source size. The user-supplied ``tar_timeout``
+            # parameter is the safety cap; the actual wait is
+            #   max(60, ceil(src_bytes / _GZIP_BYTES_PER_SEC) + 60)
+            # then clamped to tar_timeout. This means:
+            #   - 200 MB rung → ~80s timeout (instead of 600s ceiling)
+            #   - 1.1 GB steady → ~170s timeout (vs the 30s that broke us)
+            #   - 10 GB cliff → would compute ~1100s but capped at 600s
+            # The 60s floor covers very small rungs where overhead dominates.
             find_expr = self._build_find_expr(file_patterns)
-            tar_script = f"""
+            discover_script = f"""
 cd {container_path} 2>/dev/null || exit 1
 FILE_LIST=$(find . -type f {find_expr} | sort)
 FILE_COUNT=$(echo "$FILE_LIST" | grep -c . || echo 0)
 echo "FILE_COUNT:$FILE_COUNT"
 if [ "$FILE_COUNT" -gt 0 ]; then
-    echo "$FILE_LIST" | tar -czf /tmp/download/archive.tar.gz -T -
-    echo "TAR_CREATED:true"
-else
-    echo "TAR_CREATED:false"
+    BYTES=$(echo "$FILE_LIST" | xargs -r du -cb 2>/dev/null | tail -1 | awk '{{print $1}}')
+    echo "SOURCE_BYTES:$BYTES"
+    echo "$FILE_LIST" > /tmp/download/files.txt
 fi
 """
-            tar_result = await asyncio.wait_for(
-                asyncio.to_thread(pod.exec, ["sh", "-c", tar_script]),
-                timeout=tar_timeout,
+            discover_result = await asyncio.wait_for(
+                asyncio.to_thread(pod.exec, ["sh", "-c", discover_script]),
+                timeout=30,
             )
 
-            output = tar_result.stdout.decode() if tar_result.stdout else ""
             file_count = 0
-            tar_created = False
-            for line in output.split("\n"):
+            source_bytes = 0
+            for line in (
+                discover_result.stdout.decode() if discover_result.stdout else ""
+            ).split("\n"):
                 if line.startswith("FILE_COUNT:"):
                     try:
                         file_count = int(line.split(":")[1].strip())
                     except ValueError:
                         pass
-                elif line.startswith("TAR_CREATED:"):
-                    tar_created = line.split(":")[1].strip() == "true"
+                elif line.startswith("SOURCE_BYTES:"):
+                    try:
+                        source_bytes = int(line.split(":")[1].strip())
+                    except ValueError:
+                        pass
 
-            self._logger.info(
-                f"PVC {pvc_name}/{sub_path}: {file_count} files, tar_created={tar_created}"
-            )
+            tar_created = False
+            tar_bytes = 0
+
+            if file_count > 0:
+                # Compute dynamic tar timeout from observed size.
+                computed_timeout = max(
+                    60,
+                    int(source_bytes / self._GZIP_BYTES_PER_SEC) + 60,
+                )
+                effective_timeout = min(computed_timeout, tar_timeout)
+
+                self._logger.info(
+                    f"PVC {pvc_name}/{sub_path}: {file_count} files, "
+                    f"src={source_bytes / 1024 / 1024:.1f}MiB, "
+                    f"tar_timeout={effective_timeout}s "
+                    f"(computed={computed_timeout}s, cap={tar_timeout}s)"
+                )
+
+                # IMPORTANT: tar runs in a *fresh* shell from a separate
+                # `pod.exec`, so CWD is `/` — not container_path. files.txt
+                # holds relative paths like `./profile_export.json`, which
+                # tar would look up from `/` and silently produce an empty
+                # archive (header+footer only, ~10 KiB), then TAR_CREATED
+                # would still say true. Always `cd container_path` first;
+                # also make tar/stat failures observable rather than
+                # swallowed by the unconditional echo.
+                tar_script = f"""
+set -e
+cd {container_path}
+tar -czf /tmp/download/archive.tar.gz -T /tmp/download/files.txt
+echo "TAR_CREATED:true"
+TAR_BYTES=$(stat -c %s /tmp/download/archive.tar.gz 2>/dev/null || echo 0)
+echo "TAR_BYTES:$TAR_BYTES"
+"""
+                tar_result = await asyncio.wait_for(
+                    asyncio.to_thread(pod.exec, ["sh", "-c", tar_script]),
+                    timeout=effective_timeout,
+                )
+
+                for line in (
+                    tar_result.stdout.decode() if tar_result.stdout else ""
+                ).split("\n"):
+                    if line.startswith("TAR_CREATED:"):
+                        tar_created = line.split(":")[1].strip() == "true"
+                    elif line.startswith("TAR_BYTES:"):
+                        try:
+                            tar_bytes = int(line.split(":")[1].strip())
+                        except ValueError:
+                            pass
+
+                self._logger.info(
+                    f"PVC {pvc_name}/{sub_path}: tar.gz={tar_bytes / 1024 / 1024:.1f}MiB, "
+                    f"tar_created={tar_created}"
+                )
+            else:
+                self._logger.info(f"PVC {pvc_name}/{sub_path}: 0 files matched")
 
             # Step 5: Download and extract tar
             #
@@ -199,12 +275,17 @@ fi
             }
 
         except Exception as e:
-            self._logger.error(f"PVC extraction failed: {e}")
+            # Include exception type — empty str(e) is common for
+            # asyncio.TimeoutError and ExceptionGroup, which is exactly
+            # what we hit on the S1 3.2 GB cliff extraction and were
+            # left guessing at because the original log read
+            # ``PVC extraction failed: `` with no body.
+            self._logger.error(f"PVC extraction failed: {type(e).__name__}: {e}")
             # Best-effort cleanup
             await self._delete_job(job_name)
             return {
                 "success": False,
-                "error": str(e),
+                "error": f"{type(e).__name__}: {e}",
                 "output_dir": local_output_dir,
             }
 
@@ -215,16 +296,32 @@ fi
 
     # --- Internal methods ---
 
-    # Chunk size for the split-then-fetch download path. 100 MiB keeps
-    # each chunk's transfer under the Teleport-proxied WebSocket's
-    # working window (we lost 150+ MB single-shot streams on
-    # 2026-05-19). Smaller = more chunks = more pod.exec round-trips;
-    # larger = closer to the failure mode we're avoiding.
-    _CHUNK_BYTES = 100 * 1024 * 1024
+    # Conservative gzip throughput estimate (bytes/sec) used to scale the
+    # tar-creation timeout to observed source size. Real busybox `tar -czf`
+    # on aiperf jsonl payloads measured ~25-50 MB/s in prior rungs;
+    # we use 10 MB/s as a pessimistic baseline so the computed timeout
+    # has headroom even on a busy node. A 1.1 GB rung → ~170s computed
+    # budget; the rescue extraction completed in ~30s, so we have 5x margin.
+    _GZIP_BYTES_PER_SEC = 10 * 1024 * 1024
+
+    # Chunk size for the split-then-fetch download path. 50 MiB keeps
+    # each chunk's transfer comfortably under the Teleport-proxied
+    # WebSocket's working window — we empirically saw 124 MiB single
+    # transfers die with "websocket: close 1006" in prior runs (this
+    # was a 3.2 GB cliff-load JSONL on the S1 cascade test), and the
+    # original 100 MiB ceiling was right at that failure edge. Manual
+    # rescue at 50 MiB succeeded on all 5 chunks. Smaller = more
+    # round-trips but each chunk fits inside both the WS window and the
+    # per-chunk timeout with headroom for jitter.
+    _CHUNK_BYTES = 50 * 1024 * 1024
 
     # Per-chunk retry budget. Each failed chunk gets re-fetched
-    # independently — the archive is not rebuilt.
-    _CHUNK_MAX_RETRIES = 4
+    # independently — the archive is not rebuilt. Bumped 4 → 8 alongside
+    # the A.3 streaming refactor: with the in-memory buffer eliminated,
+    # the dominant failure mode shifts from "chunk too big" to "transient
+    # network blip", which retries fix cleanly. Total grace at linear
+    # 2*attempt backoff: 2+4+6+...+16 = 72 seconds across 8 attempts.
+    _CHUNK_MAX_RETRIES = 8
 
     async def _download_archive_chunked(
         self,
@@ -271,35 +368,71 @@ fi
             f"_download_archive_chunked: split into {len(part_names)} part(s)"
         )
 
-        # Step B: cat each part separately with retry
+        # Step B: stream each part directly to a per-chunk tempfile,
+        # then append to the main archive only on success.
+        #
+        # kr8s `Pod.exec(stdout=BinaryIO, capture_output=False)` writes
+        # the WebSocket exec stdout into the file handle as bytes arrive
+        # — no full-chunk in-memory buffering. Earlier versions of this
+        # method captured cat_result.stdout (50 MiB of bytes in Python
+        # memory per chunk), which interacted badly with Teleport-proxied
+        # WebSocket framing under load and surfaced as TimeoutError on
+        # the asyncio.wait_for. Streaming to disk lets the kernel buffer
+        # at TCP-receive size, decouples timing of the WS read loop from
+        # the Python event loop, and keeps memory use ~constant
+        # regardless of chunk size. Verified on the S1 cliff (3.2 GB
+        # raw / 224 MB gz) in prior runs — see the cascade reproduction work
+        # vault findings/related-investigations.md for the failure case.
+        #
+        # We stage each chunk in a sibling tempfile (`.part-<idx>.tmp`)
+        # so a chunk that fails mid-stream can be retried without
+        # corrupting the main archive. Successful chunks get appended
+        # to the main archive via shutil.copyfileobj (16 KiB kernel
+        # buffer), then the tempfile is unlinked.
         try:
             # Truncate the local file before appending parts
             local_path.write_bytes(b"")
             for idx, part_name in enumerate(part_names):
+                chunk_tmp = local_path.parent / (f".{local_path.name}.chunk-{idx}.tmp")
                 last_err: Optional[Exception] = None
                 for attempt in range(1, self._CHUNK_MAX_RETRIES + 1):
                     try:
-                        cat_result = await asyncio.wait_for(
-                            asyncio.to_thread(pod.exec, ["cat", part_name]),
-                            timeout=cat_timeout,
-                        )
+                        # Fresh tempfile each attempt — discard any
+                        # partial bytes from a prior failed try.
+                        chunk_tmp.unlink(missing_ok=True)
+                        with chunk_tmp.open("wb") as chunk_fh:
+                            cat_result = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    pod.exec,
+                                    ["cat", part_name],
+                                    stdout=chunk_fh,
+                                    capture_output=False,
+                                ),
+                                timeout=cat_timeout,
+                            )
                         if cat_result.returncode != 0:
                             raise RuntimeError(
                                 f"cat returned rc={cat_result.returncode}"
                             )
-                        # Append this chunk to the local archive
-                        with local_path.open("ab") as fh:
-                            fh.write(cat_result.stdout)
-                        self._logger.debug(
+                        chunk_bytes = chunk_tmp.stat().st_size
+                        # Append this chunk's tempfile to the main archive.
+                        with local_path.open("ab") as out:
+                            with chunk_tmp.open("rb") as inp:
+                                shutil.copyfileobj(inp, out)
+                        chunk_tmp.unlink(missing_ok=True)
+                        self._logger.info(
                             f"  chunk {idx + 1}/{len(part_names)} "
-                            f"({len(cat_result.stdout)} bytes) try {attempt} ✓"
+                            f"({chunk_bytes:,} bytes) try {attempt} ✓"
                         )
                         break
                     except Exception as e:  # noqa: BLE001
                         last_err = e
+                        partial = chunk_tmp.stat().st_size if chunk_tmp.exists() else 0
+                        chunk_tmp.unlink(missing_ok=True)
                         self._logger.warning(
-                            f"  chunk {idx + 1}/{len(part_names)} attempt {attempt} "
-                            f"failed: {type(e).__name__}: {e}"
+                            f"  chunk {idx + 1}/{len(part_names)} attempt "
+                            f"{attempt} failed after {partial:,} streamed "
+                            f"bytes: {type(e).__name__}: {e}"
                         )
                         if attempt < self._CHUNK_MAX_RETRIES:
                             await asyncio.sleep(2 * attempt)

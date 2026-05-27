@@ -239,6 +239,7 @@ markers = [
     "skip_in_nightly: excludes a test from the nightly pipeline only (still runs in pre_merge/post_merge). Used via `not skip_in_nightly` in nightly-ci.yml marker filters",
     "frontend_api_surface_compliance: marks tests that validate Dynamo's HTTP API surface (Responses/Anthropic wire shape, tool-call routing) against upstream compliance harnesses",
     "weekly: marks tests to run weekly",
+    "sanity: marks fast (<15 min) sanity-only tests; CI runs these before longer suites",
     "release: marks tests to run on release pipelines",
     "gpu_0: marks tests that don't require GPU",
     "gpu_1: marks tests to run on GPU",

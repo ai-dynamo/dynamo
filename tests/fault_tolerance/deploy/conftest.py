@@ -15,6 +15,7 @@
 
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -130,8 +131,19 @@ def logger(request):
     run from the repo root or as the standalone dynamo-ft uv project. The
     output dir comes from ``DYN_TEST_OUTPUT_PATH`` (set in ``pytest_configure``
     above), so the handler always lands next to scenario logs / reports.
+
+    Cleans the per-test output dir before each run unless
+    ``DYN_TEST_KEEP_PRIOR_OUTPUTS=1`` is set. Re-running the same
+    parametrize id otherwise leaves stale logs from the previous attempt
+    (different pod names / DGD run-ids) intermingled with fresh ones —
+    confusing on review. Users who want history can either pass a
+    unique ``DYN_TEST_OUTPUT_PATH`` per run (the default conftest
+    behaviour: outputs land under ``<cwd>/test_outputs/<test>/``) or
+    opt out of the clean via the env var.
     """
     log_dir = Path(os.environ["DYN_TEST_OUTPUT_PATH"]) / request.node.name
+    if log_dir.exists() and os.environ.get("DYN_TEST_KEEP_PRIOR_OUTPUTS", "0") != "1":
+        shutil.rmtree(log_dir, ignore_errors=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(log_dir / "test.log.txt", mode="w")
     handler.setFormatter(
