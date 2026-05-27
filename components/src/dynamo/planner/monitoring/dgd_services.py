@@ -49,10 +49,7 @@ def break_arguments(args: list[str] | None) -> list[str]:
 
 def _main_container_from_pod_template(component: dict) -> dict:
     containers = (
-        component.get("podTemplate", {})
-        .get("spec", {})
-        .get("containers", [])
-        or []
+        component.get("podTemplate", {}).get("spec", {}).get("containers", []) or []
     )
     for container in containers:
         if container.get("name") == MAIN_CONTAINER_NAME:
@@ -166,11 +163,11 @@ class Service(BaseModel):
 
         try:
             return int(gpu_str)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as err:
             raise ValueError(
                 f"Invalid GPU count '{gpu_str}' for component '{self.name}'. "
                 f"GPU count must be an integer."
-            )
+            ) from err
 
 
 def get_component_from_type_or_name(

@@ -190,9 +190,7 @@ def test_get_service_name_from_sub_component_type(kubernetes_connector):
         _component("test-component-decode", "decode", replicas=3),
     )
 
-    service = get_component_from_type_or_name(
-        deployment, SubComponentType.PREFILL
-    )
+    service = get_component_from_type_or_name(deployment, SubComponentType.PREFILL)
     assert service.name == "test-component-prefill"
     assert service.number_replicas() == 2
 
@@ -230,9 +228,7 @@ def test_get_service_name_from_v1beta_component_type(kubernetes_connector):
         },
     }
 
-    service = get_component_from_type_or_name(
-        deployment, SubComponentType.PREFILL
-    )
+    service = get_component_from_type_or_name(deployment, SubComponentType.PREFILL)
     assert service.name == "VllmPrefillWorker"
     assert service.number_replicas() == 2
 
@@ -548,6 +544,7 @@ async def test_set_component_replicas_empty_target_replicas(
         await kubernetes_connector.set_component_replicas(target_replicas)
 
 
+@pytest.mark.asyncio
 async def test_set_component_replicas_deployment_not_ready(
     kubernetes_connector, mock_kube_api
 ):
@@ -840,19 +837,6 @@ def test_service_reads_v1beta_pod_template_main_container():
 # Tests for KubernetesConnector.get_gpu_counts()
 def test_get_gpu_counts_both_services(kubernetes_connector, mock_kube_api):
     """Test get_gpu_counts returns correct counts for both prefill and decode"""
-    mock_deployment = _deployment(
-        _component("prefill-worker", "prefill", replicas=1, gpu=2),
-        _component("decode-worker", "decode", replicas=1, gpu=4),
-    )
-    mock_kube_api.get_graph_deployment.return_value = mock_deployment
-
-    prefill_gpu, decode_gpu = kubernetes_connector.get_gpu_counts()
-
-    assert prefill_gpu == 2
-    assert decode_gpu == 4
-
-
-def test_get_gpu_counts_v1beta_components(kubernetes_connector, mock_kube_api):
     mock_deployment = _deployment(
         _component("prefill-worker", "prefill", replicas=1, gpu=2),
         _component("decode-worker", "decode", replicas=1, gpu=4),
