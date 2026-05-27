@@ -147,9 +147,7 @@ mod tests {
     #[tokio::test]
     async fn test_base64_embeddings_aggregate() {
         // Verifies that `data[].embedding` can be a base64 string, not
-        // just a float array. Earlier versions typed it as `Vec<f32>`
-        // and rejected the string shape with
-        // "invalid type: string ..., expected a sequence".
+        // just a float array.
         let embedding = dynamo_protocols::types::Embedding {
             index: 0,
             object: "embedding".to_string(),
