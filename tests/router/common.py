@@ -121,7 +121,7 @@ def _test_router_basic(
         num_requests: Number of concurrent requests to send
         frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "nats".
+        request_plane: Request plane to use ("nats", "tcp"). Defaults to "nats".
         router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
         enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
         min_initial_workers: Optional frontend startup worker gate. Defaults to None.
@@ -1054,7 +1054,11 @@ def _test_router_overload_503(
     request,
     frontend_port: int,
     test_payload: dict,
-    blocks_threshold: float = 0.2,
+    blocks_threshold: float | str | None = 0.2,
+    tokens_threshold: int | str | None = None,
+    tokens_threshold_frac: float | str | None = None,
+    router_queue_threshold: float | str | None = None,
+    max_tokens: int = 50,
 ):
     """Test that 503 is returned when all workers are busy, and verify rejection metrics.
 
@@ -1073,6 +1077,10 @@ def _test_router_overload_503(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         blocks_threshold: Active decode blocks threshold for the router (default 0.2)
+        tokens_threshold: Active prefill tokens threshold for the router
+        tokens_threshold_frac: Fractional active prefill tokens threshold for the router
+        router_queue_threshold: Router queue threshold, or "None" to disable queueing
+        max_tokens: Output token count for generated overload requests
 
     Raises:
         AssertionError: If success/rejection counts or metrics don't meet expectations
@@ -1087,14 +1095,16 @@ def _test_router_overload_503(
         frontend_port=frontend_port,
         namespace=engine_workers.namespace,
         blocks_threshold=blocks_threshold,
+        tokens_threshold=tokens_threshold,
+        tokens_threshold_frac=tokens_threshold_frac,
+        router_queue_threshold=router_queue_threshold,
     ):
         frontend_url = f"http://localhost:{frontend_port}"
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
-        # Custom payload for 503 test with more tokens to consume resources
         test_payload_503 = {
             **test_payload,
-            "max_tokens": 50,  # Longer output to consume more blocks
+            "max_tokens": max_tokens,
         }
 
         logger.info("Waiting for frontend readiness before overload test...")

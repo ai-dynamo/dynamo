@@ -7,7 +7,6 @@ import os
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
 
-import pybase64
 import sglang as sgl
 from PIL.Image import Image as PILImage
 
@@ -15,7 +14,6 @@ from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -462,7 +460,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"room={bootstrap_info['bootstrap_room']}"
             )
 
-            trace_header = build_trace_headers(context) if self.enable_trace else None
+            trace_header = context.trace_headers() if self.enable_trace else None
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
@@ -521,7 +519,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             else:
                 image_data = _extract_media_urls(mm_data, "image_url")
 
-            trace_header = build_trace_headers(context) if self.enable_trace else None
+            trace_header = context.trace_headers() if self.enable_trace else None
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
@@ -644,11 +642,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
-                    # Base64-encode tensor bytes to match sglang's output format.
-                    routed_experts = pybase64.b64encode(
-                        routed_experts.numpy().tobytes()
-                    ).decode("utf-8")
-                    # Internal transport field consumed by frontend nvext mapping.
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream.
                     out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
@@ -742,10 +736,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     response_nvext["stop_reason"] = stop_reason
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
-                    # Base64-encode tensor bytes to match sglang's output format.
-                    routed_experts = pybase64.b64encode(
-                        routed_experts.numpy().tobytes()
-                    ).decode("utf-8")
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream.
                     response_nvext["routed_experts"] = routed_experts
                 if response_nvext:
                     response["nvext"] = response_nvext

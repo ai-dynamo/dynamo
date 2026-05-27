@@ -51,6 +51,14 @@ Optional AIC knobs:
 
 - `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
 - `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
+- `--aic-moe-tp-size`: MoE tensor-parallel size for models that require AIC MoE parallelism
+- `--aic-moe-ep-size`: MoE expert-parallel size for models that require AIC MoE parallelism
+- `--aic-attention-dp-size`: attention data-parallel size for models that require AIC MoE parallelism
+
+For MoE models, these values must satisfy AIC's parallelism constraint:
+`aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`.
+For Kimi-style TP-only MoE runs, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
+`--aic-moe-ep-size 1`, and `--aic-attention-dp-size 1`.
 
 ## KV Event Transport and Persistence
 
@@ -116,6 +124,8 @@ Use `--no-router-track-prefill-tokens` when a router is serving decode-only traf
 Use `--router-track-output-blocks` when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. If you also pass `nvext.agent_hints.osl` per request, the router applies fractional decay to output blocks so that requests nearing completion contribute less future load. See [Decode Load Modeling](router-concepts.md#decode-load-modeling) for the cost-model details.
 
 `--router-queue-threshold` controls when incoming requests are held in a priority queue. The router waits while all workers exceed the configured fraction of `max_num_batched_tokens`, then releases work as capacity frees up. Set it to `None` to disable queueing entirely.
+
+Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh.
 
 **Note for the SGLang backend.** Since [#8220](https://github.com/ai-dynamo/dynamo/pull/8220), the value the SGLang worker publishes for `max_num_batched_tokens` in its Model Deployment Card depends on the server args:
 

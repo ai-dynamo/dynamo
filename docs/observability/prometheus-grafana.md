@@ -80,7 +80,7 @@ Other interfaces:
 
 ### Prometheus
 
-The Prometheus configuration is specified in [prometheus.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
+The Prometheus configuration is specified in [prometheus.yml](../../dev/observability/prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
 
 Please be aware that you might need to modify the target settings to align with your specific host configuration and network environment.
 
@@ -90,7 +90,23 @@ After making changes to prometheus.yml, restart the Prometheus service. See [Obs
 
 Grafana is pre-configured with:
 - Prometheus datasource
-- Sample dashboard for visualizing service metrics
+- A set of sample dashboards under `dev/observability/grafana_dashboards/` (see below)
+
+### Dashboards
+
+#### Per-Model Dynamo Dashboard
+
+The per-model dashboard at [dev/observability/grafana_dashboards/dynamo.json](../../dev/observability/grafana_dashboards/dynamo.json) is auto-provisioned with the observability stack.
+
+Sections:
+- **Overview** - request KPIs (success rate, totals, latency averages).
+- **Frontend** - request rates, latency quantiles, sequence-length distributions, cache hits.
+- **KV Routing** - per-worker active blocks, hit rate, routing-overhead breakdown, KV cache events.
+- **Workers** - per-worker request breakdown, request duration, component throughput.
+
+Metric panels read the `dynamo_frontend_*`, `dynamo_component_*`, and `dynamo_router_*` metric surfaces, filtered by the `${model}` template variable.
+
+The Kubernetes version is provisioned from [deploy/observability/grafana-dynamo-dashboard-configmap.yaml](../../deploy/observability/grafana-dynamo-dashboard-configmap.yaml).
 
 ### Troubleshooting
 

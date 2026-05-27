@@ -30,7 +30,7 @@ mod inner;
 mod types;
 
 use inner::InnerPrefillRouter;
-pub use types::PrefillError;
+pub use types::{PrefillError, PrefillQueryOutcome};
 use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override};
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
@@ -87,6 +87,7 @@ impl
         // Extract request data while preserving context
         let (mut req, context) = request.into_parts();
         let request_id = context.id().to_string();
+        let metadata = context.metadata().clone();
         let engine_ctx = context.context();
 
         // Save original max_tokens for decode
@@ -160,13 +161,40 @@ impl
                 // disconnects, wasting prefill compute. This is an accepted
                 // trade-off (wasted compute vs permanent KV block leak). Future
                 // work: add NIXL-level cancellation that properly frees blocks.
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                let prefill_context = Context::with_id_and_metadata(
+                    prefill_req,
+                    request_id.clone(),
+                    metadata.clone(),
+                );
 
                 // Pass the phase barrier to the spawned task. It is released after routing
                 // completes so worker recording finishes before phase changes to Decode.
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
 
                 Ok(PrefillOutcome::Bootstrap(bootstrap_info))
+            }
+            PrefillResolveDecision::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            } => {
+                // Quick-reject: bubble up as ResourceExhausted so the caller
+                // can return a retryable signal upstream instead of falling
+                // back to the synchronous prefill path (which would re-enter
+                // the saturated queue).
+                //
+                // TODO(DEP-8189 / ai-dynamo#8189): once the shared rejection
+                // layer lands, classify queue-depth saturation distinctly
+                // from generic resource exhaustion (operator-facing 429 vs
+                // 503) instead of stringifying through ResourceExhausted.
+                drop(prefill_phase_barrier);
+                return Err(dynamo_runtime::error::DynamoError::builder()
+                    .error_type(dynamo_runtime::error::ErrorType::ResourceExhausted)
+                    .message(format!(
+                        "router backpressure during prefill resolve: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+                    ))
+                    .build()
+                    .into());
             }
             PrefillResolveDecision::Unavailable
             | PrefillResolveDecision::NotActivated
@@ -179,11 +207,15 @@ impl
                 drop(prefill_phase_barrier);
 
                 // NVBugs 5969206: Do NOT link prefill as child (same rationale as bootstrap path).
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                let prefill_context = Context::with_id_and_metadata(
+                    prefill_req,
+                    request_id.clone(),
+                    metadata.clone(),
+                );
 
                 // In Direct mode, pass preselected_worker so execute_prefill uses
                 // router.direct() instead of router.generate() (which bails in Direct mode).
-                let (result, _worker_info) = Self::execute_prefill(
+                let completion = Self::execute_prefill(
                     self.prefill_router.get().cloned(),
                     prefill_context,
                     preselected_worker,
@@ -191,7 +223,10 @@ impl
                 )
                 .await?;
 
-                Ok(PrefillOutcome::Completed(result))
+                Ok(PrefillOutcome::Completed {
+                    result: completion.result,
+                    worker_link: completion.worker_link,
+                })
             }
         };
 
@@ -227,8 +262,12 @@ impl
                     PrefillOutcome::Bootstrap(info) => {
                         decode_req.bootstrap_info = Some(info);
                     }
-                    PrefillOutcome::Completed(result) => {
+                    PrefillOutcome::Completed {
+                        result,
+                        worker_link,
+                    } => {
                         decode_req.prefill_result = Some(result);
+                        decode_req.migration_link = worker_link;
                     }
                 }
 

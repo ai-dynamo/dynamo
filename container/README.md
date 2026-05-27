@@ -45,7 +45,7 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/bin/etcd/ | COPY from dynamo_base |
 |  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
 |  upstream Python/site-packages | inherited from upstream `vllm/vllm-openai` (multi-arch tag selected by CUDA family) |
-|  /workspace/{tests,examples,components/src/dynamo/{common,vllm},lib,deploy/sanity_check.py} | COPY from build context |
+|  /workspace/{tests,examples,dev,components/src/dynamo/{common,frontend,vllm},lib} | COPY from build context |
 | **STAGE: dev** | **FROM runtime (via dev/Dockerfile.dev)** |
 |  /usr/bin/, /usr/lib/, etc. | COPY from dynamo_tools (dev utilities, git, sudo, etc.) |
 |  /usr/local/rustup/ | COPY from dynamo_tools |
@@ -92,9 +92,9 @@ The `run.sh` script and rendering scripts are conveniences that simplify common 
 | **Working Directory** | `/workspace` (in-container or mounted) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) |
 | **Rust Toolchain** | None (uses pre-built wheels) | System install (`/usr/local/rustup`, `/usr/local/cargo`) | System install (`/usr/local/rustup`, `/usr/local/cargo`) |
 | **Cargo Target** | None | `/workspace/target` | `/workspace/target` |
-| **Python Env** | system site-packages for vllm/sglang, venv (`/opt/dynamo/venv`) for trtllm | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) |
+| **Python Env** | system site-packages for vllm/sglang; venv (`/opt/dynamo/venv` with `--system-site-packages`) for trtllm | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages where the runtime image uses system Python) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages where the runtime image uses system Python) |
 
-**Note (SGLang)**: SGLang runtime uses system site-packages, but the `dev` and `local-dev` images create `/opt/dynamo/venv` with `--system-site-packages` for build tooling like `maturin` and `uv`.
+**Note (vLLM/TRT-LLM/SGLang)**: All three runtime images inherit upstream Python solves. vLLM and SGLang install Dynamo wheels into the upstream system site-packages with `--system --no-deps`; the TRT-LLM runtime creates `/opt/dynamo/venv` with `--system-site-packages` and installs Dynamo wheels into that venv with `uv pip install --no-deps`, so upstream packages stay importable but Dynamo's wheels live in their own namespace. The `dev`/`local-dev` images also create `/opt/dynamo/venv` (with `--system-site-packages` where the runtime image uses system Python) so build tooling like `maturin` and `uv` is available without re-solving the framework Python stack.
 
 ## Usage Guidelines
 
@@ -432,7 +432,7 @@ container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME
 # From this point forward, commands run inside the container started in step 2.
 
 # 3. Sanity check (optional but recommended)
-deploy/sanity_check.py
+dev/sanity_check.py
 
 # 4. Run inference (requires both frontend and backend)
 # Start frontend
@@ -475,7 +475,7 @@ cargo build --locked --features dynamo-llm/block-manager --workspace
 cd lib/bindings/python && maturin develop --uv && cd -
 
 # 5. Sanity check (optional but recommended)
-deploy/sanity_check.py --runtime-check-only
+dev/sanity_check.py --runtime-check-only
 
 # 6. Run tests
 python -m pytest tests/

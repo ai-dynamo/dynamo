@@ -150,10 +150,10 @@ impl TreeSizeTestIndexer {
                 let _ = index.apply_event(event);
             }
             Self::Concurrent(index) => {
-                index.apply_event(event).await;
+                KvIndexerInterface::apply_event(index, event).await;
             }
             Self::ConcurrentCompressed(index) => {
-                index.apply_event(event).await;
+                KvIndexerInterface::apply_event(index, event).await;
             }
         }
     }
@@ -238,9 +238,11 @@ impl TreeSizeTestIndexer {
     async fn snapshot_tree(&self) -> Vec<RouterEvent> {
         match self {
             Self::Single(index) => snapshot_events(index.dump_tree_as_events()),
-            Self::Concurrent(index) => snapshot_events(index.dump_events().await.unwrap()),
+            Self::Concurrent(index) => {
+                snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
+            }
             Self::ConcurrentCompressed(index) => {
-                snapshot_events(index.dump_events().await.unwrap())
+                snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
             }
         }
     }
@@ -841,6 +843,27 @@ mod interface_tests {
         flush_and_settle(&index).await;
 
         assert_request_score(&index, &tokens, worker, 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_compressed_approx_rejects_mismatched_hash_lengths() {
+        let index = ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            4,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        );
+        let worker = WorkerWithDpRank::new(7, 0);
+        let local_hashes = [LocalBlockHash(1), LocalBlockHash(2)];
+        let sequence_hashes = [1];
+
+        let result = index
+            .process_routing_decision_hash_slices(worker, &local_hashes, &sequence_hashes)
+            .await;
+
+        assert!(matches!(result, Err(KvRouterError::IndexerDroppedRequest)));
     }
 
     #[tokio::test]

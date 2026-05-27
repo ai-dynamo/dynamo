@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -9,9 +10,13 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use crate::protocols::{
-    DpRank, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    DpRank, RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::sequences::PrefillTokenDeltas;
+
+pub type OverloadedWorkerProvider =
+    Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
@@ -36,6 +41,21 @@ pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
 
+    #[error(
+        "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+    )]
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
+
+    #[error("all eligible workers are overloaded")]
+    AllEligibleWorkersOverloaded,
+
+    #[error("pinned worker {worker_id} is overloaded")]
+    PinnedWorkerOverloaded { worker_id: WorkerId },
+
     #[error("pinned worker {worker_id} is not in allowed worker set")]
     PinnedWorkerNotAllowed { worker_id: WorkerId },
 
@@ -44,6 +64,17 @@ pub enum KvSchedulerError {
 
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
+}
+
+impl KvSchedulerError {
+    pub fn is_overload(&self) -> bool {
+        matches!(
+            self,
+            Self::Backpressure { .. }
+                | Self::AllEligibleWorkersOverloaded
+                | Self::PinnedWorkerOverloaded { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -105,43 +136,65 @@ pub struct SchedulingRequest {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct RoutingEligibility<'a> {
+pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
+    overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
     pinned_worker: Option<WorkerWithDpRank>,
     routing_constraints: &'a RoutingConstraints,
 }
 
 impl<'a> RoutingEligibility<'a> {
     #[inline]
-    pub(crate) fn new(
+    pub fn new(
         allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
+        overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
         pinned_worker: Option<WorkerWithDpRank>,
         routing_constraints: &'a RoutingConstraints,
     ) -> Self {
         Self {
             allowed_worker_ids,
+            overloaded_worker_ids,
             pinned_worker,
             routing_constraints,
         }
     }
 
     #[inline]
-    pub(crate) fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
+    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
         self.pinned_worker
     }
 
     #[inline]
-    pub(crate) fn allows_worker_id(&self, worker_id: WorkerId) -> bool {
+    pub fn caller_allows_worker_id(&self, worker_id: WorkerId) -> bool {
         self.allowed_worker_ids
             .is_none_or(|worker_ids| worker_ids.contains(&worker_id))
     }
 
     #[inline]
-    pub(crate) fn allows_worker<C: WorkerConfigLike>(
+    pub fn is_worker_overloaded(&self, worker_id: WorkerId) -> bool {
+        self.overloaded_worker_ids
+            .is_some_and(|worker_ids| worker_ids.contains(&worker_id))
+    }
+
+    #[inline]
+    pub fn allows_worker_id(&self, worker_id: WorkerId) -> bool {
+        self.caller_allows_worker_id(worker_id) && !self.is_worker_overloaded(worker_id)
+    }
+
+    #[inline]
+    pub fn allows_worker_ignoring_overload<C: WorkerConfigLike>(
         &self,
         worker_id: WorkerId,
         config: &C,
     ) -> bool {
+        self.caller_allows_worker_id(worker_id)
+            && self
+                .routing_constraints
+                .is_compatible_with_worker_taints(config.taints())
+    }
+
+    #[inline]
+    pub fn allows_worker<C: WorkerConfigLike>(&self, worker_id: WorkerId, config: &C) -> bool {
         self.allows_worker_id(worker_id)
             && self
                 .routing_constraints
@@ -149,7 +202,7 @@ impl<'a> RoutingEligibility<'a> {
     }
 
     #[inline]
-    pub(crate) fn has_eligible_worker<'w, C, I>(&self, workers: I) -> bool
+    pub fn has_eligible_worker<'w, C, I>(&self, workers: I) -> bool
     where
         C: WorkerConfigLike + 'w,
         I: IntoIterator<Item = (WorkerId, &'w C)>,
@@ -168,12 +221,27 @@ impl<'a> RoutingEligibility<'a> {
     }
 
     #[inline]
-    pub(crate) fn validate_pinned_worker(&self) -> Result<(), KvSchedulerError> {
+    pub fn has_eligible_worker_ignoring_overload<'w, C, I>(&self, workers: I) -> bool
+    where
+        C: WorkerConfigLike + 'w,
+        I: IntoIterator<Item = (WorkerId, &'w C)>,
+    {
+        for (worker_id, config) in workers {
+            if self.allows_worker_ignoring_overload(worker_id, config) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[inline]
+    pub(crate) fn validate_pinned_worker_allowed(&self) -> Result<(), KvSchedulerError> {
         let Some(pinned_worker) = self.pinned_worker else {
             return Ok(());
         };
 
-        if self.allows_worker_id(pinned_worker.worker_id) {
+        if self.caller_allows_worker_id(pinned_worker.worker_id) {
             return Ok(());
         }
 
@@ -231,9 +299,18 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
 
 impl SchedulingRequest {
     #[inline]
-    pub(crate) fn eligibility(&self) -> RoutingEligibility<'_> {
+    pub fn eligibility(&self) -> RoutingEligibility<'_> {
+        self.eligibility_with_overloaded(None)
+    }
+
+    #[inline]
+    pub fn eligibility_with_overloaded<'a>(
+        &'a self,
+        overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
+    ) -> RoutingEligibility<'a> {
         RoutingEligibility::new(
             self.allowed_worker_ids.as_ref(),
+            overloaded_worker_ids,
             self.pinned_worker,
             &self.routing_constraints,
         )
@@ -385,6 +462,16 @@ mod tests {
         taints: HashSet<String>,
     }
 
+    impl Default for TestWorkerConfig {
+        fn default() -> Self {
+            Self {
+                dp_start: 0,
+                dp_size: 1,
+                taints: HashSet::new(),
+            }
+        }
+    }
+
     impl WorkerConfigLike for TestWorkerConfig {
         fn data_parallel_start_rank(&self) -> u32 {
             self.dp_start
@@ -491,6 +578,42 @@ mod tests {
         assert_eq!(
             result,
             Err(WorkerEligibilityError::RoutingConstraintsUnsatisfied { worker_id: 7 })
+        );
+    }
+
+    #[test]
+    fn routing_eligibility_applies_allowed_overloaded_and_taints() {
+        let allowed_worker_ids = HashSet::from([1, 2]);
+        let overloaded_worker_ids = HashSet::from([2]);
+        let routing_constraints = RoutingConstraints {
+            required_taints: HashSet::from(["mdc-a".to_string()]),
+            preferred_taints: HashMap::new(),
+        };
+        let eligibility = RoutingEligibility::new(
+            Some(&allowed_worker_ids),
+            Some(&overloaded_worker_ids),
+            None,
+            &routing_constraints,
+        );
+
+        let compatible = TestWorkerConfig {
+            taints: HashSet::from(["mdc-a".to_string()]),
+            ..Default::default()
+        };
+        let incompatible = TestWorkerConfig {
+            taints: HashSet::from(["mdc-b".to_string()]),
+            ..Default::default()
+        };
+
+        assert!(eligibility.allows_worker(1, &compatible));
+        assert!(!eligibility.allows_worker(2, &compatible));
+        assert!(!eligibility.allows_worker(3, &compatible));
+        assert!(!eligibility.allows_worker(1, &incompatible));
+        assert!(eligibility.has_eligible_worker([(1, &compatible), (2, &compatible)]));
+        assert!(!eligibility.has_eligible_worker([(2, &compatible)]));
+        assert!(eligibility.has_eligible_worker_ignoring_overload([(2, &compatible)]));
+        assert!(
+            eligibility.has_eligible_worker_ignoring_overload([(1, &compatible), (2, &compatible)])
         );
     }
 }
