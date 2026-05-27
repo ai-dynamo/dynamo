@@ -8,7 +8,8 @@ import os
 import random
 import string
 import sys
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import aiohttp
 import nats
@@ -699,3 +700,24 @@ async def send_request_via_python_kv_router(
         }
 
     return True
+
+
+def topology_env(
+    tmp_path: Path,
+    name: str,
+    topology_domains: Dict[str, str],
+    *,
+    transfer_domain: str = "zone",
+    enforcement: str = "required",
+) -> Dict[str, str]:
+    topology_dir = tmp_path / name
+    topology_dir.mkdir()
+    for domain, value in topology_domains.items():
+        (topology_dir / domain).write_text(value)
+
+    return {
+        "DYN_TOPOLOGY_ENABLED": "true",
+        "DYN_TOPOLOGY_MOUNT_PATH": str(topology_dir),
+        "DYN_KV_TRANSFER_DOMAIN": transfer_domain,
+        "DYN_KV_TRANSFER_ENFORCEMENT": enforcement,
+    }

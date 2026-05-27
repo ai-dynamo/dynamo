@@ -9,7 +9,6 @@
 # @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -44,6 +43,8 @@ from tests.router.helper import (
     get_kv_indexer_command,
     get_runtime,
     poll_for_worker_instances,
+    topology_env,
+    wait_for_frontend_ready,
     wait_for_indexer_workers_active,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
@@ -952,116 +953,6 @@ def _launch_disagg_workers(
             yield prefill_workers, decode_workers
 
 
-def _topology_env(
-    tmp_path: Path,
-    name: str,
-    topology_domains: Dict[str, str],
-    *,
-    transfer_domain: str = "zone",
-    enforcement: str = "required",
-) -> Dict[str, str]:
-    topology_dir = tmp_path / name
-    topology_dir.mkdir()
-    for domain, value in topology_domains.items():
-        (topology_dir / domain).write_text(value)
-
-    return {
-        "DYN_TOPOLOGY_ENABLED": "true",
-        "DYN_TOPOLOGY_MOUNT_PATH": str(topology_dir),
-        "DYN_KV_TRANSFER_DOMAIN": transfer_domain,
-        "DYN_KV_TRANSFER_ENFORCEMENT": enforcement,
-    }
-
-
-async def _wait_for_frontend_models(frontend_url: str, timeout_s: int = 120) -> None:
-    models_url = f"{frontend_url}/v1/models"
-    start_time = asyncio.get_running_loop().time()
-
-    async with aiohttp.ClientSession() as session:
-        while asyncio.get_running_loop().time() - start_time < timeout_s:
-            try:
-                async with session.get(models_url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data.get("data"):
-                            return
-            except aiohttp.ClientError:
-                pass
-            await asyncio.sleep(1)
-
-    raise TimeoutError(f"Timed out waiting for models at {models_url}")
-
-
-def _topology_pinned_payload(
-    test_payload: Dict[str, Any],
-    prefill_worker_id: int,
-) -> Dict[str, Any]:
-    return {
-        **test_payload,
-        "stream": False,
-        "nvext": {
-            **test_payload.get("nvext", {}),
-            "prefill_worker_id": prefill_worker_id,
-            "extra_fields": ["worker_id"],
-        },
-    }
-
-
-async def _send_topology_pinned_request_expect_success(
-    chat_url: str,
-    test_payload: Dict[str, Any],
-    prefill_worker_id: int,
-    decode_worker_ids: list[int],
-    timeout_s: int = 120,
-) -> Dict[str, Any]:
-    payload = _topology_pinned_payload(test_payload, prefill_worker_id)
-    deadline = asyncio.get_running_loop().time() + timeout_s
-
-    async with aiohttp.ClientSession() as session:
-        while asyncio.get_running_loop().time() < deadline:
-            async with session.post(chat_url, json=payload) as response:
-                response_body = await response.text()
-                if response.status == 404:
-                    await asyncio.sleep(1)
-                    continue
-
-                assert response.status == 200, (
-                    "Expected required KV-transfer topology match to succeed, "
-                    f"got status={response.status} body={response_body}"
-                )
-                data = json.loads(response_body)
-                worker_id_info = data.get("nvext", {}).get("worker_id", {})
-                assert worker_id_info.get("prefill_worker_id") == prefill_worker_id, (
-                    f"Expected prefill_worker_id={prefill_worker_id}, "
-                    f"got worker_id={worker_id_info}"
-                )
-                decode_worker_id = worker_id_info.get("decode_worker_id")
-                assert decode_worker_id in decode_worker_ids, (
-                    f"Expected decode_worker_id in {decode_worker_ids}, "
-                    f"got worker_id={worker_id_info}"
-                )
-                return worker_id_info
-
-    raise TimeoutError("Timed out waiting for topology-matched chat completion")
-
-
-async def _send_topology_pinned_request_expect_failure(
-    chat_url: str,
-    test_payload: Dict[str, Any],
-    prefill_worker_id: int,
-) -> tuple[int, str]:
-    payload = _topology_pinned_payload(test_payload, prefill_worker_id)
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(chat_url, json=payload) as response:
-            response_body = await response.text()
-            assert response.status != 200, (
-                "Expected required KV-transfer topology mismatch to fail, "
-                f"got status=200 body={response_body}"
-            )
-            return response.status, response_body
-
-
 @pytest.mark.timeout(180)  # planner-profile mocker setup can exceed 120s on CI CPUs
 @pytest.mark.parametrize(
     "router_mode,durable_kv_events,mocker_args_override",
@@ -1805,9 +1696,9 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
         "block_size": BLOCK_SIZE,
     }
 
-    prefill_zone_a_env = _topology_env(tmp_path, "prefill-zone-a", {"zone": "zone-a"})
-    prefill_zone_b_env = _topology_env(tmp_path, "prefill-zone-b", {"zone": "zone-b"})
-    decode_zone_a_env = _topology_env(tmp_path, "decode-zone-a", {"zone": "zone-a"})
+    prefill_zone_a_env = topology_env(tmp_path, "prefill-zone-a", {"zone": "zone-a"})
+    prefill_zone_b_env = topology_env(tmp_path, "prefill-zone-b", {"zone": "zone-b"})
+    decode_zone_a_env = topology_env(tmp_path, "decode-zone-a", {"zone": "zone-a"})
 
     with DisaggMockerProcess(
         request,
@@ -1852,7 +1743,9 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 request_plane="tcp",
                 env_overrides=decode_zone_a_env,
             ) as decode_workers:
-                decode_endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
+                decode_endpoint = runtime.endpoint(
+                    f"{shared_namespace}.backend.generate"
+                )
                 decode_ids = sorted(
                     asyncio.run(poll_for_worker_instances(decode_endpoint, 2))
                 )
@@ -1871,31 +1764,43 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                     frontend_url = f"http://localhost:{frontend_port}"
                     chat_url = f"{frontend_url}/v1/chat/completions"
 
-                    async def run_requests() -> tuple[Dict[str, Any], tuple[int, str]]:
-                        await _wait_for_frontend_models(frontend_url)
-                        success_worker_ids = (
-                            await _send_topology_pinned_request_expect_success(
-                                chat_url,
-                                TEST_PAYLOAD,
-                                prefill_zone_a_id,
-                                decode_ids,
-                            )
+                    async def run_requests() -> None:
+                        await wait_for_frontend_ready(
+                            frontend_url, expected_num_workers=4
                         )
-                        failure = await _send_topology_pinned_request_expect_failure(
-                            chat_url,
-                            TEST_PAYLOAD,
-                            prefill_zone_b_id,
-                        )
-                        return success_worker_ids, failure
+                        zone_a_payload = {
+                            **TEST_PAYLOAD,
+                            "nvext": {
+                                "prefill_worker_id": prefill_zone_a_id,
+                            },
+                        }
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(
+                                chat_url, json=zone_a_payload
+                            ) as response:
+                                response_body = await response.text()
+                                assert response.status == 200, (
+                                    "Expected required KV-transfer topology match to succeed, "
+                                    f"got status={response.status} body={response_body}"
+                                )
 
-                    success_worker_ids, (status, body) = asyncio.run(run_requests())
-                    logger.info(
-                        "Topology match succeeded with worker_id=%s; "
-                        "mismatch failed closed with status=%s body=%s",
-                        success_worker_ids,
-                        status,
-                        body,
-                    )
+                        zone_b_payload = {
+                            **TEST_PAYLOAD,
+                            "nvext": {
+                                "prefill_worker_id": prefill_zone_b_id,
+                            },
+                        }
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(
+                                chat_url, json=zone_b_payload
+                            ) as response:
+                                response_body = await response.text()
+                                assert response.status == 500, (
+                                    "Expected required KV-transfer topology mismatch to fail, "
+                                    f"got status={response.status} body={response_body}"
+                                )
+
+                    asyncio.run(run_requests())
 
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
 @pytest.mark.parametrize(
