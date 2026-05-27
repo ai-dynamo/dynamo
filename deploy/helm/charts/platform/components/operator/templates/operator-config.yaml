@@ -125,7 +125,18 @@ data:
       istio:
         {{- $istio := .Values.dynamo.serviceMesh.istio | default dict }}
         tlsMode: {{ $istio.tlsMode | default "SIMPLE" | quote }}
-        insecureSkipVerify: {{ $istio.insecureSkipVerify | default true }}
+        {{- /*
+          DYN-3115: cannot use `$istio.insecureSkipVerify | default true` here
+          because Sprig's `default` treats `false` as empty and coerces it back
+          to `true`, silently discarding a user-supplied `insecureSkipVerify=false`
+          and leaving TLS verification permanently skipped. Use an explicit
+          hasKey check (matches the pattern used on lines 93, 98, 103, 121).
+        */}}
+        {{- if hasKey $istio "insecureSkipVerify" }}
+        insecureSkipVerify: {{ $istio.insecureSkipVerify }}
+        {{- else }}
+        insecureSkipVerify: true
+        {{- end }}
         {{- if $istio.clientCertificate }}
         clientCertificate: {{ $istio.clientCertificate | quote }}
         {{- end }}
