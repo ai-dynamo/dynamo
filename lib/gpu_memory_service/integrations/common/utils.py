@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
+from gpu_memory_service.client.torch.allocator import prune_allocations
 from gpu_memory_service.client.torch.module import register_module_tensors
 from gpu_memory_service.common.locks import RequestedLockType
 
@@ -82,8 +83,16 @@ def finalize_gms_write(
     Returns:
         Total bytes committed.
     """
-    register_module_tensors(allocator, model)
+    referenced_allocation_ids = register_module_tensors(allocator, model)
+    before_prune_bytes = allocator.total_bytes
+    before_prune_count = len(allocator.mappings)
+    prune_allocations(
+        allocator,
+        referenced_allocation_ids=referenced_allocation_ids,
+    )
     total_bytes = allocator.total_bytes
+    pruned_bytes = before_prune_bytes - total_bytes
+    pruned_count = before_prune_count - len(allocator.mappings)
 
     # Synchronize before commit — caller's writes must be visible
     torch.cuda.synchronize()
@@ -94,9 +103,12 @@ def finalize_gms_write(
     allocator.remap_all_vas()
 
     logger.info(
-        "[GMS] Committed %.2f GiB, switched to read mode with %d mappings",
+        "[GMS] Committed %.2f GiB, switched to read mode with %d mappings "
+        "(pruned %d allocations / %.2f GiB before commit)",
         total_bytes / (1 << 30),
         len(allocator._mappings),
+        pruned_count,
+        pruned_bytes / (1 << 30),
     )
 
     return int(total_bytes)

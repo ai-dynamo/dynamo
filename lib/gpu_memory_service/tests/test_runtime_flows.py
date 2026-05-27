@@ -711,6 +711,38 @@ def test_destroy_mapping_frees_allocation_and_metadata(running_gms):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_prune_allocations_frees_unreferenced_mappings(running_gms):
+    _, socket_path = running_gms
+
+    from gpu_memory_service.client.torch.allocator import prune_allocations
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        writer.connect(RequestedLockType.RW)
+        keep_va = writer.create_mapping(size=4096, tag="weights")
+        prune_va = writer.create_mapping(size=8192, tag="weights")
+
+        keep_allocation_id = writer.mappings[keep_va].allocation_id
+        prune_allocation_id = writer.mappings[prune_va].allocation_id
+
+        prune_allocations(
+            writer,
+            referenced_allocation_ids={keep_allocation_id},
+            synchronize=False,
+        )
+
+        assert keep_va in writer.mappings
+        assert prune_va not in writer.mappings
+        assert [info.allocation_id for info in writer.list_handles()] == [
+            keep_allocation_id
+        ]
+        with pytest.raises(RuntimeError, match="Unknown allocation"):
+            writer.get_handle_info(prune_allocation_id)
+    finally:
+        writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 def test_remap_all_vas_succeeds_when_committed_layout_is_unchanged(
     running_gms,
 ):
