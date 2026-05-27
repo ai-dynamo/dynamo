@@ -51,7 +51,9 @@ use crate::protocols::common::preprocessor::{
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
-use dynamo_parsers::{ReasoningParser, ReasoningParserType};
+use dynamo_parsers::{
+    ReasoningParser, ReasoningParserType, skips_guided_json_when_prompt_injected,
+};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
@@ -1687,20 +1689,22 @@ impl OpenAIPreprocessor {
                 Some("kimi_k25")
             );
 
-        // Under guided-decoding (tool_choice=required/named), only force-
-        // reasoning parsers must skip — they treat the bare JSON output as
-        // reasoning_content and starve the jail. Non-force-reasoning parsers
-        // (qwen3, deepseek_v4, glm45, etc.) are safe to run: vLLM's
-        // reasoner-gate allows free generation during `<think>...</think>`
-        // before clamping to the guided grammar, so the model emits
-        // `<reasoning></think><JSON>` and the parser strips the prefix so the
-        // jail sees pure JSON.
-        let skip_reasoning_for_guided_json =
-            matches!(
-                request.inner.tool_choice,
-                Some(ChatCompletionToolChoiceOption::Required)
-                    | Some(ChatCompletionToolChoiceOption::Named(_))
-            ) && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
+        // Under guided-decoding (tool_choice=required/named), some reasoning
+        // parsers must skip because the backend emits bare JSON and the jail
+        // needs to see that JSON as content. Force-reasoning parsers always
+        // need this. Some non-force parsers also declare this unsafe when the
+        // prompt already injected the reasoning start token.
+        let is_guided_tool_choice = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+        let skip_reasoning_for_guided_json = is_guided_tool_choice
+            && (Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref())
+                || (prompt_injected_reasoning
+                    && skips_guided_json_when_prompt_injected(
+                        self.runtime_config.reasoning_parser.as_deref(),
+                    )));
 
         let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
             self.runtime_config.reasoning_parser.as_deref(),
