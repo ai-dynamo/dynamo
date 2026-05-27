@@ -113,7 +113,9 @@ spec:
         - name: ENDPOINT
           value: gpt-oss-agg-frontend:8000
         - name: CONCURRENCY_PER_GPU
-          value: "900"
+          # Five 4x GB200 128/1000 streaming runs at 2048 total concurrency averaged
+          # ~105k output tok/s, ~1.77s TTFT, and ~17.3ms ITL.
+          value: "512"
         - name: DEPLOYMENT_GPU_COUNT
           value: "4"
         - name: ISL
