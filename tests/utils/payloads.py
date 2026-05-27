@@ -409,9 +409,8 @@ class CachedTokensChatPayload(ChatPayload):
         require_vllm_mm_processor_init: bool = False,
         min_routing_total_blocks: int = 0,
     ):
-        # Strong-gating: when these opt-ins are set, fail closed if MM-aware
-        # routing silently degrades to text-prefix overlap (which would
-        # otherwise still satisfy cached_tokens >= 1 via prompt-prefix luck).
+        # Strong-gate kwargs: fail closed on text-prefix degradation, which
+        # could otherwise satisfy cached_tokens >= 1 via prompt-prefix luck.
         log_patterns: List[str] = list(expected_log or [])
         if require_lightseek_init:
             log_patterns.append(r"MM-aware KV routing enabled \(lightseek\)")

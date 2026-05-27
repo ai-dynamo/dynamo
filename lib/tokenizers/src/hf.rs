@@ -15,26 +15,10 @@ pub struct HuggingFaceTokenizer {
 }
 
 impl HuggingFaceTokenizer {
-    /// Load a HuggingFace tokenizer from `tokenizer.json`.
-    ///
-    /// If a sibling `tokenizer_config.json` is present, its
-    /// `added_tokens_decoder` entries with `"special": true` are merged in as
-    /// special tokens. This mirrors what HuggingFace's Python
-    /// `AutoTokenizer.from_pretrained()` does — some model releases (e.g.
-    /// Qwen2-VL-2B-Instruct) declare special tokens only in
-    /// `tokenizer_config.json`'s `added_tokens_decoder`, not in
-    /// `tokenizer.json`'s `added_tokens`. Without this merge, the rust
-    /// `tokenizers` crate BPE-shatters those tokens at encode time (e.g.
-    /// `<|image_pad|>` for Qwen2-VL-2B encodes to 6 sub-tokens instead of
-    /// the intended single id 151655), which silently breaks anything that
-    /// relies on the token round-tripping (MM-aware KV routing, response
-    /// post-processing keyed on special tokens, etc.).
-    ///
-    /// The merge is idempotent: tokens already registered in
-    /// `tokenizer.json`'s added_tokens are detected via
-    /// `Model::token_to_id` and reuse their existing id, so this is a no-op
-    /// for the common case where both files agree (Qwen2.5-VL, Qwen3-VL,
-    /// LLaVA, Phi-3, etc.).
+    /// Load from `tokenizer.json`, merging in special tokens declared only in
+    /// a sibling `tokenizer_config.json`'s `added_tokens_decoder`. Without
+    /// this, some releases (Qwen2-VL-2B's `<|image_pad|>`) BPE-shatter and
+    /// silently break MM-aware routing. The merge is idempotent.
     pub fn from_file(model_name: &str) -> Result<Self> {
         let mut tokenizer = HfTokenizer::from_file(model_name)
             .map_err(|err| Error::msg(format!("Error loading tokenizer: {}", err)))?;
@@ -50,19 +34,8 @@ impl HuggingFaceTokenizer {
         HuggingFaceTokenizer { tokenizer }
     }
 
-    /// Wrap an already-loaded `HfTokenizer`, then merge any
-    /// `tokenizer_config.json` special tokens from `model_dir`.
-    ///
-    /// Use this when the caller has its own reason to load the bare
-    /// `HfTokenizer` first (e.g. so it can surface a precise JSON parse
-    /// error with line context) but still wants `tokenizer.json` +
-    /// `tokenizer_config.json` to be merged into the final tokenizer.
-    /// Without this merge, models whose `<|image_pad|>`-style special
-    /// tokens live only in `tokenizer_config.json` (e.g. Qwen2-VL-2B)
-    /// silently encode their special tokens as multi-token BPE
-    /// fragments, breaking MM-aware KV routing and any other path that
-    /// depends on those tokens round-tripping. See
-    /// [`HuggingFaceTokenizer::from_file`] for the full rationale.
+    /// Wrap an already-loaded `HfTokenizer` and merge in the sibling
+    /// `tokenizer_config.json` special tokens; see [`Self::from_file`].
     pub fn from_tokenizer_with_model_dir(tokenizer: HfTokenizer, model_dir: &Path) -> Self {
         let mut tokenizer = tokenizer;
         merge_special_tokens_from_config(&mut tokenizer, model_dir);
@@ -70,14 +43,9 @@ impl HuggingFaceTokenizer {
     }
 }
 
-/// Read `tokenizer_config.json` from `model_dir` and register any
-/// `special: true` entries from its `added_tokens_decoder` map as special
-/// tokens on `tokenizer`. See `HuggingFaceTokenizer::from_file` for context.
-///
-/// Errors (missing file, parse failures, non-special entries) are swallowed
-/// because the file is optional: tokenizer.json alone is a valid HF
-/// tokenizer layout. We only log a debug line on parse failure so operators
-/// can spot a malformed sibling config without breaking the load.
+/// Promote `tokenizer_config.json`'s `special: true` `added_tokens_decoder`
+/// entries onto `tokenizer`. Missing-file / parse errors are swallowed since
+/// the file is optional. See [`HuggingFaceTokenizer::from_file`].
 fn merge_special_tokens_from_config(tokenizer: &mut HfTokenizer, model_dir: &Path) {
     let cfg_path = model_dir.join("tokenizer_config.json");
     let Ok(raw) = std::fs::read_to_string(&cfg_path) else {
@@ -105,11 +73,8 @@ fn merge_special_tokens_from_config(tokenizer: &mut HfTokenizer, model_dir: &Pat
             Some(o) => o,
             None => continue,
         };
-        // Only promote entries the model release explicitly marks as special.
-        // The id field is informational here: the tokenizers crate's
-        // `add_special_tokens` looks the content up in `Model::token_to_id`
-        // and reuses the existing vocab id (e.g. 151655 for Qwen2-VL's
-        // `<|image_pad|>`), so we don't need to plumb the id through.
+        // The id is informational — `add_special_tokens` reuses the existing
+        // vocab id via `Model::token_to_id` on the content string.
         if obj.get("special").and_then(|v| v.as_bool()) != Some(true) {
             continue;
         }
@@ -119,16 +84,12 @@ fn merge_special_tokens_from_config(tokenizer: &mut HfTokenizer, model_dir: &Pat
         if content.is_empty() {
             continue;
         }
-        // Preserve the per-token strip/normalize flags so the merged token
-        // matches the same input forms HF Python would match.
         let single_word = obj
             .get("single_word")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let lstrip = obj.get("lstrip").and_then(|v| v.as_bool()).unwrap_or(false);
         let rstrip = obj.get("rstrip").and_then(|v| v.as_bool()).unwrap_or(false);
-        // `added_tokens_decoder` defaults to `normalized: false` for special
-        // tokens; treat a missing key the same way.
         let normalized = obj
             .get("normalized")
             .and_then(|v| v.as_bool())
@@ -144,9 +105,8 @@ fn merge_special_tokens_from_config(tokenizer: &mut HfTokenizer, model_dir: &Pat
     if to_add.is_empty() {
         return;
     }
-    // `add_special_tokens` dedups against the existing added-tokens set, so
-    // tokens already present from `tokenizer.json` are no-ops. The return
-    // value is the count of net-new registrations.
+    // Dedups against existing added-tokens, so this is a no-op when
+    // tokenizer.json already had them. Return value = net-new count.
     let added = tokenizer.add_special_tokens(&to_add);
     if added > 0 {
         tracing::debug!(

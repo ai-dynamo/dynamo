@@ -992,11 +992,8 @@ impl ModelDeploymentCard {
                     Vec::new()
                 };
 
-                // Helper: wrap an HfTokenizer in the HuggingFaceTokenizer,
-                // merging sibling `tokenizer_config.json`'s `added_tokens_decoder`
-                // when a model_dir is available. Needed so models that declare
-                // special tokens only there (e.g. Qwen2-VL-2B's `<|image_pad|>`)
-                // tokenize the same way as HF Python's `AutoTokenizer.from_pretrained()`.
+                // Wrap an HfTokenizer, merging sibling tokenizer_config.json
+                // specials when a model_dir is available (needed for Qwen2-VL-2B).
                 let wrap_hf = |hf: HfTokenizer| match p.parent() {
                     Some(model_dir) => {
                         crate::tokenizers::HuggingFaceTokenizer::from_tokenizer_with_model_dir(

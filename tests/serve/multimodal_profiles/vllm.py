@@ -217,14 +217,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=19.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
-                # cached_tokens-asserting payload proves MM-aware routing
-                # engaged (2nd identical request hits the warm worker's KV
-                # cache). Qwen2-VL / Qwen2.5-VL chat templates emit
-                # `<|image_pad|>` (151655) while vLLM expands it to N
-                # `<|vision_pad|>` (151654) tokens; the rust frontend
-                # needs both to route MM requests correctly. Pre-fix this
-                # would have silently fallen back to text-prefix routing
-                # and cached_tokens would be 0.
+                # Qwen2-VL / Qwen2.5-VL: chat template emits `<|image_pad|>`
+                # (151655) but vLLM expands it to N `<|vision_pad|>` (151654);
+                # routing-side needs to handle the dual-token mapping.
                 tests=[
                     MmCase(
                         payload=make_image_payload_cached_tokens(
@@ -247,8 +242,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=16.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
-                # See qwen2.5-vl-3b note above on the dual-token routing
-                # path that this assertion validates.
+                # Dual-token routing path — see qwen2.5-vl-3b above.
                 tests=[
                     MmCase(
                         payload=make_image_payload_cached_tokens(
