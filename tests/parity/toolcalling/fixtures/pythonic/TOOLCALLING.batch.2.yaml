@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: pythonic
+mode: batch
+cases:
+  TOOLCALLING.batch.2.a:
+    description: Parallel calls in single bracket
+    ref: dynamo
+    model_text: '[get_weather(location="NYC"), get_time(timezone="EST")]'
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - &id003
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  TOOLCALLING.batch.2.c:
+    description: With surrounding narration
+    ref: dynamo
+    model_text: 'Both: [get_weather(location="NYC"), get_time(timezone="EST")] Done.'
+    tools:
+    - *id002
+    - *id003
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:'
+      vllm:
+        calls: []
+        normal_text: 'Both: [get_weather(location="NYC"), get_time(timezone="EST")] Done.'
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:  Done.'
+  TOOLCALLING.batch.2.d:
+    description: Same-name twice
+    ref: dynamo
+    model_text: '[get_weather(location="NYC"), get_weather(location="LA")]'
+    tools:
+    - *id002
+    - *id002
+    expected:
+      dynamo: &id004
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id004
+      sglang: *id004
+  TOOLCALLING.batch.2.b:
+    description: Two back-to-back fence pairs — not applicable to this family
+    reason: |-
+      pythonic's multi-call form is exercised by TOOLCALLING.batch.2.a / 2.c / 2.d; no back-to-back fence/wrapper pattern applies to this family's parser syntax.

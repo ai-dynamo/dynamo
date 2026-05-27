@@ -71,6 +71,14 @@ impl SingleRuntime {
         }
     }
 
+    /// Toggle per-request record capture on the underlying collector. When
+    /// `true`, the final `TraceSimulationReport` returned from `run()` will
+    /// have `per_request` populated. Default `false` (cheap).
+    pub(in crate::replay) fn with_per_request_records(mut self, capture: bool) -> Self {
+        self.collector.set_capture_per_request(capture);
+        self
+    }
+
     /// Cap the simulated wall-clock duration. After construction, call this to
     /// have `run()` stop gracefully once the simulated clock would exceed
     /// `ms`. Pass `None` to run to natural completion (the default).
@@ -719,7 +727,8 @@ mod tests {
     ) {
         let args = replay_args(enable_prefix_caching, enable_chunked_prefill);
         let manual = run_trace_manually(&args, replay_fixture());
-        let replay_report = simulate_trace_single(args, replay_fixture(), 1.0, None).unwrap();
+        let replay_report =
+            simulate_trace_single(args, replay_fixture(), 1.0, false, None).unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
@@ -775,7 +784,7 @@ mod tests {
             },
         ];
         let manual = run_concurrency_manually(&args, requests.clone(), 2);
-        let replay_report = simulate_concurrency_single(args, requests, 2, None).unwrap();
+        let replay_report = simulate_concurrency_single(args, requests, 2, false, None).unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();

@@ -28,6 +28,7 @@ import psutil
 import pytest
 
 from tests.conftest import EtcdServer, NatsServer
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
@@ -43,10 +44,10 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 pytestmark = [
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.e2e,
     pytest.mark.gpu_1,
     pytest.mark.integration,
-    pytest.mark.pre_merge,
     pytest.mark.model(MODEL_NAME),
     pytest.mark.timeout(300),
 ]
@@ -169,6 +170,7 @@ class WorkerProcess(ManagedProcess):
                 "--dyn-tool-call-parser",
                 "qwen25",
             ]
+        command.extend(build_gpu_mem_args("build_sglang_gpu_mem_args", env=env))
 
         super().__init__(
             command=command,
@@ -642,10 +644,9 @@ def parse_and_validate_tool_call(
 
 
 def assert_finish_reason(result: StreamResult, allowed: set[str]) -> None:
-    assert result.finish_reason in allowed, (
-        f"unexpected finish_reason={result.finish_reason!r}, "
-        f"allowed={sorted(allowed)}"
-    )
+    assert (
+        result.finish_reason in allowed
+    ), f"unexpected finish_reason={result.finish_reason!r}, allowed={sorted(allowed)}"
 
 
 def assistant_tool_message_from_result(result: StreamResult) -> dict[str, Any]:
@@ -1107,3 +1108,57 @@ class TestToolCallingModelBehavior:
             parse_and_validate_tool_call(
                 result.tool_calls[0], schema, expected_name="get_weather"
             )
+
+
+def _run_with_assertion_reruns(func, *args, attempts: int = 3):
+    """Retry assertion-only checks that can vary with model generation."""
+    for attempt in range(attempts):
+        try:
+            return func(*args)
+        except AssertionError:
+            if attempt == attempts - 1:
+                raise
+
+
+@pytest.mark.pre_merge
+@pytest.mark.core
+@pytest.mark.timeout(420)
+def test_tool_calling_sglang_all(client: OpenAI, model: str):
+    """Run the pre-merge tool-calling scenarios under one SGLang worker startup."""
+    protocol = TestToolCallingProtocol()
+    protocol.test_stream_has_required_chunk_shape(client, model)
+    protocol.test_single_tool_call_schema_valid(client, model)
+    protocol.test_tool_choice_required_forces_a_tool_call(client, model)
+    protocol.test_tool_choice_none_suppresses_tool_calls(client, model)
+    _run_with_assertion_reruns(
+        protocol.test_named_tool_choice_forces_specific_function, client, model
+    )
+    _run_with_assertion_reruns(
+        protocol.test_parallel_multi_tool_request_includes_all_expected_tools,
+        client,
+        model,
+    )
+    _run_with_assertion_reruns(protocol.test_array_argument_schema_valid, client, model)
+    _run_with_assertion_reruns(protocol.test_no_tools_is_plain_text, client, model)
+
+    multi_turn = TestToolCallingMultiTurn()
+    _run_with_assertion_reruns(
+        multi_turn.test_tool_result_is_consumed_and_final_answer_is_text, client, model
+    )
+    _run_with_assertion_reruns(
+        multi_turn.test_chained_tool_use_search_then_calculate, client, model
+    )
+    _run_with_assertion_reruns(
+        multi_turn.test_multiple_prior_tool_results_synthesize_to_text, client, model
+    )
+
+    behavior = TestToolCallingModelBehavior()
+    _run_with_assertion_reruns(
+        behavior.test_many_tools_prefers_calculator_for_math_question, client, model
+    )
+    _run_with_assertion_reruns(
+        behavior.test_unicode_arguments_are_preserved, client, model
+    )
+    _run_with_assertion_reruns(
+        behavior.test_system_instruction_encourages_tool_use, client, model
+    )

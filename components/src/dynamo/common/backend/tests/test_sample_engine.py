@@ -14,11 +14,7 @@ pytest.importorskip(
     reason="dynamo._core.backend not built — run `maturin develop` first",
 )
 
-from dynamo.common.backend.publisher import (  # noqa: E402
-    Metrics,
-    PushSource,
-    SnapshotSource,
-)
+from dynamo.common.backend.publisher import PushSource  # noqa: E402
 from dynamo.common.backend.sample_engine import SampleLLMEngine  # noqa: E402
 from dynamo.common.constants import DisaggregationMode  # noqa: E402
 
@@ -121,17 +117,15 @@ async def test_from_args_propagates_mode_to_worker_config():
 async def test_source_descriptors_have_expected_shape():
     engine = SampleLLMEngine(max_tokens=4, delay=0.0)
     [kv_src] = await engine.kv_event_sources()
-    [metrics_src] = await engine.metrics_sources()
     assert isinstance(kv_src, PushSource) and kv_src.dp_rank == 0
-    assert isinstance(metrics_src, SnapshotSource) and metrics_src.dp_rank == 0
-    assert metrics_src.snapshot() == Metrics(kv_used_blocks=0)
+    assert engine.component_metrics_dp_ranks() == [0]
 
 
-async def test_generate_round_trips_kv_used_blocks_through_snapshot():
+async def test_attach_snapshot_publisher_stashes_handle():
     engine = SampleLLMEngine(max_tokens=2, delay=0.0)
-    snapshot = (await engine.metrics_sources())[0].snapshot
-    await _collect(engine, {"token_ids": list(range(32))})
-    assert snapshot() == Metrics(kv_used_blocks=0)
+    sentinel = object()
+    engine.attach_snapshot_publisher(sentinel)
+    assert engine._snapshot_publisher is sentinel
 
 
 async def test_cleanup_joins_publisher_thread_started_via_on_ready():
@@ -141,3 +135,30 @@ async def test_cleanup_joins_publisher_thread_started_via_on_ready():
     assert engine._publish_thread is not None and engine._publish_thread.is_alive()
     await engine.cleanup()
     assert not engine._publish_thread.is_alive()
+
+
+async def test_health_check_payload_decode_probe_passes_generate(monkeypatch):
+    """Decode probe drives `generate()` end-to-end: `is_probe(request)`
+    triggers the bypass branch, `require_prefill_result` is skipped, and
+    the stream completes — even though the payload carries no synthetic
+    `prefill_result`."""
+    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    engine = SampleLLMEngine(
+        max_tokens=2, delay=0.0, disaggregation_mode=DisaggregationMode.DECODE
+    )
+    payload = await engine.health_check_payload()
+    assert payload is not None
+    assert "prefill_result" not in payload  # no payload trick
+    chunks = await _collect(engine, payload)  # type: ignore[arg-type]
+    assert any(c.get("finish_reason") for c in chunks)
+
+
+async def test_decode_without_probe_marker_still_requires_prefill_result():
+    """Negative: a real DECODE request (no `_HEALTH_CHECK` marker) must
+    still trip `require_prefill_result`. Guards against the bypass branch
+    swallowing real-traffic misconfigurations."""
+    engine = SampleLLMEngine(
+        max_tokens=2, delay=0.0, disaggregation_mode=DisaggregationMode.DECODE
+    )
+    with pytest.raises(ValueError, match="prefill_result"):
+        await _collect(engine, {"token_ids": [1]})

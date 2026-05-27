@@ -9,7 +9,6 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
@@ -53,7 +52,6 @@ required-features = ["kv-router-stress"]
 
 [dependencies]
 # repo
-dynamo-config = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
@@ -161,8 +159,8 @@ galil-seiferas = { version = "0.1" }
 
 # preprocessor
 bs62 = { version = "0.1" }
-minijinja = { version = "2.15.1", features = ["loader", "loop_controls"] }
-minijinja-contrib = { version = "2.15.1", features = ["pycompat"] }
+minijinja = { version = "2.20.0", features = ["loader", "loop_controls"] }
+minijinja-contrib = { version = "2.20.0", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor
