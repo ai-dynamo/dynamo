@@ -302,7 +302,8 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 
-	if !isRestorePodEligible(pod) {
+	if pod.DeletionTimestamp != nil ||
+		(pod.Status.Phase != corev1.PodPending && pod.Status.Phase != corev1.PodRunning) {
 		return
 	}
 
@@ -374,14 +375,6 @@ func restoreContainerIDFromStatus(pod *corev1.Pod, containerName string) string 
 	return ""
 }
 
-func isRestorePodEligible(pod *corev1.Pod) bool {
-	if pod.DeletionTimestamp != nil {
-		return false
-	}
-	return pod.Status.Phase == corev1.PodPending ||
-		pod.Status.Phase == corev1.PodRunning
-}
-
 func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *corev1.Pod, podKey, containerName string) (*corev1.Pod, bool) {
 	livePod, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	if err != nil {
@@ -398,7 +391,8 @@ func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *cor
 		)
 		return nil, false
 	}
-	if !isRestorePodEligible(livePod) {
+	if livePod.DeletionTimestamp != nil ||
+		(livePod.Status.Phase != corev1.PodPending && livePod.Status.Phase != corev1.PodRunning) {
 		w.log.V(1).Info("Skipping restore; pod became ineligible while polling runtime",
 			"pod", podKey,
 			"container", containerName,
