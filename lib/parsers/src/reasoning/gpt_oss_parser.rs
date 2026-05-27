@@ -9,6 +9,7 @@ use crate::ReasoningParser;
 use openai_harmony::StreamableParser;
 use openai_harmony::chat::TextContent;
 use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, chat::Role, load_harmony_encoding};
+use regex::Regex;
 
 ///// Static initialization of harmony encoder to not affect performance every time a parser is created
 /// This is because load_harmony_encoding downloads some tiktoken files into a directory and we don't want to do this every time we create a parser.
@@ -16,6 +17,23 @@ use std::sync::OnceLock;
 
 static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::Error>> =
     OnceLock::new();
+
+static HARMONY_CONTROL_TOKEN_RE: OnceLock<Regex> = OnceLock::new();
+
+/// Strip harmony control tokens (`<|start|>`, `<|channel|>`, `<|message|>`,
+/// `<|constrain|>`, `<|end|>`, `<|call|>`, `<|return|>`) from raw chunk text
+/// surfaced on the StreamableParser error path. Without this, malformed
+/// harmony chunks that don't match the jail's `<|channel|>commentary` start
+/// marker (e.g. bare `<|end|>` followed by prose, or analysis-only chunks)
+/// would leak structural tokens to the client. Mirrors SGLang's
+/// `_is_standalone_structural_token` filter in their tolerant HarmonyParser.
+fn strip_harmony_control_tokens(text: &str) -> String {
+    let re = HARMONY_CONTROL_TOKEN_RE.get_or_init(|| {
+        Regex::new(r"<\|(?:start|channel|message|constrain|end|call|return)\|>")
+            .expect("harmony control token regex")
+    });
+    re.replace_all(text, "").into_owned()
+}
 
 fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
     GLOBAL_HARMONY_GPTOSS_ENCODING.get_or_init(|| {
@@ -104,10 +122,12 @@ impl ReasoningParser for GptOssReasoningParser {
                 // `<|start|>`). Dropping the chunk silently loses content; surface the
                 // raw text instead so downstream (harmony tool-call regex fallback,
                 // jail) gets a shot. Once StreamableParser is in an error state, no
-                // further deltas will materialize, so abandon the loop.
+                // further deltas will materialize, so abandon the loop. Strip harmony
+                // control tokens so bare markers (e.g. `<|end|>`, `<|channel|>analysis`)
+                // don't leak past the jail, whose start markers only cover commentary.
                 tracing::warn!("Harmony parse error for token_id {token_id}: {e}");
                 return ParserResult {
-                    normal_text: text.to_string(),
+                    normal_text: strip_harmony_control_tokens(text),
                     reasoning_text: String::new(),
                 };
             }
@@ -219,9 +239,11 @@ impl ReasoningParser for GptOssReasoningParser {
                 // tool-call regex fallback, jail) can still recover instead of the
                 // chunk being dropped entirely. Drops any partial deltas accumulated
                 // in this chunk before the failure; trade-off vs. losing the chunk.
+                // Strip harmony control tokens to keep bare markers from leaking past
+                // the jail (whose start markers only cover commentary).
                 tracing::warn!("Harmony parse error for token_id {token_id}: {e}");
                 return ParserResult {
-                    normal_text: text.to_string(),
+                    normal_text: strip_harmony_control_tokens(text),
                     reasoning_text: String::new(),
                 };
             }
@@ -452,5 +474,28 @@ mod tests {
                 "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
             );
         }
+    }
+
+    #[test]
+    fn test_strip_harmony_control_tokens() {
+        // Bare control tokens and channel markers removed; prose preserved.
+        assert_eq!(
+            strip_harmony_control_tokens("<|end|>regular text"),
+            "regular text"
+        );
+        assert_eq!(
+            strip_harmony_control_tokens("<|channel|>analysis<|message|>thinking<|end|>"),
+            "analysisthinking"
+        );
+        assert_eq!(
+            strip_harmony_control_tokens("plain text with no markers"),
+            "plain text with no markers"
+        );
+        // Unknown `<|foo|>` markers are left alone — only the harmony control
+        // set is stripped, so model-emitted XML-ish tokens aren't clobbered.
+        assert_eq!(
+            strip_harmony_control_tokens("<|foo|>kept<|return|>dropped"),
+            "<|foo|>keptdropped"
+        );
     }
 }
