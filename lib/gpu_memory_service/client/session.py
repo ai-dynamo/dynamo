@@ -37,10 +37,13 @@ from gpu_memory_service.common.protocol.messages import (
     ListAllocationsResponse,
     MetadataDeleteRequest,
     MetadataDeleteResponse,
+    MetadataEntrySpec,
     MetadataGetRequest,
     MetadataGetResponse,
     MetadataListRequest,
     MetadataListResponse,
+    MetadataPutManyRequest,
+    MetadataPutManyResponse,
     MetadataPutRequest,
     MetadataPutResponse,
 )
@@ -230,6 +233,33 @@ class _GMSClientSession:
             ),
             MetadataPutResponse,
         ).success
+
+    def metadata_put_many(
+        self,
+        entries: List[tuple[str, str, int, bytes]],
+    ) -> bool:
+        if not entries:
+            return True
+        response = self._transport.request(
+            MetadataPutManyRequest(
+                entries=[
+                    MetadataEntrySpec(
+                        key=key,
+                        allocation_id=allocation_id,
+                        offset_bytes=offset_bytes,
+                        value=value,
+                    )
+                    for key, allocation_id, offset_bytes, value in entries
+                ]
+            ),
+            MetadataPutManyResponse,
+        )
+        if int(response.count) != len(entries):
+            raise RuntimeError(
+                "GMS metadata_put_many count mismatch: "
+                f"{response.count} vs {len(entries)}"
+            )
+        return response.success
 
     def metadata_get(self, key: str) -> Optional[tuple[str, int, bytes]]:
         response = self._transport.request(

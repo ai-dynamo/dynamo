@@ -692,6 +692,34 @@ def test_invalid_metadata_offset_is_rejected_without_mutating_state(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_metadata_put_many_is_atomic_on_validation_error(running_gms):
+    _, socket_path = running_gms
+
+    writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
+    try:
+        allocation_id, aligned_size = writer.allocate(4096, "weights")
+        with pytest.raises(RuntimeError, match="out of range"):
+            writer.metadata_put_many(
+                [
+                    ("tensor.good", allocation_id, 0, b"good"),
+                    ("tensor.bad", allocation_id, aligned_size, b"bad"),
+                ]
+            )
+        assert writer.metadata_list() == []
+
+        assert writer.metadata_put_many(
+            [
+                ("tensor.0", allocation_id, 0, b"x"),
+                ("tensor.1", allocation_id, 1, b"y"),
+            ]
+        )
+        assert writer.metadata_get("tensor.0") == (allocation_id, 0, b"x")
+        assert writer.metadata_get("tensor.1") == (allocation_id, 1, b"y")
+    finally:
+        writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 def test_destroy_mapping_frees_allocation_and_metadata(running_gms):
     _, socket_path = running_gms
 

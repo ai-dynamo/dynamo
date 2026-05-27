@@ -395,6 +395,12 @@ class GMSClientMemoryManager:
     ) -> bool:
         return self._client_rpc.metadata_put(key, allocation_id, offset_bytes, value)
 
+    def metadata_put_many(
+        self,
+        entries: List[tuple[str, str, int, bytes]],
+    ) -> bool:
+        return self._client_rpc.metadata_put_many(entries)
+
     def metadata_get(self, key: str) -> Optional[tuple[str, int, bytes]]:
         return self._client_rpc.metadata_get(key)
 

@@ -461,13 +461,25 @@ class GMSStorageClient:
         saved_metadata: Dict[str, Dict[str, Any]],
         id_map: Dict[str, str],
     ) -> None:
+        entries: list[tuple[str, str, int, bytes]] = []
         for key, meta in saved_metadata.items():
             old_alloc_id = meta["allocation_id"]
             new_alloc_id = id_map.get(old_alloc_id, old_alloc_id)
-            ok = mm.metadata_put(key, new_alloc_id, meta["offset_bytes"], meta["value"])
-            if not ok:
-                raise RuntimeError(f"Failed to write metadata key={key!r}")
-            logger.debug("Restored metadata key=%s -> alloc=%s", key, new_alloc_id)
+            entries.append(
+                (
+                    key,
+                    new_alloc_id,
+                    meta["offset_bytes"],
+                    meta["value"],
+                )
+            )
+
+        ok = mm.metadata_put_many(entries)
+        if not ok:
+            raise RuntimeError("Failed to write metadata batch")
+
+        for key, allocation_id, _, _ in entries:
+            logger.debug("Restored metadata key=%s -> alloc=%s", key, allocation_id)
         logger.info("Restored %d metadata keys; committing", len(saved_metadata))
 
     def _save_metadata(self, mm: Any) -> Dict[str, Any]:

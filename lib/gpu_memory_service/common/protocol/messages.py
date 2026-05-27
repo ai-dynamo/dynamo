@@ -138,6 +138,22 @@ class MetadataPutResponse(msgspec.Struct, tag="metadata_put_response"):
     success: bool
 
 
+class MetadataEntrySpec(msgspec.Struct):
+    key: str
+    allocation_id: str
+    offset_bytes: int
+    value: bytes
+
+
+class MetadataPutManyRequest(msgspec.Struct, tag="metadata_put_many_request"):
+    entries: List[MetadataEntrySpec]
+
+
+class MetadataPutManyResponse(msgspec.Struct, tag="metadata_put_many_response"):
+    success: bool
+    count: int
+
+
 class MetadataGetRequest(msgspec.Struct, tag="metadata_get_request"):
     key: str
 
@@ -227,6 +243,8 @@ Message = Union[
     ErrorResponse,
     MetadataPutRequest,
     MetadataPutResponse,
+    MetadataPutManyRequest,
+    MetadataPutManyResponse,
     MetadataGetRequest,
     MetadataGetResponse,
     MetadataDeleteRequest,

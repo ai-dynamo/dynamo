@@ -45,6 +45,8 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataGetResponse,
     MetadataListRequest,
     MetadataListResponse,
+    MetadataPutManyRequest,
+    MetadataPutManyResponse,
     MetadataPutRequest,
     MetadataPutResponse,
 )
@@ -440,6 +442,36 @@ class GMS:
                 value=msg.value,
             )
             return MetadataPutResponse(success=True), -1, False
+
+        if msg_type is MetadataPutManyRequest:
+            allocations_by_id: dict[str, AllocationInfo] = {}
+            pending: list[tuple[str, AllocationInfo, int, bytes]] = []
+            for entry in msg.entries:
+                allocation = allocations_by_id.get(entry.allocation_id)
+                if allocation is None:
+                    allocation = self._allocations.get_allocation(entry.allocation_id)
+                    allocations_by_id[entry.allocation_id] = allocation
+                self._validate_metadata_target(allocation, entry.offset_bytes)
+                pending.append(
+                    (
+                        entry.key,
+                        allocation,
+                        entry.offset_bytes,
+                        entry.value,
+                    )
+                )
+
+            for key, allocation, offset_bytes, value in pending:
+                self._metadata[key] = MetadataEntry(
+                    allocation_id=allocation.allocation_id,
+                    offset_bytes=offset_bytes,
+                    value=value,
+                )
+            return (
+                MetadataPutManyResponse(success=True, count=len(pending)),
+                -1,
+                False,
+            )
 
         if msg_type is MetadataGetRequest:
             entry = self._metadata.get(msg.key)

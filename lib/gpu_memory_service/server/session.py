@@ -25,6 +25,7 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataDeleteRequest,
     MetadataGetRequest,
     MetadataListRequest,
+    MetadataPutManyRequest,
     MetadataPutRequest,
 )
 
@@ -40,6 +41,7 @@ RW_REQUIRED: frozenset[type] = frozenset(
         AllocateManyRequest,
         AllocateRequest,
         FreeAllocationRequest,
+        MetadataPutManyRequest,
         MetadataPutRequest,
         MetadataDeleteRequest,
         CommitRequest,

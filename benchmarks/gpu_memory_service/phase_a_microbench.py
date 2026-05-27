@@ -249,6 +249,28 @@ def _metadata_put_loop(
                 raise RuntimeError(f"metadata_put failed at index {i}")
 
 
+def _metadata_put_many(
+    mm: GMSClientMemoryManager,
+    allocations,
+    count: int,
+    timings: list[StepTiming],
+) -> None:
+    payload = b'{"shape":[1],"dtype":"torch.float16","stride":[1],"tensor_type":"parameter"}'
+    entries = [
+        (f"bench_tensor_{i}", alloc.allocation_id, 0, payload)
+        for i, alloc in enumerate(allocations[:count])
+    ]
+    with Timer(
+        timings,
+        "metadata_put_many",
+        count=len(entries),
+        bytes=len(payload) * len(entries),
+    ):
+        ok = mm.metadata_put_many(entries)
+        if not ok:
+            raise RuntimeError("metadata_put_many failed")
+
+
 def _export_allocations(
     mm: GMSClientMemoryManager,
     allocations,
@@ -285,6 +307,7 @@ def _run_per_allocation(
     timings: list[StepTiming],
     batch_export: bool = False,
     export_chunk_size: int = 128,
+    batch_metadata: bool = False,
 ) -> None:
     allocations = _allocate(mm, sizes, timings)
     fds: list[int] = []
@@ -322,7 +345,8 @@ def _run_per_allocation(
                 cumem_set_access(va, size, mm.device, GrantedLockType.RW)
 
         if metadata_count:
-            _metadata_put_loop(
+            metadata_put = _metadata_put_many if batch_metadata else _metadata_put_loop
+            metadata_put(
                 mm,
                 allocations,
                 min(metadata_count, len(allocations)),
@@ -355,6 +379,7 @@ def _run_arena(
     timings: list[StepTiming],
     batch_export: bool = False,
     export_chunk_size: int = 128,
+    batch_metadata: bool = False,
 ) -> None:
     allocations = _allocate(mm, sizes, timings)
     fds: list[int] = []
@@ -426,7 +451,8 @@ def _run_arena(
                     cumem_set_access(arena_va + offset, size, mm.device, GrantedLockType.RW)
 
         if metadata_count:
-            _metadata_put_loop(
+            metadata_put = _metadata_put_many if batch_metadata else _metadata_put_loop
+            metadata_put(
                 mm,
                 allocations,
                 min(metadata_count, len(allocations)),
@@ -481,6 +507,29 @@ def run_once(
                 timings=timings,
                 batch_export=True,
                 export_chunk_size=args.export_chunk_size,
+            )
+            connected = False
+        elif variant == "arena-once-access-batch-export-batch-metadata":
+            _run_arena(
+                mm,
+                sizes,
+                one_set_access=True,
+                metadata_count=args.metadata_count,
+                timings=timings,
+                batch_export=True,
+                export_chunk_size=args.export_chunk_size,
+                batch_metadata=True,
+            )
+            connected = False
+        elif variant == "batch-export-batch-metadata":
+            _run_per_allocation(
+                mm,
+                sizes,
+                metadata_count=args.metadata_count,
+                timings=timings,
+                batch_export=True,
+                export_chunk_size=args.export_chunk_size,
+                batch_metadata=True,
             )
             connected = False
         elif variant == "arena-loop-access":
@@ -558,10 +607,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=(
             "per-allocation",
             "batch-export",
+            "batch-export-batch-metadata",
             "arena-loop-access",
             "arena-loop-access-batch-export",
             "arena-once-access",
             "arena-once-access-batch-export",
+            "arena-once-access-batch-export-batch-metadata",
         ),
         help="Variant to run. May be passed multiple times. Default: per-allocation.",
     )
