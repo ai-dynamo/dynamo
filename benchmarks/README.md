@@ -57,6 +57,17 @@ aiperf plot artifacts/my-benchmark
 - **`router/`** — KV Router benchmarking scripts (prefix ratio, trace replay, agent, priority queue)
 - **`prefix_data_generator/`** — Tools for analyzing and synthesizing prefix-structured data
 
+## Benchmarking Tools
+
+This directory contains several benchmarking tools for different use cases:
+
+- **[General Benchmarking Framework](utils/)** - Python-based wrapper around AIPerf for benchmarking any HTTP endpoints (see [complete guide](../docs/benchmarks/benchmarking.md))
+- **[LLM Benchmarking Scripts](llm/)** - Specialized scripts (`perf.sh` and `plot_pareto.py`) for detailed LLM performance analysis and Pareto frontier visualization
+- **[Router Benchmarking](router/)** - Scripts for benchmarking Dynamo router with prefix caching
+- **[Profiler Tools](profiler/)** - Performance profiling utilities for SLA-driven deployments
+
 ## Comprehensive Guide
 
 For detailed documentation including server-side benchmarking, Pareto analysis, and advanced AIPerf features, see the [complete benchmarking guide](../docs/benchmarks/benchmarking.md).
+
+For LLM-specific benchmarking with Pareto plots, see the [LLM Benchmarking Guide](llm/README.md).
