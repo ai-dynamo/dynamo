@@ -1,0 +1,209 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated + Planner deployment for Intel XPU.
+# WARNING: Requires 4+ GPU devices (2 prefill + 2 decode).
+# On a 3-GPU node, reduce replicas to 1 prefill + 2 decode (3 GPUs total).
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: planner-profile-data-xpu
+data:
+  prefill_raw_data.json: |
+    {
+      "prefill_isl":          [128, 256, 512, 1024, 2048],
+      "prefill_ttft":         [12,  18,  30,  55,   105],
+      "prefill_thpt_per_gpu": [9800, 8500, 6200, 3800, 2000]
+    }
+  decode_raw_data.json: |
+    {
+      "x_kv_usage":       [0.1, 0.1, 0.1, 0.1, 0.3, 0.3, 0.3, 0.3, 0.5, 0.5, 0.5, 0.5, 0.7, 0.7, 0.7, 0.7, 0.9, 0.9, 0.9, 0.9],
+      "y_context_length": [128, 512, 1024, 2048, 128, 512, 1024, 2048, 128, 512, 1024, 2048, 128, 512, 1024, 2048, 128, 512, 1024, 2048],
+      "z_itl":            [5, 6, 7, 9, 6, 7, 8, 10, 7, 8, 10, 12, 8, 10, 12, 15, 10, 12, 15, 20],
+      "z_thpt_per_gpu":   [4500, 4000, 3500, 2800, 4200, 3700, 3200, 2500, 3800, 3300, 2800, 2200, 3400, 2900, 2400, 1800, 2800, 2400, 1900, 1400],
+      "max_kv_tokens": 32768
+    }
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-disagg-planner-xpu-dra
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+    Planner:
+      envFromSecret: hf-token-secret
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          # Use official dynamo-planner image (CPU-only)
+          # For Dynamo >= 1.1.0, planner is a separate image from worker runtime
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:nightly-2025-05-01
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results", "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 2}'
+          volumeMounts:
+            - name: planner-profile-data-xpu
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data-xpu
+            configMap:
+              name: planner-profile-data-xpu
+    decode:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 2
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        hostIPC: true
+        hostPID: true
+        resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: gpu-template
+        # Uncomment if needed for your environment
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44    # video group
+        #     - 991   # render group
+        mainContainer:
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            claims:
+              - name: gpu
+          env:
+            # XPU-specific environment variables for disaggregated KV transfer
+            # Note: Do not set ZE_AFFINITY_MASK when using DRA - let DRA allocate GPUs automatically
+            - name: UCX_TLS
+              value: "ze_copy,tcp,cma,sysv,posix,self"
+            - name: UCX_LOG_LEVEL
+              value: "info"
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --enable-metrics
+            - --device
+            - xpu
+            - --disable-cuda-graph
+            - --grammar-backend
+            - none
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --host
+            - "0.0.0.0"
+    prefill:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        hostIPC: true
+        hostPID: true
+        resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: gpu-template
+        # Uncomment if needed for your environment
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44    # video group
+        #     - 991   # render group
+        mainContainer:
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            claims:
+              - name: gpu
+          env:
+            # XPU-specific environment variables for disaggregated KV transfer
+            # Note: Do not set ZE_AFFINITY_MASK when using DRA - let DRA allocate GPUs automatically
+            - name: UCX_TLS
+              value: "ze_copy,tcp,cma,sysv,posix,self"
+            - name: UCX_LOG_LEVEL
+              value: "info"
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --enable-metrics
+            - --device
+            - xpu
+            - --disable-cuda-graph
+            - --grammar-backend
+            - none
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "40000"
