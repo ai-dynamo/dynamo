@@ -50,11 +50,17 @@ logger = logging.getLogger(__name__)
 
 # Track imported weights for memory accounting
 _last_imported_weights_bytes: int = 0
+_last_weight_accounting_bytes: int = 0
 
 
 def get_imported_weights_bytes() -> int:
     """Return bytes of weights imported in the last load_model call."""
     return _last_imported_weights_bytes
+
+
+def get_weight_accounting_bytes() -> int:
+    """Return non-KV model bytes to charge to vLLM memory accounting."""
+    return _last_weight_accounting_bytes or _last_imported_weights_bytes
 
 
 # =============================================================================
@@ -166,7 +172,7 @@ def _load_read_mode(
     When MX is active, registers materialized tensors with NIXL so this
     node is discoverable as a P2P source (e.g. for shadow engine failover).
     """
-    global _last_imported_weights_bytes
+    global _last_imported_weights_bytes, _last_weight_accounting_bytes
 
     try:
         model = _create_meta_model(vllm_config, model_config)
@@ -179,6 +185,7 @@ def _load_read_mode(
             publish_metadata(mx_ctx)
 
         _last_imported_weights_bytes = gms_client.total_bytes
+        _last_weight_accounting_bytes = _last_imported_weights_bytes
         logger.info(
             "[GMS] Read mode: imported %.2f GiB",
             _last_imported_weights_bytes / (1 << 30),
@@ -205,7 +212,7 @@ def _load_write_mode(
     detection (RDMA P2P -> ModelStreamer -> GDS -> disk) with fallback.
     The chain also handles NIXL registration and metadata publishing.
     """
-    global _last_imported_weights_bytes
+    global _last_imported_weights_bytes, _last_weight_accounting_bytes
 
     from vllm.model_executor.model_loader.utils import (
         initialize_model,
@@ -232,11 +239,14 @@ def _load_write_mode(
 
             torch.cuda.empty_cache()
 
-    _last_imported_weights_bytes = finalize_gms_write(gms_client, model)
+    finalize_result = finalize_gms_write(gms_client, model, return_result=True)
+    _last_imported_weights_bytes = finalize_result.committed_bytes
+    _last_weight_accounting_bytes = finalize_result.accounting_bytes
 
     logger.info(
-        "[GMS] Write mode: published %.2f GiB",
+        "[GMS] Write mode: published %.2f GiB (accounting %.2f GiB)",
         _last_imported_weights_bytes / (1 << 30),
+        _last_weight_accounting_bytes / (1 << 30),
     )
     return model.eval()
 

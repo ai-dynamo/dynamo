@@ -239,21 +239,17 @@ class GMSWorker(Worker):
         # Correct memory accounting for GMS-imported weights
         try:
             from gpu_memory_service.integrations.vllm.model_loader import (
-                get_imported_weights_bytes,
+                get_weight_accounting_bytes,
             )
 
-            imported_bytes = int(get_imported_weights_bytes())
-            if (
-                imported_bytes > 0
-                and hasattr(self, "model_runner")
-                and self.model_runner is not None
-            ):
+            accounting_bytes = int(get_weight_accounting_bytes())
+            if accounting_bytes > 0 and self.model_runner is not None:
                 old_usage = getattr(self.model_runner, "model_memory_usage", 0)
-                self.model_runner.model_memory_usage = imported_bytes
+                self.model_runner.model_memory_usage = accounting_bytes
                 logger.info(
                     "[GMS] Corrected model_memory_usage: %.2f GiB -> %.2f GiB",
                     old_usage / (1 << 30),
-                    imported_bytes / (1 << 30),
+                    accounting_bytes / (1 << 30),
                 )
         except Exception as e:
             logger.debug("[GMS] Could not correct memory accounting: %s", e)
