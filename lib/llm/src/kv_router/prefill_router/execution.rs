@@ -116,6 +116,10 @@ impl PrefillRouter {
     ) -> Option<dynamo_kv_router::protocols::WorkerWithDpRank> {
         let router = self.prefill_router.get()?;
         let worker = router.sticky_worker_for_prefill(req)?;
+        if router.unbind_ineligible_sticky_prefill_worker(context_id, req, worker) {
+            return None;
+        }
+
         match router
             .validate_sticky_prefill_worker(context_id, req, worker)
             .await
@@ -125,12 +129,15 @@ impl PrefillRouter {
                 Some(worker)
             }
             Err(error) => {
+                let unbound =
+                    router.unbind_ineligible_sticky_prefill_worker(context_id, req, worker);
                 tracing::warn!(
                     request_id = %context_id,
                     worker_id = worker.worker_id,
                     dp_rank = worker.dp_rank,
                     error = %error,
-                    "Sticky prefill worker failed validation; falling back to normal prefill routing"
+                    unbound_due_to_ineligibility = unbound,
+                    "Sticky prefill worker routing failed; falling back to normal prefill routing"
                 );
                 None
             }

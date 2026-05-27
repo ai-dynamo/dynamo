@@ -88,6 +88,24 @@ impl InnerPrefillRouter {
         }
     }
 
+    pub(super) fn unbind_ineligible_sticky_prefill_worker(
+        &self,
+        context_id: &str,
+        request: &PreprocessedRequest,
+        worker: WorkerWithDpRank,
+    ) -> bool {
+        match self {
+            InnerPrefillRouter::KvRouter(router) => router
+                .unbind_ineligible_sticky_worker_for_phase(
+                    context_id,
+                    request,
+                    RequestPhase::Prefill,
+                    worker,
+                ),
+            InnerPrefillRouter::SimpleRouter(_) => false,
+        }
+    }
+
     pub(super) fn refresh_sticky_prefill_worker(&self, request: &PreprocessedRequest) {
         if let InnerPrefillRouter::KvRouter(router) = self {
             router.refresh_sticky_worker_for_phase(request, RequestPhase::Prefill);

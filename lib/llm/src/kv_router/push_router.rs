@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank};
+use dynamo_kv_router::{
+    protocols::{RoutingConstraints, TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
+    scheduling::{WorkerEligibilityError, validate_worker_eligibility},
+};
 use dynamo_runtime::{
     dynamo_nvtx_range,
     metrics::frontend_perf::{STAGE_DISPATCH, STAGE_ROUTE, StageGuard},
@@ -500,13 +503,8 @@ impl KvPushRouter {
         request: &PreprocessedRequest,
         phase: RequestPhase,
     ) -> Option<WorkerWithDpRank> {
-        let routing = request.routing.as_ref()?;
-        let sc = routing.session_control.as_ref()?;
-        if !sticky_allowed_for_phase(phase, Some(routing)) {
-            return None;
-        }
-
-        self.sticky_sessions.peek_session(&sc.session_id)
+        let session_id = sticky_session_id_for_phase(request, phase)?;
+        self.sticky_sessions.peek_session(session_id)
     }
 
     pub(crate) fn refresh_sticky_worker_for_phase(
@@ -514,17 +512,74 @@ impl KvPushRouter {
         request: &PreprocessedRequest,
         phase: RequestPhase,
     ) {
-        let Some(routing) = request.routing.as_ref() else {
+        let Some(session_id) = sticky_session_id_for_phase(request, phase) else {
             return;
         };
-        let Some(sc) = routing.session_control.as_ref() else {
+        let Some(sc) = request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.session_control.as_ref())
+        else {
             return;
         };
-        if sc.action.is_some() || !sticky_allowed_for_phase(phase, Some(routing)) {
+        if sc.action.is_some() {
             return;
         }
 
-        self.sticky_sessions.resolve_session(&sc.session_id);
+        self.sticky_sessions.resolve_session(session_id);
+    }
+
+    fn sticky_worker_ineligibility_for_phase(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+        worker: WorkerWithDpRank,
+    ) -> Option<WorkerEligibilityError> {
+        let routing = request.routing.as_ref()?;
+        if !sticky_allowed_for_phase(phase, Some(routing)) {
+            return None;
+        }
+
+        let default_constraints = RoutingConstraints::default();
+        let routing_constraints = routing
+            .routing_constraints
+            .as_ref()
+            .unwrap_or(&default_constraints);
+        let configs = self.chooser.workers_with_configs.borrow();
+        validate_worker_eligibility(
+            &configs,
+            worker,
+            routing.allowed_worker_ids.as_ref(),
+            routing_constraints,
+        )
+        .err()
+    }
+
+    pub(crate) fn unbind_ineligible_sticky_worker_for_phase(
+        &self,
+        context_id: &str,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+        worker: WorkerWithDpRank,
+    ) -> bool {
+        let Some(reason) = self.sticky_worker_ineligibility_for_phase(request, phase, worker)
+        else {
+            return false;
+        };
+
+        let Some(session_id) = sticky_session_id_for_phase(request, phase) else {
+            return false;
+        };
+        tracing::warn!(
+            request_id = %context_id,
+            %session_id,
+            worker_id = worker.worker_id,
+            dp_rank = worker.dp_rank,
+            reason = %reason,
+            "Sticky worker is no longer eligible; removing session affinity"
+        );
+        self.sticky_sessions.unbind(session_id);
+        true
     }
 
     pub(crate) async fn validate_sticky_worker_for_phase(
@@ -591,7 +646,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Treat sticky affinity as a best-effort candidate. The scheduler still
         // validates the candidate against current worker eligibility before it
         // becomes the route; if validation fails, fall back to normal routing.
-        let sticky_worker = self.sticky_worker_for_phase(&request, phase);
+        let sticky_worker = match self.sticky_worker_for_phase(&request, phase) {
+            Some(worker)
+                if self.unbind_ineligible_sticky_worker_for_phase(
+                    &context_id,
+                    &request,
+                    phase,
+                    worker,
+                ) =>
+            {
+                None
+            }
+            worker => worker,
+        };
         let selection = match self
             .select_worker(&context_id, &request, phase, is_query_only, sticky_worker)
             .instrument(tracing::info_span!("kv_router.select_worker"))
@@ -605,12 +672,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
             Err(error) if sticky_worker.is_some() => {
                 if let Some(worker) = sticky_worker {
+                    let unbound = self.unbind_ineligible_sticky_worker_for_phase(
+                        &context_id,
+                        &request,
+                        phase,
+                        worker,
+                    );
                     tracing::warn!(
                         request_id = %context_id,
                         worker_id = worker.worker_id,
                         dp_rank = worker.dp_rank,
                         error = %error,
-                        "Sticky worker failed validation; falling back to normal routing"
+                        unbound_due_to_ineligibility = unbound,
+                        "Sticky worker routing failed; falling back to normal routing"
                     );
                 }
                 self.select_worker(&context_id, &request, phase, is_query_only, None)
@@ -899,6 +973,18 @@ fn sticky_allowed_for_phase(phase: RequestPhase, routing: Option<&RoutingHints>)
             routing.backend_instance_id.is_none() && routing.dp_rank.is_none()
         }
     }
+}
+
+fn sticky_session_id_for_phase(request: &PreprocessedRequest, phase: RequestPhase) -> Option<&str> {
+    let routing = request.routing.as_ref()?;
+    if !sticky_allowed_for_phase(phase, Some(routing)) {
+        return None;
+    }
+
+    routing
+        .session_control
+        .as_ref()
+        .map(|sc| sc.session_id.as_str())
 }
 
 #[cfg(test)]

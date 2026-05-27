@@ -46,6 +46,26 @@ pub enum KvSchedulerError {
     InitFailed(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WorkerEligibilityError {
+    #[error("worker {worker_id} is not in allowed worker set")]
+    WorkerNotAllowed { worker_id: WorkerId },
+
+    #[error("worker {worker_id} is unavailable")]
+    WorkerUnavailable { worker_id: WorkerId },
+
+    #[error("worker {worker_id} dp_rank {dp_rank} is outside [{start}, {end})")]
+    DpRankUnavailable {
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        start: DpRank,
+        end: DpRank,
+    },
+
+    #[error("worker {worker_id} does not satisfy routing constraints")]
+    RoutingConstraintsUnsatisfied { worker_id: WorkerId },
+}
+
 #[derive(Debug)]
 pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
@@ -302,18 +322,175 @@ impl SchedulingRequest {
     }
 }
 
-pub fn pinned_worker_config<C: WorkerConfigLike>(
+fn worker_config_for_rank<C: WorkerConfigLike>(
     workers: &HashMap<WorkerId, C>,
     worker: WorkerWithDpRank,
-) -> Result<&C, KvSchedulerError> {
+) -> Result<&C, WorkerEligibilityError> {
     let Some(config) = workers.get(&worker.worker_id) else {
-        return Err(KvSchedulerError::NoEndpoints);
+        return Err(WorkerEligibilityError::WorkerUnavailable {
+            worker_id: worker.worker_id,
+        });
     };
     let dp_start_rank = config.data_parallel_start_rank();
     let dp_end_rank = dp_start_rank + config.data_parallel_size();
     if !(dp_start_rank..dp_end_rank).contains(&worker.dp_rank) {
-        return Err(KvSchedulerError::NoEndpoints);
+        return Err(WorkerEligibilityError::DpRankUnavailable {
+            worker_id: worker.worker_id,
+            dp_rank: worker.dp_rank,
+            start: dp_start_rank,
+            end: dp_end_rank,
+        });
     }
 
     Ok(config)
+}
+
+pub fn validate_worker_eligibility<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    worker: WorkerWithDpRank,
+    allowed_worker_ids: Option<&HashSet<WorkerId>>,
+    routing_constraints: &RoutingConstraints,
+) -> Result<(), WorkerEligibilityError> {
+    if allowed_worker_ids.is_some_and(|worker_ids| !worker_ids.contains(&worker.worker_id)) {
+        return Err(WorkerEligibilityError::WorkerNotAllowed {
+            worker_id: worker.worker_id,
+        });
+    }
+
+    let config = worker_config_for_rank(workers, worker)?;
+    if !routing_constraints.is_compatible_with_worker_taints(config.taints()) {
+        return Err(WorkerEligibilityError::RoutingConstraintsUnsatisfied {
+            worker_id: worker.worker_id,
+        });
+    }
+
+    Ok(())
+}
+
+pub fn pinned_worker_config<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    worker: WorkerWithDpRank,
+) -> Result<&C, KvSchedulerError> {
+    worker_config_for_rank(workers, worker).map_err(|_| KvSchedulerError::NoEndpoints)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct TestWorkerConfig {
+        dp_start: DpRank,
+        dp_size: DpRank,
+        taints: HashSet<String>,
+    }
+
+    impl WorkerConfigLike for TestWorkerConfig {
+        fn data_parallel_start_rank(&self) -> u32 {
+            self.dp_start
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            self.dp_size
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            None
+        }
+
+        fn taints(&self) -> &HashSet<String> {
+            &self.taints
+        }
+    }
+
+    fn workers() -> HashMap<WorkerId, TestWorkerConfig> {
+        HashMap::from([(
+            7,
+            TestWorkerConfig {
+                dp_start: 2,
+                dp_size: 3,
+                taints: HashSet::from(["zone-a".to_string()]),
+            },
+        )])
+    }
+
+    #[test]
+    fn validate_worker_eligibility_accepts_allowed_rank_matching_constraints() {
+        let workers = workers();
+        let allowed = HashSet::from([7]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from(["zone-a".to_string()]),
+            preferred_taints: HashMap::new(),
+        };
+
+        let result = validate_worker_eligibility(
+            &workers,
+            WorkerWithDpRank::new(7, 3),
+            Some(&allowed),
+            &constraints,
+        );
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn validate_worker_eligibility_rejects_disallowed_worker() {
+        let workers = workers();
+        let allowed = HashSet::from([8]);
+
+        let result = validate_worker_eligibility(
+            &workers,
+            WorkerWithDpRank::new(7, 3),
+            Some(&allowed),
+            &RoutingConstraints::default(),
+        );
+
+        assert_eq!(
+            result,
+            Err(WorkerEligibilityError::WorkerNotAllowed { worker_id: 7 })
+        );
+    }
+
+    #[test]
+    fn validate_worker_eligibility_rejects_out_of_range_dp_rank() {
+        let workers = workers();
+
+        let result = validate_worker_eligibility(
+            &workers,
+            WorkerWithDpRank::new(7, 5),
+            None,
+            &RoutingConstraints::default(),
+        );
+
+        assert_eq!(
+            result,
+            Err(WorkerEligibilityError::DpRankUnavailable {
+                worker_id: 7,
+                dp_rank: 5,
+                start: 2,
+                end: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_worker_eligibility_rejects_unsatisfied_required_taints() {
+        let workers = workers();
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from(["zone-b".to_string()]),
+            preferred_taints: HashMap::new(),
+        };
+
+        let result =
+            validate_worker_eligibility(&workers, WorkerWithDpRank::new(7, 3), None, &constraints);
+
+        assert_eq!(
+            result,
+            Err(WorkerEligibilityError::RoutingConstraintsUnsatisfied { worker_id: 7 })
+        );
+    }
 }
