@@ -120,16 +120,9 @@ docker build -f container/rendered.Dockerfile .
 # Update the image references in the YAML files
 ```
 
-**Note:** TensorRT-LLM uses git-lfs, which needs to be installed in advance:
-```bash
-apt-get update && apt-get -y install git git-lfs
-```
+The Dynamo TensorRT-LLM image is based on the upstream `nvcr.io/nvidia/tensorrt-llm/release` container, which publishes both `amd64` and `arm64` variants. To build for arm64, pass `--platform=linux/arm64` to `render.py` and `docker buildx build`.
 
-For ARM machines, use:
-```bash
-python container/render.py --framework=vllm --platform arm64 --output-short-filename
-docker build -f container/rendered.Dockerfile .
-```
+For more customization (pinning a different upstream TRT-LLM tag or using a TRT-LLM image you built from source), see the [Building a Custom Container](../../../../docs/backends/trtllm/trtllm-building-custom-container.md) guide.
 
 ## Usage
 

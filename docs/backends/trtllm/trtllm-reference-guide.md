@@ -7,7 +7,7 @@ subtitle: Features, configuration, and operational details for the TensorRT-LLM 
 
 ## Building a Custom Container
 
-To build a TensorRT-LLM container from source (e.g., for custom modifications or a different CUDA version), see the [Building a Custom Container](./trtllm-building-custom-container.md) guide.
+The Dynamo TensorRT-LLM image layers Dynamo on top of the upstream `nvcr.io/nvidia/tensorrt-llm/release` container — it does not build TensorRT-LLM from source. To rebuild it locally, pin a different upstream TRT-LLM tag, or plug in a TRT-LLM image you built from source, see the [Building a Custom Container](./trtllm-building-custom-container.md) guide.
 
 ## KV Cache Transfer
 
