@@ -42,6 +42,7 @@ from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
     get_runtime,
+    poll_for_worker_instances,
     wait_for_indexer_workers_active,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
@@ -971,30 +972,6 @@ def _topology_env(
     }
 
 
-async def _wait_for_disagg_worker_ids(
-    namespace: str,
-    component_name: str,
-    expected_num_workers: int,
-    *,
-    request_plane: str = "tcp",
-    timeout_s: int = 60,
-) -> list[int]:
-    runtime = get_runtime(request_plane=request_plane)
-    endpoint = runtime.endpoint(f"{namespace}.{component_name}.generate")
-    client = await endpoint.client()
-
-    for _ in range(timeout_s * 2):
-        worker_ids = sorted(set(client.instance_ids()))
-        if len(worker_ids) >= expected_num_workers:
-            return worker_ids
-        await asyncio.sleep(0.5)
-
-    raise TimeoutError(
-        f"Timed out waiting for {expected_num_workers} worker(s) on "
-        f"{namespace}.{component_name}.generate"
-    )
-
-
 async def _wait_for_frontend_models(frontend_url: str, timeout_s: int = 120) -> None:
     models_url = f"{frontend_url}/v1/models"
     start_time = asyncio.get_running_loop().time()
@@ -1797,9 +1774,9 @@ def test_disagg_topology_required_mismatch_fails_chat_completion(
         request_plane="tcp",
         env_overrides=prefill_env,
     ):
-        prefill_ids = asyncio.run(
-            _wait_for_disagg_worker_ids(shared_namespace, "prefill", 1)
-        )
+        runtime = get_runtime()
+        endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
+        prefill_ids = asyncio.run(poll_for_worker_instances(endpoint, 1))
         logger.info("Prefill topology worker ids: %s", prefill_ids)
 
         with DisaggMockerProcess(
@@ -1811,9 +1788,8 @@ def test_disagg_topology_required_mismatch_fails_chat_completion(
             request_plane="tcp",
             env_overrides=decode_env,
         ) as decode_workers:
-            decode_ids = asyncio.run(
-                _wait_for_disagg_worker_ids(shared_namespace, "backend", 1)
-            )
+            endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
+            decode_ids = asyncio.run(poll_for_worker_instances(endpoint, 1))
             logger.info("Mismatched decode topology worker ids: %s", decode_ids)
 
             frontend_port = get_unique_ports(request, num_ports=1)[0]
