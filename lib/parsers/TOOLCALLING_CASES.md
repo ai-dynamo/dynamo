@@ -208,6 +208,7 @@ class.
 - **`TOOLCALLING.batch.4.e`** Recovery after malformed prefix. A bad tool-looking
   fragment is followed by a valid complete call; parsers may either treat the
   whole string as normal text or resynchronize and extract the later valid call.
+- **`TOOLCALLING.batch.4.f`** Tool name emitted as XML tag instead of function opener. The model emits a well-formed outer wrapper but uses a tool-name tag such as `<terminal>` instead of the required `<function=Terminal>` opener. Tests that parsers do not treat the malformed inner tag as a valid call.
 
 ## `TOOLCALLING.batch.5` — Missing end-token recovery
 
