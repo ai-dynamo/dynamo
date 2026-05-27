@@ -22,6 +22,37 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_snapshot_agent:
+        description: 'Build and push snapshot-agent image, tagged with branch name'
+        type: boolean
+        default: false
+      build_vllm_placeholder:
+        description: 'Build and push vLLM snapshot placeholder image, tagged with branch name'
+        type: boolean
+        default: false
+      placeholder_base_image:
+        description: 'Optional fully-qualified base runtime image for placeholder. Empty = same-run vLLM runtime for placeholder_base_cuda_version'
+        type: string
+        default: ''
+      placeholder_base_sha:
+        description: 'Optional source SHA for ECR vLLM runtime base when placeholder_base_image is empty'
+        type: string
+        default: ''
+      placeholder_base_cuda_version:
+        description: 'CUDA version of same-run vLLM runtime to wrap when placeholder_base_image is empty'
+        type: choice
+        options:
+          - '13.0'
+          - '12.9'
+        default: '13.0'
+      criu_repo:
+        description: 'CRIU repository for snapshot-agent and placeholder builds'
+        type: string
+        default: 'https://github.com/dfeigin-nv/criu.git'
+      criu_ref:
+        description: 'CRIU ref for snapshot-agent and placeholder builds'
+        type: string
+        default: 'add-aio-and-parallel-memfd'
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -57,10 +88,11 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
+      build_only: true
     secrets: inherit
 
   sglang-build:
@@ -97,7 +129,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -187,6 +219,156 @@ jobs:
           done
 
   # ============================================================================
+  # SNAPSHOT AGENT (build-only)
+  # ============================================================================
+
+  snapshot-agent:
+    needs: [init]
+    if: inputs.build_snapshot_agent
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: general
+          arch: 'linux/amd64'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build and push snapshot-agent
+        shell: bash
+        working-directory: ./deploy/snapshot
+        run: |
+          set -euo pipefail
+
+          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          DEFAULT_TAG="${{ github.sha }}-snapshot-agent"
+          BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent"
+          IMAGE_URIS=(
+            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ECR_DEFAULT_IMAGE_BASE}:${BRANCH_TAG}"
+            "${ACR_IMAGE_BASE}:${BRANCH_TAG}"
+          )
+
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          echo "flags for docker buildx: ${TAGGING_FLAGS}"
+          echo "CRIU_REPO=${{ inputs.criu_repo }}"
+          echo "CRIU_REF=${{ inputs.criu_ref }}"
+
+          docker buildx build --push \
+              --platform linux/amd64 \
+              --target agent \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              --build-arg CRIU_REPO="${{ inputs.criu_repo }}" \
+              --build-arg CRIU_REF="${{ inputs.criu_ref }}" \
+              ${TAGGING_FLAGS} -f Dockerfile .
+
+          echo "### Snapshot Agent Container Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          for image_uri in "${IMAGE_URIS[@]}"; do
+            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+          done
+
+  # ============================================================================
+  # VLLM SNAPSHOT PLACEHOLDER (build-only)
+  # ============================================================================
+
+  vllm-placeholder:
+    needs: [init, vllm-build]
+    if: always() && inputs.build_vllm_placeholder
+    name: vllm-placeholder
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: general
+          arch: 'linux/amd64'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build and push vLLM placeholder
+        shell: bash
+        working-directory: ./deploy/snapshot
+        run: |
+          set -euo pipefail
+
+          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          CUDA_VERSION="${{ inputs.placeholder_base_cuda_version }}"
+          CUDA_MAJOR="${CUDA_VERSION%%.*}"
+
+          BASE_IMAGE="${{ inputs.placeholder_base_image }}"
+          if [ -z "${BASE_IMAGE}" ]; then
+            BASE_SHA="${{ inputs.placeholder_base_sha }}"
+            if [ -z "${BASE_SHA}" ]; then
+              BASE_SHA="${{ github.sha }}"
+            fi
+            BASE_IMAGE="${ECR_DEFAULT_IMAGE_BASE}:${BASE_SHA}-vllm-runtime-cuda${CUDA_MAJOR}"
+          fi
+
+          DEFAULT_TAG="${{ github.sha }}-vllm-placeholder-cuda${CUDA_MAJOR}"
+          BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder-cuda${CUDA_MAJOR}"
+          IMAGE_URIS=(
+            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ECR_DEFAULT_IMAGE_BASE}:${BRANCH_TAG}"
+            "${ACR_IMAGE_BASE}:${BRANCH_TAG}"
+          )
+
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          echo "BASE_IMAGE=${BASE_IMAGE}"
+          echo "flags for docker buildx: ${TAGGING_FLAGS}"
+          echo "CRIU_REPO=${{ inputs.criu_repo }}"
+          echo "CRIU_REF=${{ inputs.criu_ref }}"
+
+          docker buildx build --push \
+              --platform linux/amd64 \
+              --target placeholder \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+              --build-arg CRIU_REPO="${{ inputs.criu_repo }}" \
+              --build-arg CRIU_REF="${{ inputs.criu_ref }}" \
+              ${TAGGING_FLAGS} -f Dockerfile .
+
+          echo "### vLLM Placeholder Container Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          for image_uri in "${IMAGE_URIS[@]}"; do
+            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+          done
+
+  # ============================================================================
   # CLEANUP
   # ============================================================================
 
@@ -194,7 +376,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-agent, vllm-placeholder]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
