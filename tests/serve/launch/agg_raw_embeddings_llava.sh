@@ -111,14 +111,17 @@ with torch.no_grad():
     else:
         pixel_values_flat = pixel_values
 
-    vision_out = model.vision_tower(pixel_values_flat, output_hidden_states=True)
+    # transformers 5.x moved vision_tower/multi_modal_projector onto the inner
+    # LlavaNextModel; pre-5.x exposed them on LlavaNextForConditionalGeneration.
+    base = getattr(model, "model", model)
+    vision_out = base.vision_tower(pixel_values_flat, output_hidden_states=True)
     features = vision_out.hidden_states[model.config.vision_feature_layer]
 
     strategy = getattr(model.config, "vision_feature_select_strategy", "default")
     if strategy == "default":
         features = features[:, 1:]
 
-    embeddings = model.multi_modal_projector(features)
+    embeddings = base.multi_modal_projector(features)
 
     # Collapse (num_patches, seq_len, hidden) → (total_tokens, hidden)
     if embeddings.ndim == 3:
