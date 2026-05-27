@@ -19,8 +19,8 @@ import pytest
 import dynamo.vllm.publisher as publisher_mod
 from dynamo.vllm.publisher import (
     DynamoStatLoggerPublisher,
-    StatLoggerFactory,
     NoopStatLogger,
+    StatLoggerFactory,
 )
 
 pytestmark = [
