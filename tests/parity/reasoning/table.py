@@ -627,6 +627,7 @@ def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, 
     expected = case["expected"]
     dynamo = expected["dynamo"]
     dynamo_leak = _has_dynamo_leak(case, family)
+    dynamo_leak_reason = _dynamo_leak_reason(expected, family) if dynamo_leak else None
     markers = []
     unavailable = 0
     tooltip_parts = [case.get("description", "")]
@@ -644,10 +645,15 @@ def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, 
         if _canonical(spec) == _canonical(dynamo):
             tooltip_parts.append(f"{impl}: matches Dynamo")
             continue
-        suffix = "?" if dynamo_leak or not spec.get("reason") else ""
+        suffix = (
+            "?"
+            if (dynamo_leak and not dynamo_leak_reason)
+            or (not dynamo_leak and not spec.get("reason"))
+            else ""
+        )
         markers.append(f"{letter}{suffix}")
         reason = (
-            "research-needed" if dynamo_leak else spec.get("reason", "research-needed")
+            dynamo_leak_reason if dynamo_leak else spec.get("reason", "research-needed")
         )
         tooltip_parts.append(f"{impl}: diverges — {reason}")
 
@@ -1371,7 +1377,12 @@ def _tooltip_for(
             continue
         if _canonical(block) == _canonical(dyn):
             continue
-        if "reason" in block and not dynamo_leak:
+        dynamo_leak_reason = (
+            _dynamo_leak_reason(expected, family) if dynamo_leak else None
+        )
+        if dynamo_leak and dynamo_leak_reason:
+            parts.append(f"{name}: {dynamo_leak_reason}")
+        elif "reason" in block and not dynamo_leak:
             parts.append(f"{name}: {block['reason']}")
         elif "reasoning_text" in block or "normal_text" in block:
             parts.append(f"{name}: (research-needed — no `reason:` field yet)")
