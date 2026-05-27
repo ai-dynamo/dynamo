@@ -6,13 +6,13 @@
 # Idempotent — re-running steps that already completed is a no-op.
 #
 # Two axes:
-#   --hw <name>      → sources hw/<name>.env (VLLM_IMAGE, HW_NODE_SELECTOR, HW_TOLERATIONS)
+#   --hw <name>      → sources ../hw/<name>.env (VLLM_IMAGE, HW_NODE_SELECTOR, HW_TOLERATIONS)
 #   --config <name>  → resolves to DEPLOY_KIND, DEPLOY_NAME inline (see CONFIGS table below)
 #
-# Usage:
-#   ./deploy.sh -n <namespace> --hw h100 --config vllm-serve
-#   ./deploy.sh -n <namespace> --hw gb200 --config dynamo-fd-ec --step deploy
-#   ./deploy.sh -n <namespace> --hw h100 --config dynamo-fd --step clean
+# Usage (from the recipe root):
+#   ./deploy/deploy.sh -n <namespace> --hw h100 --config vllm-serve
+#   ./deploy/deploy.sh -n <namespace> --hw gb200 --config dynamo-fd-ec --step deploy
+#   ./deploy/deploy.sh -n <namespace> --hw h100 --config dynamo-fd --step clean
 #
 # Steps: pvc | download | deploy | clean | all
 #   pvc/download are config-agnostic (idempotent prep, share state across configs).
@@ -39,6 +39,7 @@ if [[ -z "$NAMESPACE" ]]; then
   echo "ERROR: -n <namespace> required" >&2; exit 2
 fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
+RECIPE_ROOT="$(cd "$HERE/.." && pwd)"
 
 # Per-config metadata. Keep this list in sync with the sibling config dirs.
 #   DEPLOY_KIND branches deploy() + clean():
@@ -67,13 +68,13 @@ case "$CONFIG" in
     exit 2 ;;
 esac
 
-HW_ENV="$HERE/hw/${HW}.env"
+HW_ENV="$RECIPE_ROOT/hw/${HW}.env"
 if [[ ! -f "$HW_ENV" ]]; then
   echo "ERROR: hardware env file not found: $HW_ENV" >&2
-  echo "Available: $(ls "$HERE/hw/" 2>/dev/null | tr '\n' ' ')" >&2
+  echo "Available: $(ls "$RECIPE_ROOT/hw/" 2>/dev/null | tr '\n' ' ')" >&2
   exit 2
 fi
-DEPLOY_TPL="$HERE/deploy/${CONFIG}.yaml"
+DEPLOY_TPL="$HERE/${CONFIG}.yaml"
 
 if ! command -v envsubst >/dev/null 2>&1; then
   echo "ERROR: envsubst missing. Install gettext-base (apt) or gettext (brew)." >&2
@@ -99,7 +100,7 @@ pvc() {
   # the PVC out-of-band — see README.md → "Storage: shared-model-cache".
   if ! $K get pvc shared-model-cache >/dev/null 2>&1; then
     echo "[pvc] ERROR: PVC 'shared-model-cache' not found in namespace '$NAMESPACE'" >&2
-    echo "[pvc] See README.md → 'Storage: shared-model-cache' for provisioning guidance." >&2
+    echo "[pvc] See ../README.md → 'Storage: shared-model-cache' for provisioning guidance." >&2
     exit 1
   fi
   $K get pvc shared-model-cache
@@ -114,7 +115,7 @@ download() {
     echo "[download] previous job present but not Complete — deleting and re-applying"
     $K delete job qwen36-model-download
   fi
-  $K apply -f "$HERE/model-cache/model-download.yaml"
+  $K apply -f "$RECIPE_ROOT/model-cache/model-download.yaml"
   $K wait --for=condition=Complete job/qwen36-model-download --timeout=3600s
 }
 

@@ -138,7 +138,7 @@ spec:
               # standard `hub/models--Qwen--Qwen3.6-...` layout.
             - name: shared-model-cache
               mountPath: /home/dynamo/.cache/vllm
-              subPath: qwen36-deploy/vllm-cache
+              subPath: qwen36/vllm-cache
             - name: shm
               mountPath: /dev/shm
       volumes:
