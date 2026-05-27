@@ -843,6 +843,66 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(
     _wait_for_server_state(server, ServerState.EMPTY)
 
 
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_scratch_mapping_maps_only_prefix_then_reallocates_full_va(
+    running_gms,
+    monkeypatch,
+):
+    server, socket_path = running_gms
+
+    map_calls: list[tuple[int, int, int]] = []
+    access_calls: list[tuple[int, int, int, GrantedLockType]] = []
+    unmap_calls: list[tuple[int, int]] = []
+    scratch_handles = itertools.count(50_000)
+
+    monkeypatch.setattr(
+        client_memory_manager,
+        "cumem_create_tolerate_oom",
+        lambda size, device: (True, next(scratch_handles)),
+    )
+    monkeypatch.setattr(
+        client_memory_manager,
+        "cumem_map",
+        lambda va, size, handle: map_calls.append((va, size, handle)),
+    )
+    monkeypatch.setattr(
+        client_memory_manager,
+        "cumem_set_access",
+        lambda va, size, device, mode: access_calls.append((va, size, device, mode)),
+    )
+    monkeypatch.setattr(
+        client_memory_manager,
+        "cumem_unmap",
+        lambda va, size: unmap_calls.append((va, size)),
+    )
+
+    manager = GMSClientMemoryManager(socket_path, device=0, tag="kv_cache")
+    try:
+        size = manager.granularity * 3 + 123
+        va = manager.create_scratch_mapping(size=size, tag="kv_cache")
+
+        assert len(map_calls) == 1
+        assert map_calls[0][0] == va
+        assert map_calls[0][1] == manager.granularity
+        assert access_calls == [(va, manager.granularity, 0, GrantedLockType.RW)]
+
+        manager.unmap_all_vas()
+        assert unmap_calls == [(va, manager.granularity)]
+
+        manager.prepare_scratch_for_reallocation()
+        mapping = manager.mappings[va]
+        assert mapping.aligned_size == manager.granularity * 4
+        assert mapping.handle == 0
+
+        _wait_for_server_state(server, ServerState.EMPTY)
+
+        manager.connect(RequestedLockType.RW)
+        manager.reallocate_all_handles(tag="kv_cache")
+        assert manager.mappings[va].aligned_size == manager.granularity * 4
+    finally:
+        manager.close()
+
+
 @pytest.mark.asyncio
 async def test_allocation_manager_caches_exported_fd(monkeypatch):
     export_calls = 0

@@ -80,9 +80,10 @@ class StaleMemoryLayoutError(Exception):
 class _ScratchMapping:
     """Per-VA tracking for one scratch-aliased KV allocation.
 
-    n_chunks granules of VA all alias the same physical chunk (scratch_handle).
-    One physical page, many virtual mappings. torch.zeros into the range
-    succeeds; cudagraphs capture VAs so they survive the eventual swap to real.
+    The shadow engine only needs stable final VAs during init/graph capture.
+    It does not need to touch the full future KV-cache range until wake-up.
+    Therefore only a small prefix is backed by a client-local scratch handle;
+    the full requested VA range stays reserved for later server-backed remap.
 
     Lifecycle: install via create_scratch_mapping; tear down via
     unmap_all_vas (drops physical) and prepare_scratch_for_reallocation
@@ -92,7 +93,7 @@ class _ScratchMapping:
 
     base_va: int
     aligned_size: int
-    n_chunks: int
+    mapped_size: int
     tag: str
     scratch_handle: int = 0  # 0 after unmap_all_vas drops the physical
 
@@ -508,12 +509,12 @@ class GMSClientMemoryManager:
             unmapped_count += 1
             total_bytes += mapping.aligned_size
 
-        # Scratch is 1 handle aliased N times across [base_va, +aligned_size).
-        # cuMemUnmap over the whole range covers all aliases in one call.
+        # Scratch only backs a small prefix of the final VA range. The rest of
+        # the range is reserved VA that will be backed with real handles at wake.
         for scratch in self._scratch_mappings.values():
             if scratch.scratch_handle == 0:
                 continue
-            cumem_unmap(scratch.base_va, scratch.aligned_size)
+            cumem_unmap(scratch.base_va, scratch.mapped_size)
             cumem_release(scratch.scratch_handle)
             scratch.scratch_handle = 0
             unmapped_count += 1
@@ -650,48 +651,48 @@ class GMSClientMemoryManager:
     # ==================== Scratch-aliased mappings ====================
 
     def create_scratch_mapping(self, size: int, tag: str = "kv_cache") -> int:
-        """Reserve VA range and back it with ONE aliased physical chunk.
+        """Reserve the final VA range and back only a small scratch prefix.
 
         Purely client-local — does not require a GMS server connection.
 
-        Used by the shadow engine at init so torch.zeros on the full kv_cache
-        size succeeds without paying the real memory cost. The shadow then
-        sleeps (unmap_all_vas drops scratch physical, preserves VAs) and
-        wakes by promoting the entries into _mappings via
-        prepare_scratch_for_reallocation; the standard reallocate_all_handles
-        + remap_all_vas flow produces real per-tensor backing at the same VAs.
+        Used by the shadow engine at init so KV tensors have their final VAs
+        without paying the real memory cost. The shadow then sleeps
+        (unmap_all_vas drops scratch physical, preserves VAs) and wakes by
+        promoting entries into _mappings; the standard reallocate_all_handles +
+        remap_all_vas flow produces full real backing at the same VAs.
 
-        Cudagraphs capture VAs, not physical, so the swap is invisible to
-        replay.
+        The vLLM scratch path must not initialize the full tensor (for example
+        with torch.zeros) before wake. During graph capture vLLM's dummy block
+        tables use the null block, so mapping the first granule is sufficient
+        for padding/null-block accesses while avoiding VMM map/access pressure
+        over the whole future KV range.
         """
         aligned_size = align_to_granularity(size, self.granularity)
-        n_chunks = aligned_size // self.granularity
+        mapped_size = min(aligned_size, self.granularity)
 
-        ok, scratch_handle = cumem_create_tolerate_oom(self.granularity, self.device)
+        ok, scratch_handle = cumem_create_tolerate_oom(mapped_size, self.device)
         if not ok:
             raise RuntimeError(
                 "cuMemCreate failed to allocate the deferred-KV scratch chunk "
-                f"({self.granularity // (1 << 20)} MiB) on device {self.device}"
+                f"({mapped_size // (1 << 20)} MiB) on device {self.device}"
             )
 
         va = cumem_address_reserve(aligned_size, self.granularity)
-        for offset in range(0, aligned_size, self.granularity):
-            cumem_map(va + offset, self.granularity, scratch_handle)
-        cumem_set_access(va, aligned_size, self.device, GrantedLockType.RW)
+        cumem_map(va, mapped_size, scratch_handle)
+        cumem_set_access(va, mapped_size, self.device, GrantedLockType.RW)
 
         self._scratch_mappings[va] = _ScratchMapping(
             base_va=va,
             aligned_size=aligned_size,
-            n_chunks=n_chunks,
+            mapped_size=mapped_size,
             tag=tag,
             scratch_handle=scratch_handle,
         )
         logger.info(
-            "[GMS] Reserved %d MiB VA at 0x%x, aliased 1x %d MiB scratch across %d granules",
+            "[GMS] Reserved %d MiB VA at 0x%x; mapped %d MiB scratch prefix",
             aligned_size // (1 << 20),
             va,
-            self.granularity // (1 << 20),
-            n_chunks,
+            mapped_size // (1 << 20),
         )
         return va
 
@@ -740,7 +741,7 @@ class GMSClientMemoryManager:
 
         cuda_synchronize()
         if scratch.scratch_handle:
-            cumem_unmap(base_va, scratch.aligned_size)
+            cumem_unmap(base_va, scratch.mapped_size)
             cumem_release(scratch.scratch_handle)
         cumem_address_free(base_va, scratch.aligned_size)
         return True

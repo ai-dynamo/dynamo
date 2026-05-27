@@ -301,11 +301,11 @@ class GMSWorker(Worker):
         device = self.local_rank
         socket = get_socket_path(device, "kv_cache")
         if is_scratch_kv_enabled():
-            # Client-local scratch only — no GMS server session at init.
-            # wake_up will connect RW and migrate to real backing.
+            # Register client-local scratch only. The vLLM allocation patch
+            # routes only raw KV tensors through the scratch mempool; transient
+            # init/graph-capture buffers stay on the normal PyTorch allocator.
             get_or_create_scratch_manager(socket, device, tag="kv_cache")
-            with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
+            self.model_runner.initialize_kv_cache(kv_cache_config)
         elif self.vllm_config.model_config.enable_sleep_mode:
             get_or_create_gms_client_memory_manager(
                 socket,

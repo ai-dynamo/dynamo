@@ -4,8 +4,6 @@
 """Worker initialization factory for vLLM workers."""
 
 import asyncio
-import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -44,45 +42,6 @@ logger = logging.getLogger(__name__)
 
 # (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
-
-
-@contextlib.contextmanager
-def _gms_shadow_startup_lock(config: Config):
-    """Serialize heavy CUDA init until each shadow can sleep and free memory."""
-    if not config.gms_shadow_mode:
-        yield
-        return
-
-    lock_path = os.environ.get(
-        "DYN_GMS_SHADOW_STARTUP_LOCK_PATH",
-        "/gms-intrapod-control/startup.lock",
-    )
-    ready_path = os.environ.get(
-        "DYN_GMS_SHADOW_STARTUP_READY_PATH",
-        "/gms-intrapod-control/startup.ready",
-    )
-    engine_id = os.environ.get("ENGINE_ID", "0")
-    if engine_id != "0":
-        while not os.path.exists(ready_path):
-            _time.sleep(0.1)
-
-    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-    logger.info("[Shadow] Waiting for startup lock: engine-%s", engine_id)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        os.ftruncate(fd, 0)
-        os.write(fd, f"engine-{engine_id}".encode())
-        logger.info("[Shadow] Startup lock acquired: engine-%s", engine_id)
-        yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-        if engine_id == "0":
-            Path(ready_path).touch()
-        logger.info("[Shadow] Startup lock released: engine-%s", engine_id)
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
@@ -345,11 +304,6 @@ class WorkerFactory:
             return
 
         await handler._quiesce_controller.quiesce(1)
-        startup_release = getattr(handler, "_gms_shadow_startup_release", None)
-        if startup_release is not None:
-            startup_release(None, None, None)
-            delattr(handler, "_gms_shadow_startup_release")
-
         runtime.set_health_status(True)
         logger.info(
             "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
@@ -413,7 +367,6 @@ class WorkerFactory:
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
-        startup_release = None
         if snapshot_engine is not None:
             (
                 engine_client,
@@ -435,25 +388,13 @@ class WorkerFactory:
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
             )
-            startup_release = None
-            if config.gms_shadow_mode:
-                startup_lock = _gms_shadow_startup_lock(config)
-                startup_release = startup_lock.__exit__
-                startup_lock.__enter__()
-            try:
-                (
-                    engine_client,
-                    vllm_config,
-                    default_sampling_params,
-                    prometheus_temp_dir,
-                    component_gauges,
-                ) = self.setup_vllm_engine(
-                    config, factory, fpm_worker_id=fpm_worker_id
-                )
-            except Exception:
-                if startup_release is not None:
-                    startup_release(None, None, None)
-                raise
+            (
+                engine_client,
+                vllm_config,
+                default_sampling_params,
+                prometheus_temp_dir,
+                component_gauges,
+            ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
@@ -481,8 +422,6 @@ class WorkerFactory:
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
-        if startup_release is not None:
-            handler._gms_shadow_startup_release = startup_release
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
