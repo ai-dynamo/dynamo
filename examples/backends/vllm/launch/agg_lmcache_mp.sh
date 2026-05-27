@@ -30,7 +30,7 @@ print_launch_banner "Launching Aggregated Serving (1 GPU) + LMCache" "$MODEL" "$
 
 # Start the LMCache MP server (out-of-process cache engine).
 lmcache server \
-  --l1-size-gb "${LMCACHE_L1_SIZE_GB:-100}" --eviction-policy LRU \
+  --l1-size-gb "${LMCACHE_L1_SIZE_GB:-16}" --eviction-policy LRU \
   --port "$LMCACHE_PORT" --http-port "$LMCACHE_HTTP_PORT" &
 
 # Wait until the server's HTTP admin endpoint is healthy before launching workers.
