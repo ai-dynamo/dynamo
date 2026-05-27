@@ -35,6 +35,24 @@ fn strip_harmony_control_tokens(text: &str) -> String {
     re.replace_all(text, "").into_owned()
 }
 
+/// Decode the parser's tokens from the most recent `<|channel|>` marker to the
+/// end. Used to surface the commentary header (`<|channel|>commentary
+/// to=functions.X <|constrain|>json<|message|>`) that `StreamableParser`
+/// silently consumes, so the downstream jail / tool-call parser sees a start
+/// marker. Returns `None` if the harmony encoding failed to load or no
+/// `<|channel|>` token is present.
+fn reconstruct_from_last_channel(parser: &StreamableParser) -> Option<String> {
+    let enc = get_harmony_encoding().as_ref().ok()?;
+    let channel_token_id = enc
+        .tokenizer()
+        .encode_with_special_tokens("<|channel|>")
+        .last()
+        .copied()?;
+    let tokens = parser.tokens();
+    let last_idx = tokens.iter().rposition(|t| *t == channel_token_id)?;
+    enc.tokenizer().decode_utf8(&tokens[last_idx..]).ok()
+}
+
 fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
     GLOBAL_HARMONY_GPTOSS_ENCODING.get_or_init(|| {
         // load_harmony_encoding internally constructs a reqwest::blocking::Client,
@@ -225,6 +243,17 @@ impl ReasoningParser for GptOssReasoningParser {
         let parser: &mut StreamableParser = &mut self.parser;
         let mut normal_delta = String::new();
         let mut reasoning_delta = String::new();
+        // Whether the parser was in the commentary channel at the start of
+        // this chunk. Combined with `entered_commentary_this_chunk` below to
+        // distinguish first-entry chunks (need header reconstruction) from
+        // continuation chunks (pass through incremental text).
+        let was_in_commentary_at_start = parser.current_channel().as_deref() == Some("commentary");
+        // Set to true once the parser transitions into the commentary channel
+        // during this chunk's token loop. Drives the commentary-header
+        // reconstruction below; using a transition flag (rather than
+        // `current_content.is_empty()`) ensures recovery still fires when
+        // body tokens arrive in the same chunk as the `<|message|>` boundary.
+        let mut entered_commentary_this_chunk = false;
 
         for (i, token_id) in token_ids.iter().enumerate() {
             tracing::debug!(
@@ -248,6 +277,13 @@ impl ReasoningParser for GptOssReasoningParser {
                 };
             }
 
+            if !was_in_commentary_at_start
+                && !entered_commentary_this_chunk
+                && parser.current_channel().as_deref() == Some("commentary")
+            {
+                entered_commentary_this_chunk = true;
+            }
+
             if let (Some(delta), Some(channel)) = (
                 parser.last_content_delta().unwrap_or_default(),
                 parser.current_channel(),
@@ -264,73 +300,50 @@ impl ReasoningParser for GptOssReasoningParser {
             }
         }
 
-        if !normal_delta.is_empty() || !reasoning_delta.is_empty() {
+        // Commentary header recovery. `StreamableParser` consumes
+        // `<|channel|>commentary to=functions.X <|constrain|>json<|message|>`
+        // silently and emits no delta for commentary content. The jail keys
+        // off `<|channel|>commentary`, so the consumed header must be surfaced
+        // here on the chunk that enters commentary — including chunks that
+        // also contain body tokens (current_content non-empty).
+        //
+        // Must run BEFORE the delta early-return: when a single chunk carries
+        // both an analysis tail (`reasoning_delta` non-empty) AND entry into
+        // commentary, returning only the delta would drop the header and leak
+        // `<|constrain|>json<|message|>{...}` past the jail on subsequent
+        // chunks (which is the dominant leak pattern observed in production).
+        let commentary_header = if entered_commentary_this_chunk {
+            reconstruct_from_last_channel(parser).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if !normal_delta.is_empty() || !reasoning_delta.is_empty() || !commentary_header.is_empty()
+        {
             tracing::debug!(
-                "Returning aggregated deltas: normal: {} chars, reasoning: {} chars",
+                "Returning aggregated deltas: normal: {} chars, reasoning: {} chars, commentary_header: {} chars",
                 normal_delta.len(),
-                reasoning_delta.len()
+                reasoning_delta.len(),
+                commentary_header.len(),
             );
             return ParserResult {
-                normal_text: normal_delta,
+                normal_text: format!("{}{}", normal_delta, commentary_header),
                 reasoning_text: reasoning_delta,
             };
         }
 
         if let Some(channel) = parser.current_channel() {
             if channel == "commentary" {
-                tracing::debug!("In commentary channel, recovering full content");
-                // If we're in the commentary channel, we should return raw token content and recover content that has been consumed by the parser
-                // so that the tool parser can process it properly
-                if let Ok(enc) = get_harmony_encoding() {
-                    let current_content = parser.current_content().unwrap_or_default();
-                    let mut final_text = text.to_string();
-
-                    // Restore commentary metadata consumed by the parser so the tool-call parser can
-                    // process it correctly.
-                    //
-                    // Example:
-                    //   Before parsing:
-                    //   "<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{\"format\":\"celsius\",\"location\":\"San Francisco\"}<|call|>"
-                    //   After parsing, the header is stripped, so we must reconstruct it:
-                    //   "<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>"
-                    //
-                    // This ensures downstream tool-call parsing receives the channel, target, and
-                    // constraint metadata together with the message payload.
-
-                    // Recovery should only happen once, and only when `current_content` is empty.
-                    if current_content.is_empty() {
-                        let tokens = parser.tokens();
-
-                        // Get the token id for " <|channel|>"
-                        let channel_token_id = enc
-                            .tokenizer()
-                            .encode_with_special_tokens("<|channel|>")
-                            .last()
-                            .copied();
-
-                        // Find the last occurrence of the <|channel|> token (id 20005) in the tokens vector
-                        let last_channel_token_idx = channel_token_id
-                            .and_then(|token_id| {
-                                tokens.iter().rposition(|token| *token == token_id)
-                            })
-                            .unwrap_or(0);
-
-                        // Then get the generated text from the last <|channel|> to the end of parser.tokens()
-                        let end_token_idx = parser.tokens().len();
-                        // Use Harmony's decode_utf8 to decode tokens into text
-                        let generated_text = enc
-                            .tokenizer()
-                            .decode_utf8(&parser.tokens()[last_channel_token_idx..end_token_idx])
-                            .unwrap_or_default();
-
-                        final_text = generated_text;
-                    }
-
-                    return ParserResult {
-                        normal_text: final_text,
-                        reasoning_text: String::new(),
-                    };
-                }
+                // Continuation chunk while in commentary (was already in
+                // commentary at the start of this chunk and no deltas to
+                // forward). Pass through the raw chunk text incrementally so
+                // the jail's accumulator gets the body (and any trailing
+                // `<|call|>` end marker).
+                tracing::debug!("In commentary channel continuation, passing raw text");
+                return ParserResult {
+                    normal_text: text.to_string(),
+                    reasoning_text: String::new(),
+                };
             } else {
                 tracing::warn!("Shouldn't be delta content after in channel: {}", channel);
             }
@@ -496,6 +509,48 @@ mod tests {
         assert_eq!(
             strip_harmony_control_tokens("<|foo|>kept<|return|>dropped"),
             "<|foo|>keptdropped"
+        );
+    }
+
+    /// Regression: when a single chunk carries the tail of an analysis message
+    /// AND completes entry into the commentary channel, the commentary header
+    /// must be surfaced alongside the reasoning delta. Previously the delta
+    /// early-return dropped the header, causing subsequent commentary chunks
+    /// (e.g. `<|constrain|>json<|message|>{...}`) to leak past the jail as
+    /// regular content.
+    #[test]
+    fn test_gpt_oss_reasoning_parser_analysis_then_commentary_in_one_chunk() {
+        let text = "<|channel|>analysis<|message|>We should call get_system_health.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
+        let enc = get_harmony_encoding()
+            .as_ref()
+            .expect("Failed to get encoding");
+        let token_ids = enc.tokenizer().encode_with_special_tokens(text);
+
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let mut normal_text_incr = String::new();
+        let mut reasoning_text_incr = String::new();
+
+        // Single chunk carrying everything from analysis tail through the
+        // commentary header (and the empty body up to but not including the
+        // body delta).
+        let result = parser.parse_reasoning_streaming_incremental("", &token_ids);
+        normal_text_incr.push_str(&result.normal_text);
+        reasoning_text_incr.push_str(&result.reasoning_text);
+
+        assert_eq!(reasoning_text_incr, "We should call get_system_health.");
+        // The commentary header must be surfaced so the jail's
+        // `<|channel|>commentary` start marker triggers.
+        assert!(
+            normal_text_incr.contains("<|channel|>commentary"),
+            "expected commentary header in normal_text, got: {normal_text_incr:?}"
+        );
+        assert!(
+            normal_text_incr.contains("to=functions.get_system_health"),
+            "expected recipient in normal_text, got: {normal_text_incr:?}"
+        );
+        assert!(
+            normal_text_incr.contains("<|constrain|>json<|message|>"),
+            "expected constrain/message tokens in normal_text, got: {normal_text_incr:?}"
         );
     }
 }
