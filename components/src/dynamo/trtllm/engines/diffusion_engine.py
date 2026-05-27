@@ -30,9 +30,9 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 if TYPE_CHECKING:
-    from tensorrt_llm.visual_gen.args import VisualGenArgs
     from tensorrt_llm._torch.visual_gen.output import MediaOutput
     from tensorrt_llm._torch.visual_gen.pipeline import BasePipeline
+    from tensorrt_llm.visual_gen.args import VisualGenArgs
 
     from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 
