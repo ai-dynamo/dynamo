@@ -124,7 +124,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             require_lightseek_init=True,
-                            min_routing_total_blocks=10,
+                            min_avg_kv_hit_rate=0.9,
                         )
                     )
                 ],
@@ -225,7 +225,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             require_lightseek_init=True,
-                            min_routing_total_blocks=10,
+                            min_avg_kv_hit_rate=0.9,
                         )
                     )
                 ],
@@ -248,7 +248,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             require_lightseek_init=True,
-                            min_routing_total_blocks=10,
+                            min_avg_kv_hit_rate=0.9,
                         )
                     )
                 ],
@@ -279,7 +279,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             require_lightseek_init=True,
-                            min_routing_total_blocks=10,
+                            min_avg_kv_hit_rate=0.9,
                         )
                     )
                 ],
@@ -407,7 +407,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             require_lightseek_init=True,
-                            min_routing_total_blocks=10,
+                            min_avg_kv_hit_rate=0.9,
                         )
                     )
                 ],
@@ -533,7 +533,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             require_lightseek_init=True,
-                            min_routing_total_blocks=10,
+                            min_avg_kv_hit_rate=0.9,
                         )
                     )
                 ],

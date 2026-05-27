@@ -407,23 +407,13 @@ class CachedTokensChatPayload(ChatPayload):
         router_nvext_expectation: RouterNvextExpectation | None = None,
         require_lightseek_init: bool = False,
         require_vllm_mm_processor_init: bool = False,
-        min_routing_total_blocks: int = 0,
+        min_avg_kv_hit_rate: float = 0.0,
     ):
-        # Strong-gate kwargs: fail closed on text-prefix degradation, which
-        # could otherwise satisfy cached_tokens >= 1 via prompt-prefix luck.
         log_patterns: List[str] = list(expected_log or [])
         if require_lightseek_init:
             log_patterns.append(r"MM-aware KV routing enabled \(lightseek\)")
         if require_vllm_mm_processor_init:
             log_patterns.append(r"\[mm-routing\] Transfer mode:")
-        if min_routing_total_blocks > 0:
-            # Regex requires the M side of "X/M blocks overlap" to start
-            # with a non-zero digit and have at least min_digits digits.
-            # Threshold should be a power of 10 (10, 100, …).
-            min_digits = len(str(min_routing_total_blocks))
-            log_patterns.append(
-                rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
-            )
         super().__init__(
             body=body,
             repeat_count=repeat_count,
@@ -435,6 +425,11 @@ class CachedTokensChatPayload(ChatPayload):
         self._request_count = 0
         self._cached_tokens_found = False
         self.router_nvext_expectation = router_nvext_expectation
+        # Asserts the post-R1 mean of router_kv_hit_rate >= threshold. Catches
+        # router/worker hash divergence (overlap=0) that cached_tokens alone
+        # can miss via load-balance luck on vLLM's per-worker prefix cache.
+        self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
+        self._metrics_baseline: Optional[Dict[str, tuple[float, float]]] = None
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -475,10 +470,36 @@ class CachedTokensChatPayload(ChatPayload):
                     f"(expected >= {self.min_cached_tokens})"
                 )
 
-    def final_validation(self) -> None:
-        """Called after all requests are processed to ensure we saw cached tokens.
+        # Snapshot after R1 so the delta in final_validation isolates R2+.
+        if (
+            self._metrics_baseline is None
+            and self._request_count == 1
+            and self.min_avg_kv_hit_rate > 0
+        ):
+            self._metrics_baseline = self._scrape_router_histograms()
 
-        Raises AssertionError if cached tokens were not found on any repeated request.
+    def _scrape_router_histograms(self) -> Dict[str, tuple[float, float]]:
+        """Return ``{"router_kv_hit_rate": (sum, count)}`` from the frontend
+        /metrics endpoint. The component MetricsHierarchy auto-prepends
+        ``dynamo_component_`` to the exported name.
+        """
+        url = f"http://localhost:{self.port}/metrics"
+        try:
+            text = requests.get(url, timeout=5).text
+        except Exception as e:
+            logger.warning("Failed to scrape %s: %s", url, e)
+            return {}
+        full = "dynamo_component_router_kv_hit_rate"
+        return {
+            "router_kv_hit_rate": (
+                sum_metric_samples(text, f"{full}_sum"),
+                sum_metric_samples(text, f"{full}_count"),
+            )
+        }
+
+    def final_validation(self) -> None:
+        """Assert cached_tokens >= min_cached_tokens on at least one repeat,
+        and (if set) router_kv_hit_rate post-R1 mean >= min_avg_kv_hit_rate.
         """
         if self.repeat_count > 1 and not self._cached_tokens_found:
             raise AssertionError(
@@ -489,6 +510,36 @@ class CachedTokensChatPayload(ChatPayload):
             )
         logger.info(
             "✓ Final validation PASSED: cached_tokens found in repeated requests"
+        )
+
+        if self.min_avg_kv_hit_rate <= 0:
+            return
+        if self._metrics_baseline is None:
+            raise AssertionError(
+                "min_avg_kv_hit_rate set but no metrics baseline captured "
+                "(R1 validate() didn't run or /metrics was unreachable)."
+            )
+        after = self._scrape_router_histograms()
+        bsum, bcount = self._metrics_baseline.get("router_kv_hit_rate", (0.0, 0.0))
+        asum, acount = after.get("router_kv_hit_rate", (0.0, 0.0))
+        d_sum, d_count = asum - bsum, acount - bcount
+        if d_count <= 0:
+            raise AssertionError(
+                f"router_kv_hit_rate: no new observations between R1 and final "
+                f"(baseline_count={bcount}, after_count={acount}); "
+                f"MM-routing likely not engaging on repeat requests."
+            )
+        avg = d_sum / d_count
+        if avg < self.min_avg_kv_hit_rate:
+            raise AssertionError(
+                f"router_kv_hit_rate: mean over R2+ ({avg:.3f}) below required "
+                f"min ({self.min_avg_kv_hit_rate}). delta_n={d_count}, "
+                f"delta_sum={d_sum:.3f}. Router-side block hashes did not "
+                f"match the worker — MM-aware routing degraded silently."
+            )
+        logger.info(
+            f"✓ router_kv_hit_rate: mean over R2+ = {avg:.3f} "
+            f"(>= {self.min_avg_kv_hit_rate})"
         )
 
 
