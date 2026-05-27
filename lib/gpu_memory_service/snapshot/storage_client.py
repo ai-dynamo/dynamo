@@ -19,9 +19,7 @@ from gpu_memory_service.snapshot.backends.sharded_ssd import (
     SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY,
     SHARDED_SSD_ROOTS_CONFIG_KEY,
 )
-from gpu_memory_service.snapshot.disk import (
-    DeviceToFileWriter,
-)
+from gpu_memory_service.snapshot.disk import DeviceToFileWriter
 from gpu_memory_service.snapshot.disk import decode_metadata as _decode_metadata_impl
 from gpu_memory_service.snapshot.disk import (
     load_manifest_and_metadata as _load_manifest_and_metadata_impl,
