@@ -10,6 +10,10 @@ Covers:
 - ``_report_diagnostics``: scaling-decision Enum gauges must only be
   written for the scaling path that actually ran this tick, so
   load-only ticks don't wipe the throughput Enum (and vice versa).
+- SLA target gauges (``sla_target_ttft_ms``, ``sla_target_itl_ms``):
+  must be written once at planner startup with the configured SLA
+  values so Grafana dashboards can compare observed/estimated latency
+  against the operator-defined target.
 """
 
 import os
@@ -289,3 +293,120 @@ class TestReportDiagnosticsEnumGating:
 
         pm.load_scaling_decision.state.assert_not_called()
         pm.throughput_scaling_decision.state.assert_not_called()
+
+
+# ── SLA target gauges: published once at __init__ ───────────────────
+
+
+def _make_planner_with_port(
+    ttft_ms: float = 500.0,
+    itl_ms: float = 50.0,
+    prometheus_enabled: bool = True,
+) -> NativePlannerBase:
+    """Build a NativePlannerBase with prometheus_port set at config time.
+
+    Unlike ``_make_planner``, this helper sets ``metric_reporting_prometheus_port``
+    in the PlannerConfig itself (not post-init) so that __init__-time Prometheus
+    publication — such as the one-shot SLA target gauge writes — is exercised.
+    ``start_http_server`` is still patched to avoid binding a real port.
+    """
+    port = 9091 if prometheus_enabled else 0
+    with patch(
+        "dynamo.planner.core.base.PlannerPrometheusMetrics"
+    ) as mock_metrics, patch("dynamo.planner.core.base.start_http_server"), patch(
+        "dynamo.planner.connectors.kubernetes.KubernetesAPI"
+    ), patch.dict(
+        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
+    ):
+        mock_metrics.return_value = Mock()
+        config = PlannerConfig.model_construct(
+            throughput_adjustment_interval_seconds=60,
+            prefill_engine_num_gpu=2,
+            decode_engine_num_gpu=4,
+            min_endpoint=1,
+            max_gpu_budget=-1,
+            ttft_ms=ttft_ms,
+            itl_ms=itl_ms,
+            backend="vllm",
+            no_operation=True,
+            metric_pulling_prometheus_endpoint="http://localhost:9090",
+            metric_reporting_prometheus_port=port,
+            load_predictor="constant",
+            environment="kubernetes",
+            namespace="test-namespace",
+            mode="disagg",
+            enable_load_scaling=True,
+            enable_throughput_scaling=True,
+            load_adjustment_interval_seconds=5,
+            max_num_fpm_samples=50,
+            fpm_sample_bucket_size=16,
+            load_scaling_down_sensitivity=80,
+            load_metric_samples=10,
+            load_min_observations=5,
+        )
+        planner = NativePlannerBase(None, config)
+    return planner
+
+
+class TestSlaTargetGaugesInit:
+    """sla_target_ttft_ms and sla_target_itl_ms must be published once
+    during NativePlannerBase.__init__ with the values from PlannerConfig."""
+
+    def test_sla_targets_set_at_init_with_default_config_values(self):
+        """Default config (ttft_ms=500, itl_ms=50) is pushed to Prometheus on startup."""
+        planner = _make_planner_with_port()
+        pm = planner.prometheus_metrics
+
+        pm.sla_target_ttft_ms.set.assert_called_once_with(500.0)
+        pm.sla_target_itl_ms.set.assert_called_once_with(50.0)
+
+    def test_sla_targets_not_set_when_prometheus_disabled(self):
+        """No gauge writes when prometheus_port=0 (Prometheus export disabled)."""
+        planner = _make_planner_with_port(prometheus_enabled=False)
+        pm = planner.prometheus_metrics
+
+        pm.sla_target_ttft_ms.set.assert_not_called()
+        pm.sla_target_itl_ms.set.assert_not_called()
+
+    def test_sla_targets_reflect_custom_config_values(self):
+        """Non-default SLA targets from PlannerConfig are passed through unchanged."""
+        planner = _make_planner_with_port(ttft_ms=1500.0, itl_ms=75.0)
+        pm = planner.prometheus_metrics
+
+        pm.sla_target_ttft_ms.set.assert_called_once_with(1500.0)
+        pm.sla_target_itl_ms.set.assert_called_once_with(75.0)
+
+
+class TestPlannerPrometheusMetricsHasSlaTargetGauges:
+    """PlannerPrometheusMetrics must declare sla_target_ttft_ms and
+    sla_target_itl_ms as Gauge attributes with the correct metric names."""
+
+    def test_metrics_object_has_sla_target_gauge_attributes(self):
+        """Instance attributes sla_target_ttft_ms and sla_target_itl_ms must exist."""
+        from unittest.mock import MagicMock
+
+        from dynamo.planner.monitoring.planner_metrics import (
+            PREFIX,
+            PlannerPrometheusMetrics,
+        )
+
+        with patch(
+            "dynamo.planner.monitoring.planner_metrics.Gauge"
+        ) as mock_gauge, patch("dynamo.planner.monitoring.planner_metrics.Enum"):
+            mock_gauge.return_value = MagicMock()
+            metrics = PlannerPrometheusMetrics()
+
+        assert hasattr(
+            metrics, "sla_target_ttft_ms"
+        ), "PlannerPrometheusMetrics is missing sla_target_ttft_ms attribute"
+        assert hasattr(
+            metrics, "sla_target_itl_ms"
+        ), "PlannerPrometheusMetrics is missing sla_target_itl_ms attribute"
+
+        registered_names = [call.args[0] for call in mock_gauge.call_args_list]
+        assert (
+            f"{PREFIX}_sla_target_ttft_ms" in registered_names
+        ), f"Expected Gauge name '{PREFIX}_sla_target_ttft_ms' not registered"
+        assert (
+            f"{PREFIX}_sla_target_itl_ms" in registered_names
+        ), f"Expected Gauge name '{PREFIX}_sla_target_itl_ms' not registered"

@@ -167,6 +167,8 @@ class NativePlannerBase:
                 )
             except Exception as e:
                 logger.error(f"Failed to start Prometheus metrics server: {e}")
+            self.prometheus_metrics.sla_target_ttft_ms.set(config.ttft_ms)
+            self.prometheus_metrics.sla_target_itl_ms.set(config.itl_ms)
 
         # Worker info (resolved during _async_init)
         self.prefill_worker_info = WorkerInfo()
