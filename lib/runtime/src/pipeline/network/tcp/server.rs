@@ -1873,4 +1873,124 @@ mod tests {
             Ok(_) => panic!("invalid prologue should produce an error, but got Ok"),
         }
     }
+
+    // ==================== request_stream_send_handler integration tests ====================
+    //
+    // These exercise the closing-message contract of `request_stream_send_handler`
+    // end-to-end: register a request stream, dial it as a raw client (so we can
+    // inspect frames directly), then trigger each of the exit branches and
+    // assert which ControlMessage arrives on the wire.
+
+    use futures::SinkExt;
+
+    /// Register a request stream and dial it with a raw client. Returns the
+    /// framed reader on the raw client side, the StreamSender held by the
+    /// upstream, and the upstream's engine context (so the test can drive
+    /// kill / stop externally).
+    async fn register_and_dial_request_stream(
+        server: &TcpStreamServer,
+    ) -> (
+        FramedRead<tokio::io::ReadHalf<TcpStream>, TwoPartCodec>,
+        super::StreamSender,
+        Arc<dyn AsyncEngineContext>,
+    ) {
+        let upstream_ctx = Context::new(()).context();
+        let options = StreamOptions::builder()
+            .context(upstream_ctx.clone())
+            .enable_request_stream(true)
+            .enable_response_stream(false)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let send_stream = pending.send_stream.unwrap();
+        let (conn_info, send_provider) = send_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = conn_info.try_into().unwrap();
+
+        let raw = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (read_half, write_half) = tokio::io::split(raw);
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = super::CallHomeHandshake {
+            subject: tcp_info.subject.clone(),
+            stream_type: StreamType::Request,
+        };
+        let handshake_bytes = serde_json::to_vec(&handshake).unwrap();
+        framed_writer
+            .send(TwoPartMessage::from_header(handshake_bytes.into()))
+            .await
+            .unwrap();
+        drop(framed_writer);
+
+        let sender = send_provider.await.unwrap().unwrap();
+        (framed_reader, sender, upstream_ctx)
+    }
+
+    /// Pull frames off the raw client reader until the first `ControlMessage`
+    /// arrives, ignoring any DataOnly frames before it. Returns the variant.
+    async fn next_control_message(
+        reader: &mut FramedRead<tokio::io::ReadHalf<TcpStream>, TwoPartCodec>,
+    ) -> ControlMessage {
+        loop {
+            let frame = reader
+                .next()
+                .await
+                .expect("socket closed before control message arrived")
+                .expect("decode error");
+            if let Some(header) = frame.header() {
+                return serde_json::from_slice::<ControlMessage>(header)
+                    .expect("invalid control message bytes");
+            }
+            // DataOnly frame — skip and keep reading.
+        }
+    }
+
+    /// Dropping the upstream's StreamSender drains `request_rx` and the server
+    /// emits [`ControlMessage::Sentinel`] as the closing frame.
+    #[tokio::test]
+    async fn test_request_stream_sends_sentinel_on_clean_drop() {
+        let server = test_server().await;
+        let (mut reader, sender, _ctx) = register_and_dial_request_stream(&server).await;
+
+        drop(sender);
+
+        let ctrl = next_control_message(&mut reader).await;
+        assert!(
+            matches!(ctrl, ControlMessage::Sentinel),
+            "clean drain should emit Sentinel, got {ctrl:?}"
+        );
+    }
+
+    /// `context.kill()` makes the server emit [`ControlMessage::Kill`] before
+    /// shutting down the write half.
+    #[tokio::test]
+    async fn test_request_stream_sends_kill_on_context_killed() {
+        let server = test_server().await;
+        let (mut reader, _sender, ctx) = register_and_dial_request_stream(&server).await;
+
+        ctx.kill();
+
+        let ctrl = next_control_message(&mut reader).await;
+        assert!(
+            matches!(ctrl, ControlMessage::Kill),
+            "context.kill() should emit Kill, got {ctrl:?}"
+        );
+    }
+
+    /// `context.stop()` makes the server emit [`ControlMessage::Stop`] before
+    /// shutting down the write half.
+    #[tokio::test]
+    async fn test_request_stream_sends_stop_on_context_stopped() {
+        let server = test_server().await;
+        let (mut reader, _sender, ctx) = register_and_dial_request_stream(&server).await;
+
+        ctx.stop();
+
+        let ctrl = next_control_message(&mut reader).await;
+        assert!(
+            matches!(ctrl, ControlMessage::Stop),
+            "context.stop() should emit Stop, got {ctrl:?}"
+        );
+    }
 }

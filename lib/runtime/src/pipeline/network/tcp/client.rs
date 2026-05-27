@@ -1453,4 +1453,270 @@ mod tests {
             assert_eq!(counter.get(), 1, "{label}: should be counted once");
         }
     }
+
+    // ==================== handle_request_reader tests ====================
+
+    struct RequestReaderHarness {
+        framed_server: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        bytes_tx: mpsc::Sender<Bytes>,
+        bytes_rx: mpsc::Receiver<Bytes>,
+        controller: Arc<Controller>,
+    }
+
+    async fn request_reader_harness() -> RequestReaderHarness {
+        let (client, server) = create_tcp_pair().await;
+        let (read_half, _write_half) = tokio::io::split(client);
+        let (_server_read, server_write) = tokio::io::split(server);
+
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let framed_server = FramedWrite::new(server_write, TwoPartCodec::default());
+        let (bytes_tx, bytes_rx) = mpsc::channel::<Bytes>(64);
+        let controller = Arc::new(Controller::default());
+
+        RequestReaderHarness {
+            framed_server,
+            framed_reader,
+            bytes_tx,
+            bytes_rx,
+            controller,
+        }
+    }
+
+    /// Receiving Stop calls context.stop(), increments the counter, and exits.
+    #[tokio::test]
+    async fn test_handle_request_reader_stop_control_message() {
+        let RequestReaderHarness {
+            mut framed_server,
+            framed_reader,
+            bytes_tx,
+            bytes_rx: _bytes_rx,
+            controller,
+        } = request_reader_harness().await;
+
+        let counter = IntCounter::new("tcp_request_reader_stop_test", "test counter").unwrap();
+
+        let counter_clone = counter.clone();
+        let controller_clone = controller.clone();
+        let handle = tokio::spawn(async move {
+            handle_request_reader(
+                framed_reader,
+                bytes_tx,
+                controller_clone,
+                Some(counter_clone),
+            )
+            .await
+        });
+
+        framed_server
+            .send(control_message(&ControlMessage::Stop))
+            .await
+            .unwrap();
+
+        handle.await.unwrap();
+
+        assert!(controller.is_stopped(), "Stop should call context.stop()");
+        assert!(!controller.is_killed(), "Stop should not kill the context");
+        assert_eq!(counter.get(), 1, "cancellation counter should increment");
+    }
+
+    /// Receiving Kill calls context.kill(), increments the counter, and exits.
+    #[tokio::test]
+    async fn test_handle_request_reader_kill_control_message() {
+        let RequestReaderHarness {
+            mut framed_server,
+            framed_reader,
+            bytes_tx,
+            bytes_rx: _bytes_rx,
+            controller,
+        } = request_reader_harness().await;
+
+        let counter = IntCounter::new("tcp_request_reader_kill_test", "test counter").unwrap();
+
+        let counter_clone = counter.clone();
+        let controller_clone = controller.clone();
+        let handle = tokio::spawn(async move {
+            handle_request_reader(
+                framed_reader,
+                bytes_tx,
+                controller_clone,
+                Some(counter_clone),
+            )
+            .await
+        });
+
+        framed_server
+            .send(control_message(&ControlMessage::Kill))
+            .await
+            .unwrap();
+
+        handle.await.unwrap();
+
+        assert!(controller.is_killed(), "Kill should call context.kill()");
+        assert_eq!(counter.get(), 1, "cancellation counter should increment");
+    }
+
+    /// Receiving Sentinel exits cleanly without touching the context or counter.
+    #[tokio::test]
+    async fn test_handle_request_reader_sentinel_control_message() {
+        let RequestReaderHarness {
+            mut framed_server,
+            framed_reader,
+            bytes_tx,
+            mut bytes_rx,
+            controller,
+        } = request_reader_harness().await;
+
+        let counter = IntCounter::new("tcp_request_reader_sentinel_test", "test counter").unwrap();
+
+        let counter_clone = counter.clone();
+        let controller_clone = controller.clone();
+        let handle = tokio::spawn(async move {
+            handle_request_reader(
+                framed_reader,
+                bytes_tx,
+                controller_clone,
+                Some(counter_clone),
+            )
+            .await
+        });
+
+        framed_server
+            .send(control_message(&ControlMessage::Sentinel))
+            .await
+            .unwrap();
+
+        handle.await.unwrap();
+
+        assert!(
+            !controller.is_stopped(),
+            "Sentinel must not stop the context"
+        );
+        assert!(
+            !controller.is_killed(),
+            "Sentinel must not kill the context"
+        );
+        assert_eq!(counter.get(), 0, "Sentinel must not increment counter");
+        assert!(
+            bytes_rx.recv().await.is_none(),
+            "bytes_tx should be dropped on exit"
+        );
+    }
+
+    /// DataOnly frames are forwarded to bytes_tx; the loop continues until a
+    /// terminator arrives (here, Sentinel).
+    #[tokio::test]
+    async fn test_handle_request_reader_forwards_data() {
+        let RequestReaderHarness {
+            mut framed_server,
+            framed_reader,
+            bytes_tx,
+            mut bytes_rx,
+            controller,
+        } = request_reader_harness().await;
+
+        let controller_clone = controller.clone();
+        let handle = tokio::spawn(async move {
+            handle_request_reader(framed_reader, bytes_tx, controller_clone, None).await
+        });
+
+        framed_server
+            .send(TwoPartMessage::from_data(Bytes::from_static(b"hello")))
+            .await
+            .unwrap();
+        framed_server
+            .send(TwoPartMessage::from_data(Bytes::from_static(b"world")))
+            .await
+            .unwrap();
+
+        assert_eq!(bytes_rx.recv().await.unwrap().as_ref(), b"hello");
+        assert_eq!(bytes_rx.recv().await.unwrap().as_ref(), b"world");
+
+        framed_server
+            .send(control_message(&ControlMessage::Sentinel))
+            .await
+            .unwrap();
+
+        handle.await.unwrap();
+        assert!(
+            bytes_rx.recv().await.is_none(),
+            "channel should close after Sentinel"
+        );
+    }
+
+    /// External context.kill() exits the reader without touching the wire.
+    #[tokio::test]
+    async fn test_handle_request_reader_exits_on_context_killed() {
+        let RequestReaderHarness {
+            framed_server: _framed_server,
+            framed_reader,
+            bytes_tx,
+            bytes_rx: _bytes_rx,
+            controller,
+        } = request_reader_harness().await;
+
+        let controller_clone = controller.clone();
+        let handle = tokio::spawn(async move {
+            handle_request_reader(framed_reader, bytes_tx, controller_clone, None).await
+        });
+
+        controller.kill();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        assert!(
+            result.is_ok(),
+            "handler should exit promptly on context.kill()"
+        );
+    }
+
+    /// External context.stop() exits the reader without touching the wire.
+    #[tokio::test]
+    async fn test_handle_request_reader_exits_on_context_stopped() {
+        let RequestReaderHarness {
+            framed_server: _framed_server,
+            framed_reader,
+            bytes_tx,
+            bytes_rx: _bytes_rx,
+            controller,
+        } = request_reader_harness().await;
+
+        let controller_clone = controller.clone();
+        let handle = tokio::spawn(async move {
+            handle_request_reader(framed_reader, bytes_tx, controller_clone, None).await
+        });
+
+        controller.stop();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        assert!(
+            result.is_ok(),
+            "handler should exit promptly on context.stop()"
+        );
+    }
+
+    /// Socket EOF exits the reader and drops bytes_tx.
+    #[tokio::test]
+    async fn test_handle_request_reader_exits_on_stream_closed() {
+        let RequestReaderHarness {
+            mut framed_server,
+            framed_reader,
+            bytes_tx,
+            mut bytes_rx,
+            controller,
+        } = request_reader_harness().await;
+
+        let controller_clone = controller.clone();
+        let handle = tokio::spawn(async move {
+            handle_request_reader(framed_reader, bytes_tx, controller_clone, None).await
+        });
+
+        framed_server.close().await.unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        assert!(result.is_ok(), "handler should exit on EOF");
+        assert!(
+            bytes_rx.recv().await.is_none(),
+            "bytes_tx should be dropped"
+        );
+    }
 }
