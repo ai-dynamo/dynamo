@@ -344,9 +344,7 @@ class GMSStorageClient:
 
         backend_config = {
             SHARDED_SSD_ROOTS_CONFIG_KEY: self._sharded_ssd_roots,
-            SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY: (
-                self._sharded_ssd_queues_per_root
-            ),
+            SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY: (self._sharded_ssd_queues_per_root),
         }
         backend = None
         session = None

@@ -142,9 +142,7 @@ def build_remote_transfer_sources(
 ) -> List[RemoteTransferSource]:
     """Convert manifest allocation records into remote-memory transfer extents."""
     if not isinstance(peer_sources, Mapping):
-        peer_sources = {
-            str(source["allocation_id"]): source for source in peer_sources
-        }
+        peer_sources = {str(source["allocation_id"]): source for source in peer_sources}
 
     sources: List[RemoteTransferSource] = []
     for entry in allocations:

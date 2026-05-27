@@ -293,7 +293,9 @@ class _NixlGDSTransferSession:
                     if ready is None:
                         break
                     file_group, targets = ready
-                    inflight.append(self._start_file_group_transfer(file_group, targets))
+                    inflight.append(
+                        self._start_file_group_transfer(file_group, targets)
+                    )
 
                 self._poll_completed_transfers(inflight)
 
@@ -301,9 +303,7 @@ class _NixlGDSTransferSession:
                     if not self._pending_group_indices and not inflight:
                         return
                     ready_exists = any(
-                        not self._missing_group_targets(
-                            self._file_groups[group_index]
-                        )
+                        not self._missing_group_targets(self._file_groups[group_index])
                         for group_index in self._pending_group_indices
                     )
                     if ready_exists and len(inflight) < self._max_workers:
@@ -373,9 +373,7 @@ class _NixlGDSTransferSession:
                 continue
             try:
                 if state == "ERR":
-                    raise RuntimeError(
-                        f"NIXL GDS transfer failed: {transfer.label}"
-                    )
+                    raise RuntimeError(f"NIXL GDS transfer failed: {transfer.label}")
                 if state != "DONE":
                     raise RuntimeError(
                         f"NIXL GDS transfer ended in unexpected state {state!r}: "
