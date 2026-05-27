@@ -183,7 +183,7 @@ impl
                 // back to the synchronous prefill path (which would re-enter
                 // the saturated queue).
                 //
-                // TODO(DEP-8189 / ai-dynamo#8189): once the shared rejection
+                // TODO(ai-dynamo#8189): once the shared rejection
                 // layer lands, classify queue-depth saturation distinctly
                 // from generic resource exhaustion (operator-facing 429 vs
                 // 503) instead of stringifying through ResourceExhausted.

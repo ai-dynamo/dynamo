@@ -165,7 +165,7 @@ Key behaviors:
 - **Turns 2+** skip the radix tree entirely. KV is restored from the `SessionSlot` in O(1).
 - **Session KV is invisible to eviction**. It cannot be evicted -- only freed by explicit close or inactivity timeout.
 - **Deterministic cleanup**: On close, session KV is freed immediately.
-- **Router-side affinity**: The `StickySessionRouter` maintains a `session_id -> worker_id` mapping with sliding-window TTL. Clients can use `action: "bind"` for router-only sticky routing, or `action: "open"` for SGLang streaming-session KV isolation.
+- **Router-side affinity**: The `StickySessionRouter` maintains a `session_id -> (worker_id, dp_rank)` mapping with sliding-window TTL. Clients can use `action: "bind"` for router-only sticky routing, or `action: "open"` for SGLang streaming-session KV isolation; both route later turns to the pinned worker/rank.
 
 ### Enabling Session Control
 
