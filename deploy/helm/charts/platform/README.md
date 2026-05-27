@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 1.2.1](https://img.shields.io/badge/Version-1.2.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 1.3.0](https://img.shields.io/badge/Version-1.3.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -97,7 +97,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 1.2.1 |
+| file://components/operator | dynamo-operator | 1.3.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.8 |
@@ -107,74 +107,200 @@ The chart includes built-in validation to prevent all operator conflicts:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| global.etcd.install | bool | `false` | Whether this chart should install the bundled etcd subchart. When true, deploys etcd and auto-configures the operator with its address. When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd. |
-| global.nats.install | bool | `true` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes). |
-| global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
-| global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
-| global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
-| global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
-| dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
-| dynamo-operator.upgradeCRD | bool | `true` | Whether to manage CRDs via a pre-install/pre-upgrade hook Job. The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply. |
-| dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
-| dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port" |
-| dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
-| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments. |
-| dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEPRECATED: Do not enable for new deployments. Namespace-restricted mode is deprecated. |
-| dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
-| dynamo-operator.namespaceRestriction.lease | object | `{"duration":"30s","renewInterval":"10s"}` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
-| dynamo-operator.namespaceRestriction.lease.duration | string | `"30s"` | DEPRECATED: Lease duration for namespace-restricted mode, which is deprecated. |
-| dynamo-operator.namespaceRestriction.lease.renewInterval | string | `"10s"` | DEPRECATED: Lease renew interval for namespace-restricted mode, which is deprecated. |
-| dynamo-operator.gpuDiscovery | object | `{"enabled":true}` | DEPRECATED: GPU discovery for namespace-scoped operators is deprecated along with namespace-restricted mode. |
-| dynamo-operator.gpuDiscovery.enabled | bool | `true` | DEPRECATED: Only relevant when namespaceRestriction is enabled, which is deprecated. |
-| dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
+| dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
+| dynamo-operator.checkpoint.storage | object | `{}` | Optional PVC storage used when the snapshot-agent is installed outside workload namespaces with snapshot.storage.accessMode=podMount. Set create=true for operator-managed namespace PVCs, or omit/create=false to require an already-present PVC with the configured name. ReadWriteOnce can be used with podMount for sequential checkpoint/restore on suitable storage backends; use ReadWriteMany for concurrent multi-node access. |
 | dynamo-operator.controllerManager.affinity | object | `{}` | Affinity for controller manager pods |
 | dynamo-operator.controllerManager.leaderElection.id | string | `""` | Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously. |
 | dynamo-operator.controllerManager.leaderElection.namespace | string | `""` | Namespace for leader election leases (only used in cluster-wide mode). If empty, defaults to kube-system for cluster-wide coordination. All cluster-wide operators should use the SAME namespace for proper leader election. |
-| dynamo-operator.controllerManager.manager.image.repository | string | `"nvcr.io/nvidia/ai-dynamo/kubernetes-operator"` | Official NVIDIA Dynamo operator image repository |
-| dynamo-operator.controllerManager.manager.image.tag | string | `""` | Image tag (leave empty to use chart default) |
-| dynamo-operator.controllerManager.manager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy - when to pull the image |
 | dynamo-operator.controllerManager.manager.args[0] | string | `"--health-probe-bind-address=:8081"` | Health probe endpoint for Kubernetes health checks |
 | dynamo-operator.controllerManager.manager.args[1] | string | `"--metrics-bind-address=127.0.0.1:8080"` | Metrics endpoint for Prometheus scraping (localhost only for security) |
-| dynamo-operator.imagePullSecrets | list | `[]` | Secrets for pulling private container images |
-| dynamo-operator.dynamo.groveTerminationDelay | string | `"4h"` | How long to wait before forcefully terminating Grove instances |
-| dynamo-operator.dynamo.dockerRegistry.useKubernetesSecret | bool | `false` | Whether to use Kubernetes secrets for registry authentication |
-| dynamo-operator.dynamo.dockerRegistry.server | string | `nil` | Docker registry server URL |
-| dynamo-operator.dynamo.dockerRegistry.username | string | `nil` | Registry username |
-| dynamo-operator.dynamo.dockerRegistry.password | string | `nil` | Registry password (consider using existingSecretName instead) |
+| dynamo-operator.controllerManager.manager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy - when to pull the image |
+| dynamo-operator.controllerManager.manager.image.repository | string | `"nvcr.io/nvidia/ai-dynamo/kubernetes-operator"` | Official NVIDIA Dynamo operator image repository |
+| dynamo-operator.controllerManager.manager.image.tag | string | `""` | Image tag (leave empty to use chart default) |
+| dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
+| dynamo-operator.discoveryBackend | string | `"kubernetes"` |  |
 | dynamo-operator.dynamo.dockerRegistry.existingSecretName | string | `nil` | Name of existing Kubernetes secret containing registry credentials |
+| dynamo-operator.dynamo.dockerRegistry.password | string | `nil` | Registry password (consider using existingSecretName instead) |
 | dynamo-operator.dynamo.dockerRegistry.secure | bool | `true` | Whether the registry uses HTTPS |
-| dynamo-operator.dynamo.ingress.enabled | bool | `false` | Whether to create ingress resources |
+| dynamo-operator.dynamo.dockerRegistry.server | string | `nil` | Docker registry server URL |
+| dynamo-operator.dynamo.dockerRegistry.useKubernetesSecret | bool | `false` | Whether to use Kubernetes secrets for registry authentication |
+| dynamo-operator.dynamo.dockerRegistry.username | string | `nil` | Registry username |
+| dynamo-operator.dynamo.groveTerminationDelay | string | `"4h"` | How long to wait before forcefully terminating Grove instances |
 | dynamo-operator.dynamo.ingress.className | string | `nil` | Ingress class name (e.g., "nginx", "traefik") |
+| dynamo-operator.dynamo.ingress.enabled | bool | `false` | Whether to create ingress resources |
 | dynamo-operator.dynamo.ingress.tlsSecretName | string | `"my-tls-secret"` | Secret name containing TLS certificates |
+| dynamo-operator.dynamo.ingressHostSuffix | string | `""` | Host suffix for generated ingress hostnames |
 | dynamo-operator.dynamo.istio.enabled | bool | `false` | Whether to enable Istio integration |
 | dynamo-operator.dynamo.istio.gateway | string | `nil` | Istio gateway name for routing |
-| dynamo-operator.dynamo.ingressHostSuffix | string | `""` | Host suffix for generated ingress hostnames |
-| dynamo-operator.dynamo.virtualServiceSupportsHTTPS | bool | `false` | Whether VirtualServices should support HTTPS routing |
-| dynamo-operator.dynamo.serviceMesh.enabled | bool | `false` | Whether to enable service mesh resource generation for EPP |
-| dynamo-operator.dynamo.serviceMesh.provider | string | `"istio"` | Service mesh provider. Supported: "istio" |
-| dynamo-operator.dynamo.serviceMesh.istio | object | `{"insecureSkipVerify":true,"tlsMode":"SIMPLE"}` | Istio-specific settings (only used when provider is "istio") |
-| dynamo-operator.dynamo.serviceMesh.istio.tlsMode | string | `"SIMPLE"` | TLS mode for DestinationRules: "SIMPLE", "DISABLE", "ISTIO_MUTUAL", "MUTUAL" |
-| dynamo-operator.dynamo.serviceMesh.istio.insecureSkipVerify | bool | `true` | Skip TLS certificate verification (for self-signed EPP certs) |
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
 | dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
-| dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |
-| dynamo-operator.webhook.certificateSecret.external | bool | `false` | Whether to manage the certificate secret externally. When false (default), the operator's built-in cert-controller generates and rotates certificates automatically. When true, you must create the secret manually before installing the chart. |
+| dynamo-operator.dynamo.serviceMesh.enabled | bool | `false` | Whether to enable service mesh resource generation for EPP |
+| dynamo-operator.dynamo.serviceMesh.istio | object | `{"insecureSkipVerify":true,"tlsMode":"SIMPLE"}` | Istio-specific settings (only used when provider is "istio") |
+| dynamo-operator.dynamo.serviceMesh.istio.insecureSkipVerify | bool | `true` | Skip TLS certificate verification (for self-signed EPP certs) |
+| dynamo-operator.dynamo.serviceMesh.istio.tlsMode | string | `"SIMPLE"` | TLS mode for DestinationRules: "SIMPLE", "DISABLE", "ISTIO_MUTUAL", "MUTUAL" |
+| dynamo-operator.dynamo.serviceMesh.provider | string | `"istio"` | Service mesh provider. Supported: "istio" |
+| dynamo-operator.dynamo.virtualServiceSupportsHTTPS | bool | `false` | Whether VirtualServices should support HTTPS routing |
+| dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
+| dynamo-operator.env | list | `[]` |  |
+| dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port" |
+| dynamo-operator.gpuDiscovery | object | `{"enabled":true}` | DEPRECATED: GPU discovery for namespace-scoped operators is deprecated along with namespace-restricted mode. |
+| dynamo-operator.gpuDiscovery.enabled | bool | `true` | DEPRECATED: Only relevant when namespaceRestriction is enabled, which is deprecated. |
+| dynamo-operator.imagePullSecrets | list | `[]` | Secrets for pulling private container images |
+| dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
+| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments. |
+| dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEPRECATED: Do not enable for new deployments. Namespace-restricted mode is deprecated. |
+| dynamo-operator.namespaceRestriction.lease | object | `{"duration":"30s","renewInterval":"10s"}` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
+| dynamo-operator.namespaceRestriction.lease.duration | string | `"30s"` | DEPRECATED: Lease duration for namespace-restricted mode, which is deprecated. |
+| dynamo-operator.namespaceRestriction.lease.renewInterval | string | `"10s"` | DEPRECATED: Lease renew interval for namespace-restricted mode, which is deprecated. |
+| dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
+| dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
+| dynamo-operator.upgradeCRD | bool | `true` | Whether to manage CRDs via a pre-install/pre-upgrade hook Job. The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply. |
 | dynamo-operator.webhook.caBundle | string | `""` | CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically. |
-| dynamo-operator.webhook.failurePolicy | string | `"Fail"` | Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees. |
-| dynamo-operator.webhook.timeoutSeconds | int | `10` | Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy. |
-| dynamo-operator.webhook.namespaceSelector | object | `{}` | Custom namespace selector for webhook validation. Use this to include or exclude specific namespaces from webhook validation. For CLUSTER-WIDE operators, you can exclude namespaces managed by namespace-restricted operators by using: matchExpressions: [{ key: "dynamo-operator", operator: "NotIn", values: ["namespace-restricted"] }]. For NAMESPACE-RESTRICTED operators, leave empty as it will be auto-configured to match only the operator's namespace. |
-| dynamo-operator.webhook.certManager.enabled | bool | `false` | Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will provision and rotate certificates instead of the operator's built-in cert-controller. |
 | dynamo-operator.webhook.certManager.certificate.duration | string | `"8760h"` | Certificate duration for webhook certificates managed by cert-manager (e.g., "8760h" for 1 year). cert-manager will automatically renew the certificate before it expires. |
 | dynamo-operator.webhook.certManager.certificate.renewBefore | string | `"360h"` | Time before certificate expiration to trigger renewal (e.g., "360h" for 15 days). cert-manager will attempt to renew the certificate when this threshold is reached. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
-| dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
-| dynamo-operator.checkpoint.storage | object | `{}` | Optional PVC storage used when the snapshot-agent is installed outside workload namespaces with snapshot.storage.accessMode=podMount. Set create=true for operator-managed namespace PVCs, or omit/create=false to require an already-present PVC with the configured name. ReadWriteOnce can be used with podMount for sequential checkpoint/restore on suitable storage backends; use ReadWriteMany for concurrent multi-node access. |
-| grove.tolerations | list | `[]` | Node tolerations for Grove pods |
-| grove.affinity | object | `{}` | Affinity for Grove pods |
-| kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
-| kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
+| dynamo-operator.webhook.certManager.enabled | bool | `false` | Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will provision and rotate certificates instead of the operator's built-in cert-controller. |
+| dynamo-operator.webhook.certificateSecret.external | bool | `false` | Whether to manage the certificate secret externally. When false (default), the operator's built-in cert-controller generates and rotates certificates automatically. When true, you must create the secret manually before installing the chart. |
+| dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |
+| dynamo-operator.webhook.failurePolicy | string | `"Fail"` | Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees. |
+| dynamo-operator.webhook.namespaceSelector | object | `{}` | Custom namespace selector for webhook validation. Use this to include or exclude specific namespaces from webhook validation. For CLUSTER-WIDE operators, you can exclude namespaces managed by namespace-restricted operators by using: matchExpressions: [{ key: "dynamo-operator", operator: "NotIn", values: ["namespace-restricted"] }]. For NAMESPACE-RESTRICTED operators, leave empty as it will be auto-configured to match only the operator's namespace. |
+| dynamo-operator.webhook.timeoutSeconds | int | `10` | Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy. |
+| etcd.affinity | object | `{}` |  |
+| etcd.auth.rbac.create | bool | `false` |  |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
+| etcd.image.tag | string | `"3.5.18-debian-12-r5"` |  |
+| etcd.livenessProbe.enabled | bool | `false` |  |
+| etcd.pdb.create | bool | `false` |  |
+| etcd.persistence.enabled | bool | `true` |  |
+| etcd.persistence.size | string | `"1Gi"` |  |
+| etcd.persistence.storageClass | string | `nil` |  |
+| etcd.preUpgradeJob.enabled | bool | `false` |  |
+| etcd.readinessProbe.enabled | bool | `false` |  |
+| etcd.replicaCount | int | `1` |  |
+| etcd.tolerations | list | `[]` |  |
+| global.etcd.install | bool | `false` | Whether this chart should install the bundled etcd subchart. When true, deploys etcd and auto-configures the operator with its address. When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd. |
+| global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
+| global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
+| global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
+| global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
+| global.nats.install | bool | `true` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes). |
+| grove.affinity | object | `{}` | Affinity for Grove pods |
+| grove.tolerations | list | `[]` | Node tolerations for Grove pods |
+| kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
+| kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
+| nats.config.cluster.enabled | bool | `false` |  |
+| nats.config.gateway.enabled | bool | `false` |  |
+| nats.config.jetstream.enabled | bool | `true` |  |
+| nats.config.jetstream.fileStore.dir | string | `"/data"` |  |
+| nats.config.jetstream.fileStore.enabled | bool | `true` |  |
+| nats.config.jetstream.fileStore.maxSize | string | `nil` |  |
+| nats.config.jetstream.fileStore.pvc.enabled | bool | `true` |  |
+| nats.config.jetstream.fileStore.pvc.merge | object | `{}` |  |
+| nats.config.jetstream.fileStore.pvc.name | string | `nil` |  |
+| nats.config.jetstream.fileStore.pvc.patch | list | `[]` |  |
+| nats.config.jetstream.fileStore.pvc.size | string | `"10Gi"` |  |
+| nats.config.jetstream.fileStore.pvc.storageClassName | string | `nil` |  |
+| nats.config.jetstream.memoryStore.enabled | bool | `false` |  |
+| nats.config.jetstream.merge | object | `{}` |  |
+| nats.config.jetstream.patch | list | `[]` |  |
+| nats.config.leafnodes.enabled | bool | `false` |  |
+| nats.config.merge.max_payload | int | `15728640` |  |
+| nats.config.monitor.enabled | bool | `true` |  |
+| nats.config.monitor.port | int | `8222` |  |
+| nats.config.monitor.tls.enabled | bool | `false` |  |
+| nats.config.mqtt.enabled | bool | `false` |  |
+| nats.config.nats.port | int | `4222` |  |
+| nats.config.nats.tls.enabled | bool | `false` |  |
+| nats.config.nats.tls.merge | object | `{}` |  |
+| nats.config.nats.tls.patch | list | `[]` |  |
+| nats.config.patch | list | `[]` |  |
+| nats.config.profiling.enabled | bool | `false` |  |
+| nats.config.profiling.port | int | `65432` |  |
+| nats.config.resolver.enabled | bool | `false` |  |
+| nats.config.serverNamePrefix | string | `""` |  |
+| nats.config.websocket.enabled | bool | `false` |  |
+| nats.configMap.merge | object | `{}` |  |
+| nats.configMap.name | string | `nil` |  |
+| nats.configMap.patch | list | `[]` |  |
+| nats.container.env | object | `{}` |  |
+| nats.container.image.pullPolicy | string | `nil` |  |
+| nats.container.image.registry | string | `nil` |  |
+| nats.container.image.repository | string | `"nats"` |  |
+| nats.container.image.tag | string | `"2.10.21-alpine"` |  |
+| nats.container.merge | object | `{}` |  |
+| nats.container.patch | list | `[]` |  |
+| nats.container.ports.cluster | object | `{}` |  |
+| nats.container.ports.gateway | object | `{}` |  |
+| nats.container.ports.leafnodes | object | `{}` |  |
+| nats.container.ports.monitor | object | `{}` |  |
+| nats.container.ports.mqtt | object | `{}` |  |
+| nats.container.ports.nats | object | `{}` |  |
+| nats.container.ports.profiling | object | `{}` |  |
+| nats.container.ports.websocket | object | `{}` |  |
+| nats.headlessService.merge | object | `{}` |  |
+| nats.headlessService.name | string | `nil` |  |
+| nats.headlessService.patch | list | `[]` |  |
+| nats.natsBox.container.env | object | `{}` |  |
+| nats.natsBox.container.image.pullPolicy | string | `nil` |  |
+| nats.natsBox.container.image.registry | string | `nil` |  |
+| nats.natsBox.container.image.repository | string | `"natsio/nats-box"` |  |
+| nats.natsBox.container.image.tag | string | `"0.14.5"` |  |
+| nats.natsBox.container.merge | object | `{}` |  |
+| nats.natsBox.container.patch | list | `[]` |  |
+| nats.natsBox.contexts.default.creds.contents | string | `nil` |  |
+| nats.natsBox.contexts.default.creds.dir | string | `nil` |  |
+| nats.natsBox.contexts.default.creds.key | string | `"nats.creds"` |  |
+| nats.natsBox.contexts.default.creds.secretName | string | `nil` |  |
+| nats.natsBox.contexts.default.merge | object | `{}` |  |
+| nats.natsBox.contexts.default.nkey.contents | string | `nil` |  |
+| nats.natsBox.contexts.default.nkey.dir | string | `nil` |  |
+| nats.natsBox.contexts.default.nkey.key | string | `"nats.nk"` |  |
+| nats.natsBox.contexts.default.nkey.secretName | string | `nil` |  |
+| nats.natsBox.contexts.default.patch | list | `[]` |  |
+| nats.natsBox.contexts.default.tls.cert | string | `"tls.crt"` |  |
+| nats.natsBox.contexts.default.tls.dir | string | `nil` |  |
+| nats.natsBox.contexts.default.tls.key | string | `"tls.key"` |  |
+| nats.natsBox.contexts.default.tls.secretName | string | `nil` |  |
+| nats.natsBox.defaultContextName | string | `"default"` |  |
+| nats.natsBox.enabled | bool | `false` |  |
+| nats.natsBox.podTemplate.merge.spec.affinity | object | `{}` |  |
+| nats.natsBox.podTemplate.merge.spec.tolerations | list | `[]` |  |
+| nats.natsBox.podTemplate.patch | list | `[]` |  |
+| nats.natsBox.serviceAccount.enabled | bool | `false` |  |
+| nats.podDisruptionBudget.enabled | bool | `true` |  |
+| nats.podTemplate.configChecksumAnnotation | bool | `true` |  |
+| nats.podTemplate.merge.spec.affinity | object | `{}` |  |
+| nats.podTemplate.merge.spec.tolerations | list | `[]` |  |
+| nats.podTemplate.patch | list | `[]` |  |
+| nats.podTemplate.topologySpreadConstraints | object | `{}` |  |
+| nats.promExporter.enabled | bool | `false` |  |
+| nats.reloader.enabled | bool | `true` |  |
+| nats.reloader.env | object | `{}` |  |
+| nats.reloader.image.pullPolicy | string | `nil` |  |
+| nats.reloader.image.registry | string | `nil` |  |
+| nats.reloader.image.repository | string | `"natsio/nats-server-config-reloader"` |  |
+| nats.reloader.image.tag | string | `"0.16.0"` |  |
+| nats.reloader.merge | object | `{}` |  |
+| nats.reloader.natsVolumeMountPrefixes[0] | string | `"/etc/"` |  |
+| nats.reloader.patch | list | `[]` |  |
+| nats.service.enabled | bool | `true` |  |
+| nats.service.merge | object | `{}` |  |
+| nats.service.name | string | `nil` |  |
+| nats.service.patch | list | `[]` |  |
+| nats.service.ports.cluster.enabled | bool | `false` |  |
+| nats.service.ports.gateway.enabled | bool | `false` |  |
+| nats.service.ports.leafnodes.enabled | bool | `true` |  |
+| nats.service.ports.monitor.enabled | bool | `false` |  |
+| nats.service.ports.mqtt.enabled | bool | `true` |  |
+| nats.service.ports.nats.enabled | bool | `true` |  |
+| nats.service.ports.profiling.enabled | bool | `false` |  |
+| nats.service.ports.websocket.enabled | bool | `true` |  |
+| nats.serviceAccount.enabled | bool | `false` |  |
+| nats.statefulSet.merge | object | `{}` |  |
+| nats.statefulSet.name | string | `nil` |  |
+| nats.statefulSet.patch | list | `[]` |  |
+| nats.tlsCA.enabled | bool | `false` |  |
 
 ### NATS Configuration
 

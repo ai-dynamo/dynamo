@@ -60,8 +60,13 @@ These options are used only when `--router-mode kv` is combined with `--router-p
 | `--aic-model-path` | `DYN_AIC_MODEL_PATH` | — | Model path or model identifier used for AIC perf lookup |
 | `--aic-backend-version` | `DYN_AIC_BACKEND_VERSION` | backend-specific | Pinned AIC database version. If omitted, Dynamo uses the backend default |
 | `--aic-tp-size` | `DYN_AIC_TP_SIZE` | `1` | Tensor-parallel size to model in AIC |
+| `--aic-moe-tp-size` | `DYN_AIC_MOE_TP_SIZE` | — | MoE tensor-parallel size for models that require AIC MoE parallelism |
+| `--aic-moe-ep-size` | `DYN_AIC_MOE_EP_SIZE` | — | MoE expert-parallel size for models that require AIC MoE parallelism |
+| `--aic-attention-dp-size` | `DYN_AIC_ATTENTION_DP_SIZE` | — | Attention data-parallel size for models that require AIC MoE parallelism |
 
 When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix. The router then decays only the oldest active prefill request on each worker for prompt-side load accounting.
+
+For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--aic-moe-tp-size` to the same value as `--aic-tp-size`, with `--aic-moe-ep-size 1` and `--aic-attention-dp-size 1`.
 
 ## Fault Tolerance
 
@@ -71,7 +76,7 @@ When enabled, the frontend's embedded KV router predicts one expected prefill du
 | `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` | KV cache utilization fraction (0.0–1.0) for busy detection. Pass `None` to disable |
 | `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` | Absolute token count for prefill busy detection. Pass `None` to disable |
 | `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | `64.0` | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold. Pass `None` to disable |
-| `--no-admission-control` | `DYN_NO_ADMISSION_CONTROL` | `false` | Disable busy-worker admission checks by clearing the busy thresholds. Router queueing remains controlled by `--router-queue-threshold` |
+| `--admission-control` | `DYN_ADMISSION_CONTROL` | `none` | Admission control mode. `token-capacity` applies the busy thresholds above; `none` clears them. Router queueing remains controlled by `--router-queue-threshold` |
 
 ## Model Discovery
 
@@ -88,8 +93,8 @@ When enabled, the frontend's embedded KV router predicts one expected prefill du
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--discovery-backend` | `DYN_DISCOVERY_BACKEND` | `etcd` | Service discovery: `kubernetes`, `etcd`, `file`, `mem` |
-| `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats`, `http` |
-| `--event-plane` | `DYN_EVENT_PLANE` | `nats` | Event publishing: `nats`, `zmq` |
+| `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats` |
+| `--event-plane` | `DYN_EVENT_PLANE` | auto | Event publishing: `nats`, `zmq`; defaults to `zmq` for `file`/`mem` discovery and `nats` for `etcd`/`kubernetes` |
 
 ## KServe gRPC
 

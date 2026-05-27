@@ -160,7 +160,7 @@ wait_frontend_models() {
 
 echo "Prerequisite: start etcd and NATS yourself before running this script."
 echo "Example:"
-echo "  docker compose -f deploy/docker-compose.yml up -d"
+echo "  docker compose -f dev/docker-compose.yml up -d"
 echo
 
 COMMON_ENV=(

@@ -377,6 +377,11 @@ pub mod llm {
 
     /// Agent trace configuration
     pub mod agent_trace {
+        /// Master switch. Truthy enables tracing with defaults for sinks,
+        /// output path, and the ZMQ tool-event endpoint; other variables below
+        /// override individual knobs.
+        pub const DYN_AGENT_TRACE: &str = "DYN_AGENT_TRACE";
+
         /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
         pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
 
@@ -650,6 +655,7 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE,
             llm::agent_trace::DYN_AGENT_TRACE_SINKS,
             llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
             llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,

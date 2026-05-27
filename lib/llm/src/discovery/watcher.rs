@@ -49,6 +49,7 @@ use crate::{
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
+    types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
 };
 
 use super::ModelManager;
@@ -104,6 +105,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Prefill,
+    ModelType::Realtime,
 ];
 
 /// Returns true if no models in the manager support the given model type.
@@ -124,6 +126,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_tensor_models().is_empty()
     } else if model_type == ModelType::Prefill {
         manager.list_prefill_models().is_empty()
+    } else if model_type == ModelType::Realtime {
+        manager.list_realtime_models().is_empty()
     } else {
         true
     }
@@ -780,6 +784,9 @@ impl ModelWatcher {
                         // Create prefill-specific config with track_active_blocks disabled
                         let mut prefill_config = router_config.kv_router_config.clone();
                         prefill_config.router_track_active_blocks = false;
+                        // Prefill KV events are emitted by prefill workers; do not inherit
+                        // decode-only speculative hash mode.
+                        let prefill_enable_eagle = false;
 
                         PrefillRouter::new(
                             rx,
@@ -791,7 +798,7 @@ impl ModelWatcher {
                             router_config.enforce_disagg,
                             model_name.clone(),
                             namespace.clone(),
-                            card.runtime_config.enable_eagle,
+                            prefill_enable_eagle,
                         )
                     })
             } else {
@@ -801,13 +808,13 @@ impl ModelWatcher {
             // Create a new worker monitor for this WorkerSet. Each WorkerSet gets its own
             // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
             // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
-            // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
+            // worker TTFT/ITL cleanup). The thresholds control overload detection behavior only.
             //
             // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
-            // so that busy-state updates (via update_free_instances) are visible to the
+            // so that overload-state updates (via set_overloaded_instances) are visible to the
             // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
             // Using a different Client instance would cause the PushRouter to never see
-            // busy workers, since each Client::new() creates independent ArcSwap state.
+            // overloaded workers, since each Client::new() creates independent ArcSwap state.
             let worker_monitor = if needs_preprocessed_routing {
                 let monitor_client = kv_chooser
                     .as_ref()
@@ -853,8 +860,13 @@ impl ModelWatcher {
                 })?;
                 let chat_engine = if let Some(ref factory) = self.chat_engine_factory {
                     let routed_engine = routing
-                        .build_prefill_pipeline()
-                        .context("PreprocessedRouting::build_prefill_pipeline")?;
+                        .build_preprocessed_pipeline(
+                            card,
+                            self.migration_limit,
+                            self.migration_max_seq_len,
+                            self.metrics.clone(),
+                        )
+                        .context("PreprocessedRouting::build_preprocessed_pipeline")?;
                     factory(mcid.clone(), card.clone(), routed_engine)
                         .await
                         .context("python chat_engine_factory")?
@@ -1058,6 +1070,17 @@ impl ModelWatcher {
             )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_realtime() {
+            // Case 7: Text + Realtime
+            // 'Text' is being overloaded here, it simply means the I/O will be passed through
+            let realtime_router = PushRouter::<
+                RealtimeClientEvent,
+                Annotated<RealtimeServerEvent>,
+            >::from_client_with_monitor(
+                client, router_config.router_mode, None
+            )
+            .await?;
+            worker_set.realtime_engine = Some(Arc::new(realtime_router));
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens
@@ -1216,6 +1239,20 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
+        assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    #[test]
+    fn test_is_model_type_list_empty_realtime_after_register() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+        mm.add_realtime_model("rt-echo", "0", engine).unwrap();
+        assert!(!is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    #[test]
+    fn test_realtime_in_all_model_types() {
+        assert!(ALL_MODEL_TYPES.contains(&ModelType::Realtime));
     }
 
     #[test]

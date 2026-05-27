@@ -784,9 +784,11 @@ impl GrpcInferenceService for KserveService {
         &self,
         _request: Request<inference::ServerReadyRequest>,
     ) -> Result<Response<inference::ServerReadyResponse>, Status> {
-        let has_models = !self.state.manager().get_model_cards().is_empty();
+        // Only report ready when at least one model has a WorkerSet that can
+        // actually serve an inference request — a registered ModelDeploymentCard
+        // is not enough (the WorkerSet is wired up afterwards).
         Ok(Response::new(inference::ServerReadyResponse {
-            ready: has_models,
+            ready: self.state.manager().has_any_ready_model(),
         }))
     }
 
@@ -795,14 +797,11 @@ impl GrpcInferenceService for KserveService {
         request: Request<inference::ModelReadyRequest>,
     ) -> Result<Response<inference::ModelReadyResponse>, Status> {
         let request_model_name = &request.into_inner().name;
-        let is_ready = self
-            .state
-            .manager()
-            .get_model_cards()
-            .into_iter()
-            .any(|card| request_model_name == &card.display_name);
         Ok(Response::new(inference::ModelReadyResponse {
-            ready: is_ready,
+            ready: self
+                .state
+                .manager()
+                .is_model_ready_to_serve(request_model_name),
         }))
     }
 }

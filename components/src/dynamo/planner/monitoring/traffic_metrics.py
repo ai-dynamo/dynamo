@@ -18,7 +18,7 @@ import logging
 import math
 import typing
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, Optional
 
 import aiohttp
 from prometheus_api_client import PrometheusConnect
@@ -27,6 +27,25 @@ from pydantic import BaseModel, ValidationError
 
 from dynamo import prometheus_names
 from dynamo.runtime.logging import configure_dynamo_logging
+
+
+class _BearerTokenFileAuth:
+    """Auth callable that re-reads a bearer token from disk on every request.
+
+    Assigned to requests.Session.auth. Any callable that takes a PreparedRequest
+    and returns it qualifies — no AuthBase subclass required.
+    Useful for rotating tokens (Kubernetes projected ServiceAccount tokens).
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def __call__(self, request):  # type: ignore[override]
+        with open(self._path) as f:
+            token = f.read().strip()
+        request.headers["Authorization"] = f"Bearer {token}"
+        return request
+
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -93,9 +112,25 @@ class FrontendMetricContainer(BaseModel):
 
 class PrometheusAPIClient:
     def __init__(
-        self, url: str, dynamo_namespace: str, metrics_source: str = "frontend"
+        self,
+        url: str,
+        dynamo_namespace: str,
+        metrics_source: str = "frontend",
+        bearer_token: Optional[str] = None,
+        bearer_token_file: Optional[str] = None,
+        ssl_verify: bool = False,
+        extra_query_params: Optional[Dict[str, str]] = None,
+        ca_bundle: Optional[str] = None,
     ):
-        self.prom = PrometheusConnect(url=url, disable_ssl=True)
+        self.prom = PrometheusConnect(url=url, disable_ssl=not ssl_verify)
+        if bearer_token:
+            self.prom._session.headers["Authorization"] = f"Bearer {bearer_token}"
+        if bearer_token_file:
+            self.prom._session.auth = _BearerTokenFileAuth(bearer_token_file)
+        if extra_query_params:
+            self.prom._session.params = dict(extra_query_params)
+        if ca_bundle:
+            self.prom._session.verify = ca_bundle
         self.dynamo_namespace = dynamo_namespace
         self.metrics_source = metrics_source  # "frontend" | "router"
 

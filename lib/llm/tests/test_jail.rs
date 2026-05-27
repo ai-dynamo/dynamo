@@ -1874,7 +1874,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_harmony_parser() {
-        // Harmony format with analysis text and a tool call encoded in special tags
+        // With only the Harmony tool parser configured, analysis is internal
+        // reasoning and must not be exposed as normal content.
         let chunks = vec![
             create_mock_response_chunk(
                 "<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>"
@@ -1899,22 +1900,11 @@ mod tests {
         let jail = JailedStream::builder().tool_call_parser("harmony").build();
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have at least one output containing both analysis text and parsed tool call
+        // Should have at least one output containing the parsed tool call.
         assert!(!results.is_empty());
 
-        // Verify the analysis text appears as content in one of the outputs
-        let has_analysis_text = results.iter().any(|r| {
-            r.data
-                .as_ref()
-                .and_then(|d| d.inner.choices.first())
-                .and_then(|c| c.delta.content.as_ref())
-                .map(|content| {
-                    test_utils::extract_text(content)
-                        .contains("Need to use function get_current_weather.")
-                })
-                .unwrap_or(false)
-        });
-        assert!(has_analysis_text, "Should contain extracted analysis text");
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
 
         // Verify a tool call was parsed with expected name and args
         let tool_call_idx = results
@@ -1926,6 +1916,117 @@ mod tests {
             "get_current_weather",
             json!({"location": "San Francisco"}),
         );
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_bare_commentary_marker_split() {
+        // TOOLCALLING.stream.3: gpt-oss may start a tool call directly at the
+        // commentary channel marker, and the marker can split across chunks.
+        let chunks = vec![
+            create_mock_response_chunk("<|".to_string(), 0),
+            create_mock_response_chunk("cha".to_string(), 0),
+            create_mock_response_chunk("nnel|".to_string(), 0),
+            create_mock_response_chunk(">commentary".to_string(), 0),
+            create_mock_response_chunk(" to=functions.get_w".to_string(), 0),
+            create_mock_response_chunk("ea".to_string(), 0),
+            create_mock_response_chunk("the".to_string(), 0),
+            create_mock_response_chunk("r <|c".to_string(), 0),
+            create_mock_response_chunk("onstrain|>j".to_string(), 0),
+            create_mock_response_chunk("son<|message|>{\"loc".to_string(), 0),
+            create_mock_response_chunk("at".to_string(), 0),
+            create_mock_response_chunk("ion".to_string(), 0),
+            create_mock_response_chunk("\":\"NY".to_string(), 0),
+            create_mock_response_chunk("C\"}<|call|>".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("<|channel|>"));
+        let tool_call_idx = results
+            .iter()
+            .position(test_utils::has_tool_call)
+            .expect("Should have a tool call result");
+        test_utils::assert_tool_call(
+            &results[tool_call_idx],
+            "get_weather",
+            json!({"location": "NYC"}),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_analysis_only_drops_content() {
+        let chunks = vec![create_mock_response_chunk(
+            "<|channel|>analysis<|message|>Need to inspect the request.<|end|>".to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_truncated_call_drops_analysis_without_marker_leak() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("<|channel|>"));
+        assert!(!content.contains("Need current weather."));
+        assert!(!content.contains("Hidden City"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_drops_directed_non_function_commentary() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|start|>assistant<|channel|>commentary to=browser.search <|constrain|>json<|message|>{"query":"secret weather"}<|call|>"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("secret weather"));
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_drops_recipientless_tool_call_payload() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"}<|call|>"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("NYC"));
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
     }
 
     #[tokio::test]
@@ -3472,6 +3573,84 @@ fahrenheit
                     }
                 }
             }
+        }
+    }
+
+    /// MiniMax uses a strict reference parser: incomplete paired XML fences do
+    /// not recover a call. At stream end, the jail must still avoid surfacing
+    /// the raw `<minimax:tool_call>` protocol block as assistant content.
+    #[tokio::test]
+    async fn test_minimax_m2_stream_finalize_zero_call_truncation_drops_markup() {
+        // These are jail/finalize regression checks for existing parser parity cases:
+        // the first and prefix-preservation rows cover TOOLCALLING.stream.4.a, and
+        // the mid-call body truncation row covers TOOLCALLING.stream.4.b.
+        let cases = [
+            (
+                "complete body without outer close",
+                "<minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NYC</parameter>\n\
+                 </invoke>",
+                "",
+            ),
+            (
+                "mid-call body truncation",
+                "<minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NY",
+                "",
+            ),
+            (
+                "pre-marker prose before truncated call",
+                "I will check that. <minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NYC</parameter>\n\
+                 </invoke>",
+                "I will check that. ",
+            ),
+        ];
+
+        for (label, partial_tool_call, expected_content) in cases {
+            let input_chunks = vec![
+                test_utils::create_mock_response_chunk(partial_tool_call.to_string(), 0),
+                test_utils::create_final_response_chunk(0),
+            ];
+
+            let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+                Some("minimax_m2".to_string()),
+                None,
+                None,
+                stream::iter(input_chunks),
+            )
+            .collect()
+            .await;
+
+            let tool_call_count: usize = results
+                .iter()
+                .map(|r| {
+                    r.data.as_ref().map_or(0, |d| {
+                        d.inner
+                            .choices
+                            .iter()
+                            .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
+                            .sum::<usize>()
+                    })
+                })
+                .sum();
+            assert_eq!(
+                tool_call_count, 0,
+                "{label}: strict MiniMax must not recover a call"
+            );
+
+            let content = test_utils::reconstruct_content(&results);
+            assert!(
+                !content.contains("<minimax:tool_call>") && !content.contains("<invoke"),
+                "{label}: MiniMax protocol markup leaked into content: {content:?}"
+            );
+            assert_eq!(
+                content, expected_content,
+                "{label}: unexpected residual content"
+            );
         }
     }
 

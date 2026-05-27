@@ -1503,15 +1503,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "dynamo-config"
-version = "1.2.1"
+name = "dynamo-data-gen"
+version = "1.3.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
+ "dynamo-tokens",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1538,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "aho-corasick",
  "aligned-vec",
@@ -1561,7 +1566,6 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -1625,7 +1629,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -1641,24 +1645,30 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "futures",
  "indicatif 0.18.4",
  "kvbm-logical",
  "ndarray",
  "ndarray-interp",
  "ndarray-npy",
  "rand 0.9.4",
+ "rmp-serde",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "slotmap",
+ "tmq",
  "tokio",
  "tokio-timerfd",
  "tokio-util",
@@ -1669,10 +1679,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
- "dynamo-protocols",
  "num-traits",
  "openai-harmony",
  "regex",
@@ -1686,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -1701,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1718,14 +1727,12 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
- "dynamo-config",
  "educe",
  "either",
  "etcd-client",
  "figment",
  "futures",
  "humantime",
- "hyper-util",
  "k8s-openapi",
  "kube",
  "libc",
@@ -1769,10 +1776,12 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake3",
+ "dashmap",
  "fastokens",
  "rayon",
  "rustc-hash 1.1.0",
@@ -1786,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2010,9 +2019,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d32240c0737afda27afb5c55c5e56b24b0d9e7d5058bf7f61898d83e9f01e32"
+checksum = "796a262ed47d1458a4b40d0ed831c927e6f54d5b9c1de2683bb4ac9b04f4c7cc"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
@@ -3281,7 +3290,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-logical"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3306,7 +3315,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-py3"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -3656,9 +3665,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+checksum = "2929e494b2280e1e18959bb2e121da03347ae896896fdfaceaab43c88a02803f"
 dependencies = [
  "memo-map",
  "serde",
@@ -3666,9 +3675,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45092d80391870622fcf3bd82f5d2af18f99533ea60debb4bc9db0c76f0e809a"
+checksum = "99df5123c54391e2a228014c1dbbd85a3dab08a25e776c810526f2f47542b3de"
 dependencies = [
  "minijinja",
  "serde",

@@ -24,24 +24,14 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
+from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
+from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
 
 
 def get_local_dp_rank_range(server_args) -> range:
     """Return the global DP ranks hosted by this local worker."""
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
-    nnodes = getattr(server_args, "nnodes", 1) or 1
-    node_rank = getattr(server_args, "node_rank", 0) or 0
-
-    if enable_dp_attention and dp_size > 1:
-        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-        start_dp_rank = node_rank * local_dp_size
-        end_dp_rank = start_dp_rank + local_dp_size
-    else:
-        start_dp_rank = 0
-        end_dp_rank = 1
-
+    start_dp_rank, end_dp_rank = local_dp_rank_bounds(server_args)
     return range(start_dp_rank, end_dp_rank)
 
 
@@ -57,6 +47,59 @@ def set_forward_pass_metrics_worker_id(
     server_args.forward_pass_metrics_worker_id = str(generate_endpoint.connection_id())
     ipc_path = tempfile.NamedTemporaryFile(delete=False).name
     server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
+
+
+async def _resolve_multinode_leader_worker_id(
+    generate_endpoint: Endpoint,
+    server_args,
+) -> Optional[int]:
+    """Return the routable leader worker id for SGLang non-leader nodes."""
+    node_rank = getattr(server_args, "node_rank", 0) or 0
+    nnodes = getattr(server_args, "nnodes", 1) or 1
+    if node_rank <= 0 or nnodes <= 1:
+        return None
+
+    worker_group_id = get_sglang_worker_group_id(server_args)
+    client = await generate_endpoint.client()
+    if worker_group_id is not None:
+        timeout_s = getattr(server_args, "dist_timeout", None)
+        timeout_s = None if timeout_s is None else float(timeout_s)
+        try:
+            worker_id = await client.wait_for_instance_by_runtime_data(
+                SGLANG_WORKER_GROUP_ID_KEY,
+                worker_group_id,
+                timeout_s=timeout_s,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to resolve SGLang leader worker_id for non-leader "
+                f"KV event attribution using {SGLANG_WORKER_GROUP_ID_KEY}="
+                f"{worker_group_id!r}"
+            ) from e
+
+        logging.info(
+            "Using SGLang leader worker_id=%s for non-leader KV event "
+            "publishing via worker_group_id=%s",
+            worker_id,
+            worker_group_id,
+        )
+        return int(worker_id)
+
+    instances = await client.wait_for_instances()
+    if len(instances) == 1:
+        worker_id = int(instances[0])
+        logging.info(
+            "Using SGLang leader worker_id=%s for non-leader KV event publishing",
+            worker_id,
+        )
+        return worker_id
+
+    logging.warning(
+        "Expected exactly one SGLang leader endpoint instance for non-leader "
+        "KV event attribution, got %d; skipping non-leader KV event publishing",
+        len(instances),
+    )
+    return None
 
 
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
@@ -102,6 +145,7 @@ class DynamoSglangPublisher:
         generate_endpoint: Endpoint,
         component_gauges: LLMBackendMetrics,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
+        kv_worker_id: Optional[int] = None,
     ) -> None:
         """Initialize the SGLang publisher for metrics and KV events.
 
@@ -111,11 +155,13 @@ class DynamoSglangPublisher:
             generate_endpoint: The Dynamo endpoint for generation requests.
             metrics_labels: Optional list of label key-value pairs for metrics.
             component_gauges: LLM backend metrics instance (created via LLMBackendMetrics()).
+            kv_worker_id: Optional worker identity for KV event attribution.
         """
         self.engine = engine
         self.server_args = config.server_args
         self.dynamo_args = config.dynamo_args
         self.generate_endpoint = generate_endpoint
+        self.kv_worker_id = kv_worker_id
         self.metrics_publisher = WorkerMetricsPublisher()
         self.component_gauges = component_gauges
         # Endpoint creation is deferred to async context in setup_sgl_metrics
@@ -171,15 +217,15 @@ class DynamoSglangPublisher:
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
-                active_decode_blocks = kv_metrics.kv_active_blocks
+                active_decode_blocks, total_blocks = kv_metrics_block_values(
+                    kv_metrics, self.server_args.page_size
+                )
                 self.metrics_publisher.publish(
                     dp_rank, kv_used_blocks=active_decode_blocks
                 )
                 dp_rank_str = str(dp_rank)
                 # Publish total blocks (always available in KvMetrics)
-                self.component_gauges.set_total_blocks(
-                    dp_rank_str, kv_metrics.kv_total_blocks
-                )
+                self.component_gauges.set_total_blocks(dp_rank_str, total_blocks)
                 # Publish GPU cache usage percentage (always available in KvMetrics)
                 self.component_gauges.set_gpu_cache_usage(
                     dp_rank_str, kv_metrics.gpu_cache_usage_perc
@@ -286,6 +332,7 @@ class DynamoSglangPublisher:
                 )
                 publisher = KvEventPublisher(
                     endpoint=self.generate_endpoint,
+                    worker_id=self.kv_worker_id,
                     kv_block_size=self.server_args.page_size,
                     zmq_endpoint=zmq_ep,
                     zmq_topic="",
@@ -401,6 +448,7 @@ async def setup_sgl_metrics(
     engine: sgl.Engine,
     config: Config,
     generate_endpoint: Endpoint,
+    kv_worker_id: Optional[int] = None,
 ) -> tuple[DynamoSglangPublisher, asyncio.Task, list[tuple[str, str]]]:
     """Create publisher, initialize metrics, and start the metrics publishing loop.
 
@@ -408,6 +456,7 @@ async def setup_sgl_metrics(
         engine: The SGLang engine instance.
         config: SGLang configuration including server args.
         generate_endpoint: The Dynamo endpoint for generation requests.
+        kv_worker_id: Optional worker identity for KV event attribution.
 
     Returns:
         Tuple of (publisher instance, running asyncio task, metrics labels).
@@ -445,13 +494,16 @@ async def setup_sgl_metrics(
         generate_endpoint,
         component_gauges=component_gauges,
         metrics_labels=metrics_labels,
+        kv_worker_id=kv_worker_id,
     )
     # Create endpoint in async context (must await before publishing)
     await publisher.metrics_publisher.create_endpoint(generate_endpoint)
     logging.debug("SGLang metrics publisher endpoint created")
 
     publisher.init_engine_metrics_publish()
-    publisher.init_kv_event_publish()
+    node_rank = getattr(config.server_args, "node_rank", 0) or 0
+    if node_rank <= 0:
+        publisher.init_kv_event_publish()
     publisher.init_fpm_relay()
 
     task = asyncio.create_task(publisher.run())
@@ -479,6 +531,15 @@ async def handle_non_leader_node(
     )
 
     try:
+        if publisher.server_args.kv_events_config:
+            kv_worker_id = await _resolve_multinode_leader_worker_id(
+                publisher.generate_endpoint,
+                publisher.server_args,
+            )
+            if kv_worker_id is not None:
+                publisher.kv_worker_id = kv_worker_id
+                publisher.init_kv_event_publish()
+
         await asyncio.Event().wait()
     finally:
         metrics_task.cancel()

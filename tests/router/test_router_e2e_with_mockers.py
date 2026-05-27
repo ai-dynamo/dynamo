@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
@@ -22,6 +23,7 @@ import pytest
 
 from tests.router.common import (
     _test_busy_threshold_endpoint,
+    _test_disagg_background_prefill_sticky_routing,
     _test_disagg_direct_mode,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
@@ -42,6 +44,7 @@ from tests.router.helper import (
     get_runtime,
     wait_for_indexer_workers_active,
 )
+from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -59,6 +62,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.integration,
+    pytest.mark.router,
     pytest.mark.model(MODEL_NAME),
 ]
 NUM_MOCKERS = 2
@@ -86,6 +90,25 @@ ROUTER_AIC_CONFIG = {
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
+ROUTER_OVERLOAD_503_CASES = (
+    pytest.param(
+        {
+            "blocks_threshold": 0.2,
+            "max_tokens": 50,
+        },
+        id="decode-blocks",
+    ),
+    pytest.param(
+        {
+            "blocks_threshold": "None",
+            "tokens_threshold": 1,
+            "tokens_threshold_frac": "None",
+            "router_queue_threshold": "None",
+            "max_tokens": 1,
+        },
+        id="prefill-tokens",
+    ),
+)
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
     "Flaky on CI: tcp nondurable round-robin mocker router path timed out"
 )
@@ -624,6 +647,8 @@ class DisaggMockerProcess:
         store_backend: str = "etcd",
         request_plane: str = "nats",
         enable_bootstrap: bool = False,
+        event_plane: Optional[str] = None,
+        zmq_kv_events: bool = False,
     ):
         if worker_type not in ("prefill", "decode"):
             raise ValueError(
@@ -634,6 +659,7 @@ class DisaggMockerProcess:
         self.worker_type = worker_type
         self.num_workers = num_mockers
         self._bootstrap_ports: list[int] = []
+        self._zmq_kv_events_ports: list[int] = []
 
         # Set component name and endpoint based on worker type
         if worker_type == "prefill":
@@ -655,6 +681,18 @@ class DisaggMockerProcess:
                 f"Allocated bootstrap ports {self._bootstrap_ports} for {num_mockers} prefill workers"
             )
 
+        if zmq_kv_events:
+            dp_size = mocker_args.get("dp_size", 1)
+            self._zmq_kv_events_ports = allocate_contiguous_ports(
+                num_mockers, dp_size, BASE_PORT_ZMQ
+            )
+            bases = [self._zmq_kv_events_ports[i * dp_size] for i in range(num_mockers)]
+            mocker_args["zmq_kv_events_ports"] = ",".join(str(p) for p in bases)
+            logger.info(
+                f"Allocated ZMQ KV event ports {self._zmq_kv_events_ports} "
+                f"(bases: {bases}) for {num_mockers} {worker_type} workers"
+            )
+
         command = _build_mocker_command(
             endpoint=self.endpoint,
             store_backend=store_backend,
@@ -665,6 +703,10 @@ class DisaggMockerProcess:
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
+        if event_plane is not None:
+            env["DYN_EVENT_PLANE"] = event_plane
+        if event_plane == "zmq" and request_plane != "nats":
+            env.pop("NATS_SERVER", None)
 
         self._process = ManagedProcess(
             command=command,
@@ -702,6 +744,10 @@ class DisaggMockerProcess:
             deallocate_ports(self._bootstrap_ports)
             logger.info(f"Deallocated bootstrap ports {self._bootstrap_ports}")
             self._bootstrap_ports = []
+        if self._zmq_kv_events_ports:
+            deallocate_ports(self._zmq_kv_events_ports)
+            logger.info(f"Deallocated ZMQ KV event ports {self._zmq_kv_events_ports}")
+            self._zmq_kv_events_ports = []
 
 
 class CounterWorkerProcess:
@@ -827,7 +873,10 @@ def _launch_disagg_workers(
     num_prefill_mockers: int,
     num_decode_mockers: int,
     enable_disagg_bootstrap: bool,
+    store_backend: str = "etcd",
     request_plane: str = "nats",
+    event_plane: Optional[str] = None,
+    zmq_kv_events: bool = False,
 ) -> Iterator[tuple[DisaggMockerProcess, DisaggMockerProcess]]:
     if registration_order not in ("prefill_first", "decode_first"):
         raise ValueError(f"Unexpected registration order: {registration_order}")
@@ -840,8 +889,11 @@ def _launch_disagg_workers(
             worker_type="prefill",
             mocker_args=prefill_mocker_args,
             num_mockers=num_prefill_mockers,
+            store_backend=store_backend,
             request_plane=request_plane,
             enable_bootstrap=enable_disagg_bootstrap,
+            event_plane=event_plane,
+            zmq_kv_events=zmq_kv_events,
         ) as prefill_workers:
             logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
 
@@ -854,7 +906,10 @@ def _launch_disagg_workers(
                 worker_type="decode",
                 mocker_args=decode_mocker_args,
                 num_mockers=num_decode_mockers,
+                store_backend=store_backend,
                 request_plane=request_plane,
+                event_plane=event_plane,
+                zmq_kv_events=zmq_kv_events,
             ) as decode_workers:
                 logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
                 yield prefill_workers, decode_workers
@@ -867,7 +922,10 @@ def _launch_disagg_workers(
         worker_type="decode",
         mocker_args=decode_mocker_args,
         num_mockers=num_decode_mockers,
+        store_backend=store_backend,
         request_plane=request_plane,
+        event_plane=event_plane,
+        zmq_kv_events=zmq_kv_events,
     ) as decode_workers:
         logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
 
@@ -880,8 +938,11 @@ def _launch_disagg_workers(
             worker_type="prefill",
             mocker_args=prefill_mocker_args,
             num_mockers=num_prefill_mockers,
+            store_backend=store_backend,
             request_plane=request_plane,
             enable_bootstrap=enable_disagg_bootstrap,
+            event_plane=event_plane,
+            zmq_kv_events=zmq_kv_events,
         ) as prefill_workers:
             logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
             yield prefill_workers, decode_workers
@@ -1073,6 +1134,7 @@ def test_mocker_two_kv_router(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
+@pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_503_CASES)
 @pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
 def test_mocker_kv_router_overload_503(
     request,
@@ -1080,6 +1142,7 @@ def test_mocker_kv_router_overload_503(
     predownload_tokenizers,
     durable_kv_events,
     monkeypatch,
+    overload_config,
 ):
     """Test that KV router returns 503 when mocker workers are overloaded."""
     monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
@@ -1107,7 +1170,7 @@ def test_mocker_kv_router_overload_503(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
-            blocks_threshold=0.2,
+            **overload_config,
         )
 
 
@@ -1534,6 +1597,80 @@ def test_router_decisions_disagg(
             request_plane="nats",
             enable_bootstrap=enable_disagg_bootstrap,
         )
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("discovery_backend", ["etcd"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
+)
+def test_disagg_background_prefill_sticky(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    discovery_backend,
+    request_plane,
+    durable_kv_events,
+):
+    """Sticky session affinity pins disagg background prefill on TCP/NATS."""
+    _ = (runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events)
+
+    namespace_suffix = generate_random_suffix()
+    shared_namespace = f"test-namespace-{namespace_suffix}"
+    prefill_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "dp_size": 2,
+    }
+    decode_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    frontend_port = get_unique_ports(
+        request,
+        num_ports=1,
+        store_backend=discovery_backend,
+        request_plane=request_plane,
+    )[0]
+    with FrontendRouterProcess(
+        request,
+        BLOCK_SIZE,
+        frontend_port,
+        shared_namespace,
+        discovery_backend,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        event_plane="nats",
+        durable_kv_events=False,
+    ):
+        time.sleep(1.0)
+        with _launch_disagg_workers(
+            request,
+            shared_namespace,
+            "prefill_first",
+            prefill_mocker_args=prefill_mocker_args,
+            decode_mocker_args=decode_mocker_args,
+            num_prefill_mockers=3,
+            num_decode_mockers=2,
+            enable_disagg_bootstrap=True,
+            store_backend=discovery_backend,
+            request_plane=request_plane,
+            event_plane="nats",
+        ) as (prefill_workers, decode_workers):
+            _test_disagg_background_prefill_sticky_routing(
+                prefill_workers=prefill_workers,
+                decode_workers=decode_workers,
+                block_size=BLOCK_SIZE,
+                request=request,
+                frontend_port=frontend_port,
+                model_name=MODEL_NAME,
+                store_backend=discovery_backend,
+                request_plane=request_plane,
+                event_plane="nats",
+                frontend_already_running=True,
+            )
 
 
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])

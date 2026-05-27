@@ -110,6 +110,6 @@ Optional:
   cd lib/bindings/kvbm && maturin develop --uv  # For KVBM support
 
 Verify with:
-  $WORKSPACE_DIR/deploy/sanity_check.py
+  $WORKSPACE_DIR/dev/sanity_check.py
 ========================================
 EOF

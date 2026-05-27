@@ -12,7 +12,6 @@ Provides:
 """
 
 import asyncio
-import os
 import warnings
 from typing import Optional, Tuple
 
@@ -53,7 +52,7 @@ def create_runtime(
 
     Args:
         discovery_backend: Discovery backend type (kubernetes, etcd, file, mem).
-        request_plane: Request distribution method (nats, http, tcp).
+        request_plane: Request distribution method (nats, tcp).
         event_plane: Event publishing method (nats, zmq). When None, the Rust
             runtime auto-detects from the discovery backend (ZMQ for file/mem,
             NATS for etcd/kubernetes).
@@ -75,19 +74,12 @@ def create_runtime(
 
     loop = asyncio.get_running_loop()
 
-    # Scope DYN_EVENT_PLANE to this call so an explicit event_plane doesn't leak
-    # process-wide and silently override later create_runtime(event_plane=None)
-    # calls that rely on the Rust-side auto-detect.
-    previous_event_plane = os.environ.get("DYN_EVENT_PLANE")
-    try:
-        if event_plane:
-            os.environ["DYN_EVENT_PLANE"] = event_plane
-        runtime = DistributedRuntime(loop, discovery_backend, request_plane)
-    finally:
-        if previous_event_plane is None:
-            os.environ.pop("DYN_EVENT_PLANE", None)
-        else:
-            os.environ["DYN_EVENT_PLANE"] = previous_event_plane
+    runtime = DistributedRuntime(
+        loop,
+        discovery_backend,
+        request_plane,
+        event_plane=event_plane,
+    )
 
     return runtime, loop
 

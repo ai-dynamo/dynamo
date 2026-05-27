@@ -119,7 +119,7 @@ def _prepare_request(
     has_tools = bool(request_for_sampling.tools)
     if tool_parser_class and (has_tools or enable_auto_tool_choice):
         if request_for_sampling.tool_choice != "none":
-            tool_parser = tool_parser_class(tokenizer)
+            tool_parser = tool_parser_class(tokenizer, request_for_sampling.tools)
             request_for_sampling = tool_parser.adjust_request(request_for_sampling)
 
     # Strip tools from the template when tool_choice=none so the model doesn't

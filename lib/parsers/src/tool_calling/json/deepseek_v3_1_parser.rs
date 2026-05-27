@@ -270,7 +270,8 @@ mod tests {
         (call.function.name, args)
     }
 
-    #[test] // PARSER.batch.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b in tests/parity/toolcalling/fixtures/deepseek_v3_1/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2
     fn test_parse_tool_calls_deepseek_v3_1_basic() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Paris"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
         let config = match ToolCallConfig::deepseek_v3_1().parser_config {
@@ -288,7 +289,8 @@ mod tests {
         assert_eq!(args["location"], "Paris");
     }
 
-    #[test] // PARSER.batch.8
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/deepseek_v3_1/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.8
     fn test_parse_tool_calls_deepseek_v3_1_with_normal_text() {
         let text = r#"The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "New York"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
         let config = match ToolCallConfig::deepseek_v3_1().parser_config {
@@ -306,7 +308,8 @@ mod tests {
         assert_eq!(args["location"], "New York");
     }
 
-    #[test] // PARSER.batch.4 — recovery from missing start
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/deepseek_v3_1/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4 — recovery from missing start
     fn test_parse_tool_calls_deepseek_v3_1_without_tool_call_start_token() {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather宽带}{location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
         let config = match ToolCallConfig::deepseek_v3_1().parser_config {
@@ -318,7 +321,8 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test] // PARSER.batch.2, PARSER.batch.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a, TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/deepseek_v3_1/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/deepseek_v3_1/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.batch.7
     fn test_parse_tool_calls_deepseek_v3_1_with_multi_tool_calls_with_multiple_args() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
         let config = match ToolCallConfig::deepseek_v3_1().parser_config {
@@ -343,7 +347,8 @@ mod tests {
         assert_eq!(args["radius"], 50);
     }
 
-    #[test] // PARSER.batch.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.b in tests/parity/toolcalling/fixtures/deepseek_v3_1/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_parse_tool_calls_deepseek_v3_1_with_invalid_json() {
         // Everything is normal text in case of invalid json
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather}{location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
@@ -356,7 +361,8 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test] // PARSER.batch.2, PARSER.batch.8
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.c, TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/deepseek_v3_1/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/deepseek_v3_1/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.batch.8
     fn test_parse_tool_calls_deepseek_v3_1_with_multi_tool_calls_with_normal_text() {
         // Everything is normal text in case of invalid json
         let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather宽带}{location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast宽带}{location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality宽带}{location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
@@ -369,7 +375,8 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test] // PARSER.batch.7, PARSER.fmt.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.b in tests/parity/toolcalling/fixtures/deepseek_v3_1/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7, TOOLCALLING.fmt.2
     fn test_parse_tool_calls_deepseek_v3_1_with_multiline_json() {
         let text = r#"I'll help you understand this codebase. Let me start by exploring the structure and key
   files to provide you with a comprehensive
@@ -467,7 +474,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // helper, PARSER.stream.3
+    #[test] // helper, TOOLCALLING.stream.3
     fn test_detect_tool_call_start_deepseek_v3_1_partial_tokens() {
         // Test partial token detection for streaming scenarios with unicode characters
         let config = match ToolCallConfig::deepseek_v3_1().parser_config {
