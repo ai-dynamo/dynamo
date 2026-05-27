@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::config::RouterConfigOverride;
+use dynamo_runtime::error::DynamoError;
 
 use crate::protocols::common::preprocessor::{BootstrapInfo, PrefillResult};
 
@@ -23,6 +24,20 @@ pub enum PrefillError {
     /// Disaggregated params not found in prefill response
     #[error("No disaggregated params in prefill response: {0}")]
     NoDisaggregatedParams(String),
+
+    /// DIS-2105: Prefill worker rejected the request with an overload signal
+    /// (e.g., TCP work-queue full). The inner `DynamoError` carries
+    /// `ErrorType::ResourceExhausted`, which the HTTP layer's
+    /// `request_was_rejected` chain walker downcasts to map to HTTP 503.
+    ///
+    /// This variant is distinct from `PrefillError(_, Some(Box<...>))` because
+    /// the `anyhow::Error -> Box<dyn StdError>` conversion at the wrap site can
+    /// erase the inner `DynamoError`'s downcast identity, leaving the chain
+    /// walker unable to find `ResourceExhausted`. Holding the `DynamoError`
+    /// directly via `#[source]` keeps the chain clean: anyhow -> PrefillError
+    /// -> DynamoError(ResourceExhausted).
+    #[error("Prefill worker rejected request with overload signal")]
+    WorkerOverloaded(#[source] DynamoError),
 }
 
 /// Result of the prefill phase in `generate()`.
