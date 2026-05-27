@@ -34,9 +34,14 @@ lmcache server \
   --port "$LMCACHE_PORT" --http-port "$LMCACHE_HTTP_PORT" &
 
 # Wait until the server's HTTP admin endpoint is healthy before launching workers.
-until curl -sf "http://localhost:$LMCACHE_HTTP_PORT/healthcheck" >/dev/null 2>&1; do
+for _ in $(seq 1 60); do
+  curl -sf "http://localhost:$LMCACHE_HTTP_PORT/healthcheck" >/dev/null 2>&1 && break
   sleep 1
 done
+curl -sf "http://localhost:$LMCACHE_HTTP_PORT/healthcheck" >/dev/null 2>&1 || {
+  echo "lmcache server failed to become healthy on :$LMCACHE_HTTP_PORT" >&2
+  exit 1
+}
 
 python -m dynamo.frontend &
 
