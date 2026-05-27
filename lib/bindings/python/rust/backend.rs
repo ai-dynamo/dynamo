@@ -801,11 +801,22 @@ impl LLMEngine for PyLLMEngine {
         }
     }
 
-    async fn drain(&self) -> Result<(), DynamoError> {
-        self.call_method0_async("drain")
+    async fn is_idle(&self) -> Result<bool, DynamoError> {
+        let py_obj = self
+            .call_method0_async("is_idle")
             .await
             .map_err(py_err_to_dynamo)?;
-        Ok(())
+        Python::with_gil(|py| -> PyResult<bool> {
+            let bound = py_obj.bind(py);
+            // None from Python (e.g. an engine that ignored the contract)
+            // is conservative — treat as "not idle" so the loop keeps
+            // polling until the deadline.
+            if bound.is_none() {
+                return Ok(false);
+            }
+            bound.extract::<bool>()
+        })
+        .map_err(py_err_to_dynamo)
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

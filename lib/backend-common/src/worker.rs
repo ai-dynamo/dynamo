@@ -36,6 +36,16 @@ const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 /// Shared with the Python helper so a single env var controls both.
 const GRACE_PERIOD_ENV: &str = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS";
 
+/// Max time the drain loop polls `engine.is_idle()` before proceeding to
+/// cleanup. Capped further by `graceful_shutdown_timeout` minus grace and
+/// elapsed time so the overall shutdown budget always wins.
+const DEFAULT_DRAIN_TIMEOUT_S: f64 = 30.0;
+const DRAIN_TIMEOUT_ENV: &str = "DYN_PREFILL_DRAIN_TIMEOUT_S";
+/// Interval between `engine.is_idle()` polls during drain.
+const DRAIN_POLL_INTERVAL_S: f64 = 0.5;
+/// Cadence at which the drain loop emits a progress log.
+const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
+
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
 const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
@@ -234,7 +244,8 @@ impl Worker {
     ///   1. `endpoint.unregister_endpoint_instance()` — router stops routing.
     ///   2. Sleep `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (default 5s) to
     ///      let in-flight router decisions complete.
-    ///   3. `engine.drain()` — backend-side drain (e.g. NIXL prefill).
+    ///   3. Poll `engine.is_idle()` until it returns true or the drain
+    ///      budget (`DYN_PREFILL_DRAIN_TIMEOUT_S`, default 30s) expires.
     ///   4. `engine.cleanup()` — release engine resources while NATS / etcd
     ///      are still reachable.
     ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
@@ -711,9 +722,10 @@ impl Worker {
         Ok(())
     }
 
-    /// Engine-facing shutdown sequence: grace period sleep → `engine.drain()`
-    /// → `cleanup_once()`. Each engine step swallows non-fatal failures so a
-    /// misbehaving engine can't block the worker from exiting.
+    /// Engine-facing shutdown sequence: grace period sleep → drain loop on
+    /// `engine.is_idle()` → `cleanup_once()`. Each engine step swallows
+    /// non-fatal failures so a misbehaving engine can't block the worker
+    /// from exiting.
     async fn run_engine_shutdown_steps(&mut self) {
         self.run_engine_shutdown_steps_with_grace(grace_period_secs())
             .await
@@ -730,15 +742,87 @@ impl Worker {
         }
 
         let drain_start = std::time::Instant::now();
-        if let Err(e) = self.engine.drain().await {
-            tracing::warn!(error = %e, "engine drain failed");
-        }
+        self.drain_until_idle_or_deadline().await;
         let drain_elapsed = drain_start.elapsed().as_secs_f64();
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.observe_drain_time(drain_elapsed);
         }
 
         self.cleanup_once().await;
+    }
+
+    /// Poll `engine.is_idle()` until it reports ready or the drain budget
+    /// expires. Engines without an idle signal inherit the trait default
+    /// `Ok(true)` and exit immediately.
+    async fn drain_until_idle_or_deadline(&self) {
+        let budget = drain_timeout_secs();
+        let deadline = std::time::Instant::now() + Duration::from_secs_f64(budget);
+        let start = std::time::Instant::now();
+        let mut last_heartbeat = start;
+        tracing::info!("drain: entered (PREFILL, timeout={:.1}s)", budget);
+        loop {
+            match self.engine.is_idle().await {
+                Ok(true) => {
+                    tracing::info!(
+                        "drain: exited (idle, elapsed={:.1}s)",
+                        start.elapsed().as_secs_f64()
+                    );
+                    return;
+                }
+                Ok(false) => {}
+                Err(e) => tracing::debug!(error = %e, "is_idle raised; treating as not idle"),
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "drain: timed out at {:.1}s; proceeding with cleanup",
+                    start.elapsed().as_secs_f64()
+                );
+                return;
+            }
+            if last_heartbeat.elapsed().as_secs_f64() >= DRAIN_HEARTBEAT_INTERVAL_S {
+                tracing::info!(
+                    "drain: heartbeat (elapsed={:.1}s)",
+                    start.elapsed().as_secs_f64()
+                );
+                last_heartbeat = std::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_secs_f64(DRAIN_POLL_INTERVAL_S)).await;
+        }
+    }
+}
+
+/// Drain-budget resolver: `DYN_PREFILL_DRAIN_TIMEOUT_S` with the same
+/// validation policy as `grace_period_secs` (invalid → default, negative
+/// → 0).
+fn drain_timeout_secs() -> f64 {
+    match std::env::var(DRAIN_TIMEOUT_ENV) {
+        Err(_) => DEFAULT_DRAIN_TIMEOUT_S,
+        Ok(s) if s.is_empty() => DEFAULT_DRAIN_TIMEOUT_S,
+        Ok(s) => match s.parse::<f64>() {
+            Ok(v) if !v.is_finite() => {
+                tracing::warn!(
+                    "Non-finite {}={:?}; using default {:.1}s",
+                    DRAIN_TIMEOUT_ENV,
+                    s,
+                    DEFAULT_DRAIN_TIMEOUT_S
+                );
+                DEFAULT_DRAIN_TIMEOUT_S
+            }
+            Ok(v) if v < 0.0 => {
+                tracing::warn!("Negative {}={:?}; clamping to 0", DRAIN_TIMEOUT_ENV, s);
+                0.0
+            }
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!(
+                    "Invalid {}={:?}; using default {:.1}s",
+                    DRAIN_TIMEOUT_ENV,
+                    s,
+                    DEFAULT_DRAIN_TIMEOUT_S
+                );
+                DEFAULT_DRAIN_TIMEOUT_S
+            }
+        },
     }
 }
 
@@ -1420,19 +1504,19 @@ mod tests {
 
     use std::sync::Mutex as StdMutex;
 
-    /// Engine that records the order of `drain` and `cleanup` calls into a
-    /// shared log so tests can assert on sequencing.
+    /// Engine that records the order of `is_idle` and `cleanup` calls
+    /// into a shared log so tests can assert on sequencing.
     struct OrderingMockEngine {
         log: Arc<StdMutex<Vec<&'static str>>>,
-        drain_should_fail: bool,
+        is_idle_should_fail: bool,
     }
 
     impl OrderingMockEngine {
-        fn new(drain_should_fail: bool) -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
+        fn new(is_idle_should_fail: bool) -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
             let log = Arc::new(StdMutex::new(Vec::new()));
             let eng = Arc::new(Self {
                 log: log.clone(),
-                drain_should_fail,
+                is_idle_should_fail,
             });
             (eng, log)
         }
@@ -1459,15 +1543,15 @@ mod tests {
             unreachable!("not used in orchestrator tests")
         }
 
-        async fn drain(&self) -> Result<(), DynamoError> {
-            self.log.lock().unwrap().push("drain");
-            if self.drain_should_fail {
+        async fn is_idle(&self) -> Result<bool, DynamoError> {
+            self.log.lock().unwrap().push("is_idle");
+            if self.is_idle_should_fail {
                 Err(err(
                     ErrorType::Backend(BackendError::Unknown),
-                    "synthetic drain failure",
+                    "synthetic is_idle failure",
                 ))
             } else {
-                Ok(())
+                Ok(true)
             }
         }
 
@@ -1490,23 +1574,39 @@ mod tests {
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec!["start", "drain", "cleanup"],
-            "drain must run before cleanup"
+            vec!["start", "is_idle", "cleanup"],
+            "is_idle (drain) must run before cleanup"
         );
     }
 
     #[tokio::test]
     async fn shutdown_steps_drain_failure_does_not_block_cleanup() {
-        let (engine, log) = OrderingMockEngine::new(true); // drain fails
+        // is_idle errors are treated as "not idle"; the drain loop keeps
+        // polling until the budget expires, then cleanup still runs.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var(DRAIN_TIMEOUT_ENV).ok();
+        // SAFETY: tests in this mod serialize env access via ENV_LOCK.
+        unsafe { std::env::set_var(DRAIN_TIMEOUT_ENV, "0") };
+
+        let (engine, log) = OrderingMockEngine::new(true); // is_idle fails
         let mut worker = worker_with(engine);
         worker.start_engine(0).await.unwrap();
 
         worker.run_engine_shutdown_steps_with_grace(0.0).await;
 
-        // Drain ran (and failed), but cleanup still ran exactly once.
+        // is_idle ran at least once (and errored), then cleanup ran.
         let recorded = log.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["start", "drain", "cleanup"]);
+        assert!(recorded.starts_with(&["start", "is_idle"]));
+        assert_eq!(recorded.last().copied(), Some("cleanup"));
         assert_eq!(worker.state, LifecycleState::Stopped);
+
+        // SAFETY: see above.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var(DRAIN_TIMEOUT_ENV, v),
+                None => std::env::remove_var(DRAIN_TIMEOUT_ENV),
+            }
+        }
     }
 
     // The "drain skipped when engine never started" scenario isn't

@@ -9,7 +9,6 @@ and feature gap details.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import tempfile
@@ -45,7 +44,6 @@ from dynamo.common.backend.metrics import (
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.utils.drain import prefill_drain_context
 from dynamo.llm import ModelInput
 from dynamo.vllm.args import parse_args
 from dynamo.vllm.cache_info import (
@@ -424,20 +422,17 @@ class VllmLLMEngine(LLMEngine):
             await self.engine_client.abort(request_id)
             logger.debug("Aborted request %s", request_id)
 
-    async def drain(self) -> None:
-        """Prefill-only: bounded wait so in-flight NIXL KV pulls settle
-        before ``AsyncLLM.shutdown()`` frees GPU memory. vLLM exposes
-        no connector-aware idle signal, so the body is a
-        heartbeat-paced sleep."""
+    async def is_idle(self) -> bool:
+        """Prefill-only predicate. vLLM exposes no connector-aware idle
+        signal, so we return ``False`` and let the Rust drain loop run
+        out its deadline. Aggregated and decode roles report idle
+        immediately."""
         if (
             self.engine_client is None
             or self.disaggregation_mode != DisaggregationMode.PREFILL
         ):
-            return
-        async with prefill_drain_context(logger) as ctx:
-            while not ctx.expired():
-                ctx.heartbeat()
-                await asyncio.sleep(min(ctx.heartbeat_s, ctx.remaining_s()))
+            return True
+        return False
 
     async def health_check_payload(self) -> Optional[dict[str, Any]]:
         if self.disaggregation_mode == DisaggregationMode.DECODE:

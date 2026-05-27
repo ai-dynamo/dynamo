@@ -174,18 +174,17 @@ class LLMEngine(ABC):
         ``context.metadata`` during :meth:`generate` are not visible here.
         """
 
-    async def drain(self) -> None:
-        """Drain in-flight engine work before cleanup (optional, default no-op).
+    async def is_idle(self) -> bool:
+        """Predicate: are all engine-internal resources safe to release?
 
-        Called once during graceful shutdown after the discovery unregister
-        + grace-period sleep, but before :meth:`cleanup`.  Use it for
-        backend-side draining that must complete while the distributed
-        runtime (NATS / etcd) is still alive — e.g. waiting for in-flight
-        NIXL KV transfers on prefill workers (issue #7319), so downstream
-        decode workers don't observe a use-after-free on freed GPU memory.
-
-        Failures are logged and swallowed; shutdown proceeds regardless.
+        The Rust ``Worker`` polls this between the grace-period sleep and
+        :meth:`cleanup` and proceeds to cleanup when it returns ``True``
+        OR the drain budget (``DYN_PREFILL_DRAIN_TIMEOUT_S``) expires.
+        Prefill workers holding KV blocks for in-flight NIXL pulls should
+        return ``False`` until the connector reports the transfer is done.
+        Default ``True`` opts out of waiting.
         """
+        return True
 
     @abstractmethod
     async def cleanup(self) -> None:

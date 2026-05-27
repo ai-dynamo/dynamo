@@ -42,7 +42,6 @@ from dynamo.common.backend.health_check import (
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.utils.drain import prefill_drain_context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
@@ -420,23 +419,11 @@ class SglangLLMEngine(LLMEngine):
             tokenizer_manager.abort_request(rid=rid, abort_all=False)
             logger.debug("Aborted request %s", rid)
 
-    async def drain(self) -> None:
-        """Prefill-only: gather background consume tasks so a decode
-        peer's NIXL pull finishes before cleanup. SGLang's
-        ``engine.async_generate`` stream stays alive through the KV
-        transfer, so awaiting the spawned tasks is the in-flight
-        signal."""
-        pending = [t for t in self._prefill_consume_tasks if not t.done()]
-        if not pending:
-            return
-        async with prefill_drain_context(logger) as ctx:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*pending, return_exceptions=True),
-                    timeout=ctx.remaining_s(),
-                )
-            except asyncio.TimeoutError:
-                pass
+    async def is_idle(self) -> bool:
+        """Prefill-only predicate. SGLang's ``engine.async_generate``
+        stream stays alive through the KV transfer; idle when every
+        background consume task has completed."""
+        return all(t.done() for t in self._prefill_consume_tasks)
 
     async def cleanup(self) -> None:
         # Anything still running here either timed out in drain() or was
