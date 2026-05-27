@@ -849,6 +849,80 @@ def test_remap_all_vas_accepts_new_layout_with_same_structural_layout(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_remap_all_vas_accepts_restored_layout_after_pruned_slot_gap(
+    running_gms,
+):
+    """Pruned layouts may have sparse source slots but compact restore slots."""
+
+    _, socket_path = running_gms
+
+    from gpu_memory_service.client.torch.allocator import prune_allocations
+
+    first_writer = GMSClientMemoryManager(socket_path, device=0)
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    second_writer = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        first_writer.connect(RequestedLockType.RW)
+        kept_a_va = first_writer.create_mapping(size=4096, tag="weights")
+        pruned_va = first_writer.create_mapping(size=8192, tag="weights")
+        kept_b_va = first_writer.create_mapping(
+            size=first_writer.granularity + 4096,
+            tag="weights",
+        )
+
+        kept_a = first_writer.mappings[kept_a_va]
+        kept_b = first_writer.mappings[kept_b_va]
+        assert first_writer.mappings[pruned_va].layout_slot == 1
+        assert kept_b.layout_slot == 2
+
+        prune_allocations(
+            first_writer,
+            referenced_allocation_ids={kept_a.allocation_id, kept_b.allocation_id},
+            synchronize=False,
+        )
+        first_writer.metadata_put("tensor.0", kept_a.allocation_id, 0, b"a")
+        first_writer.metadata_put("tensor.1", kept_b.allocation_id, 0, b"b")
+        assert first_writer.commit()
+
+        reader.connect(RequestedLockType.RO)
+        source_hash = reader.get_memory_layout_hash()
+        assert source_hash
+        imported_a_va = reader.create_mapping(allocation_id=kept_a.allocation_id)
+        imported_b_va = reader.create_mapping(allocation_id=kept_b.allocation_id)
+        reader.unmap_all_vas()
+        reader.abort()
+
+        second_writer.connect(RequestedLockType.RW)
+        restored_a_va = second_writer.create_mapping(size=kept_a.size, tag=kept_a.tag)
+        restored_b_va = second_writer.create_mapping(size=kept_b.size, tag=kept_b.tag)
+        restored_a = second_writer.mappings[restored_a_va]
+        restored_b = second_writer.mappings[restored_b_va]
+        assert restored_a.layout_slot == 0
+        assert restored_b.layout_slot == 1
+        second_writer.metadata_put("tensor.0", restored_a.allocation_id, 0, b"a")
+        second_writer.metadata_put("tensor.1", restored_b.allocation_id, 0, b"b")
+        assert second_writer.commit()
+
+        verifier = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+        try:
+            assert verifier.get_memory_layout_hash() == source_hash
+        finally:
+            verifier.close()
+
+        reader.connect(RequestedLockType.RO)
+        reader.remap_all_vas()
+
+        assert reader.mappings[imported_a_va].allocation_id == restored_a.allocation_id
+        assert reader.mappings[imported_b_va].allocation_id == restored_b.allocation_id
+        assert reader.metadata_get("tensor.0") == (restored_a.allocation_id, 0, b"a")
+        assert reader.metadata_get("tensor.1") == (restored_b.allocation_id, 0, b"b")
+    finally:
+        second_writer.close()
+        reader.close()
+        first_writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(
     running_gms,
 ):
