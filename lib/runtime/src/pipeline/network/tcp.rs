@@ -21,10 +21,10 @@
 //!
 //! The TCP transport has two sides:
 //!
-//! - Request sender: The peer that **initiates the transfer** runs [`server::TcpStreamServer`],
+//! - Request sender: The upstream that **initiates the transfer** runs [`server::TcpStreamServer`],
 //!   registers what it expects to receive, and listens. It publishes its address + a per-stream
 //!   subject UUID via [`TcpStreamConnectionInfo`], which is serialized into a [`ConnectionInfo`].
-//! - Request receiver: The peer that **acknowledges the transfer** runs [`client::TcpClient`],
+//! - Request receiver: The downstream that **acknowledges the transfer** runs [`client::TcpClient`],
 //!   reads the connection info out of the request, dials the listener, and identifies itself with
 //!   a `CallHomeHandshake` to the request sender.
 //!
@@ -57,9 +57,9 @@
 //! [`ResponseService::register`] takes [`StreamOptions`] with `enable_request_stream` /
 //! `enable_response_stream` flags and returns [`PendingConnections`] holding zero, one, or two
 //! [`RegisteredStream`]s. Each [`RegisteredStream`] carries a [`ConnectionInfo`] and a oneshot
-//! that resolves to the [`StreamSender`] / [`StreamReceiver`] once the peer dials in and the
-//! handshake completes. Once registered, the pending entry remains until the peer successfully
-//! establishes the stream. Two mechanisms ensure the pending entry is removed when the peer
+//! that resolves to the [`StreamSender`] / [`StreamReceiver`] once the downstream dials in and the
+//! handshake completes. Once registered, the pending entry remains until the downstream successfully
+//! establishes the stream. Two mechanisms ensure the pending entry is removed when the downstream
 //! cannot be reached:
 //!
 //! 1. The returned [`RegisteredStream`] is RAII — dropping it without `into_parts()` removes the
