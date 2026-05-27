@@ -99,8 +99,17 @@ impl ReasoningParser for GptOssReasoningParser {
                 token_id
             );
             if let Err(e) = parser.process(*token_id) {
+                // Strict StreamableParser rejects malformed model output (e.g. natural
+                // language in a `to=` recipient slot, or text after `<|end|>` without
+                // `<|start|>`). Dropping the chunk silently loses content; surface the
+                // raw text instead so downstream (harmony tool-call regex fallback,
+                // jail) gets a shot. Once StreamableParser is in an error state, no
+                // further deltas will materialize, so abandon the loop.
                 tracing::warn!("Harmony parse error for token_id {token_id}: {e}");
-                return ParserResult::default();
+                return ParserResult {
+                    normal_text: text.to_string(),
+                    reasoning_text: String::new(),
+                };
             }
         }
 
@@ -205,8 +214,16 @@ impl ReasoningParser for GptOssReasoningParser {
                 token_id
             );
             if let Err(e) = parser.process(*token_id) {
+                // See sibling fallback in `detect_and_parse_reasoning`: surface raw
+                // chunk text on strict-parser failure so downstream parsers (harmony
+                // tool-call regex fallback, jail) can still recover instead of the
+                // chunk being dropped entirely. Drops any partial deltas accumulated
+                // in this chunk before the failure; trade-off vs. losing the chunk.
                 tracing::warn!("Harmony parse error for token_id {token_id}: {e}");
-                return ParserResult::default();
+                return ParserResult {
+                    normal_text: text.to_string(),
+                    reasoning_text: String::new(),
+                };
             }
 
             if let (Some(delta), Some(channel)) = (
