@@ -679,24 +679,31 @@ async fn tcp_listener(
     }
 
     /// Pump frames the upstream queued on its `StreamSender` into the TCP socket.
-    /// On clean closure (the upstream drops the sender → `request_rx` returns
-    /// `None`), write a `ControlMessage::Sentinel` so the downstream
-    /// `handle_request_reader` exits its loop cleanly.
+    /// The closing control message depends on why the loop exited:
+    /// - `context.killed()` → [`ControlMessage::Kill`] (hard cancel notification)
+    /// - `context.stopped()` → [`ControlMessage::Stop`] (graceful cancel notification)
+    /// - `request_rx` returns `None` → [`ControlMessage::Sentinel`] (clean EOS)
+    /// - write error → no control message, the socket is already broken
+    ///
+    /// The downstream `handle_request_reader` matches on the received variant
+    /// and reacts accordingly.
     async fn request_stream_send_handler(
         mut framed_writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
         mut request_rx: mpsc::Receiver<TwoPartMessage>,
         context: Arc<dyn AsyncEngineContext>,
     ) {
-        let mut send_sentinel = true;
-
-        loop {
+        let closing_msg: Option<ControlMessage> = loop {
             tokio::select! {
                 biased;
 
                 _ = context.killed() => {
                     tracing::trace!("context kill received in request-stream send handler");
-                    send_sentinel = false;
-                    break;
+                    break Some(ControlMessage::Kill);
+                }
+
+                _ = context.stopped() => {
+                    tracing::trace!("context stop received in request-stream send handler");
+                    break Some(ControlMessage::Stop);
                 }
 
                 msg = request_rx.recv() => {
@@ -707,20 +714,21 @@ async fn tcp_listener(
                                     "failed to send request-stream frame to downstream: {:?}",
                                     e
                                 );
-                                send_sentinel = false;
-                                break;
+                                break None;
                             }
                         }
                         None => {
                             tracing::trace!("upstream request-stream sender closed; sending sentinel");
-                            break;
+                            break Some(ControlMessage::Sentinel);
                         }
                     }
                 }
             }
-        }
+        };
 
-        if send_sentinel && let Ok(bytes) = serde_json::to_vec(&ControlMessage::Sentinel) {
+        if let Some(ctrl) = closing_msg
+            && let Ok(bytes) = serde_json::to_vec(&ctrl)
+        {
             let _ = framed_writer
                 .send(TwoPartMessage::from_header(bytes.into()))
                 .await;
@@ -731,65 +739,60 @@ async fn tcp_listener(
         let _ = inner.shutdown().await;
     }
 
-    /// Read the downstream's control messages. Today the only expected message
-    /// is `ControlMessage::Sentinel` — the downstream acknowledging it has
-    /// finished consuming the request stream. Stop / Kill from the downstream
-    /// side aren't reachable in current flows (the downstream is the consumer,
-    /// not the cancel-initiator) but are handled defensively in case a future
-    /// caller wires that direction.
+    /// Read the downstream's control messages. The only expected message is
+    /// [`ControlMessage::Sentinel`] — the downstream acknowledging it has
+    /// finished consuming the request stream. `Stop` / `Kill` on this
+    /// direction is a protocol violation (the downstream is the consumer, not
+    /// the cancel-initiator); the handler closes the stream rather than
+    /// honouring the cancel, matching the response-path policy.
     async fn request_stream_recv_handler(
         mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
         context: Arc<dyn AsyncEngineContext>,
     ) {
-        loop {
-            tokio::select! {
-                biased;
+        // Only one legitimate frame is expected on this direction (Sentinel),
+        // so the handler exits after a single read or on context kill.
+        tokio::select! {
+            biased;
 
-                _ = context.killed() => {
-                    tracing::trace!("context kill received in request-stream recv handler");
-                    break;
-                }
+            _ = context.killed() => {
+                tracing::trace!("context kill received in request-stream recv handler");
+            }
 
-                msg = framed_reader.next() => {
-                    match msg {
-                        Some(Ok(two_part_msg)) => match two_part_msg.into_message_type() {
-                            TwoPartMessageType::HeaderOnly(header) => {
-                                match serde_json::from_slice::<ControlMessage>(&header) {
-                                    Ok(ControlMessage::Sentinel) => {
-                                        tracing::trace!("downstream acknowledged request-stream close");
-                                        break;
-                                    }
-                                    Ok(ControlMessage::Stop) => context.stop(),
-                                    Ok(ControlMessage::Kill) => {
-                                        context.kill();
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "invalid control message on request-stream recv: {}",
-                                            e
-                                        );
-                                        break;
-                                    }
+            msg = framed_reader.next() => {
+                match msg {
+                    Some(Ok(two_part_msg)) => match two_part_msg.into_message_type() {
+                        TwoPartMessageType::HeaderOnly(header) => {
+                            match serde_json::from_slice::<ControlMessage>(&header) {
+                                Ok(ControlMessage::Sentinel) => {
+                                    tracing::trace!("downstream acknowledged request-stream close");
+                                }
+                                Ok(other) => {
+                                    tracing::warn!(
+                                        ?other,
+                                        "unexpected control message on request-stream recv direction, closing stream"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "invalid control message on request-stream recv: {}",
+                                        e
+                                    );
                                 }
                             }
-                            _ => {
-                                tracing::error!(
-                                    "unexpected non-control frame on request-stream recv direction"
-                                );
-                                break;
-                            }
                         }
-                        Some(Err(e)) => {
+                        _ => {
                             tracing::error!(
-                                "decode error on request-stream recv handler: {e:?}"
+                                "unexpected non-control frame on request-stream recv direction"
                             );
-                            break;
                         }
-                        None => {
-                            tracing::trace!("request-stream recv socket closed by downstream");
-                            break;
-                        }
+                    },
+                    Some(Err(e)) => {
+                        tracing::error!(
+                            "decode error on request-stream recv handler: {e:?}"
+                        );
+                    }
+                    None => {
+                        tracing::trace!("request-stream recv socket closed by downstream");
                     }
                 }
             }

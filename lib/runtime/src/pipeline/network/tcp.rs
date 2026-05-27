@@ -82,13 +82,22 @@
 //!
 //! # Control / Shutdown Protocol
 //!
-//! [`ControlMessage`] frames travel header-only on the same socket as data frames:
+//! [`ControlMessage`] frames are header-only frames interleaved with data on either socket:
 //!
+//! - [`ControlMessage::Sentinel`] — per-direction clean end-of-stream; the producing side emits
+//!   it before closing the socket. Used on both the request and response sockets.
 //! - [`ControlMessage::Stop`] — caller asks the producer to cancel; the receiving side calls
 //!   `context.stop()`. The reader stays alive so a later [`ControlMessage::Kill`] can upgrade.
 //! - [`ControlMessage::Kill`] — hard cancel; `context.kill()` and break out.
-//! - [`ControlMessage::Sentinel`] — clean end-of-stream; the data direction emits it before
-//!   closing the socket.
+//!
+//! Today `Stop` and `Kill` are only emitted on the **response** socket (frontend → worker). This
+//! is an expected asymmetry: the response stream is always enabled while the request stream is
+//! optional, so the response socket is the single channel used to propagate cancellation across
+//! processes. Within a single process the shared `AsyncEngineContext` then fans the cancellation
+//! out to the request-stream half — e.g. the worker's request-stream reader watches
+//! `context.killed()` / `context.stopped()` and exits when the response-stream reader flips the
+//! context. The request-stream handlers do decode `Stop` / `Kill` defensively, but no current
+//! code path writes them on that socket.
 //!
 //! A killed or stopped context **skips** the sentinel so a crash isn't signalled as clean
 //! closure. Read errors, decode errors, and protocol violations (e.g. a [`ControlMessage::Sentinel`]

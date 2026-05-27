@@ -243,7 +243,6 @@ async fn handle_request_reader(
     context: Arc<dyn AsyncEngineContext>,
     cancellation_counter: Option<IntCounter>,
 ) {
-    let mut cancellation_counted = false;
     let mut send_sentinel = true;
 
     loop {
@@ -274,16 +273,17 @@ async fn handle_request_reader(
                             };
                             match ctrl {
                                 ControlMessage::Stop => {
-                                    if let Some(counter) = &cancellation_counter && !cancellation_counted {
+                                    if let Some(counter) = &cancellation_counter {
                                         counter.inc();
-                                        cancellation_counted = true;
                                     }
                                     context.stop();
+                                    // Upstream has stopped producing; ack with
+                                    // Sentinel so the server-side recv handler
+                                    // can exit cleanly.
+                                    break;
                                 }
                                 ControlMessage::Kill => {
-                                    if let Some(counter) = &cancellation_counter
-                                        && !cancellation_counted
-                                    {
+                                    if let Some(counter) = &cancellation_counter {
                                         counter.inc();
                                     }
                                     context.kill();
