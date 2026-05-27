@@ -33,8 +33,6 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
-  # Root-level compatibility symlink -> .agents/skills (skills live there).
-  - 'skills'
 
 examples:
   - 'recipes/**'
