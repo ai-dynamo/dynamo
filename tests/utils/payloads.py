@@ -408,7 +408,6 @@ class CachedTokensChatPayload(ChatPayload):
         require_lightseek_init: bool = False,
         require_vllm_mm_processor_init: bool = False,
         min_routing_total_blocks: int = 0,
-        inter_request_settle_s: float = 0.0,
     ):
         # Strong-gating: when these opt-ins are set, fail closed if MM-aware
         # routing silently degrades to text-prefix overlap (which would
@@ -437,13 +436,6 @@ class CachedTokensChatPayload(ChatPayload):
         self._request_count = 0
         self._cached_tokens_found = False
         self.router_nvext_expectation = router_nvext_expectation
-        # Wait between repeats so the kv-router has time to ingest BlockStored
-        # events from the preceding request before scoring the next one. With
-        # multi-worker setups and large prefixes (e.g. Phi-3's 2.5k tokens →
-        # 159 blocks), zmq-published events can arrive after the next request
-        # starts routing; the router then under-counts overlap on the prior
-        # worker and load-balances to a cold one. 0 disables.
-        self.inter_request_settle_s = inter_request_settle_s
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -483,14 +475,6 @@ class CachedTokensChatPayload(ChatPayload):
                     f"Request {self._request_count}: cached_tokens={cached_tokens} "
                     f"(expected >= {self.min_cached_tokens})"
                 )
-
-        # Give the kv-router time to ingest BlockStored events from this
-        # request before the next repeat scores routing decisions.
-        if (
-            self.inter_request_settle_s > 0
-            and self._request_count < self.repeat_count
-        ):
-            time.sleep(self.inter_request_settle_s)
 
     def final_validation(self) -> None:
         """Called after all requests are processed to ensure we saw cached tokens.

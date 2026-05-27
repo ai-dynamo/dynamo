@@ -71,7 +71,6 @@ def make_image_payload_cached_tokens(
     require_lightseek_init: bool = False,
     require_vllm_mm_processor_init: bool = False,
     min_routing_total_blocks: int = 0,
-    inter_request_settle_s: float = 1.5,
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
 
@@ -79,12 +78,6 @@ def make_image_payload_cached_tokens(
     (chat-processor path) plus ``min_routing_total_blocks`` form a strong
     gate: the [ROUTING] block count is well above what text-prefix-only
     routing produces (~1-3 blocks), and the corresponding init log fired.
-
-    ``inter_request_settle_s`` (default 1.5s) waits between repeats so the
-    kv-router can ingest BlockStored events from the prior request before
-    scoring the next routing decision. Multi-worker setups with large
-    prefixes (e.g. Phi-3-vision's 2.5k tokens → 159 blocks) otherwise race
-    the zmq event publication and route the repeat to a cold worker.
     """
     return CachedTokensChatPayload(
         body={
@@ -110,7 +103,6 @@ def make_image_payload_cached_tokens(
         require_lightseek_init=require_lightseek_init,
         require_vllm_mm_processor_init=require_vllm_mm_processor_init,
         min_routing_total_blocks=min_routing_total_blocks,
-        inter_request_settle_s=inter_request_settle_s,
     )
 
 
