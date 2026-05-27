@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank};
+use dynamo_kv_router::{
+    indexer::RoutingDecisionHashes,
+    protocols::{RoutingConstraints, TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
+    scheduling::{WorkerEligibilityError, validate_worker_eligibility},
+};
 use dynamo_runtime::{
     dynamo_nvtx_range,
     error::{DynamoError, ErrorType as DynamoErrorType},
@@ -22,9 +27,9 @@ use tracing::Instrument;
 use crate::{
     kv_router::{
         KvRouter,
-        agent_controller::{AgentController, SessionCloseAction},
+        agent_controller::{AgentController, SessionCloseAction, SessionLifecycleOutcome},
         metrics::RouterRequestMetrics,
-        sticky_sessions::{InMemoryAffinityStore, StickySessionRouter},
+        sticky_sessions::{AffinityKind, InMemoryAffinityStore, StickySessionRouter},
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -50,6 +55,7 @@ struct WorkerSelection {
     overlap_amount: u32,
     effective_overlap_blocks: f64,
     cached_tokens: usize,
+    routing_hashes: Option<RoutingDecisionHashes>,
     /// Whether the scheduler is tracking this request (add_request or
     /// find_best_match_details with update_states=true was called).
     scheduler_tracked: bool,
@@ -296,6 +302,8 @@ impl KvPushRouter {
         request: &PreprocessedRequest,
         phase: RequestPhase,
         is_query_only: bool,
+        sticky_worker: Option<WorkerWithDpRank>,
+        return_routing_hashes: bool,
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
@@ -307,7 +315,10 @@ impl KvPushRouter {
             .and_then(|r| r.routing_constraints.clone())
             .unwrap_or_default();
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
-        let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
+        let sticky_pin = sticky_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let Some((pinned_worker_id, requested_dp_rank)) =
+            pinned_worker_hint(phase, routing).or(sticky_pin)
+        else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let outcome = self
                 .chooser
@@ -317,6 +328,7 @@ impl KvPushRouter {
                     block_mm_infos,
                     request.router_config_override.as_ref(),
                     !is_query_only,
+                    return_routing_hashes,
                     lora_name,
                     priority_jump,
                     expected_output_tokens,
@@ -325,37 +337,44 @@ impl KvPushRouter {
                     routing_constraints.clone(),
                 )
                 .await?;
-            let (best_worker, effective_overlap_blocks, cached_tokens, overlap_amount) =
-                match outcome {
-                    crate::kv_router::FindBestMatchOutcome::Routed {
-                        worker,
-                        overlap_blocks,
-                        effective_overlap_blocks,
-                        cached_tokens,
-                    } => (
-                        worker,
-                        effective_overlap_blocks,
-                        cached_tokens,
-                        overlap_blocks,
-                    ),
-                    crate::kv_router::FindBestMatchOutcome::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
-                    } => {
-                        // TODO(DEP-8189 / ai-dynamo#8189): classify queue-depth
-                        // saturation distinctly from generic resource exhaustion
-                        // (operator-facing 429 vs 503) once the shared rejection
-                        // layer lands.
-                        return Err(DynamoError::builder()
+            let (
+                best_worker,
+                effective_overlap_blocks,
+                cached_tokens,
+                overlap_amount,
+                routing_hashes,
+            ) = match outcome {
+                crate::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    routing_hashes,
+                } => (
+                    worker,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    overlap_blocks,
+                    routing_hashes,
+                ),
+                crate::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                } => {
+                    // TODO(#8189): classify queue-depth
+                    // saturation distinctly from generic resource exhaustion
+                    // (operator-facing 429 vs 503) once the shared rejection
+                    // layer lands.
+                    return Err(DynamoError::builder()
                         .error_type(DynamoErrorType::ResourceExhausted)
                         .message(format!(
                             "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
                         ))
                         .build()
                         .into());
-                    }
-                };
+                }
+            };
 
             if !is_query_only {
                 let total_blocks = routing_token_ids
@@ -382,6 +401,7 @@ impl KvPushRouter {
                 overlap_amount,
                 effective_overlap_blocks,
                 cached_tokens,
+                routing_hashes,
                 scheduler_tracked: !is_query_only,
             });
         };
@@ -399,6 +419,7 @@ impl KvPushRouter {
                     block_mm_infos,
                     request.router_config_override.as_ref(),
                     true,
+                    return_routing_hashes,
                     lora_name.clone(),
                     priority_jump,
                     expected_output_tokens,
@@ -407,35 +428,42 @@ impl KvPushRouter {
                     routing_constraints.clone(),
                 )
                 .await?;
-            let (best_worker, effective_overlap_blocks, cached_tokens, overlap_amount) =
-                match outcome {
-                    crate::kv_router::FindBestMatchOutcome::Routed {
-                        worker,
-                        overlap_blocks,
-                        effective_overlap_blocks,
-                        cached_tokens,
-                    } => (
-                        worker,
-                        effective_overlap_blocks,
-                        cached_tokens,
-                        overlap_blocks,
-                    ),
-                    crate::kv_router::FindBestMatchOutcome::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
-                    } => {
-                        // TODO(DEP-8189 / ai-dynamo#8189): same classification
-                        // refinement applies on the pinned-worker path.
-                        return Err(DynamoError::builder()
+            let (
+                best_worker,
+                effective_overlap_blocks,
+                cached_tokens,
+                overlap_amount,
+                routing_hashes,
+            ) = match outcome {
+                crate::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    routing_hashes,
+                } => (
+                    worker,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    overlap_blocks,
+                    routing_hashes,
+                ),
+                crate::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                } => {
+                    // TODO(#8189): same classification
+                    // refinement applies on the pinned-worker path.
+                    return Err(DynamoError::builder()
                         .error_type(DynamoErrorType::ResourceExhausted)
                         .message(format!(
                             "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
                         ))
                         .build()
                         .into());
-                    }
-                };
+                }
+            };
 
             return Ok(WorkerSelection {
                 instance_id: best_worker.worker_id,
@@ -443,6 +471,7 @@ impl KvPushRouter {
                 overlap_amount,
                 effective_overlap_blocks,
                 cached_tokens,
+                routing_hashes,
                 scheduler_tracked: true,
             });
         }
@@ -489,13 +518,14 @@ impl KvPushRouter {
         // estimate query and won't affect scheduler state.
         let effective_dp_rank = resolved_dp_rank.unwrap_or(0);
         let worker = WorkerWithDpRank::new(pinned_worker_id, effective_dp_rank);
-        let cache_hit = self
+        let (cache_hit, routing_hashes) = self
             .chooser
-            .get_cache_hit_estimate(
+            .get_cache_hit_estimate_with_hashes(
                 routing_token_ids,
                 block_mm_infos,
                 worker,
                 lora_name.as_deref(),
+                return_routing_hashes,
             )
             .await?;
         let effective_overlap_blocks = cache_hit.effective_overlap_blocks;
@@ -539,8 +569,109 @@ impl KvPushRouter {
             overlap_amount: overlap_blocks,
             effective_overlap_blocks,
             cached_tokens,
+            routing_hashes,
             scheduler_tracked: !is_query_only && resolved_dp_rank.is_some(),
         })
+    }
+
+    pub(crate) fn sticky_worker_for_phase(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+    ) -> Option<WorkerWithDpRank> {
+        let session_id = sticky_session_id_for_phase(request, phase)?;
+        self.sticky_sessions.peek_session(session_id)
+    }
+
+    pub(crate) fn refresh_sticky_worker_for_phase(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+    ) {
+        let Some(session_id) = sticky_session_id_for_phase(request, phase) else {
+            return;
+        };
+        let Some(sc) = request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.session_control.as_ref())
+        else {
+            return;
+        };
+        if sc.action.is_some() {
+            return;
+        }
+
+        self.sticky_sessions.resolve_session(session_id);
+    }
+
+    fn sticky_worker_ineligibility_for_phase(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+        worker: WorkerWithDpRank,
+    ) -> Option<WorkerEligibilityError> {
+        let routing = request.routing.as_ref()?;
+        if !sticky_allowed_for_phase(phase, Some(routing)) {
+            return None;
+        }
+
+        let default_constraints = RoutingConstraints::default();
+        let routing_constraints = routing
+            .routing_constraints
+            .as_ref()
+            .unwrap_or(&default_constraints);
+        let configs = self.chooser.workers_with_configs.borrow();
+        validate_worker_eligibility(
+            &configs,
+            worker,
+            routing.allowed_worker_ids.as_ref(),
+            routing_constraints,
+        )
+        .err()
+    }
+
+    pub(crate) fn unbind_ineligible_sticky_worker_for_phase(
+        &self,
+        context_id: &str,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+        worker: WorkerWithDpRank,
+    ) -> bool {
+        let Some(reason) = self.sticky_worker_ineligibility_for_phase(request, phase, worker)
+        else {
+            return false;
+        };
+
+        let Some(session_id) = sticky_session_id_for_phase(request, phase) else {
+            return false;
+        };
+        tracing::warn!(
+            request_id = %context_id,
+            %session_id,
+            worker_id = worker.worker_id,
+            dp_rank = worker.dp_rank,
+            reason = %reason,
+            "Sticky worker is no longer eligible; removing session affinity"
+        );
+        let _ = self.sticky_sessions.unbind(session_id);
+        true
+    }
+
+    pub(crate) async fn validate_sticky_worker_for_phase(
+        &self,
+        context_id: &str,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+        worker: WorkerWithDpRank,
+    ) -> Result<WorkerWithDpRank, Error> {
+        let selection = self
+            .select_worker(context_id, request, phase, true, Some(worker), false)
+            .await?;
+        Ok(WorkerWithDpRank::new(
+            selection.instance_id,
+            selection.dp_rank,
+        ))
     }
 }
 
@@ -569,31 +700,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
-        mut request: SingleIn<PreprocessedRequest>,
+        request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-
-        // Resolve session affinity: if the request has a session_id, inject the
-        // pinned worker_id into backend_instance_id before worker selection.
-        // Skip entirely for non-session requests to keep them off the sticky path.
-        if request
-            .routing
-            .as_ref()
-            .and_then(|r| r.session_control.as_ref())
-            .is_some()
-            && request
-                .routing
-                .as_ref()
-                .and_then(|r| r.backend_instance_id)
-                .is_none()
-            && let Some(worker_id) = self.sticky_sessions.resolve(&request)
-        {
-            request.routing_mut().backend_instance_id = Some(worker_id);
-        }
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
@@ -604,48 +717,102 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
 
+        let should_record = !is_query_only && self.chooser.indexer().records_routing_decisions();
         let block_size = self.chooser.block_size() as usize;
-        let selection = self
-            .select_worker(&context_id, &request, phase, is_query_only)
+        let sticky_worker = match self.sticky_worker_for_phase(&request, phase) {
+            Some(worker)
+                if self.unbind_ineligible_sticky_worker_for_phase(
+                    &context_id,
+                    &request,
+                    phase,
+                    worker,
+                ) =>
+            {
+                None
+            }
+            worker => worker,
+        };
+        let selection = match self
+            .select_worker(
+                &context_id,
+                &request,
+                phase,
+                is_query_only,
+                sticky_worker,
+                should_record,
+            )
             .instrument(tracing::info_span!("kv_router.select_worker"))
-            .await?;
+            .await
+        {
+            Ok(selection) => {
+                if sticky_worker.is_some() && !is_query_only {
+                    self.refresh_sticky_worker_for_phase(&request, phase);
+                }
+                selection
+            }
+            Err(error) if sticky_worker.is_some() => {
+                if let Some(worker) = sticky_worker {
+                    let unbound = self.unbind_ineligible_sticky_worker_for_phase(
+                        &context_id,
+                        &request,
+                        phase,
+                        worker,
+                    );
+                    tracing::warn!(
+                        request_id = %context_id,
+                        worker_id = worker.worker_id,
+                        dp_rank = worker.dp_rank,
+                        error = %error,
+                        unbound_due_to_ineligibility = unbound,
+                        "Sticky worker routing failed; falling back to normal routing"
+                    );
+                }
+                self.select_worker(
+                    &context_id,
+                    &request,
+                    phase,
+                    is_query_only,
+                    None,
+                    should_record,
+                )
+                .instrument(tracing::info_span!("kv_router.select_worker_fallback"))
+                .await?
+            }
+            Err(error) => return Err(error),
+        };
         let WorkerSelection {
             instance_id,
             dp_rank,
             overlap_amount,
             effective_overlap_blocks,
             cached_tokens,
+            routing_hashes,
             scheduler_tracked,
         } = selection;
 
-        // Record the routing decision into the indexer when:
-        //   - approximate mode (use_kv_events=false): primary indexer is the
-        //     only cache-state signal, so record there, or
-        //   - predict-on-route: Indexer dispatches the write to a side
-        //     approximate indexer whose entries expire after a short TTL.
-        // In event-only mode with no predicted TTL we
-        // skip recording — the engine's KV events are the source of truth.
-        let cfg = self.chooser.kv_router_config();
-        let should_record =
-            !is_query_only && (!cfg.use_kv_events || cfg.predict_on_route_enabled());
         if should_record {
-            let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
-            let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
             let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-            let mut tokens_with_hashes =
-                TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
-                    .with_is_eagle(self.chooser.is_eagle());
-            if let Some(infos) = block_mm_infos {
-                tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
-            }
-            if let Some(lora_name) = lora_name {
-                tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
-            }
-            if let Err(e) = self
-                .chooser
-                .record_routing_decision(tokens_with_hashes, worker)
-                .await
-            {
+            let record_result = if let Some(hashes) = routing_hashes {
+                self.chooser
+                    .record_routing_decision_hashes(hashes, worker)
+                    .await
+            } else {
+                let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+                let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
+                let mut tokens_with_hashes =
+                    TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
+                        .with_is_eagle(self.chooser.is_eagle());
+                if let Some(infos) = block_mm_infos {
+                    tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
+                }
+                if let Some(lora_name) = lora_name {
+                    tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+                }
+                self.chooser
+                    .record_routing_decision(tokens_with_hashes, worker)
+                    .await
+            };
+            if let Err(e) = record_result {
                 tracing::warn!(
                     request_id = %context_id,
                     worker_id = instance_id,
@@ -714,7 +881,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         // Session lifecycle RPCs via agent controller.
         // Fails fast if session_control.open is requested but the client can't be created.
-        let deferred_close = self
+        let route_outcome = self
             .agent_controller
             .on_routed(
                 &request,
@@ -723,6 +890,27 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 Some(&*self.sticky_sessions),
             )
             .await?;
+        if let Some(kind) = affinity_kind_for_lifecycle(route_outcome.lifecycle)
+            && let Some(sc) = request
+                .routing
+                .as_ref()
+                .and_then(|r| r.session_control.as_ref())
+        {
+            let worker = WorkerWithDpRank::new(instance_id, dp_rank);
+            let ttl = Duration::from_secs(sc.timeout);
+            match kind {
+                AffinityKind::RouterOnly => {
+                    self.sticky_sessions
+                        .bind_router_only(&sc.session_id, worker, ttl);
+                }
+                AffinityKind::EngineBacked => {
+                    // Bind/rebind only after the worker accepted open_session.
+                    self.sticky_sessions
+                        .bind_engine_session(&sc.session_id, worker, ttl);
+                }
+            }
+        }
+        let deferred_close = route_outcome.deferred_close;
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
@@ -847,6 +1035,51 @@ fn pinned_worker_hint(
     }
 }
 
+fn sticky_allowed_for_phase(phase: RequestPhase, routing: Option<&RoutingHints>) -> bool {
+    let Some(routing) = routing else {
+        return false;
+    };
+    if routing.session_control.is_none() {
+        return false;
+    }
+
+    match phase {
+        RequestPhase::Prefill => {
+            routing.prefill_worker_id.is_none()
+                && routing.prefill_dp_rank.is_none()
+                && routing.backend_instance_id.is_none()
+        }
+        RequestPhase::Decode => {
+            routing.decode_worker_id.is_none()
+                && routing.dp_rank.is_none()
+                && routing.backend_instance_id.is_none()
+        }
+        RequestPhase::Aggregated => {
+            routing.backend_instance_id.is_none() && routing.dp_rank.is_none()
+        }
+    }
+}
+
+fn affinity_kind_for_lifecycle(lifecycle: SessionLifecycleOutcome) -> Option<AffinityKind> {
+    match lifecycle {
+        SessionLifecycleOutcome::OpenSucceeded => Some(AffinityKind::EngineBacked),
+        SessionLifecycleOutcome::BindRequested => Some(AffinityKind::RouterOnly),
+        _ => None,
+    }
+}
+
+fn sticky_session_id_for_phase(request: &PreprocessedRequest, phase: RequestPhase) -> Option<&str> {
+    let routing = request.routing.as_ref()?;
+    if !sticky_allowed_for_phase(phase, Some(routing)) {
+        return None;
+    }
+
+    routing
+        .session_control
+        .as_ref()
+        .map(|sc| sc.session_id.as_str())
+}
+
 /// A direct routing wrapper for `RouterMode::Direct`.
 ///
 /// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
@@ -894,8 +1127,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
 #[cfg(test)]
 mod tests {
-    use super::pinned_worker_hint;
+    use super::{affinity_kind_for_lifecycle, pinned_worker_hint, sticky_allowed_for_phase};
+    use crate::kv_router::agent_controller::SessionLifecycleOutcome;
+    use crate::kv_router::sticky_sessions::AffinityKind;
     use crate::protocols::common::{preprocessor::RoutingHints, timing::RequestPhase};
+    use crate::protocols::openai::nvext::SessionControl;
+
+    fn session_control() -> SessionControl {
+        SessionControl {
+            session_id: "sess-1".to_string(),
+            action: None,
+            timeout: 300,
+        }
+    }
 
     #[test]
     fn pinned_worker_hint_prefill_uses_prefill_worker_before_backend() {
@@ -934,5 +1178,111 @@ mod tests {
 
         let hint = pinned_worker_hint(RequestPhase::Aggregated, Some(&routing));
         assert_eq!(hint, Some((9, Some(7))));
+    }
+
+    #[test]
+    fn sticky_is_noop_without_session_control() {
+        let routing = RoutingHints::default();
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Aggregated,
+            Some(&routing)
+        ));
+    }
+
+    #[test]
+    fn sticky_allowed_when_only_session_control_is_present() {
+        let routing = RoutingHints {
+            session_control: Some(session_control()),
+            ..Default::default()
+        };
+        assert!(sticky_allowed_for_phase(
+            RequestPhase::Aggregated,
+            Some(&routing)
+        ));
+        assert!(sticky_allowed_for_phase(
+            RequestPhase::Prefill,
+            Some(&routing)
+        ));
+        assert!(sticky_allowed_for_phase(
+            RequestPhase::Decode,
+            Some(&routing)
+        ));
+    }
+
+    #[test]
+    fn sticky_skips_phase_specific_explicit_pins() {
+        let prefill = RoutingHints {
+            session_control: Some(session_control()),
+            prefill_worker_id: Some(1),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Prefill,
+            Some(&prefill)
+        ));
+
+        let prefill_rank = RoutingHints {
+            session_control: Some(session_control()),
+            prefill_dp_rank: Some(2),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Prefill,
+            Some(&prefill_rank)
+        ));
+
+        let decode = RoutingHints {
+            session_control: Some(session_control()),
+            decode_worker_id: Some(3),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Decode,
+            Some(&decode)
+        ));
+
+        let decode_rank = RoutingHints {
+            session_control: Some(session_control()),
+            dp_rank: Some(4),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Decode,
+            Some(&decode_rank)
+        ));
+
+        let aggregated = RoutingHints {
+            session_control: Some(session_control()),
+            backend_instance_id: Some(5),
+            ..Default::default()
+        };
+        assert!(!sticky_allowed_for_phase(
+            RequestPhase::Aggregated,
+            Some(&aggregated)
+        ));
+    }
+
+    #[test]
+    fn open_lifecycle_binds_engine_backed_affinity() {
+        assert_eq!(
+            affinity_kind_for_lifecycle(SessionLifecycleOutcome::OpenSucceeded),
+            Some(AffinityKind::EngineBacked)
+        );
+    }
+
+    #[test]
+    fn bind_lifecycle_binds_router_only_affinity() {
+        assert_eq!(
+            affinity_kind_for_lifecycle(SessionLifecycleOutcome::BindRequested),
+            Some(AffinityKind::RouterOnly)
+        );
+    }
+
+    #[test]
+    fn no_action_lifecycle_does_not_create_affinity() {
+        assert_eq!(
+            affinity_kind_for_lifecycle(SessionLifecycleOutcome::NoAction),
+            None
+        );
     }
 }

@@ -4,7 +4,7 @@ Reference taxonomy for unit testing **reasoning** parsers under
 `src/reasoning/` (Granite, GPT-OSS, Gemma, Qwen3 think-tag, Minimax,
 DeepSeek V3 think-tag, etc.). Sibling files cover adjacent stages:
 
-- **Tool-call parsers** (`src/tool_calling/`): see `PARSER_CASES.md`.
+- **Tool-call parsers** (`src/tool_calling/`): see `TOOLCALLING_CASES.md`.
 - **Frontend gating**: see
   `components/src/dynamo/frontend/tests/FRONTEND_CASES.md`.
 - **Pipeline boundary**: see `PIPELINE_CASES.md`.
@@ -15,7 +15,7 @@ format axes:
 - **Stage** — `REASONING.*` (this file).
 - **Mode** — `batch` (entire model output as one string) or `stream`
   (incremental `delta_text`).
-- **Format** — `PARSER.fmt|xml|harmony.*` tags from `PARSER_CASES.md`
+- **Format** — `TOOLCALLING.fmt|xml|harmony.*` tags from `TOOLCALLING_CASES.md`
   also attach to reasoning tests when the reasoning parser consumes
   the corresponding format. The format tag describes the *grammar*,
   not the parser stage.
@@ -166,18 +166,18 @@ fixture `ref` field.
 
 ### Format-conditional tags (cross-stage)
 
-The `PARSER.fmt|xml|harmony.*` tags from `PARSER_CASES.md` also apply
+The `TOOLCALLING.fmt|xml|harmony.*` tags from `TOOLCALLING_CASES.md` also apply
 to reasoning parsers when they consume the corresponding format. For
 example, the GPT-OSS reasoning parser exercises Harmony's
 `<|channel|>analysis<|message|>...<|end|>` envelope, so its tests
-carry both `REASONING.batch.2.a` and `PARSER.harmony.1`.
+carry both `REASONING.batch.2.a` and `TOOLCALLING.harmony.1`.
 
 ### Categories that are N/A for reasoning parsers
 
-- `PARSER.batch.2` — "multiple tool calls" maps to `REASONING.batch.6.*`
+- `TOOLCALLING.batch.2` — "multiple tool calls" maps to `REASONING.batch.6.*`
   (multiple reasoning spans), not directly. The tool-call-shaped tag
   doesn't apply.
-- `PARSER.batch.8` — interleaved tool-call markers and normal text;
+- `TOOLCALLING.batch.8` — interleaved tool-call markers and normal text;
   reasoning's analog is `REASONING.batch.2.{b,c,d}` (reasoning +
   normal text) or `REASONING.batch.3.*` (reasoning + downstream tool
   call).
@@ -288,7 +288,7 @@ the right boundary and preserve the downstream parser's input.
 
 ## Customer-incident regression tests
 
-Same convention as `PARSER_CASES.md`: include the originating
+Same convention as `TOOLCALLING_CASES.md`: include the originating
 reference inline in the `#[test]` comment.
 
 ```rust
@@ -319,5 +319,5 @@ parser family is considered complete, add:
 6. `REASONING.stream.{1, 2, 3, 4}` — streaming. Add `stream.4.*`
    before declaring complete coverage for any parser with an explicit
    downstream tool-call boundary.
-7. Format tags where applicable: `PARSER.harmony.1` for parsers
+7. Format tags where applicable: `TOOLCALLING.harmony.1` for parsers
    consuming Harmony-format input, etc.

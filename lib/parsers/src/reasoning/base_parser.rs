@@ -105,7 +105,20 @@ impl ReasoningParser for BasicReasoningParser {
 
     fn detect_and_parse_reasoning(&mut self, text: &str, _token_ids: &[u32]) -> ParserResult {
         let has_think_tag = text.contains(&self.think_start_token);
-        let in_reasoning = self._in_reasoning || has_think_tag;
+        // REASONING.batch.4: dangling end marker without an opener. Treat the
+        // prefix as reasoning.
+        // Models in this family normally emit `<think>...</think>final_answer`;
+        // when the opener is absent but a `</think>` is present, the natural
+        // reading is that the opener was implicit (chat template or tokenizer
+        // consumed it). Without this, the `</think>` markup leaks into
+        // normal_text. Matches vLLM's `partition()`-based behavior for the
+        // same input.
+        let supports_dangling_end_recovery =
+            self.think_start_token == "<think>" && self.think_end_token == "</think>";
+        let has_dangling_end = supports_dangling_end_recovery
+            && !has_think_tag
+            && text.contains(&self.think_end_token);
+        let in_reasoning = self._in_reasoning || has_think_tag || has_dangling_end;
         if !in_reasoning {
             return ParserResult {
                 normal_text: text.to_string(),
@@ -134,7 +147,10 @@ impl ReasoningParser for BasicReasoningParser {
         let mut reasoning_parts = Vec::new();
         let mut normal_parts = Vec::new();
         let mut cursor = 0;
-        let mut currently_reasoning = self._in_reasoning;
+        // Dangling-end case enters the loop already in reasoning so the prefix
+        // before `</think>` is captured (the loop's normal-text branch would
+        // otherwise treat it as plain text and re-leak the closer).
+        let mut currently_reasoning = self._in_reasoning || has_dangling_end;
 
         while cursor < text.len() {
             if currently_reasoning {
@@ -336,6 +352,25 @@ impl ReasoningParser for BasicReasoningParser {
         ParserResult {
             normal_text: accumulated_normal,
             reasoning_text: accumulated_reasoning,
+        }
+    }
+
+    fn finish_reasoning_stream(&mut self) -> ParserResult {
+        if self._buffer.is_empty() {
+            return ParserResult::default();
+        }
+
+        let buffered = std::mem::take(&mut self._buffer);
+        if self._in_reasoning {
+            ParserResult {
+                normal_text: String::new(),
+                reasoning_text: buffered,
+            }
+        } else {
+            ParserResult {
+                normal_text: buffered,
+                reasoning_text: String::new(),
+            }
         }
     }
 }
@@ -541,7 +576,16 @@ mod tests {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
         let result = parser.detect_and_parse_reasoning("normal text</think> more normal", &[]);
-        assert_eq!(result.normal_text, "normal text</think> more normal");
+        assert_eq!(result.normal_text, "more normal");
+        assert_eq!(result.reasoning_text, "normal text");
+    }
+
+    #[test] // REASONING.batch.4 — Kimi Unicode delimiters keep stray closer as normal text.
+    fn test_kimi_unicode_stray_closing_tag_passes_through() {
+        let mut parser =
+            BasicReasoningParser::new("◁think▷".to_string(), "◁/think▷".to_string(), false, true);
+        let result = parser.detect_and_parse_reasoning("normal◁/think▷answer", &[]);
+        assert_eq!(result.normal_text, "normal◁/think▷answer");
         assert_eq!(result.reasoning_text, "");
     }
 
@@ -566,7 +610,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
     }
 
-    #[test] // REASONING.batch.2.e, PARSER.fmt.2
+    #[test] // REASONING.batch.2.e, TOOLCALLING.fmt.2
     fn test_whitespace_only_reasoning_block() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
