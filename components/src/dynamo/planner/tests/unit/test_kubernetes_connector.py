@@ -236,9 +236,7 @@ def test_get_service_name_from_v1beta_component_type(kubernetes_connector):
     assert service.name == "VllmPrefillWorker"
     assert service.number_replicas() == 2
 
-    service = get_component_from_type_or_name(
-        deployment, SubComponentType.DECODE
-    )
+    service = get_component_from_type_or_name(deployment, SubComponentType.DECODE)
     assert service.name == "VllmDecodeWorker"
     assert service.number_replicas() == 3
 
@@ -246,9 +244,7 @@ def test_get_service_name_from_v1beta_component_type(kubernetes_connector):
 def test_get_service_name_from_sub_component_type_not_found(kubernetes_connector):
     deployment = _deployment(_component("test-component-decode", "decode", replicas=3))
     with pytest.raises(SubComponentNotFoundError) as exc_info:
-        get_component_from_type_or_name(
-            deployment, SubComponentType.PREFILL
-        )
+        get_component_from_type_or_name(deployment, SubComponentType.PREFILL)
 
     with pytest.raises(SubComponentNotFoundError) as exc_info:
         get_component_from_type_or_name(
@@ -1143,7 +1139,9 @@ def test_resolve_dgd_service_trtllm_decode_uses_backend_name(
     kubernetes_connector, mock_kube_api
 ):
     """TRT-LLM decode: MDC carries "backend" (matches vLLM/SGLang); filter must match."""
-    mock_deployment = _deployment(_component("TRTLLMDecodeWorker", "decode", replicas=1))
+    mock_deployment = _deployment(
+        _component("TRTLLMDecodeWorker", "decode", replicas=1)
+    )
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
     _, expected_component = kubernetes_connector._resolve_dgd_service(

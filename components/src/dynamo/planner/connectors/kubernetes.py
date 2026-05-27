@@ -40,8 +40,8 @@ from dynamo.planner.errors import (
     UserProvidedModelNameMismatchError,
 )
 from dynamo.planner.monitoring.dgd_services import (
-    get_component_type,
     get_component_from_type_or_name,
+    get_component_type,
     get_components_by_name,
 )
 from dynamo.planner.monitoring.worker_info import (
@@ -112,9 +112,7 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
-        service = get_component_from_type_or_name(
-            deployment, sub_component_type
-        )
+        service = get_component_from_type_or_name(deployment, sub_component_type)
         self.kube_api.update_graph_replicas(
             self.graph_deployment_name,
             service.name,
@@ -132,9 +130,7 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
-        service = get_component_from_type_or_name(
-            deployment, sub_component_type
-        )
+        service = get_component_from_type_or_name(deployment, sub_component_type)
         if service.number_replicas() > 0:
             self.kube_api.update_graph_replicas(
                 self.graph_deployment_name,
@@ -330,9 +326,7 @@ class KubernetesConnector(PlannerConnector):
 
         for component_name, component_spec in components.items():
             if get_component_type(component_spec) == "frontend":
-                service_name = (
-                    f"{self.graph_deployment_name}-{component_name.lower()}"
-                )
+                service_name = f"{self.graph_deployment_name}-{component_name.lower()}"
                 url = f"http://{service_name}:{port}/metrics"
                 logger.info(f"Auto-discovered frontend metrics URL: {url}")
                 return url
@@ -440,9 +434,7 @@ class KubernetesConnector(PlannerConnector):
         expected_component = defaults.component_name or ""
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-            service = get_component_from_type_or_name(
-                deployment, sub_component_type
-            )
+            service = get_component_from_type_or_name(deployment, sub_component_type)
             user_component = service.get_component_name_from_endpoint_arg()
             if user_component:
                 expected_component = user_component
