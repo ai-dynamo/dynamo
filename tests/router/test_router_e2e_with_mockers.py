@@ -25,6 +25,7 @@ from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_background_prefill_sticky_routing,
     _test_disagg_direct_mode,
+    _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_basic,
@@ -44,10 +45,9 @@ from tests.router.helper import (
     get_runtime,
     poll_for_worker_instances,
     topology_env,
-    wait_for_frontend_ready,
     wait_for_indexer_workers_active,
 )
-from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
+from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -1752,55 +1752,16 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 logger.info("Decode zone-a worker ids: %s", decode_ids)
 
                 frontend_port = get_unique_ports(request, num_ports=1)[0]
-                with KVRouterProcess(
-                    request,
-                    BLOCK_SIZE,
-                    frontend_port,
-                    namespace=shared_namespace,
-                    enforce_disagg=True,
+                _test_disagg_topology_required_prefill_pin_match_and_mismatch(
+                    decode_workers=decode_workers,
+                    block_size=BLOCK_SIZE,
+                    request=request,
+                    frontend_port=frontend_port,
+                    test_payload=TEST_PAYLOAD,
+                    prefill_zone_a_id=prefill_zone_a_id,
+                    prefill_zone_b_id=prefill_zone_b_id,
                     request_plane="tcp",
-                    min_initial_workers=decode_workers.num_workers,
-                ):
-                    frontend_url = f"http://localhost:{frontend_port}"
-                    chat_url = f"{frontend_url}/v1/chat/completions"
-
-                    async def run_requests() -> None:
-                        await wait_for_frontend_ready(
-                            frontend_url, expected_num_workers=4
-                        )
-                        zone_a_payload = {
-                            **TEST_PAYLOAD,
-                            "nvext": {
-                                "prefill_worker_id": prefill_zone_a_id,
-                            },
-                        }
-                        async with aiohttp.ClientSession() as session:
-                            async with session.post(
-                                chat_url, json=zone_a_payload
-                            ) as response:
-                                response_body = await response.text()
-                                assert response.status == 200, (
-                                    "Expected required KV-transfer topology match to succeed, "
-                                    f"got status={response.status} body={response_body}"
-                                )
-
-                        zone_b_payload = {
-                            **TEST_PAYLOAD,
-                            "nvext": {
-                                "prefill_worker_id": prefill_zone_b_id,
-                            },
-                        }
-                        async with aiohttp.ClientSession() as session:
-                            async with session.post(
-                                chat_url, json=zone_b_payload
-                            ) as response:
-                                response_body = await response.text()
-                                assert response.status == 500, (
-                                    "Expected required KV-transfer topology mismatch to fail, "
-                                    f"got status={response.status} body={response_body}"
-                                )
-
-                    asyncio.run(run_requests())
+                )
 
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
 @pytest.mark.parametrize(
