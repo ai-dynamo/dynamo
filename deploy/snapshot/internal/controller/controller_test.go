@@ -590,6 +590,15 @@ func TestReconcileRestorePod(t *testing.T) {
 			want:      false,
 		},
 		{
+			name:      "unknown pod does not restore",
+			nodeName:  testNodeName,
+			phase:     corev1.PodUnknown,
+			ready:     false,
+			hash:      "abc123",
+			createDir: true,
+			want:      false,
+		},
+		{
 			name:      "ready placeholder still restores",
 			nodeName:  testNodeName,
 			phase:     corev1.PodRunning,

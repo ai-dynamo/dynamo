@@ -375,9 +375,11 @@ func restoreContainerIDFromStatus(pod *corev1.Pod, containerName string) string 
 }
 
 func isRestorePodEligible(pod *corev1.Pod) bool {
-	return pod.DeletionTimestamp == nil &&
-		pod.Status.Phase != corev1.PodSucceeded &&
-		pod.Status.Phase != corev1.PodFailed
+	if pod.DeletionTimestamp != nil {
+		return false
+	}
+	return pod.Status.Phase == corev1.PodPending ||
+		pod.Status.Phase == corev1.PodRunning
 }
 
 func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *corev1.Pod, podKey, containerName string) (*corev1.Pod, bool) {
@@ -397,7 +399,7 @@ func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *cor
 		return nil, false
 	}
 	if !isRestorePodEligible(livePod) {
-		w.log.V(1).Info("Skipping restore; pod became terminal or deleting while polling runtime",
+		w.log.V(1).Info("Skipping restore; pod became ineligible while polling runtime",
 			"pod", podKey,
 			"container", containerName,
 			"phase", livePod.Status.Phase,
