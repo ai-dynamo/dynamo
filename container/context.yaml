@@ -96,6 +96,8 @@ sglang:
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
+  enable_modelexpress: "false"
+  modelexpress_ref: "76fc5d7f06c37121ee8789a29fac6f9b08c4743a"  # v0.3.0
 
 trtllm:
   cuda13.1:

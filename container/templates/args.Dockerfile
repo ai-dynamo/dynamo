@@ -117,6 +117,11 @@ ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
 {%- endif -%}
 
+{% if framework == "sglang" -%}
+# ModelExpress Python client for model loading (optional)
+ARG MODELEXPRESS_REF={{ context.sglang.modelexpress_ref }}
+{%- endif -%}
+
 {% if framework == "sglang" and device == "xpu" -%}
 # SGLang XPU build: clone and build from source (no pre-built runtime image)
 ARG SGLANG_GIT_URL={{ context.sglang.xpu.sglang_git_url }}

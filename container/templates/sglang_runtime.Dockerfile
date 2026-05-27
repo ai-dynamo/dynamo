@@ -13,6 +13,8 @@ FROM framework AS runtime
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 {% endif %}
 
+ARG MODELEXPRESS_REF
+
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -121,6 +123,15 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
     fi
+
+{% if context.sglang.enable_modelexpress == "true" %}
+RUN --mount=type=bind,source=./container/deps/sglang/install_modelexpress.sh,target=/tmp/install_modelexpress.sh \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eux; \
+    export PIP_CACHE_DIR=/root/.cache/pip; \
+    export MODELEXPRESS_REF="${MODELEXPRESS_REF}"; \
+    bash /tmp/install_modelexpress.sh
+{% endif %}
 {% endif %}
 {% endif %}
 

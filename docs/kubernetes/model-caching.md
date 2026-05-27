@@ -147,7 +147,7 @@ spec:
 
 ## Option 2: ModelExpress (P2P Distribution)
 
-[ModelExpress](https://github.com/ai-dynamo/modelexpress) is a model weight distribution service that integrates with vLLM's weight loading pipeline. It can publish model weights from one worker and let later workers pull those tensors from GPU memory over NIXL/RDMA instead of repeating a full storage download.
+[ModelExpress](https://github.com/ai-dynamo/modelexpress) is a model weight distribution service that integrates with engine weight loading pipelines. It can publish model weights from one worker and let later workers pull those tensors from GPU memory over NIXL/RDMA instead of repeating a full storage download.
 
 ModelExpress can also use **ModelStreamer** as a loading strategy. ModelStreamer streams safetensors directly from object storage or a local filesystem path into GPU memory through the `runai-model-streamer` package. In that setup, the first worker can stream from storage and then publish ModelExpress metadata so later workers can use the P2P path.
 
@@ -156,7 +156,7 @@ Use this path when startup time or fleet-wide model rollout time matters more th
 ### How It Works
 
 1. A ModelExpress server runs in the cluster and stores metadata for available sources.
-2. vLLM workers use the ModelExpress loader from an MX-enabled runtime image with `--load-format modelexpress`.
+2. Engine workers use the ModelExpress loader from an MX-enabled runtime image. For vLLM, set `--load-format modelexpress`. For SGLang, use a runtime image whose SGLang version includes the native `backend=modelexpress` loader.
 3. If a compatible source is already serving the model, a new worker pulls model tensors from that source over NIXL/RDMA.
 4. If no source is available, the worker falls back to storage. With a shared filesystem (RWX PVC, NFS, hostPath), the worker reads directly from the server's cache. Without a shared filesystem, set `MODEL_EXPRESS_NO_SHARED_STORAGE=1` so the client streams files from the server over gRPC; see [Streaming Without Shared Storage](#streaming-without-shared-storage) below. When `MX_MODEL_URI` is set, ModelStreamer can stream safetensors from S3, GCS, Azure Blob Storage, or a local path.
 5. Workers that use a ModelExpress server set `MODEL_EXPRESS_URL` in the worker pod environment.
@@ -165,10 +165,11 @@ Use this path when startup time or fleet-wide model rollout time matters more th
 
 | Layer | What to configure | Notes |
 |-------|-------------------|-------|
-| Runtime image | Include the `modelexpress` Python package and, for ModelStreamer, `runai-model-streamer` plus the object-storage dependencies. | Dynamo or vLLM raises an import error if the worker uses a ModelExpress load format but the package is missing. |
+| Runtime image | Include the `modelexpress` Python package and, for ModelStreamer, `runai-model-streamer` plus the object-storage dependencies. | Dynamo or the engine raises an import error if the worker uses a ModelExpress loader but the package is missing. |
 | ModelExpress server | Deploy the server with Redis or Kubernetes CRD metadata backend. | See the [ModelExpress deployment guide](https://github.com/ai-dynamo/modelexpress/blob/main/docs/DEPLOYMENT.md). |
 | Dynamo platform | Optionally set `dynamo-operator.modelExpressURL`. | The operator injects `MODEL_EXPRESS_URL` into pods when a deployment should use one platform-level ModelExpress server. |
 | vLLM worker | Set `--load-format modelexpress`. | The Dynamo runtime image must include the MX Python client. Until an official MX-enabled runtime ships, use an explicitly built development image. |
+| SGLang worker | Use `remote_instance` with `backend=modelexpress`. | This requires an SGLang runtime version containing the native ModelExpress loader plus the MX Python client in the image. |
 | ModelStreamer | Set `MX_MODEL_URI` to the storage location. | Supported URI forms include `s3://...`, `gs://...`, `az://...`, an absolute local path, or a Hugging Face model ID resolved from the local cache. |
 
 ### Setup
