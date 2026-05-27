@@ -54,18 +54,11 @@ async def init_image_diffusion_worker(
 
     logging.info(f"Initializing image diffusion worker with config: {config}")
 
-    # Parse skip_components from comma-separated string to list
-    skip_components = (
-        [c.strip() for c in config.skip_components.split(",") if c.strip()]
-        if config.skip_components
-        else []
-    )
-
     if not config.endpoint:
         raise ValueError("endpoint must be configured for image diffusion worker")
 
     # Build DiffusionConfig from the main Config
-    diffusion_config = DiffusionConfig.from_config(config, skip_components)
+    diffusion_config = DiffusionConfig.from_config(config)
 
     # Get the endpoint from the runtime
     endpoint = runtime.endpoint(

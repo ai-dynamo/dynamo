@@ -74,13 +74,6 @@ class DiffusionEngine:
             f"Initializing DiffusionEngine: model_path={self.config.model_path}"
         )
 
-        if self.config.skip_components:
-            raise ValueError(
-                "--skip-components is not supported by TensorRT-LLM's public "
-                "VisualGen API. Dynamo avoids private PipelineLoader usage for "
-                "diffusion serving."
-            )
-
         # Import TensorRT-LLM VisualGen lazily because it is an optional backend.
         from tensorrt_llm.visual_gen import VisualGen
 
@@ -258,7 +251,7 @@ class DiffusionEngine:
             self._visual_gen.shutdown()
             self._visual_gen = None
         self._initialized = False
-        if self.device == "cuda":
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
         logger.info("DiffusionEngine cleanup complete")
 
@@ -266,12 +259,3 @@ class DiffusionEngine:
     def is_initialized(self) -> bool:
         """Check if the engine is initialized."""
         return self._initialized
-
-    @property
-    def device(self) -> str:
-        """Get the device where the pipeline runs.
-
-        Returns:
-            "cpu" if CPU offload is enabled, "cuda" otherwise.
-        """
-        return "cpu" if self.config.enable_async_cpu_offload else "cuda"

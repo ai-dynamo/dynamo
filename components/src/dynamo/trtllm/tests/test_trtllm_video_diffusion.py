@@ -119,11 +119,11 @@ class TestDiffusionConfig:
         assert config.quant_algo is None
         assert config.enable_cuda_graph is False
         assert config.skip_warmup is False
-        assert config.fuse_qkv is True
 
         # Parallelism defaults
-        assert config.dit_dp_size == 1
-        assert config.dit_tp_size == 1
+        assert config.dit_cfg_size == 1
+        assert config.dit_ulysses_size == 1
+        assert config.dit_ring_size == 1
 
     def test_custom_values(self):
         """Test that custom values override defaults."""
@@ -132,14 +132,14 @@ class TestDiffusionConfig:
             default_width=1280,
             default_num_frames=120,
             enable_teacache=True,
-            dit_tp_size=2,
+            dit_cfg_size=2,
         )
 
         assert config.default_height == 720
         assert config.default_width == 1280
         assert config.default_num_frames == 120
         assert config.enable_teacache is True
-        assert config.dit_tp_size == 2
+        assert config.dit_cfg_size == 2
 
     def test_custom_media_storage(self):
         """Test that media storage fields can be overridden."""
@@ -163,7 +163,7 @@ class TestDiffusionConfig:
         assert "DiffusionConfig(" in str_repr
         assert "model_path=test/model" in str_repr
         assert "default_height=480" in str_repr
-        assert "dit_tp_size=" in str_repr
+        assert "dit_cfg_size=" in str_repr
 
 
 # =============================================================================
