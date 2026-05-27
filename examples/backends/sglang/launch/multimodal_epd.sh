@@ -16,6 +16,8 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CHAT_TEMPLATE="qwen2-vl"
 PROVIDED_CHAT_TEMPLATE=""
+CACHE_CAPACITY_GB=""
+TRANSFER_BACKEND="${DYN_SGLANG_DISAGGREGATION_TRANSFER_BACKEND:-nixl}"
 
 # --single-gpu: Packs both workers (encode, PD) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
@@ -41,6 +43,14 @@ while [[ $# -gt 0 ]]; do
             SINGLE_GPU=true
             shift
             ;;
+        --multimodal-embedding-cache-capacity-gb)
+            CACHE_CAPACITY_GB=$2
+            shift 2
+            ;;
+        --disaggregation-transfer-backend)
+            TRANSFER_BACKEND=$2
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -48,6 +58,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --served-model-name <served_model_name> Specify the served model name to use (default: empty)"
             echo "  --chat-template <template> Specify the SGLang chat template to use (default: $CHAT_TEMPLATE)"
             echo "  --single-gpu         Pack both workers on 1 GPU (for small models, e.g. 2B)"
+            echo "  --multimodal-embedding-cache-capacity-gb <gb>"
+            echo "                       Enable encode-worker CPU embedding cache with this capacity"
+            echo "  --disaggregation-transfer-backend <backend>"
+            echo "                       SGLang disaggregation transfer backend (default: $TRANSFER_BACKEND)"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -96,6 +110,10 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 ENCODE_EXTRA_ARGS="$GPU_MEM_ARGS"
 WORKER_EXTRA_ARGS="$GPU_MEM_ARGS"
+
+if [[ -n "$CACHE_CAPACITY_GB" ]]; then
+    ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS --multimodal-embedding-cache-capacity-gb $CACHE_CAPACITY_GB"
+fi
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Both workers share one GPU; cap activations tightly.
@@ -149,7 +167,7 @@ env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --disable-radix-cache \
-  --disaggregation-transfer-backend nixl \
+  --disaggregation-transfer-backend "$TRANSFER_BACKEND" \
   $WORKER_EXTRA_ARGS &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
