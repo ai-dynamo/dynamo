@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# This is a Jinja2 template — render with `deploy/kvbm-cd/render.py --image <ref>`.
+# More template variables (model, replicas, nodepool, …) will be added as the
+# deployment matures. Today, only `image` is parameterized.
+#
 # KVBM Conditional Disaggregation on GKE GB200 (GCP).
 #
 # Four services in one DGD + a ConfigMap holding the base KvbmConfig + an
@@ -36,7 +40,8 @@
 #   * vLLM+KVBM arm64 image with NIXL/UCX backend (sibling of Karen's
 #     TRT-LLM image; substitute below).
 #   * Secrets: nvcr-imagepullsecret, hf-token-secret.
-#   * PVC: shared-model-cache pre-warmed with Qwen3-235B-A22B weights.
+#   * PVC: shared-model-cache pre-warmed with the model weights at HF_HOME=/models
+#     (see download Job using the same PVC).
 
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -60,11 +65,11 @@ spec:
       replicas: 1
       resources:
         requests:
-          cpu: "2"
-          memory: "4Gi"
-        limits:
           cpu: "4"
-          memory: "8Gi"
+          memory: "24Gi"
+        limits:
+          cpu: "6"
+          memory: "32Gi"
       extraPodSpec:
         nodeSelector:
           kubernetes.io/arch: arm64
@@ -93,8 +98,7 @@ spec:
           - name: kvbm-config
             configMap: { name: kvbm-cd-config }
         mainContainer:
-          # TODO: replace with the published vllm+kvbm arm64 image once built.
-          image: nvcr.io/nvidian/dynamo-dev/REPLACE-ME:vllm-kvbm-arm64
+          image: {{ image }}
           name: ""
           # Binary name is `kvbm_hub` (underscore) — Cargo's auto-discovered
           # bin from `lib/kvbm-hub/src/bin/kvbm_hub.rs`. The package is
@@ -110,9 +114,9 @@ spec:
             - --prefill-worker-concurrency
             - "4"
             - --block-size
-            - "32"
+            - "{{ block_size }}"
             - --max-seq-len
-            - "32768"
+            - "{{ max_model_len }}"
             - --layout
             - operational
             # Pin the indexer ZMQ ingress to a known port (default is OS-assigned)
@@ -231,8 +235,7 @@ spec:
           - name: kvbm-config
             configMap: { name: kvbm-cd-config }
         mainContainer:
-          # TODO: replace with the published vllm+kvbm arm64 image once built.
-          image: nvcr.io/nvidian/dynamo-dev/REPLACE-ME:vllm-kvbm-arm64
+          image: {{ image }}
           name: ""
           workingDir: /workspace/
           securityContext:
@@ -245,7 +248,7 @@ spec:
           # would need to target vLLM's `/health` on whatever port vLLM is
           # configured to use; left off until that wiring is finalized.
           volumeMounts:
-            - { name: model-cache,  mountPath: /model-cache }
+            - { name: model-cache,  mountPath: /models }
             - { name: dshm,         mountPath: /dev/shm }
             - { name: triton-cache, mountPath: /tmp/.triton-cache }
             # Layer 3 of the figment chain (system TOML, hardcoded path).
@@ -266,7 +269,7 @@ spec:
             - { name: NCCL_SOCKET_IFNAME,        value: "eth0" }
             - { name: GLOO_SOCKET_IFNAME,        value: "eth0" }
             # Pull weights from the warmed PVC.
-            - { name: HF_HOME,           value: /model-cache }
+            - { name: HF_HOME,           value: /models }
             - { name: HF_HUB_OFFLINE,    value: "1" }
             - { name: HF_MODULES_CACHE,  value: /tmp/hf_modules }
             - { name: TRITON_CACHE_DIR,  value: /tmp/.triton-cache }
@@ -278,9 +281,9 @@ spec:
             - -m
             - kvbm.vllm.prefill
             - --model
-            - Qwen/Qwen3-235B-A22B
+            - {{ model }}
             - --served-model-name
-            - Qwen/Qwen3-235B-A22B
+            - {{ model }}
             - --tensor-parallel-size
             - "4"
             - --enable-expert-parallel
@@ -288,9 +291,9 @@ spec:
             - --gpu-memory-utilization
             - "0.85"
             - --max-model-len
-            - "32768"
+            - "{{ max_model_len }}"
             - --block-size
-            - "32"
+            - "{{ block_size }}"
             # The kvbm.vllm.prefill auto-wire (kvbm.hub.detect.try_wrap_engine)
             # reads `leader.hub.url` and `leader.disagg.role` from
             # vllm_config.kv_transfer_config.kv_connector_extra_config — NOT
@@ -316,7 +319,7 @@ spec:
         imagePullSecrets:
           - name: nvcr-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/REPLACE-ME:vllm-kvbm-arm64
+          image: {{ image }}
           name: ""
           command: [python3]
           args:
@@ -411,7 +414,7 @@ spec:
           - name: kvbm-config
             configMap: { name: kvbm-cd-config }
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/REPLACE-ME:vllm-kvbm-arm64
+          image: {{ image }}
           name: ""
           workingDir: /workspace/
           securityContext:
@@ -424,7 +427,7 @@ spec:
             periodSeconds: 60
             timeoutSeconds: 20
           volumeMounts:
-            - { name: model-cache,  mountPath: /model-cache }
+            - { name: model-cache,  mountPath: /models }
             - { name: dshm,         mountPath: /dev/shm }
             - { name: triton-cache, mountPath: /tmp/.triton-cache }
             - { name: kvbm-config, mountPath: /opt/dynamo/etc/kvbm.toml, subPath: base.toml,        readOnly: true }
@@ -439,7 +442,7 @@ spec:
             - { name: NCCL_GRAPH_MIXING_SUPPORT, value: "0" }
             - { name: NCCL_SOCKET_IFNAME,        value: "eth0" }
             - { name: GLOO_SOCKET_IFNAME,        value: "eth0" }
-            - { name: HF_HOME,           value: /model-cache }
+            - { name: HF_HOME,           value: /models }
             - { name: HF_HUB_OFFLINE,    value: "1" }
             - { name: HF_MODULES_CACHE,  value: /tmp/hf_modules }
             - { name: TRITON_CACHE_DIR,  value: /tmp/.triton-cache }
@@ -449,9 +452,9 @@ spec:
             - -m
             - dynamo.vllm
             - --model
-            - Qwen/Qwen3-235B-A22B
+            - {{ model }}
             - --served-model-name
-            - Qwen/Qwen3-235B-A22B
+            - {{ model }}
             - --tensor-parallel-size
             - "4"
             - --enable-expert-parallel
@@ -459,9 +462,9 @@ spec:
             - --gpu-memory-utilization
             - "0.85"
             - --max-model-len
-            - "32768"
+            - "{{ max_model_len }}"
             - --block-size
-            - "32"
+            - "{{ block_size }}"
             - --enable-prefix-caching
             - --publish-events-and-metrics
             - --request-plane

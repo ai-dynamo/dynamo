@@ -622,6 +622,29 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         fi; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo KVBM"
+
+# Build kvbm-hub server (kvbm_hub) + kvbmctl CLI as release binaries. These are
+# Cargo bins from the root workspace, not wheels — the maturin step above only
+# builds the kvbm Python extension. Both bins land at /opt/dynamo/bin/ for the
+# runtime stages to COPY. Default features include the kvbmctl bin gate.
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
+    fi && \
+    mkdir -p /opt/dynamo/bin && \
+    touch /opt/dynamo/bin/.placeholder && \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
+        cd /opt/dynamo && \
+        cargo build --release -p kvbm-hub --bin kvbm_hub --bin kvbmctl && \
+        install -m 0755 ${CARGO_TARGET_DIR}/release/kvbm_hub /opt/dynamo/bin/kvbm_hub && \
+        install -m 0755 ${CARGO_TARGET_DIR}/release/kvbmctl  /opt/dynamo/bin/kvbmctl; \
+    fi && \
+    /tmp/use-sccache.sh show-stats "KVBM Hub bins"
 {% endif %}
 
 # Consolidate all wheels from the runtime wheel builder stage
