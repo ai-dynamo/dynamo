@@ -45,6 +45,14 @@ def test_enable_nats_parameter_in_signature():
     assert param.default is None
 
 
+def test_event_plane_parameter_in_signature():
+    """DistributedRuntime.__init__ should accept explicit event-plane selection."""
+    sig = inspect.signature(DistributedRuntime)
+    assert "event_plane" in sig.parameters
+    param = sig.parameters["event_plane"]
+    assert param.default is None
+
+
 @pytest.mark.forked
 def test_enable_nats_emits_deprecation_warning(discovery_backend, request_plane):
     """Passing enable_nats should emit a DeprecationWarning but otherwise work.
@@ -93,6 +101,37 @@ def test_no_warning_without_enable_nats(discovery_backend, request_plane):
             assert len(deprecation_warnings) == 0
         finally:
             runtime.shutdown()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.forked
+def test_event_plane_zmq_ignores_ambient_nats(monkeypatch):
+    """Explicit ZMQ event plane should not connect to ambient NATS in file/TCP mode."""
+
+    async def _run():
+        monkeypatch.setenv("NATS_SERVER", "nats://127.0.0.1:9")
+        runtime = DistributedRuntime(
+            asyncio.get_running_loop(),
+            "file",
+            "tcp",
+            event_plane="zmq",
+        )
+        runtime.shutdown()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.forked
+def test_invalid_event_plane_errors():
+    async def _run():
+        with pytest.raises(Exception, match="Invalid event_plane value"):
+            DistributedRuntime(
+                asyncio.get_running_loop(),
+                "file",
+                "tcp",
+                event_plane="invalid",
+            )
 
     asyncio.run(_run())
 
