@@ -8,7 +8,7 @@
   .callout { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 22px; font-weight: 600; fill: #74b711; }
   .callout-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #8c8c8c; }
 </style>
-<text class="title" x="40" y="58">Startup Time</text>
+<text class="title" x="40" y="58">Dynamo Snapshot Startup Time</text>
 <text class="subtitle" x="40" y="88">gpt-oss-120b on 1xB200</text>
 <text class="label" x="40" y="166">Cold Start</text>
 <rect x="320" y="142" width="759.8" height="38" fill="#4a4a4a" fill-opacity="0.75"/>
