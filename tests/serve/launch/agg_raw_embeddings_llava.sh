@@ -109,47 +109,26 @@ print("Running vision encoder …")
 with torch.no_grad():
     strategy = getattr(model.config, "vision_feature_select_strategy", "default")
 
-    if hasattr(model, "get_image_features"):
-        # Newer Transformers exposes the vision encoder + projector through this
-        # helper instead of stable top-level vision_tower/projector attributes.
-        if image_sizes is None:
-            raise KeyError(
-                "Processor output missing image_sizes required by get_image_features"
-            )
-        image_features = model.get_image_features(
-            pixel_values=pixel_values,
-            image_sizes=image_sizes,
-            vision_feature_layer=model.config.vision_feature_layer,
-            vision_feature_select_strategy=strategy,
+    if not hasattr(model, "get_image_features"):
+        raise AttributeError(
+            "LlavaNextForConditionalGeneration.get_image_features is required"
         )
-        embeddings = getattr(image_features, "pooler_output", None)
-        if embeddings is None:
-            embeddings = image_features
-    else:
-        # Compatibility path for older Transformers builds.
-        vision_tower = getattr(model, "vision_tower", None)
-        projector = getattr(model, "multi_modal_projector", None)
-        if vision_tower is None and hasattr(model, "model"):
-            vision_tower = getattr(model.model, "vision_tower", None)
-        if projector is None and hasattr(model, "model"):
-            projector = getattr(model.model, "multi_modal_projector", None)
-        if vision_tower is None or projector is None:
-            raise AttributeError("Could not find LlavaNext vision tower/projector")
 
-        # LlavaNext may produce 5-D pixel_values: (batch, num_patches, C, H, W)
-        if pixel_values.ndim == 5:
-            b, n, c, h, w = pixel_values.shape
-            pixel_values_flat = pixel_values.reshape(b * n, c, h, w)
-        else:
-            pixel_values_flat = pixel_values
-
-        vision_out = vision_tower(pixel_values_flat, output_hidden_states=True)
-        features = vision_out.hidden_states[model.config.vision_feature_layer]
-
-        if strategy == "default":
-            features = features[:, 1:]
-
-        embeddings = projector(features)
+    # Transformers 5.x exposes the vision encoder + projector through this
+    # helper instead of stable top-level vision_tower/projector attributes.
+    if image_sizes is None:
+        raise KeyError(
+            "Processor output missing image_sizes required by get_image_features"
+        )
+    image_features = model.get_image_features(
+        pixel_values=pixel_values,
+        image_sizes=image_sizes,
+        vision_feature_layer=model.config.vision_feature_layer,
+        vision_feature_select_strategy=strategy,
+    )
+    embeddings = getattr(image_features, "pooler_output", None)
+    if embeddings is None:
+        embeddings = image_features
 
     if isinstance(embeddings, (list, tuple)):
         embeddings = torch.cat(
