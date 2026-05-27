@@ -9,7 +9,11 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId};
-use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
+use dynamo_runtime::{
+    error::{DynamoError, ErrorType, match_error_chain},
+    pipeline::SingleIn,
+    protocols::maybe_error::MaybeError,
+};
 
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
 use crate::protocols::common::{
@@ -139,6 +143,36 @@ impl PrefillRouter {
             .generate_to_worker(request, target_worker)
             .await
             .map_err(|e| {
+                // DIS-2105: sibling fix to addressed_router.rs request-plane ACK
+                // detection. When a prefill worker rejects on the request-plane
+                // ACK (queue full), addressed_router synthesises a
+                // `DynamoError(ResourceExhausted)` wrapped in `anyhow::Error`.
+                // The decode side propagates this chain straight to the HTTP
+                // layer, where `request_was_rejected` downcasts and maps it to
+                // HTTP 503.
+                //
+                // On the prefill side we wrap into `PrefillError::PrefillError`
+                // with the source as `Box<dyn StdError>` via `anyhow::Error::into`.
+                // That conversion can erase the inner `DynamoError`'s downcast
+                // identity, so the HTTP-layer chain walker fails to find
+                // `ResourceExhausted` and the rejection surfaces as HTTP 500.
+                //
+                // Detect ResourceExhausted here and emit the dedicated
+                // `WorkerOverloaded(DynamoError)` variant so the chain stays
+                // anyhow -> PrefillError::WorkerOverloaded -> DynamoError, with
+                // a guaranteed-downcastable `DynamoError` link.
+                if match_error_chain(e.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
+                    tracing::warn!(
+                        worker_error = %e,
+                        "Prefill worker rejected request with overload signal — mapping to ResourceExhausted (HTTP 503)"
+                    );
+                    return PrefillError::WorkerOverloaded(
+                        DynamoError::builder()
+                            .error_type(ErrorType::ResourceExhausted)
+                            .message(e.to_string())
+                            .build(),
+                    );
+                }
                 PrefillError::PrefillError(
                     "failed to route to prefill worker".to_string(),
                     Some(e.into()),
