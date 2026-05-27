@@ -106,9 +106,8 @@ def patch_moe_wna16_marlin_gemm_fake_impl() -> None:
 
     try:
         import torch
-        from torch.library import register_fake
-
         import vllm._custom_ops  # noqa: F401
+        from torch.library import register_fake
     except ImportError:
         logger.debug("[GMS Patch] vLLM custom ops not available")
         return
@@ -360,8 +359,8 @@ def meta_safe_module_to_during_meta_init() -> Iterator[None]:
             def meta_safe_to(self, *args, **kwargs):
                 assert _module_to_original is not None
                 try:
-                    device, dtype, non_blocking, memory_format = (
-                        torch._C._nn._parse_to(*args, **kwargs)
+                    device, dtype, non_blocking, memory_format = torch._C._nn._parse_to(
+                        *args, **kwargs
                     )
                 except Exception:
                     return _module_to_original(self, *args, **kwargs)
@@ -523,9 +522,7 @@ def patch_kv_cache_allocation_for_scratch() -> None:
 
     try:
         import torch
-
-        from vllm.v1.worker import gpu_model_runner
-        from vllm.v1.worker import kv_connector_model_runner_mixin
+        from vllm.v1.worker import gpu_model_runner, kv_connector_model_runner_mixin
     except ImportError:
         logger.debug("[GMS Patch] vLLM KV allocation helpers not available")
         return

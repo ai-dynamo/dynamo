@@ -19,15 +19,15 @@ import pytest
 
 try:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-    from gpu_memory_service.client.torch.module import (
-        materialize_module_from_gms,
-        move_tensor_attrs_out_of_gms,
-        register_module_tensors,
-    )
     from gpu_memory_service.client.torch.allocator import (
         evict_gms_client_memory_manager,
         get_or_create_gms_client_memory_manager,
         gms_use_mem_pool,
+    )
+    from gpu_memory_service.client.torch.module import (
+        materialize_module_from_gms,
+        move_tensor_attrs_out_of_gms,
+        register_module_tensors,
     )
     from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
     from gpu_memory_service.common.locks import RequestedLockType
