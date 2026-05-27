@@ -266,15 +266,20 @@ class GMSStorageClient:
         id_map: Dict[str, str] = {}
         targets: Dict[str, GMSTransferTarget] = {}
 
-        allocations = mm.allocate_handles(
-            [(int(entry.size), str(entry.tag)) for entry in manifest.allocations]
-        )
+        specs = [(int(entry.size), str(entry.tag)) for entry in manifest.allocations]
+        alloc_t0 = time.monotonic()
+        allocations = mm.allocate_handles(specs)
+        allocate_elapsed = time.monotonic() - alloc_t0
         if len(allocations) != len(manifest.allocations):
             raise RuntimeError(
                 "GMS batch allocation count mismatch: "
                 f"{len(allocations)} vs {len(manifest.allocations)}"
             )
 
+        export_elapsed = 0.0
+        reserve_elapsed = 0.0
+        map_elapsed = 0.0
+        target_elapsed = 0.0
         for entry, allocation in zip(
             manifest.allocations, allocations, strict=True
         ):
@@ -285,8 +290,16 @@ class GMSStorageClient:
                     f"{entry.aligned_size}"
                 )
             old_id = entry.allocation_id
+
+            step_t0 = time.monotonic()
             fd = mm.export_handle(allocation.allocation_id)
+            export_elapsed += time.monotonic() - step_t0
+
+            step_t0 = time.monotonic()
             va = mm.reserve_va(allocation.aligned_size)
+            reserve_elapsed += time.monotonic() - step_t0
+
+            step_t0 = time.monotonic()
             mm.map_va(
                 fd,
                 va,
@@ -295,6 +308,9 @@ class GMSStorageClient:
                 entry.tag,
                 allocation.layout_slot,
             )
+            map_elapsed += time.monotonic() - step_t0
+
+            step_t0 = time.monotonic()
             id_map[old_id] = allocation.allocation_id
             targets[old_id] = GMSTransferTarget(
                 allocation_id=old_id,
@@ -302,10 +318,31 @@ class GMSStorageClient:
                 device=self.device,
                 byte_count=entry.aligned_size,
             )
+            target_elapsed += time.monotonic() - step_t0
+
+        total_elapsed = time.monotonic() - t0
+        logger.info(
+            "Phase A breakdown: allocations=%d bytes=%.2f GiB "
+            "allocate_many=%.3fs export=%.3fs reserve_va=%.3fs "
+            "import_map_access=%.3fs target_build=%.3fs other=%.3fs",
+            len(targets),
+            sum(int(entry.aligned_size) for entry in manifest.allocations) / (1 << 30),
+            allocate_elapsed,
+            export_elapsed,
+            reserve_elapsed,
+            map_elapsed,
+            target_elapsed,
+            total_elapsed
+            - allocate_elapsed
+            - export_elapsed
+            - reserve_elapsed
+            - map_elapsed
+            - target_elapsed,
+        )
         logger.info(
             "Phase A complete: batch allocated and mapped %d GMS VAs in %.3fs",
             len(targets),
-            time.monotonic() - t0,
+            total_elapsed,
         )
         return id_map, targets
 
