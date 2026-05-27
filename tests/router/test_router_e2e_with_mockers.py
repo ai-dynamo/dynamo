@@ -976,7 +976,7 @@ async def _wait_for_disagg_worker_ids(
     component_name: str,
     expected_num_workers: int,
     *,
-    request_plane: str = "nats",
+    request_plane: str = "tcp",
     timeout_s: int = 60,
 ) -> list[int]:
     runtime = get_runtime(request_plane=request_plane)
@@ -1794,7 +1794,7 @@ def test_disagg_topology_required_mismatch_fails_chat_completion(
         worker_type="prefill",
         mocker_args=mocker_args,
         num_mockers=1,
-        request_plane="nats",
+        request_plane="tcp",
         env_overrides=prefill_env,
     ):
         prefill_ids = asyncio.run(
@@ -1808,7 +1808,7 @@ def test_disagg_topology_required_mismatch_fails_chat_completion(
             worker_type="decode",
             mocker_args=mocker_args,
             num_mockers=1,
-            request_plane="nats",
+            request_plane="tcp",
             env_overrides=decode_env,
         ) as decode_workers:
             decode_ids = asyncio.run(
@@ -1823,7 +1823,7 @@ def test_disagg_topology_required_mismatch_fails_chat_completion(
                 frontend_port,
                 namespace=shared_namespace,
                 enforce_disagg=True,
-                request_plane="nats",
+                request_plane="tcp",
                 min_initial_workers=decode_workers.num_workers,
             ):
                 frontend_url = f"http://localhost:{frontend_port}"
