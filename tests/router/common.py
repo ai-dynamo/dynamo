@@ -2385,6 +2385,7 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
     test_payload: dict,
     prefill_zone_a_id: int,
     prefill_zone_b_id: int,
+    shared_namespace: str,
     request_plane: str = "tcp",
 ):
     """Validate required topology constraints derived from pinned prefill workers."""
@@ -2401,8 +2402,13 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
         chat_url = f"{frontend_url}/v1/chat/completions"
 
         async def run_requests() -> None:
-            await wait_for_frontend_ready(
-                frontend_url, expected_num_workers=decode_workers.num_workers + 2
+            runtime = get_runtime(request_plane=request_plane)
+            decode_endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
+            prefill_endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
+
+            await poll_for_worker_instances(decode_endpoint, decode_workers.num_workers)
+            await poll_for_worker_instances(
+                prefill_endpoint, decode_workers.num_workers
             )
 
             zone_a_payload = {

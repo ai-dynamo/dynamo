@@ -1760,6 +1760,7 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                     test_payload=TEST_PAYLOAD,
                     prefill_zone_a_id=prefill_zone_a_id,
                     prefill_zone_b_id=prefill_zone_b_id,
+                    shared_namespace=shared_namespace,
                     request_plane="tcp",
                 )
 
