@@ -670,11 +670,7 @@ impl WorkerRegistry {
                 // block_size is authoritative on IndexerEntry (validated on
                 // every register() call), not on individual listener records.
                 // Read it from there to avoid the same TOCTOU.
-                let block_size = self
-                    .indexers
-                    .get(key)
-                    .map(|e| e.block_size)
-                    .unwrap_or(0);
+                let block_size = self.indexers.get(key).map(|e| e.block_size).unwrap_or(0);
 
                 let listeners: HashMap<u32, ListenerInfo> = worker
                     .listeners
@@ -685,8 +681,7 @@ impl WorkerRegistry {
                     .iter()
                     .map(|(dp_rank, info)| (*dp_rank, info.endpoint.clone()))
                     .collect();
-                let status =
-                    ListenerStatus::aggregate(listeners.values().map(|info| info.status));
+                let status = ListenerStatus::aggregate(listeners.values().map(|info| info.status));
                 Some(WorkerInfo {
                     instance_id: *entry.key(),
                     source: WorkerSource::Zmq,

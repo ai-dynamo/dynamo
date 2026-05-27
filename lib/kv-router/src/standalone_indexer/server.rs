@@ -209,10 +209,11 @@ async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WorkersQuery>,
 ) -> impl IntoResponse {
-    Json(state.registry.list_filtered(
-        params.model_name.as_deref(),
-        params.tenant_id.as_deref(),
-    ))
+    Json(
+        state
+            .registry
+            .list_filtered(params.model_name.as_deref(), params.tenant_id.as_deref()),
+    )
 }
 
 /// Build the [`ScoreResponse`] in both the flat (legacy) and per-instance
@@ -777,7 +778,10 @@ mod tests {
         model_names.sort();
         assert_eq!(model_names, ["llama3", "mistral"]);
 
-        let llama = workers.iter().find(|w| w["model_name"] == "llama3").unwrap();
+        let llama = workers
+            .iter()
+            .find(|w| w["model_name"] == "llama3")
+            .unwrap();
         assert_eq!(llama["block_size"], 4);
         assert_eq!(llama["tenant_id"], "acme");
 
