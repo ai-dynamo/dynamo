@@ -541,15 +541,21 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
-            // Reserve a slot in the bounded channel BEFORE incrementing the
-            // queue-depth gauge. Senders parked in `send().await` waiting for
-            // capacity would otherwise count as queue occupancy, letting the
-            // gauge exceed `queue_capacity` under saturation — exactly the
-            // regime this metric exists to surface. `reserve()` waits for
-            // capacity, then `Permit::send` is non-blocking and infallible,
-            // providing the same happens-before edge to the dispatcher's
-            // `recv()` as `send().await` did.
-            match work_tx.reserve().await {
+            // Admission control: try_reserve is non-blocking. If the work
+            // queue is at DYN_TCP_WORK_QUEUE_SIZE capacity, reject the
+            // request immediately (Full) rather than waiting for capacity —
+            // the FE sees a fast "Server overloaded" response and can fail
+            // the client request with a 503 instead of a TCP read timeout.
+            // See DIS-2105.
+            //
+            // Reserving the slot BEFORE incrementing the queue-depth gauge
+            // means the gauge cannot exceed `queue_capacity` under
+            // saturation — exactly the regime this metric exists to
+            // surface. `try_reserve()` is non-blocking, and the returned
+            // `Permit::send` is non-blocking and infallible, providing the
+            // same happens-before edge to the dispatcher's `recv()` as
+            // `send()` did.
+            match work_tx.try_reserve() {
                 Ok(permit) => {
                     WORK_HANDLER_QUEUE_DEPTH.inc();
                     permit.send(work_item);
@@ -572,21 +578,21 @@ impl SharedTcpServer {
                         "Request queued and acknowledged"
                     );
                 }
-                Err(e) => {
-                    // `reserve()` only errors when the receiver has been
-                    // dropped (channel closed) — the dispatcher is gone, so
-                    // the read loop must terminate.
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // Work queue at capacity — load-shed by sending an
+                    // overload response and KEEP the connection open so
+                    // subsequent requests on the same connection can be
+                    // admitted once the dispatcher drains.
                     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
-                        error = %e,
-                        "Failed to reserve worker pool slot, sending error response"
+                        "Worker pool queue full, rejecting request"
                     );
 
-                    // Send error response to client instead of ACK
-                    let error_response =
-                        TcpResponseMessage::new(Bytes::from(format!("Server overloaded: {}", e)));
+                    let error_response = TcpResponseMessage::new(Bytes::from(
+                        "Server overloaded: worker pool queue full",
+                    ));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
                     }
@@ -594,8 +600,27 @@ impl SharedTcpServer {
                     // Clean up inflight counter
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
+                    // Do not break — connection stays open for subsequent requests.
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    // Dispatcher is gone — terminate the read loop.
+                    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
+                    tracing::error!(
+                        endpoint = handler.endpoint_name.as_str(),
+                        instance_id = handler.instance_id,
+                        "Worker pool channel closed, shutting down read loop"
+                    );
 
-                    tracing::error!("Worker pool channel closed, shutting down read loop");
+                    let error_response = TcpResponseMessage::new(Bytes::from(
+                        "Server unavailable: worker pool channel closed",
+                    ));
+                    if let Ok(encoded) = error_response.encode() {
+                        let _ = response_tx.send(encoded);
+                    }
+
+                    handler.inflight.fetch_sub(1, Ordering::SeqCst);
+                    handler.notify.notify_one();
+
                     break;
                 }
             }
