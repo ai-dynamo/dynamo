@@ -146,9 +146,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_base64_embeddings_aggregate() {
-        // Regression: the aggregator must accept a base64 string payload
-        // on `data[].embedding`. Before the response type was owned,
-        // this shape was rejected during deserialization with
+        // Verifies that `data[].embedding` can be a base64 string, not
+        // just a float array. Earlier versions typed it as `Vec<f32>`
+        // and rejected the string shape with
         // "invalid type: string ..., expected a sequence".
         let embedding = dynamo_protocols::types::Embedding {
             index: 0,
