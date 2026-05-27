@@ -32,6 +32,7 @@ use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 
 use crate::engine::{GenerateContext, LLMEngine};
+use crate::metrics::{EngineMetrics, TestHierarchy};
 use ConformanceFailure::*;
 
 const DEFAULT_CANCEL_DEADLINE: Duration = Duration::from_secs(2);
@@ -65,11 +66,26 @@ pub enum ConformanceFailure {
     NoTerminalChunk,
     StreamYieldedError(String),
     ConcurrentGenerateFailed(String),
-    CancellationNotObserved { after: Duration },
+    CancellationNotObserved {
+        after: Duration,
+    },
     CancellationIgnored,
     CleanupFailed(String),
     SecondCleanupFailed(String),
     CleanupWithoutStartFailed(String),
+    KvEventSourcesFailed(String),
+    KvEventSourcesNotIdempotent,
+    SetupMetricsFailed(String),
+    ComponentMetricsNotIdempotent,
+    /// The engine's terminal `completion_usage.completion_tokens` doesn't
+    /// match the sum of `chunk.token_ids.len()` it emitted across the
+    /// stream. The framework records `output_tokens` from the chunk-token
+    /// sum; a divergence means the engine's internal bookkeeping disagrees
+    /// with what it actually streamed.
+    CompletionTokensMismatch {
+        chunked: usize,
+        reported: u32,
+    },
 }
 
 impl std::fmt::Display for ConformanceFailure {
@@ -104,6 +120,24 @@ impl std::fmt::Display for ConformanceFailure {
                  (Worker calls cleanup() after start() raises, so engines must \
                  be null-safe against partial / no allocation)"
             ),
+            KvEventSourcesFailed(m) => write!(f, "kv_event_sources() failed: {m}"),
+            KvEventSourcesNotIdempotent => write!(
+                f,
+                "kv_event_sources() returned different dp_rank set on a second call \
+                 (the descriptor list must be stable for the engine's lifetime)"
+            ),
+            SetupMetricsFailed(m) => write!(f, "setup_metrics() failed: {m}"),
+            ComponentMetricsNotIdempotent => write!(
+                f,
+                "setup_metrics().dp_ranks returned different ranks across calls \
+                 (the rank set must be stable for the engine's lifetime)"
+            ),
+            CompletionTokensMismatch { chunked, reported } => write!(
+                f,
+                "engine emitted {chunked} tokens across the stream but reported \
+                 completion_usage.completion_tokens = {reported} on the terminal \
+                 (engine bookkeeping diverges from streamed output)"
+            ),
         }
     }
 }
@@ -130,18 +164,28 @@ where
         return Err(EmptyModelInConfig);
     }
 
-    // 2. A plain generate() yields a well-formed stream ending in a terminal chunk.
+    // 2. KV-aware-routing source descriptors satisfy their contracts:
+    //    - kv_event_sources doesn't error; rank set is stable across calls
+    //    - setup_metrics doesn't error against a synthetic EngineMetrics
+    //    - returned MetricsBindings.dp_ranks are stable across calls
+    //
+    //    Run before generate() to match Worker's actual call order
+    //    (publishers wire up between start() and serve).
+    check_kv_event_sources(&engine).await?;
+    check_setup_metrics(&engine).await?;
+
+    // 4. A plain generate() yields a well-formed stream ending in a terminal chunk.
     check_single_generate(&engine, &config.model).await?;
 
-    // 3. Interleaved generate() calls both complete — catches shared-state bugs.
+    // 5. Interleaved generate() calls both complete — catches shared-state bugs.
     //    Uses tokio::join! under the test runtime (single-threaded by default),
     //    so this is interleaving rather than true parallelism.
     check_concurrent_generates(&engine, &config.model).await?;
 
-    // 4. Cancellation is observed within a bounded deadline.
+    // 6. Cancellation is observed within a bounded deadline.
     check_cancellation(&engine, &config.model, DEFAULT_CANCEL_DEADLINE).await?;
 
-    // 5. cleanup() succeeds and is idempotent.
+    // 7. cleanup() succeeds and is idempotent.
     engine
         .cleanup()
         .await
@@ -151,7 +195,7 @@ where
         .await
         .map_err(|e| SecondCleanupFailed(e.to_string()))?;
 
-    // 6. cleanup() is safe on a never-started engine — mirrors the path
+    // 8. cleanup() is safe on a never-started engine — mirrors the path
     //    `Worker` takes after `start()` raises. Engines must guard each
     //    allocated resource with a null-check.
     let fresh = factory();
@@ -211,11 +255,25 @@ async fn check_single_generate<E: LLMEngine>(
             terminal_idx = Some(i);
         }
     }
-    match terminal_idx {
-        Some(i) if i == chunks.len() - 1 => Ok(()),
-        Some(_) => Err(ChunkAfterTerminal),
-        None => Err(NoTerminalChunk),
+    let terminal_idx = match terminal_idx {
+        Some(i) if i == chunks.len() - 1 => i,
+        Some(_) => return Err(ChunkAfterTerminal),
+        None => return Err(NoTerminalChunk),
+    };
+
+    // Engine bookkeeping self-consistency: if the engine reports its own
+    // completion_tokens count on the terminal chunk, it must agree with the
+    // tokens it actually emitted. Skip when the engine doesn't report.
+    if let Some(usage) = chunks[terminal_idx].completion_usage.as_ref() {
+        let chunked: usize = chunks.iter().map(|c| c.token_ids.len()).sum();
+        if chunked != usage.completion_tokens as usize {
+            return Err(CompletionTokensMismatch {
+                chunked,
+                reported: usage.completion_tokens,
+            });
+        }
     }
+    Ok(())
 }
 
 async fn check_concurrent_generates<E: LLMEngine>(
@@ -242,6 +300,55 @@ async fn check_concurrent_generates<E: LLMEngine>(
     for result in futures::future::join_all(futs).await {
         result?;
     }
+    Ok(())
+}
+
+async fn check_kv_event_sources<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
+    let first = engine
+        .kv_event_sources()
+        .await
+        .map_err(|e| KvEventSourcesFailed(e.to_string()))?;
+    let second = engine
+        .kv_event_sources()
+        .await
+        .map_err(|e| KvEventSourcesFailed(e.to_string()))?;
+    let ranks_a: Vec<u32> = first.iter().map(|s| s.dp_rank()).collect();
+    let ranks_b: Vec<u32> = second.iter().map(|s| s.dp_rank()).collect();
+    if ranks_a != ranks_b {
+        return Err(KvEventSourcesNotIdempotent);
+    }
+    Ok(())
+}
+
+async fn check_setup_metrics<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
+    let make_ctx = |metrics: &'static EngineMetrics| crate::engine::MetricsCtx {
+        model: "test-model",
+        component: "test",
+        model_load_time_seconds: 0.0,
+        metrics,
+    };
+    // Leaking is fine in a test — the EngineMetrics handle is short-lived
+    // and we need a 'static borrow for both calls. Alternative would be
+    // separate `EngineMetrics` per call with a thread_local; cleaner to leak.
+    let metrics: &'static EngineMetrics = Box::leak(Box::new(EngineMetrics::from_hierarchy(
+        TestHierarchy::new(),
+    )));
+
+    let bindings_a = engine
+        .setup_metrics(make_ctx(metrics))
+        .await
+        .map_err(|e| SetupMetricsFailed(e.to_string()))?;
+    let bindings_b = engine
+        .setup_metrics(make_ctx(metrics))
+        .await
+        .map_err(|e| SetupMetricsFailed(e.to_string()))?;
+
+    if bindings_a.dp_ranks != bindings_b.dp_ranks {
+        return Err(ComponentMetricsNotIdempotent);
+    }
+    // `on_publisher_ready` callbacks from both bindings are dropped without
+    // invocation — they're FnOnce, so this just confirms engines aren't
+    // capturing side-effects we'd inadvertently fire twice.
     Ok(())
 }
 
@@ -284,5 +391,71 @@ async fn check_cancellation<E: LLMEngine>(
         Some(Ok(_)) => Err(CancellationIgnored),
         Some(Err(e)) => Err(StreamYieldedError(e.to_string())),
         None => Err(NoChunksYielded),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{EngineConfig, PreprocessedRequest};
+    use crate::error::DynamoError;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+
+    /// Minimal engine that opts out of everything except `start`/`cleanup`
+    /// and a custom `setup_metrics`. Other trait methods that
+    /// `check_setup_metrics` doesn't touch are stubbed with `unreachable!`.
+    struct ConfigurableMetricsEngine {
+        dp_ranks: Vec<u32>,
+    }
+
+    #[async_trait]
+    impl LLMEngine for ConfigurableMetricsEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "mock".to_string(),
+                ..EngineConfig::default()
+            })
+        }
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            unreachable!()
+        }
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+        async fn setup_metrics(
+            &self,
+            _ctx: crate::engine::MetricsCtx<'_>,
+        ) -> Result<crate::engine::MetricsBindings, DynamoError> {
+            Ok(crate::engine::MetricsBindings {
+                dp_ranks: self.dp_ranks.clone(),
+                on_publisher_ready: None,
+            })
+        }
+    }
+
+    /// Engines that opt out entirely (returning an empty `dp_ranks`) are
+    /// acceptable — opt-out is the default.
+    #[tokio::test]
+    async fn check_setup_metrics_accepts_opt_out() {
+        let engine = ConfigurableMetricsEngine { dp_ranks: vec![] };
+        let result = check_setup_metrics(&engine).await;
+        assert!(result.is_ok(), "opt-out should pass: {:?}", result);
+    }
+
+    /// Engines declaring a non-empty rank set pass when stable across calls.
+    #[tokio::test]
+    async fn check_setup_metrics_accepts_stable_ranks() {
+        let engine = ConfigurableMetricsEngine {
+            dp_ranks: vec![0, 1, 2],
+        };
+        assert!(check_setup_metrics(&engine).await.is_ok());
     }
 }

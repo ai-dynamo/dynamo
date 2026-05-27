@@ -97,16 +97,51 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
-/// Validates that no unsupported fields are present in the request
+/// Extra-body fields accepted for backend-specific handling.
+pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
+    "cache_salt",
+    "stop_token_ids",
+    "detokenize",
+    "allowed_token_ids",
+    "bad_words_token_ids",
+];
+
+/// Validates that no unsupported fields are present in the request.
+///
+/// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
-    if !unsupported_fields.is_empty() {
-        let fields: Vec<_> = unsupported_fields
-            .keys()
-            .map(|s| format!("`{}`", s))
-            .collect();
-        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    let unknown: Vec<_> = unsupported_fields
+        .keys()
+        .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
+        .map(|s| format!("`{}`", s))
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
+    }
+    if let Some(value) = unsupported_fields.get("cache_salt")
+        && !value.is_string()
+    {
+        anyhow::bail!("`cache_salt` must be a string");
+    }
+    if let Some(value) = unsupported_fields.get("stop_token_ids") {
+        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+            .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("detokenize")
+        && !value.is_boolean()
+    {
+        anyhow::bail!("`detokenize` must be a boolean");
+    }
+    if let Some(value) = unsupported_fields.get("allowed_token_ids") {
+        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+            .map_err(|_| anyhow::anyhow!("`allowed_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("bad_words_token_ids") {
+        serde_json::from_value::<Vec<Vec<crate::types::TokenIdType>>>(value.clone()).map_err(
+            |_| anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays"),
+        )?;
     }
     Ok(())
 }
@@ -454,7 +489,48 @@ pub fn validate_tools(
         if tool.function.name.trim().is_empty() {
             anyhow::bail!("Function name at index {} cannot be empty", i);
         }
+        if !tool
+            .function
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            anyhow::bail!(
+                "Function at index {} has an invalid name: \"{}\". \
+                 Only a-z, A-Z, 0-9, underscores, and dashes are allowed.",
+                i,
+                tool.function.name,
+            );
+        }
     }
+    Ok(())
+}
+
+/// Validates that forced tool_choice requests refer to available tools.
+pub fn validate_tool_choice(
+    tool_choice: &Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
+    tools: Option<&[dynamo_protocols::types::ChatCompletionTool]>,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ChatCompletionToolChoiceOption;
+
+    let tools_empty = tools.is_none_or(|tools| tools.is_empty());
+
+    match tool_choice {
+        Some(ChatCompletionToolChoiceOption::Required) if tools_empty => {
+            anyhow::bail!("tool_choice is \"required\" but tools is empty");
+        }
+        Some(ChatCompletionToolChoiceOption::Named(named)) => {
+            let tools = tools.unwrap_or(&[]);
+            if !tools.iter().any(|t| t.function.name == named.function.name) {
+                anyhow::bail!(
+                    "tool named \"{}\" in tool_choice is not present in tools",
+                    named.function.name
+                );
+            }
+        }
+        _ => {}
+    }
+
     Ok(())
 }
 

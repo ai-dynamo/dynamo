@@ -775,14 +775,11 @@ impl DistributedConfig {
 ///
 /// This determines how requests are distributed from routers to workers:
 /// - `Nats`: Use NATS for request distribution (legacy)
-/// - `Http`: Use HTTP/2 for request distribution
 /// - `Tcp`: Use raw TCP for request distribution with msgpack support (default)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequestPlaneMode {
     /// Use NATS for request plane
     Nats,
-    /// Use HTTP/2 for request plane
-    Http,
     /// Use raw TCP for request plane with msgpack support
     #[default]
     Tcp,
@@ -792,7 +789,6 @@ impl fmt::Display for RequestPlaneMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Nats => write!(f, "nats"),
-            Self::Http => write!(f, "http"),
             Self::Tcp => write!(f, "tcp"),
         }
     }
@@ -804,10 +800,9 @@ impl std::str::FromStr for RequestPlaneMode {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "nats" => Ok(Self::Nats),
-            "http" => Ok(Self::Http),
             "tcp" => Ok(Self::Tcp),
             _ => Err(anyhow::anyhow!(
-                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp'",
+                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'tcp'",
                 s
             )),
         }
@@ -941,10 +936,6 @@ mod tests {
             RequestPlaneMode::Nats
         );
         assert_eq!(
-            "http".parse::<RequestPlaneMode>().unwrap(),
-            RequestPlaneMode::Http
-        );
-        assert_eq!(
             "tcp".parse::<RequestPlaneMode>().unwrap(),
             RequestPlaneMode::Tcp
         );
@@ -953,20 +944,9 @@ mod tests {
             RequestPlaneMode::Nats
         );
         assert_eq!(
-            "HTTP".parse::<RequestPlaneMode>().unwrap(),
-            RequestPlaneMode::Http
-        );
-        assert_eq!(
             "TCP".parse::<RequestPlaneMode>().unwrap(),
             RequestPlaneMode::Tcp
         );
         assert!("invalid".parse::<RequestPlaneMode>().is_err());
-    }
-
-    #[test]
-    fn test_request_plane_mode_display() {
-        assert_eq!(RequestPlaneMode::Nats.to_string(), "nats");
-        assert_eq!(RequestPlaneMode::Http.to_string(), "http");
-        assert_eq!(RequestPlaneMode::Tcp.to_string(), "tcp");
     }
 }

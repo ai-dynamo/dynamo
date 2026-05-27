@@ -125,7 +125,7 @@ pub(crate) struct EnginePassResult {
     pub(crate) completed_requests: usize,
     pub(crate) output_signals: Vec<OutputSignal>,
     pub(crate) admissions: Vec<AdmissionEvent>,
-    pub(crate) active_decode_blocks: u64,
+    pub(crate) mocker_metrics: MockerMetrics,
     /// Controls when replay/live schedulers should expose this pass's buffered
     /// KV events to the real router or publisher sink.
     pub(crate) router_event_visibility: RouterEventVisibility,
@@ -186,6 +186,22 @@ impl EngineCore {
         match self {
             Self::Vllm(core) => core.execute_hidden_pass(now_ms),
             Self::Sglang(core) => core.execute_hidden_pass(now_ms),
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn tick_offload_only(&mut self, now_ms: f64) -> Vec<RouterEvent> {
+        match self {
+            Self::Vllm(core) => core.tick_offload_only(now_ms),
+            Self::Sglang(_) => Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn earliest_offload_deadline(&self) -> Option<f64> {
+        match self {
+            Self::Vllm(core) => core.earliest_offload_deadline(),
+            Self::Sglang(_) => None,
         }
     }
 }
@@ -282,7 +298,7 @@ pub async fn init_kvbm_live(
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
-    let Some(config) = KvbmOffloadConfig::from_args(args) else {
+    let Some(config) = KvbmOffloadConfig::from_args(args)? else {
         return Ok(None);
     };
     let engine = std::thread::spawn(move || build_owned_offload_engine(config))
@@ -301,14 +317,17 @@ pub fn init_kvbm_offline(
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
-    let Some(config) = KvbmOffloadConfig::from_args(args) else {
+    let Some(config) = KvbmOffloadConfig::from_args(args)? else {
         return Ok(None);
     };
     tracing::debug!(
         num_g2_blocks = config.num_g2_blocks,
+        num_g3_blocks = config.num_g3_blocks,
         offload_batch_size = config.offload_batch_size,
         bw_g1_to_g2_gbps = config.bandwidth_g1_to_g2_gbps,
         bw_g2_to_g1_gbps = config.bandwidth_g2_to_g1_gbps,
+        bw_g2_to_g3_gbps = config.bandwidth_g2_to_g3_gbps,
+        bw_g3_to_g2_gbps = config.bandwidth_g3_to_g2_gbps,
         "kvbm-offload: init_kvbm_offline attaching engine"
     );
     let engine = build_owned_offload_engine(config)?;

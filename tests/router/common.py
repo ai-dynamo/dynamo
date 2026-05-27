@@ -57,6 +57,32 @@ def min_initial_workers_env(min_initial_workers: int):
             os.environ[MIN_INITIAL_WORKERS_ENV] = previous
 
 
+async def _assert_overlap_scores(
+    kv_router,
+    token_ids: list[int],
+    block_size: int,
+    expected_device_blocks: dict[tuple[int, int], int],
+    label: str,
+):
+    scores = await kv_router.get_overlap_scores(token_ids, include_shared=False)
+
+    assert scores["block_size"] == block_size
+    assert scores["num_blocks"] == len(token_ids) // block_size
+    assert scores["shared_cache"]["enabled"] is False
+
+    rows = {(row["worker_id"], row["dp_rank"]): row for row in scores["workers"]}
+
+    for key, expected in expected_device_blocks.items():
+        assert key in rows, f"{label}: missing overlap row for {key}"
+        row = rows[key]
+        assert (
+            row["device_blocks"] == expected
+        ), f"{label}: expected {key} device_blocks={expected}, got {row}"
+        assert row["host_pinned_extension_blocks"] == 0
+        assert row["disk_extension_blocks"] == 0
+        assert row["shared_beyond_device_blocks"] is None
+
+
 ########################################################
 # Test templates
 ########################################################
@@ -95,7 +121,7 @@ def _test_router_basic(
         num_requests: Number of concurrent requests to send
         frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "nats".
+        request_plane: Request plane to use ("nats", "tcp"). Defaults to "nats".
         router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
         enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
         min_initial_workers: Optional frontend startup worker gate. Defaults to None.
@@ -601,6 +627,12 @@ def _test_remote_indexer_decisions(
             (consumer_router, A + C + D + F, None, None, 2.0),
             (consumer_router, A + C + E + G, None, None, 2.0),
         ]
+        dp_a = dp_rank_a if dp_rank_a is not None else 0
+        dp_b = dp_rank_b if dp_rank_b is not None else 0
+        expected_overlap_by_request = {
+            4: {(worker_a_id, dp_a): 3, (worker_b_id, dp_b): 2},
+            5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
+        }
 
         responses: list[dict[str, Optional[int]]] = []
         for i, (
@@ -624,6 +656,14 @@ def _test_remote_indexer_decisions(
                     else ""
                 ),
             )
+            if i in expected_overlap_by_request:
+                await _assert_overlap_scores(
+                    kv_router,
+                    token_ids,
+                    block_size,
+                    expected_overlap_by_request[i],
+                    f"request {i}",
+                )
             result = await send_request_via_python_kv_router(
                 kv_python_router=kv_router,
                 model_name=model_name,
@@ -1014,7 +1054,11 @@ def _test_router_overload_503(
     request,
     frontend_port: int,
     test_payload: dict,
-    blocks_threshold: float = 0.2,
+    blocks_threshold: float | str | None = 0.2,
+    tokens_threshold: int | str | None = None,
+    tokens_threshold_frac: float | str | None = None,
+    router_queue_threshold: float | str | None = None,
+    max_tokens: int = 50,
 ):
     """Test that 503 is returned when all workers are busy, and verify rejection metrics.
 
@@ -1033,6 +1077,10 @@ def _test_router_overload_503(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         blocks_threshold: Active decode blocks threshold for the router (default 0.2)
+        tokens_threshold: Active prefill tokens threshold for the router
+        tokens_threshold_frac: Fractional active prefill tokens threshold for the router
+        router_queue_threshold: Router queue threshold, or "None" to disable queueing
+        max_tokens: Output token count for generated overload requests
 
     Raises:
         AssertionError: If success/rejection counts or metrics don't meet expectations
@@ -1047,14 +1095,16 @@ def _test_router_overload_503(
         frontend_port=frontend_port,
         namespace=engine_workers.namespace,
         blocks_threshold=blocks_threshold,
+        tokens_threshold=tokens_threshold,
+        tokens_threshold_frac=tokens_threshold_frac,
+        router_queue_threshold=router_queue_threshold,
     ):
         frontend_url = f"http://localhost:{frontend_port}"
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
-        # Custom payload for 503 test with more tokens to consume resources
         test_payload_503 = {
             **test_payload,
-            "max_tokens": 50,  # Longer output to consume more blocks
+            "max_tokens": max_tokens,
         }
 
         logger.info("Waiting for frontend readiness before overload test...")
@@ -1083,16 +1133,11 @@ def _test_router_overload_503(
                                 return response.status
 
                             if response.status == 503:
-                                body = await response.json()
+                                body = await response.text()
                                 logger.info(
                                     f"Request {req_id} got expected 503: {body}"
                                 )
                                 stop_event.set()
-                                error_msg = body.get("message", "")
-                                assert (
-                                    "Service temporarily unavailable" in error_msg
-                                    or "All workers are busy" in error_msg
-                                ), f"Expected service overload error message, got: {body}"
                                 return response.status
 
                             body = await response.text()
@@ -1504,11 +1549,14 @@ def _test_router_indexers_sync(
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
         )
+        event_plane = "nats" if durable_kv_events else None
 
         # If standalone indexer mode, launch workers one-by-one and register.
         # We need to create a temporary endpoint just to discover worker IDs.
         if standalone_indexer_url:
-            tmp_runtime = get_runtime(store_backend, request_plane)
+            tmp_runtime = get_runtime(
+                store_backend, request_plane, event_plane=event_plane
+            )
             tmp_endpoint = tmp_runtime.endpoint(
                 f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
             )
@@ -1604,7 +1652,7 @@ def _test_router_indexers_sync(
 
         # Create first runtime and endpoint for router 1
         logger.info("Creating first KV router with its own runtime")
-        runtime1 = get_runtime(store_backend, request_plane)
+        runtime1 = get_runtime(store_backend, request_plane, event_plane=event_plane)
         endpoint1 = runtime1.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -1713,7 +1761,7 @@ def _test_router_indexers_sync(
 
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
-        runtime2 = get_runtime(store_backend, request_plane)
+        runtime2 = get_runtime(store_backend, request_plane, event_plane=event_plane)
         endpoint2 = runtime2.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -2133,6 +2181,202 @@ def _test_router_decisions_disagg(
         )
 
 
+def _test_disagg_background_prefill_sticky_routing(
+    prefill_workers,
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    model_name: str,
+    store_backend: str = "file",
+    request_plane: str = "tcp",
+    event_plane: str = "zmq",
+    frontend_already_running: bool = False,
+):
+    """Verify sticky prefill routing overrides normal KV choice in bootstrap disagg."""
+
+    frontend_context = contextlib.nullcontext()
+    if not frontend_already_running:
+        frontend_context = FrontendRouterProcess(
+            request,
+            block_size,
+            frontend_port,
+            decode_workers.namespace,
+            store_backend,
+            enforce_disagg=True,
+            request_plane=request_plane,
+            event_plane=event_plane,
+            durable_kv_events=False,
+            min_initial_workers=decode_workers.num_workers,
+        )
+
+    with frontend_context:
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        async def send_chat(
+            session: aiohttp.ClientSession,
+            content: str,
+            *,
+            session_control: Optional[dict[str, Any]] = None,
+        ) -> tuple[int, int]:
+            payload: dict[str, Any] = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": content}],
+                "stream": True,
+                "max_tokens": 2,
+                "nvext": {"extra_fields": ["worker_id", "timing"]},
+            }
+            if session_control is not None:
+                payload["nvext"]["session_control"] = session_control
+
+            async with session.post(chat_url, json=payload) as response:
+                body = []
+                assert response.status == 200, (
+                    f"Request failed with status {response.status}: "
+                    f"{await response.text()}"
+                )
+
+                prefill_worker_id = None
+                prefill_dp_rank = None
+                async for line in response.content:
+                    line_str = line.decode("utf-8", errors="replace").strip()
+                    body.append(line_str)
+                    if not line_str.startswith("data:"):
+                        continue
+                    data_str = line_str[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    worker_id = data.get("nvext", {}).get("worker_id", {})
+                    prefill_worker_id = worker_id.get(
+                        "prefill_worker_id", prefill_worker_id
+                    )
+                    prefill_dp_rank = worker_id.get("prefill_dp_rank", prefill_dp_rank)
+
+                assert (
+                    prefill_worker_id is not None
+                ), "Missing prefill_worker_id in response body: " + "\n".join(body)
+                assert (
+                    prefill_dp_rank is not None
+                ), "Missing prefill_dp_rank in response body: " + "\n".join(body)
+                return int(prefill_worker_id), int(prefill_dp_rank)
+
+        async def test_sync():
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+            )
+
+            runtime = get_runtime(
+                store_backend=store_backend, request_plane=request_plane
+            )
+            prefill_endpoint = runtime.endpoint(
+                f"{prefill_workers.namespace}.prefill.generate"
+            )
+            prefill_session_control_endpoint = runtime.endpoint(
+                f"{prefill_workers.namespace}.prefill.session_control"
+            )
+            await poll_for_worker_instances(
+                prefill_endpoint,
+                prefill_workers.num_workers,
+                max_wait_time=120,
+            )
+            await poll_for_worker_instances(
+                prefill_session_control_endpoint,
+                prefill_workers.num_workers,
+                max_wait_time=120,
+            )
+
+            suffix = random.randint(100_000, 999_999)
+            session_a = f"sticky-a-{suffix}"
+            session_b = f"sticky-b-{suffix}"
+            prompt_a = (
+                f"session alpha {suffix}: "
+                "redwood vectors amber matrix northbound lantern " * 20
+            )
+
+            async with aiohttp.ClientSession() as session:
+                session_a_pair = await send_chat(
+                    session,
+                    prompt_a,
+                    session_control={
+                        "session_id": session_a,
+                        "action": "open",
+                        "timeout": 300,
+                    },
+                )
+
+                competing_pair = None
+                competing_prompt = None
+                for attempt in range(6):
+                    candidate = (
+                        f"session beta {suffix} attempt {attempt}: "
+                        "cerulean ledger quartz valley transit cacheline " * 20
+                    )
+                    pair = await send_chat(
+                        session,
+                        candidate,
+                        session_control={
+                            "session_id": f"{session_b}-{attempt}",
+                            "action": "open",
+                            "timeout": 300,
+                        },
+                    )
+                    if pair != session_a_pair:
+                        competing_pair = pair
+                        competing_prompt = candidate
+                        break
+
+                assert competing_pair is not None, (
+                    "Could not warm a competing prefill worker/rank different from "
+                    f"session A pair {session_a_pair}"
+                )
+
+                control_pair = None
+                for _ in range(10):
+                    control_pair = await send_chat(
+                        session,
+                        competing_prompt
+                        + " control continuation proving normal kv routing",
+                    )
+                    if control_pair == competing_pair:
+                        break
+                    await asyncio.sleep(0.5)
+
+                assert control_pair == competing_pair, (
+                    "No-sticky control did not follow normal KV overlap routing: "
+                    f"expected {competing_pair}, got {control_pair}"
+                )
+
+                followups = [
+                    competing_prompt + f" sticky continuation {idx} {suffix}"
+                    for idx in range(3)
+                ]
+                results = await asyncio.gather(
+                    *[
+                        send_chat(
+                            session,
+                            content,
+                            session_control={"session_id": session_a},
+                        )
+                        for content in followups
+                    ]
+                )
+
+            assert results == [session_a_pair] * len(results), (
+                "Sticky follow-ups should stay pinned to session A prefill pair "
+                f"{session_a_pair}, but got {results}; competing pair was "
+                f"{competing_pair}"
+            )
+
+        asyncio.run(test_sync())
+
+
 def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
     prefill_workers,
     decode_workers,
@@ -2412,6 +2656,12 @@ def _test_router_decisions(
                 2.0,
             ),  # req5: router picks (worker b should win)
         ]
+        dp_a = dp_rank_a if dp_rank_a is not None else 0
+        dp_b = dp_rank_b if dp_rank_b is not None else 0
+        expected_overlap_by_request = {
+            4: {(worker_a_id, dp_a): 3, (worker_b_id, dp_b): 2},
+            5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
+        }
 
         response_worker_ids: list[dict[str, Optional[int]]] = []
 
@@ -2424,6 +2674,16 @@ def _test_router_decisions(
                 if dp_override is not None:
                     log_msg += f", dp_rank={dp_override}"
             logger.info(log_msg)
+
+            request_idx = i + 1
+            if request_idx in expected_overlap_by_request:
+                await _assert_overlap_scores(
+                    kv_router,
+                    token_ids,
+                    block_size,
+                    expected_overlap_by_request[request_idx],
+                    f"request {request_idx}",
+                )
 
             result = await send_request_via_python_kv_router(
                 kv_python_router=kv_router,

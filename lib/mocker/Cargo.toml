@@ -16,10 +16,11 @@ readme = "README.md"
 default = []
 profile = []
 # Enables G1↔G2 offload simulation via kvbm-engine.
-kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo", "dep:futures"]
+kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo"]
 
 [dependencies]
 # repo
+dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
 kvbm-logical = { workspace = true }
@@ -29,17 +30,21 @@ kvbm-engine = { workspace = true, optional = true }
 kvbm-physical = { workspace = true, optional = true }
 kvbm-common = { workspace = true, optional = true }
 velo = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
 
 # workspace
 anyhow = { workspace = true }
+bytes = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
+futures = { workspace = true }
 indicatif = "0.18"
 rand = { workspace = true }
+rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
+tmq = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

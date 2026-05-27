@@ -111,6 +111,8 @@ mod core_behavior {
             "first request should emit immediately"
         );
         assert_eq!(core.state.waiting.len(), 0);
+        assert_eq!(pass.mocker_metrics.running_requests, 2);
+        assert_eq!(pass.mocker_metrics.waiting_requests, 0);
         assert_eq!(
             core.state.running.iter().copied().collect::<Vec<_>>(),
             vec![r1, r2]
@@ -326,13 +328,16 @@ mod core_behavior {
         }
 
         let mut collector = crate::replay::TraceCollector::default();
-        core.execute_pass(&mut collector, 0.0);
-        core.execute_pass(&mut collector, 1.0);
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+        let pass2 = core.execute_pass(&mut collector, 1.0);
         let request = core.state.requests.get(&r2).unwrap();
         assert_eq!(request.status, RequestStatus::Preempted);
         assert_eq!(request.num_computed_tokens, 0);
         assert_eq!(request.num_preemptions, 1);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
+        assert_eq!(pass1.mocker_metrics.vllm_preemptions_total, 0);
+        assert_eq!(pass2.mocker_metrics.vllm_preemptions_total, 1);
+        assert_eq!(pass2.mocker_metrics.waiting_requests, 1);
     }
 
     #[test]
@@ -1296,11 +1301,12 @@ mod forward_pass_metrics {
 #[cfg(feature = "kvbm-offload")]
 mod offload {
     use dynamo_tokens::PositionalLineageHash;
-    use kvbm_engine::G2;
+    use kvbm_engine::{G2, G3};
     use kvbm_logical::manager::BlockManager;
     use uuid::Uuid;
 
     use crate::common::protocols::{DirectRequest, MockEngineArgs, MoveBlock};
+    use crate::kvbm_offload::shared_g3::shared_g3_test_guard_blocking;
     use crate::kvbm_offload::{KvbmOffloadConfig, MockOffloadEngine};
 
     use super::super::core::VllmCore;
@@ -1314,6 +1320,15 @@ mod offload {
             let mutable = alloc.pop().unwrap();
             let staged = mutable.stage(*plh, g2.block_size()).expect("G2 stage");
             drop(g2.register_block(staged));
+        }
+    }
+
+    fn seed_g3_blocks(g3: &BlockManager<G3>, plhs: &[PositionalLineageHash]) {
+        for plh in plhs {
+            let (mut alloc, _evicted) = g3.allocate_blocks_with_evictions(1).expect("G3 allocate");
+            let mutable = alloc.pop().unwrap();
+            let staged = mutable.stage(*plh, g3.block_size()).expect("G3 stage");
+            drop(g3.register_block(staged));
         }
     }
 
@@ -1498,6 +1513,85 @@ mod offload {
             core.state.waiting.contains(&cold_uuid),
             "cold request should remain waiting for G1 capacity"
         );
+    }
+
+    /// Offline replay uses this hook to advance offload-only deadlines before
+    /// running admissions at the same timestamp. A staged G3 hit must take
+    /// two virtual hops, then be immediately reusable by the next pass.
+    #[test]
+    fn tick_offload_only_completes_g3_staging_before_same_timestamp_admission() {
+        let _guard = shared_g3_test_guard_blocking();
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(1)
+            .block_size(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let config = KvbmOffloadConfig {
+            block_size_tokens: 4,
+            block_size_bytes: Some(1_000_000),
+            num_g2_blocks: 8,
+            num_g3_blocks: Some(8),
+            bandwidth_g2_to_g1_gbps: 1.0,
+            bandwidth_g3_to_g2_gbps: 1.0,
+            ..Default::default()
+        };
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(config))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+        engine.tick(0.0);
+
+        let uuid = Uuid::new_v4();
+        core.receive(DirectRequest {
+            tokens: (0..4).collect(),
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let plhs = core
+            .state
+            .requests
+            .get(&uuid)
+            .unwrap()
+            .sequence
+            .positional_lineage_hashes();
+        assert_eq!(plhs.len(), 1, "test request should have one full block");
+        seed_g3_blocks(engine.g3_manager().expect("G3 enabled"), plhs);
+        core.kv_manager.attach_new_offload_engine(engine);
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let parked = core.execute_pass(&mut collector, 0.0);
+        assert!(parked.admissions.is_empty());
+        assert_eq!(core.requests_awaiting_swap_in.len(), 1);
+
+        core.tick_offload_only(1.0);
+        assert_eq!(
+            core.requests_awaiting_swap_in.len(),
+            1,
+            "G3→G2 completion should start, not finish, the G2→G1 hop"
+        );
+
+        core.tick_offload_only(2.0);
+        assert!(
+            core.requests_awaiting_swap_in.is_empty(),
+            "G2→G1 completion should requeue the request before admission"
+        );
+
+        let admitted = core.execute_pass(&mut collector, 2.0);
+        assert_eq!(admitted.admissions.len(), 1);
+        assert_eq!(admitted.admissions[0].reused_input_tokens, 4);
     }
 
     /// A partial G2 swap-in is scheduled from the first G1 miss onward. The

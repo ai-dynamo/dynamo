@@ -91,7 +91,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: auto
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.0.2"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 ```bash
@@ -105,7 +105,7 @@ kubectl get dgdr qwen3-quickstart -n $NAMESPACE -w
 ```
 
 > [!NOTE]
-> Dynamo supports vLLM, TensorRT-LLM, and SGLang backends. Setting `backend: auto` lets the profiler choose the best one for your model and hardware. See the [backends guide](../backends/) for details.
+> Dynamo supports vLLM, TensorRT-LLM, and SGLang backends. Setting `backend: auto` lets the profiler choose the best one for your model and hardware. See the [vLLM backend guide](../backends/vllm/README.md) for a backend guide example.
 
 
 ## Send a Request

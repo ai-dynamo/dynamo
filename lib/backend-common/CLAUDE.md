@@ -12,13 +12,13 @@ Python-shaped request/response wrappers.
 ## Engine Lifecycle
 
 ```
-construct  ->  start(worker_id)  ->  generate() / abort()  ->  drain()  ->  cleanup()
-    |                |                       |                    |            |
-parse args,    start engine,           serve requests       pre-cleanup    shutdown,
-return engine  return metadata         (concurrent)         drain          release
+construct -> start(worker_id) -> setup_metrics -> generate/abort -> drain -> cleanup
+    |               |                  |                |             |        |
+parse args,    start engine,    wire Prometheus    serve requests pre-cleanup shutdown,
+return engine  return metadata  (optional)         (concurrent)   drain       release
 ```
 
-The trait has five methods. `from_args` is NOT on the trait — each
+The trait has six methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
@@ -29,6 +29,21 @@ opt-out and lets `run.rs` stay non-generic.
   the lifecycle. `worker_id` is an opaque runtime-allocated identifier;
   most engines ignore it. Backends needing a stable cluster-wide key
   (e.g. TRT-LLM's `disagg_machine_id` snowflake) derive from it.
+- `setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError>` —
+  optional, default returns empty `MetricsBindings`. Single hook for
+  both foreign-registry expfmt bridging (side effect on `ctx.metrics`)
+  AND the engine-side `dynamo_component_*` declaration: returns
+  `dp_ranks` (which ranks the engine will publish snapshots for) plus
+  an optional `on_publisher_ready` closure the framework invokes with
+  the constructed `SnapshotPublisher`. See **KV-aware Routing &
+  Component Metrics** below for the push contract.
+
+  Framework-owned lifecycle gauges
+  (`dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds}`)
+  are emitted by `Worker` independent of this method. The Worker
+  constructs `LifecycleGauges` after `engine.start()` succeeds, seeds
+  `model_load_time` with the elapsed `start()` time, and observes
+  cleanup/drain during shutdown.
 - `generate(&self, request, ctx: GenerateContext) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>`
   — streaming inference. `GenerateContext` derefs to
   `dyn AsyncEngineContext` (`ctx.stopped()`, `ctx.is_stopped()`,
@@ -260,6 +275,103 @@ Mid-stream errors have two equivalent terminal forms:
   * **String**: yield `Ok(LLMEngineOutput::error(msg))`. Convenient for
     pure message-level failures. Loses the typed `BackendError` variant.
 
+## KV-aware Routing & Component Metrics
+
+Two engine-declared surfaces; both are **push-driven** — engines call into
+framework-owned publishers from their natural producer thread. No tokio
+poll task, no snapshot-fn latency ceiling, no GIL on the framework side.
+
+- `kv_event_sources() -> Vec<KvEventSource>` — KV cache event
+  descriptors, one per data-parallel rank. Drives the router's prefix
+  cache.
+- `setup_metrics(ctx) -> MetricsBindings` — declares the engine's
+  `dp_ranks` and (optionally) an `on_publisher_ready` closure that
+  receives the constructed `SnapshotPublisher`.
+
+`Worker` calls both once after `start()` succeeds, constructs the
+publishers itself, and hands them back via the engine's `on_ready`
+closures. Engines never instantiate publishers. On shutdown, `Worker`
+drops the handles while NATS is still alive; engines stop their
+producer threads in `cleanup()`.
+
+### `KvEventSource` flavors
+
+Pick based on how the engine's KV event API is shaped:
+
+- `Zmq { endpoint, topic, dp_rank }` — engine already publishes to a
+  ZMQ PUB socket. `Worker` subscribes directly.
+- `Push { on_ready, dp_rank }` — engine has a programmatic event
+  surface. `Worker` constructs the publisher, then calls
+  `on_ready(publisher)` once during setup. The engine stashes the
+  publisher and drives `publish_stored` / `publish_removed` from its
+  own thread. The engine **must** stop that thread in `cleanup()`.
+
+### `SnapshotPublisher` (mirrors `KvEventSource::Push`)
+
+`setup_metrics(ctx)` returns:
+
+```rust
+pub struct MetricsBindings {
+    pub dp_ranks: Vec<u32>,
+    pub on_publisher_ready: Option<OnSnapshotPublisherReady>,
+}
+```
+
+When `dp_ranks` is non-empty, `Worker`:
+
+1. Constructs `ComponentGauges::new(metrics, &dp_ranks)` — the
+   constructor seeds each rank's child gauges at zero so empty
+   `GaugeVec` families still render in `/metrics` (the prometheus
+   text encoder skips families with no children).
+2. Constructs one `WorkerMetricsPublisher` per rank (NATS endpoint
+   for the router's `kv_used_blocks` load signal).
+3. Wraps both in an `Arc<SnapshotPublisher>` and invokes
+   `on_publisher_ready(publisher)`.
+
+The engine stashes the `Arc<SnapshotPublisher>` and calls
+`publisher.publish(dp_rank, ComponentSnapshot { … })` from its natural
+producer thread (engine iteration callback, stat-logger, ZMQ recv,
+etc.) on every tick. `publish` is the hot path: one atomic gauge
+write per field plus one NATS publish. No allocation, no GIL.
+
+```rust
+impl SnapshotPublisher {
+    pub fn publish(&self, dp_rank: u32, snap: ComponentSnapshot);
+}
+```
+
+Single source of truth for both consumers — the `/metrics` scrape
+(gauges) and the KV router (NATS `kv_used_blocks` signal) see the
+same `ComponentSnapshot`.
+
+`ComponentSnapshot.kv_cache_hit_rate` is tri-state: `None` means "no
+data yet" or "no prefix cache" — the gauge child is not written, so
+`/metrics` omits it. `0.0` is a legitimate zero-hit measurement and
+DOES write.
+
+### PyO3 bridge
+
+`lib/bindings/python/rust/backend.rs` implements `setup_metrics` for
+Python engines. It calls Python's `component_metrics_dp_ranks()` to
+get the rank list, then — if non-empty — builds an
+`on_publisher_ready` closure that calls Python's
+`attach_snapshot_publisher(publisher)` under the GIL. Python engines
+expose two methods, mirroring `KvEventSource::Push` shape:
+
+- `component_metrics_dp_ranks() -> list[int]`
+- `attach_snapshot_publisher(publisher: SnapshotPublisher) -> None`
+
+Per-rank engine gauges always emit (seeded at construction) when
+`dp_ranks` is non-empty — operators see baseline gauge lines even
+before the first push.
+
+### Conformance
+
+The kit asserts `kv_event_sources()` and `component_metrics_dp_ranks()`
+are idempotent across calls (rank sets stable for the engine's
+lifetime) and that `on_publisher_ready` runs at most once per
+`setup_metrics` invocation. See `lib/backend-common/src/testing.rs`.
+
 ## Logging
 
 Keep logging standardized across all Rust engines. When adding or
@@ -274,6 +386,37 @@ Level standards:
 - `tracing::debug!` for per-request events (request abort, cancellation).
 - `tracing::warn!` for recoverable problems.
 - `tracing::error!` only for unrecoverable failures.
+
+## Tracing / OpenTelemetry
+
+Rust engines use the `tracing` crate directly for static-name spans —
+spans opened inside `generate()` nest under the framework's `handle_payload`
+parent automatically (set up by the runtime at
+`lib/runtime/src/pipeline/network/ingress/push_endpoint.rs`). When
+`OTEL_EXPORT_ENABLED=1` (see `lib/runtime/src/logging.rs`), these spans export
+as OTLP via the `tracing-opentelemetry` layer; otherwise they remain local.
+
+For **dynamic** span names — names computed at runtime, which `tracing::info_span!`
+can't handle — use `dynamo_backend_common::telemetry::start_span(name)`. It
+goes through OTel directly while still inheriting the bridged parent context;
+the returned `SpanGuard` closes on drop. Both paths land in the same trace
+tree.
+
+Two patterns worth knowing:
+
+- Prefer `.instrument(span)` on futures / streams over
+  `let _g = span.entered();`. The `Entered` guard pins the span to the
+  current thread; holding it across an `.await` either fails to compile
+  or — under `tokio`'s single-threaded scheduler — leaves the span entered
+  on whatever task polls you next.
+- `tokio::spawn(fut.in_current_span())` — bare `tokio::spawn` does NOT inherit
+  the current span, so logs and events from the spawned task lose the
+  trace_id.
+
+For outbound calls that need to carry trace context (HTTP / TCP / custom
+transports), use `dynamo_runtime::logging::inject_trace_headers_into_map(...)`
+or `get_distributed_tracing_context()`. NATS egress is auto-injected by the
+runtime; engines do nothing.
 
 ## Testing
 
@@ -323,7 +466,10 @@ Also available: `testing::mock_context()` and
 
 | File | What it does |
 |------|-------------|
-| `engine.rs` | `LLMEngine` trait, `EngineConfig`, `GenerateContext`, `chunk::token`, `LLMEngineOutputExt` setters, `usage()` helper. Re-exports `PreprocessedRequest` / `LLMEngineOutput` / `FinishReason` / `PrefillResult` / `BootstrapInfo` / etc. |
+| `engine.rs` | `LLMEngine` trait, `EngineConfig`, `GenerateContext`, `MetricsBindings`, `OnSnapshotPublisherReady`, `ComponentSnapshot`, `chunk::token`, `LLMEngineOutputExt` setters, `usage()` helper. Re-exports `PreprocessedRequest` / `LLMEngineOutput` / `FinishReason` / `PrefillResult` / `BootstrapInfo` / etc. |
+| `metrics.rs` | `EngineMetrics` (capability handle passed to `setup_metrics` — `add_expfmt_callback` for foreign registries + precomputed `auto_labels` for FFI). `LifecycleGauges` (framework-owned `cleanup_time` / `drain_time` / `model_load_time`). `ComponentGauges` (per-rank `total_blocks` / `gpu_cache_usage_percent` / `kv_cache_hit_rate`; seeded at construction). |
+| `snapshot_publisher.rs` | `SnapshotPublisher` — single push surface. `publish(dp_rank, ComponentSnapshot)` fans out inline to `ComponentGauges` and per-rank `WorkerMetricsPublisher`. |
+| `publisher.rs` | `setup_publishers` — constructs `KvEventPublisher`s + `SnapshotPublisher` from engine bindings; owned by `Worker` until shutdown. |
 | `worker.rs` | `Worker` — runtime lifecycle: create `DistributedRuntime`, register model (with `disaggregation_mode` adjustments), serve endpoint, orchestrate drain + cleanup. `WorkerConfig` lives here. |
 | `adapter.rs` | `EngineAdapter` — bridges `LLMEngine` to `AsyncEngine`. Cancellation monitor + debug-build validator wrapping. |
 | `run.rs` | `pub fn run(engine, config)` — entry point used by all per-backend `main.rs`. Non-generic. |

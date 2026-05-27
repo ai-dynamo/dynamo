@@ -15,6 +15,29 @@ use super::super::ToolDefinition;
 use super::super::config::Glm47ParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
+/// Render a tool_call block snippet for logs. Bounded so a huge truncated
+/// argument body doesn't blow up the log line; control chars are escaped
+/// because raw newlines/tabs make the warning unreadable in grep/jq.
+fn truncate_for_log(s: &str) -> String {
+    const MAX: usize = 200;
+    let mut out = String::with_capacity(MAX.min(s.len()) + 16);
+    let mut bytes = 0usize;
+    for ch in s.chars() {
+        if bytes >= MAX {
+            out.push('…');
+            break;
+        }
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+        bytes += ch.len_utf8();
+    }
+    out
+}
+
 /// Check if a chunk contains the start of a GLM-4.7 tool call.
 /// Format: <tool_call>function_name<arg_key>...</arg_key><arg_value>...</arg_value></tool_call>
 pub fn detect_tool_call_start_glm47(chunk: &str, config: &Glm47ParserConfig) -> bool {
@@ -107,21 +130,36 @@ fn extract_tool_calls(
         if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
             let abs_start = cursor + start_pos;
 
-            // Add text before tool call to normal parts
-            normal_parts.push(&text[cursor..abs_start]);
+            // Only surface normal text that precedes the first parsed call.
+            // Text after any </tool_call> is not response content; matches the
+            // convention ported into the generic XML parser by PR #9350 and
+            // vLLM's glm47_moe_tool_parser.
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..abs_start]);
+            }
 
             // Find the corresponding end token
             if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
                 let abs_end = abs_start + end_pos + end_token.len();
                 let block = &text[abs_start..abs_end];
 
-                // Parse this tool call block; preserve unparseable blocks as
-                // normal text so model output is never silently dropped.
+                // Parse this tool call block. Unparseable blocks (malformed
+                // <tool_call>...</tool_call> markup the parser can't extract)
+                // are dropped — emitting the raw markup as normal_text leaks
+                // wire tags downstream. vLLM and SGLang both drop on this
+                // path; aligning Dynamo to that contract.
                 match parse_tool_call_block(block, config, tools) {
                     Ok(parsed_call) => calls.push(parsed_call),
                     Err(e) => {
-                        warn!("Failed to parse GLM-4.7 tool call block: {e}");
-                        normal_parts.push(block);
+                        warn!(
+                            reason = %e,
+                            why = "block has open + close fence but content failed to parse \
+                                   as a GLM-4.7 tool call (e.g. empty function name, \
+                                   missing <arg_key>, malformed args); dropping to avoid \
+                                   leaking wire tags through normal_text",
+                            dropped_block = %truncate_for_log(block),
+                            "GLM-4.7 parser dropping unparseable tool_call block"
+                        );
                     }
                 }
 
@@ -142,21 +180,55 @@ fn extract_tool_calls(
                             continue;
                         }
                         Err(e) => {
-                            warn!("Failed to parse GLM-4.7 tool call block (no end token): {e}");
+                            warn!(
+                                reason = %e,
+                                why = "EOF recovery enabled and <arg_key> opener present, \
+                                       but parse_tool_call_block failed on the truncated \
+                                       tail; dropping to avoid leaking wire tags through \
+                                       normal_text",
+                                dropped_block = %truncate_for_log(block),
+                                "GLM-4.7 parser dropping truncated tool_call block (recovery attempt failed)"
+                            );
                         }
                     }
+                } else {
+                    // Either recovery disabled (production default for GLM-4.7)
+                    // or no <arg_key> in the tail (so this is plausibly not a
+                    // real tool call at all, just a stray <tool_call> token).
+                    let reason = if !config.allow_eof_recovery {
+                        "allow_eof_recovery=false (production default for GLM-4.7 to match \
+                         vLLM/SGLang on truncated tool calls)"
+                    } else {
+                        "no <arg_key> in the tail after the <tool_call> start fence, so the \
+                         block does not look like a structurally-real GLM-4.7 tool call"
+                    };
+                    warn!(
+                        why = %reason,
+                        dropped_block = %truncate_for_log(block),
+                        "GLM-4.7 parser dropping truncated tool_call block (no end fence)"
+                    );
                 }
-                normal_parts.push(&text[abs_start..]);
+                // Drop the truncated/unrecoverable tail. Emitting the raw
+                // <tool_call>...<arg_key>...<arg_value>... prefix as
+                // normal_text would leak wire tags into message.content; vLLM
+                // strips the same way on truncation.
                 break;
             }
         } else {
             // No more tool calls
-            normal_parts.push(&text[cursor..]);
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..]);
+            }
             break;
         }
     }
 
-    let normal_text = normal_parts.join("").trim().to_string();
+    let normal_text = normal_parts.join("");
+    let normal_text = if calls.is_empty() {
+        normal_text.trim().to_string()
+    } else {
+        normal_text
+    };
     Ok((normal_text, calls))
 }
 
@@ -351,7 +423,8 @@ mod tests {
         assert!(!detect_tool_call_start_glm47("Just normal text", &config));
     }
 
-    #[test] // PARSER.batch.1
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1 in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1
     fn test_parse_simple_tool_call() {
         let config = get_test_config();
         let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call>";
@@ -370,7 +443,8 @@ mod tests {
         assert_eq!(normal_text, Some("".to_string()));
     }
 
-    #[test] // PARSER.batch.1, PARSER.batch.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1, TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.7.yaml, tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1, TOOLCALLING.batch.7
     fn test_parse_tool_call_with_multiple_args() {
         let config = get_test_config();
         let message = "<tool_call>book_flight<arg_key>from</arg_key><arg_value>NYC</arg_value><arg_key>to</arg_key><arg_value>LAX</arg_value><arg_key>date</arg_key><arg_value>2026-03-15</arg_value></tool_call>";
@@ -387,7 +461,8 @@ mod tests {
         assert_eq!(args.get("date").unwrap().as_str().unwrap(), "2026-03-15");
     }
 
-    #[test] // PARSER.batch.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_tool_call_with_json_value() {
         let config = get_test_config();
         let message = r#"<tool_call>search<arg_key>filters</arg_key><arg_value>{"category": "books", "price_max": 50}</arg_value></tool_call>"#;
@@ -403,7 +478,8 @@ mod tests {
         assert!(filters.is_object());
     }
 
-    #[test] // PARSER.batch.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2
     fn test_parse_multiple_tool_calls() {
         let config = get_test_config();
         let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_time<arg_key>timezone</arg_key><arg_value>EST</arg_value></tool_call>";
@@ -415,7 +491,8 @@ mod tests {
         assert_eq!(calls[1].function.name, "get_time");
     }
 
-    #[test] // PARSER.batch.8
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.8
     fn test_parse_with_normal_text() {
         let config = get_test_config();
         let message = "I'll check the weather for you. <tool_call>get_weather<arg_key>location</arg_key><arg_value>Paris</arg_value></tool_call>";
@@ -426,11 +503,12 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(
             normal_text,
-            Some("I'll check the weather for you.".to_string())
+            Some("I'll check the weather for you. ".to_string())
         );
     }
 
-    #[test] // PARSER.batch.6
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.6.yaml.
+    #[test] // TOOLCALLING.batch.6
     fn test_parse_tool_call_no_args() {
         let config = get_test_config();
         let message = "<tool_call>get_current_time</tool_call>";
@@ -497,7 +575,8 @@ mod tests {
         );
     }
 
-    #[test] // PARSER.batch.2 + PARSER.batch.8 — bug report repro: text + parallel calls
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.c, TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.2 + TOOLCALLING.batch.8 — bug report repro: text + parallel calls
     fn test_parse_text_then_parallel_calls() {
         let config = get_test_config();
         let message = "I'll check the weather for both cities at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value></tool_call>";
@@ -525,7 +604,8 @@ mod tests {
         );
     }
 
-    #[test] // PARSER.batch.7, PARSER.fmt.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.b in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7, TOOLCALLING.fmt.2
     fn test_parse_multiline_arg_value() {
         let config = get_test_config();
         let message = "<tool_call>write_file<arg_key>path</arg_key><arg_value>/tmp/hello.py</arg_value><arg_key>content</arg_key><arg_value>#!/usr/bin/env python3\nprint(\"Hello, World!\")\n</arg_value></tool_call>";
@@ -546,7 +626,8 @@ mod tests {
         assert!(content.contains("print(\"Hello, World!\")"));
     }
 
-    #[test] // PARSER.batch.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_malformed_tool_call() {
         let config = get_test_config();
 
@@ -563,7 +644,8 @@ mod tests {
     // when the inner arg pairs are well-formed, treat EOF as the end token
     // and extract the call. The arg_key opener gates recovery so plain text
     // that happens to start with `<tool_call>` is still preserved verbatim.
-    #[test] // PARSER.batch.5
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5
     fn test_parse_no_end_tag_complete_args_recovers() {
         let config = Glm47ParserConfig {
             allow_eof_recovery: true,
@@ -579,7 +661,8 @@ mod tests {
         assert_eq!(args["location"], "NYC");
     }
 
-    #[test] // PARSER.batch.5
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b, TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5
     fn test_parse_no_end_tag_multiple_calls_recovers() {
         let config = Glm47ParserConfig {
             allow_eof_recovery: true,
@@ -594,25 +677,36 @@ mod tests {
         assert_eq!(calls[1].function.name, "get_time");
     }
 
-    #[test] // PARSER.batch.4, PARSER.batch.8
-    fn test_unparseable_block_preserved_as_normal_text() {
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.c, TOOLCALLING.batch.13 in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.13.yaml, tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.4, TOOLCALLING.batch.8
+    fn test_unparseable_block_dropped_no_tag_leak() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
             name: "get_weather".to_string(),
             parameters: None,
+            strict: None,
         }];
 
-        // Tool call block references a function not in the tools list
+        // Tool call block references a function not in the tools list — the
+        // whole block (including <tool_call>...<arg_key>...<arg_value>... wire
+        // markup) must be dropped, not leaked through normal_text.
         let message = "Here is the result: <tool_call>unknown_func<arg_key>x</arg_key><arg_value>1</arg_value></tool_call> done";
         let (calls, normal_text) =
             try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
 
         assert_eq!(calls.len(), 0);
-        // The unparseable block should be preserved in normal text, not dropped
         let text = normal_text.unwrap();
         assert!(
-            text.contains("unknown_func"),
-            "Unparseable block should be in normal text, got: {text}"
+            !text.contains("unknown_func"),
+            "Unparseable block must be dropped to avoid tag leakage, got: {text}"
+        );
+        assert!(
+            !text.contains("<tool_call>") && !text.contains("<arg_key>"),
+            "Wire-format tags must not leak into normal_text, got: {text}"
+        );
+        assert!(
+            text.contains("Here is the result:") && text.contains("done"),
+            "Surrounding prose must be preserved, got: {text}"
         );
     }
 
@@ -646,6 +740,7 @@ mod tests {
                     "label": {"type": "string"}
                 }
             })),
+            strict: None,
         }];
 
         let message = "<tool_call>set_temperature<arg_key>degrees</arg_key><arg_value>72.5</arg_value><arg_key>enabled</arg_key><arg_value>true</arg_value><arg_key>count</arg_key><arg_value>3</arg_value><arg_key>label</arg_key><arg_value>warm</arg_value></tool_call>";
@@ -677,6 +772,7 @@ mod tests {
                     "tags": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
 
         // Model emits comma-separated values without JSON brackets
@@ -703,6 +799,7 @@ mod tests {
                     "ids": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
 
         // Model emits proper JSON array
@@ -727,6 +824,7 @@ mod tests {
                     "count": {"type": "integer"}
                 }
             })),
+            strict: None,
         }];
 
         // "not_a_number" can't be parsed as integer — should fall back to string
@@ -755,10 +853,11 @@ mod tests {
         assert_eq!(calls.len(), 1);
     }
 
-    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
+    /// TOOLCALLING.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls; normal_text
     /// collapses to the empty string.
-    #[test] // PARSER.batch.9
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.9
     fn test_parse_glm47_empty_and_whitespace_inputs() {
         let config = get_test_config();
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -777,10 +876,11 @@ mod tests {
         }
     }
 
-    /// PARSER.batch.10 — duplicate calls (same function name twice in one section).
+    /// TOOLCALLING.batch.10 — duplicate calls (same function name twice in one section).
     /// Universal gap noted in the test taxonomy; pin parser-level behavior —
     /// both calls returned with distinct ids.
-    #[test] // PARSER.batch.10
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.10 in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.10
     fn test_parse_glm47_duplicate_calls_same_name() {
         let config = get_test_config();
         let input = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>LA</arg_value></tool_call>";

@@ -297,9 +297,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                # TODO: re-enable GPU-parallel scheduling with
-                # profiled_vram_gib=12.0 once this has a bounded --kv-bytes profile.
                 timeout_s=300,
+                profiled_vram_gib=12.0,
+                requested_vllm_kv_cache_bytes=922_354_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
@@ -334,8 +334,22 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # workers, one per GPU on the gpu_2 runner (no SINGLE_GPU
             # packing — 7B × 2 would exceed 24 GiB on a single card). Each
             # worker peaks ~19 GiB; the 24 GiB L4 tier has headroom.
+            #
+            # Skipped: LLaVA-1.5 on vLLM 0.20 is flaky — the model
+            # degenerates into "No." / newline-padded output even at
+            # temperature=0 (see PR #9336 for the e_pd manifestation
+            # and the comment block above on color-naming variance).
+            # The agg_router routing path is already covered by the
+            # Qwen3-VL-2B / Qwen2.5-VL-3B / Qwen2-VL-2B / Phi-3-vision
+            # profiles above without the LLaVA flake.
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[
+                    pytest.mark.skip(
+                        reason="LLaVA-1.5 flake on vLLM 0.20 (see PR #9336); "
+                        "agg_router routing path is covered by Qwen and Phi-3 profiles"
+                    ),
+                    pytest.mark.post_merge,
+                ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
                 profiled_vram_gib=19.2,
@@ -437,12 +451,23 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     # LLaVA-NeXT covers a separate lightseek processor (LlavaNextProcessor,
     # anyres multi-crop) vs LLaVA-1.5's plain LlavaProcessor. Same gpu_2
     # multi-GPU layout as LLaVA-1.5 agg_router above; ~14 GiB / GPU.
+    #
+    # Skipped: LLaVA-NeXT inherits the same LLaVA-on-vLLM-0.20 output
+    # flake as LLaVA-1.5 (see PR #9336); the agg_router routing path is
+    # covered by the Qwen and Phi-3 profiles above.
     MultimodalModelProfile(
         name="llava-hf/llava-v1.6-mistral-7b-hf",
         short_name="llava-next-mistral-7b",
         topologies={
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[
+                    pytest.mark.skip(
+                        reason="LLaVA-NeXT inherits LLaVA-1.5 flake on vLLM 0.20 "
+                        "(see PR #9336); agg_router routing path is covered by "
+                        "Qwen and Phi-3 profiles"
+                    ),
+                    pytest.mark.post_merge,
+                ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
                 profiled_vram_gib=19.2,

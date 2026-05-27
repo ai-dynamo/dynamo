@@ -41,7 +41,7 @@ To build KVBM from source, see the detailed instructions in the [KVBM bindings R
 
 ```bash
 # Start up etcd for KVBM leader/worker registration and discovery
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 Pick one of the following to get a Dynamo vLLM container with KVBM built in. The subsequent serving commands are the same either way.
@@ -110,7 +110,7 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 
 ```bash
 # Start up etcd for KVBM leader/worker registration and discovery
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built in. The subsequent serving commands are the same either way.
@@ -213,7 +213,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-> **Learn more:** See the [SGLang HiCache Integration Guide](../../integrations/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
+> **Learn more:** See the [SGLang HiCache Integration Guide](../../backends/sglang/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
 
 ## Disaggregated Serving with KVBM
 
@@ -304,7 +304,7 @@ When disabled (default), each GPU loads KV blocks independently. Set `DYN_KVBM_N
 
 ```bash
 # Start basic services (etcd & natsd), along with Prometheus and Grafana
-docker compose -f deploy/docker-observability.yml up -d
+docker compose -f dev/docker-observability.yml up -d
 ```
 
 ### Enable Metrics for vLLM
@@ -494,4 +494,4 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connect
 - [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache-integration.md)
 - [FlexKV Integration](../../integrations/flexkv-integration.md)
-- [SGLang HiCache](../../integrations/sglang-hicache.md)
+- [SGLang HiCache](../../backends/sglang/sglang-hicache.md)

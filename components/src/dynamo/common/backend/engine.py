@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
 
+from .publisher import KvEventSource
+
 if TYPE_CHECKING:
+    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
+
     from .worker import WorkerConfig
 
 
@@ -69,6 +73,16 @@ class EngineConfig:
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
+    # Number of data-parallel ranks this worker hosts (defaults to 1).
+    # Engines with attention-DP set this from their engine-side count
+    # (e.g. TRT-LLM's `get_attention_dp_size()`).
+    data_parallel_size: Optional[int] = None
+    # Global index of the first DP rank this worker hosts (defaults to 0).
+    # Non-zero only under multi-worker DP layouts where each worker owns a
+    # sub-range — vLLM hybrid/external LB, SGLang DP-attention across
+    # multiple nodes. The router enumerates ranks
+    # `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    data_parallel_start_rank: Optional[int] = None
     # Bootstrap address advertised to decode peers. Only meaningful for
     # backends with a Dynamo-level host/port handshake (today: SGLang).
     # Backends whose KV transport is internal — TRT-LLM, vLLM
@@ -82,6 +96,7 @@ class EngineConfig:
     # decode concurrent with prefill).
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
+    runtime_data: Optional[dict[str, Any]] = None
 
 
 class LLMEngine(ABC):
@@ -153,6 +168,10 @@ class LLMEngine(ABC):
         Called by Worker when the client disconnects or
         the request is cancelled.  Override to release engine resources
         (KV cache, scheduler slots, etc.).
+
+        ``context.metadata`` in this callback reflects the original
+        propagated request metadata snapshot. Mutations made to
+        ``context.metadata`` during :meth:`generate` are not visible here.
         """
 
     async def drain(self) -> None:
@@ -193,3 +212,53 @@ class LLMEngine(ABC):
         ``cleanup()`` call after a successful first is a safe no-op.
         """
         ...
+
+    async def kv_event_sources(self) -> list[KvEventSource]:
+        """KV event sources, one per data-parallel rank. Default opts out
+        of KV-aware routing. ``Worker`` calls once after :meth:`start`."""
+        return []
+
+    async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        """Bridge a vendor-prefixed Prometheus registry into the runtime's
+        ``/metrics`` output via :func:`metrics.add_expfmt_callback`. Default
+        no-op. See :mod:`dynamo.common.backend.metrics` for helpers. Do not
+        retain ``metrics`` past return.
+
+        Framework-owned lifecycle + per-rank gauges
+        (``dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds,total_blocks,gpu_cache_usage_percent,kv_cache_hit_rate}``)
+        are owned and registered by the framework Rust-side — they do NOT
+        require the engine to implement this method."""
+
+    def component_metrics_dp_ranks(self) -> list[int]:
+        """Declare the data-parallel ranks this engine publishes
+        per-rank snapshots for. Empty (default) opts out.
+
+        Stable for the engine's lifetime. ``Worker`` constructs a
+        :class:`SnapshotPublisher` sized to these ranks and hands it
+        back via :meth:`attach_snapshot_publisher`. The engine then
+        calls ``publisher.publish(rank, snap)`` from its stat-logger
+        thread — event-driven, no polling.
+
+        ``ComponentSnapshot.kv_cache_hit_rate`` is tri-state:
+        ``None`` means "no data yet" or "no prefix cache" (gauge
+        skipped), ``0.0`` is a legitimate measurement (zero hits)."""
+        return []
+
+    def attach_snapshot_publisher(self, publisher: Any) -> None:
+        """Framework hands the engine the Rust-owned
+        :class:`SnapshotPublisher` once, after ``setup_metrics``
+        constructed it from :meth:`component_metrics_dp_ranks`. Stash
+        the reference; call ``publisher.publish(rank, snap)`` from your
+        stat-logger thereafter.
+
+        Only invoked when :meth:`component_metrics_dp_ranks` returns
+        non-empty. Default is no-op so engines that opt out don't need
+        to override."""
+
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        """Canary payload the runtime sends through :meth:`generate` when
+        the endpoint is idle. Return ``None`` (default) to disable active
+        probing. ``Worker`` calls this once after :meth:`start` and resolves
+        ``DYN_HEALTH_CHECK_PAYLOAD`` / ``--health-check-payload`` overrides
+        on top."""
+        return None
