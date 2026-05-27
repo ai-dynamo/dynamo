@@ -20,11 +20,11 @@ uv pip install lmcache
 
 LMCache only publishes x86_64 manylinux wheels linked against CUDA 12. For aarch64 hosts, or hosts running PyTorch built against a different CUDA major version, build LMCache from source against your matching torch + CUDA stack — see the official [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html).
 
-LMCacheMPConnector is currently incompatible with vLLM 0.20.0.
-vLLM 0.20.0 uses new KV formats (6, 7) not supported in LMCache’s MP path.
-This causes: `RuntimeError: Unsupported GPUKVFormat: 7` and failed cache retrievals.
-Status: Fixed in LMCache main, not yet released.
-Workarounds: Build LMCache from source with the fix until this [PR](https://github.com/LMCache/LMCache/pull/3282) is a part of the release.
+> **Compatibility note**
+>
+> `LMCacheMPConnector` needs the fix from [LMCache#3282](https://github.com/LMCache/LMCache/pull/3282), which is on LMCache `main` but not yet released. Without it, the MP path fails on vLLM ≥ 0.20.0 (including the `vllm==0.21.0` Dynamo currently pins) with `RuntimeError: Unsupported GPUKVFormat: 7` — vLLM 0.20+ uses GPU KV formats 6 / 7 that the MP path doesn't yet handle.
+>
+> Until the next LMCache release, build LMCache from source against that PR.
 
 ## Aggregated Serving
 
