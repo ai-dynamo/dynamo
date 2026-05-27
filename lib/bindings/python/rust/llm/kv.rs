@@ -1129,6 +1129,7 @@ impl KvRouter {
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
+                    false,
                     lora_name.clone(),
                     0.0,
                     None,

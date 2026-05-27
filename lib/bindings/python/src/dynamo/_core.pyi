@@ -78,6 +78,32 @@ async def parse_tool_calls_stream(
     """
     ...
 
+def parse_reasoning_batch(
+    parser_name: str,
+    message: str,
+    token_ids: Optional[List[int]] = None,
+    in_reasoning: bool = False,
+) -> str:
+    """Parse reasoning from a complete model output string using the specified parser.
+
+    Returns:
+        JSON-serialized string `{"reasoning_text": str, "normal_text": str}`.
+    """
+    ...
+
+def parse_reasoning_stream(
+    parser_name: str,
+    chunks: List[str],
+    token_chunks: Optional[List[List[int]]] = None,
+    in_reasoning: bool = False,
+) -> str:
+    """Parse reasoning from streaming chunks using one stateful parser instance.
+
+    Returns:
+        JSON-serialized string with accumulated `reasoning_text` and `normal_text`.
+    """
+    ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
@@ -97,6 +123,9 @@ class DistributedRuntime:
         event_loop: Any,
         discovery_backend: str,
         request_plane: str,
+        enable_nats: Optional[bool] = None,
+        *,
+        event_plane: Optional[str] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -105,6 +134,8 @@ class DistributedRuntime:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp" or "nats")
+            enable_nats: Deprecated; NATS enablement is inferred from runtime config
+            event_plane: Event plane transport ("nats" or "zmq")
         """
         ...
 
@@ -651,6 +682,10 @@ class ModelRuntimeConfig:
     taints: Set[str]
     stable_routing_id: str | None
     runtime_data: dict[str, Any]
+    topology_domains: dict[str, str]
+    kv_transfer_domain: str | None
+    kv_transfer_enforcement: str | None
+    kv_transfer_preferred_weight: float | None
     tensor_model_config: Any | None
     bootstrap_host: str | None
     bootstrap_port: int | None
@@ -663,6 +698,18 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
+        ...
+
+    def set_structural_tag_mode(self, mode: str) -> None:
+        """Set structural tag mode ("off" or "on")."""
+        ...
+
+    def set_structural_tag_scope(self, scope: str) -> None:
+        """Set structural tag scope ("auto" or "always")."""
+        ...
+
+    def set_structural_tag_schema(self, schema: str) -> None:
+        """Set structural tag schema mode ("auto" or "strict")."""
         ...
 
     def set_disaggregated_endpoint(
@@ -2693,6 +2740,10 @@ class backend:
             metrics_labels: List[Tuple[str, str]] = ...,
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
+            health_check_payload: Optional[Dict[str, Any]] = None,
+            structural_tag_mode: str = ...,
+            structural_tag_scope: str = ...,
+            structural_tag_schema: str = ...,
         ) -> None: ...
 
     class Worker:

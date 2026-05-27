@@ -25,6 +25,10 @@ use dynamo_backend_common::{
     MetricsCtx, OnPublisherReady, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
+use dynamo_llm::local_model::runtime_config::{
+    StructuralTagMode as RsStructuralTagMode, StructuralTagSchemaMode as RsStructuralTagSchemaMode,
+    StructuralTagScope as RsStructuralTagScope,
+};
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
@@ -51,6 +55,7 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Worker>()?;
     m.add_class::<PySnapshotPublisher>()?;
     m.add_class::<crate::prometheus_metrics::EngineMetrics>()?;
+    m.add("HEALTH_CHECK_KEY", dynamo_backend_common::HEALTH_CHECK_KEY)?;
     parent.add_submodule(&m)?;
     py.import("sys")?
         .getattr("modules")?
@@ -272,9 +277,14 @@ impl WorkerConfig {
         metrics_labels = Vec::new(),
         runtime = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
+        health_check_payload = None,
+        structural_tag_mode = "off".to_string(),
+        structural_tag_scope = "auto".to_string(),
+        structural_tag_schema = "auto".to_string(),
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         namespace: String,
         component: String,
         endpoint: String,
@@ -291,14 +301,65 @@ impl WorkerConfig {
         metrics_labels: Vec<(String, String)>,
         runtime: Option<RuntimeConfig>,
         disaggregation_mode: DisaggregationMode,
-    ) -> Self {
+        health_check_payload: Option<PyObject>,
+        structural_tag_mode: String,
+        structural_tag_scope: String,
+        structural_tag_schema: String,
+    ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
             ModelInput::Text => RsModelInput::Text,
             ModelInput::Tokens => RsModelInput::Tokens,
             ModelInput::Tensor => RsModelInput::Tensor,
         };
-        Self {
+        // Accept a Python dict or None; depythonize to serde_json::Value
+        // and require an object — engines branch on a dict marker, and the
+        // runtime canary registers a dict-shaped payload.
+        let health_check_payload = match health_check_payload {
+            Some(obj) if !obj.is_none(py) => {
+                let bound = obj.bind(py);
+                let value: serde_json::Value = depythonize(bound).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "health_check_payload must be a JSON-serializable dict: {e}"
+                    ))
+                })?;
+                if !value.is_object() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "health_check_payload must be a JSON object (dict)",
+                    ));
+                }
+                Some(value)
+            }
+            _ => None,
+        };
+        let st_mode = match structural_tag_mode.as_str() {
+            "off" => RsStructuralTagMode::Off,
+            "on" => RsStructuralTagMode::On,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid structural_tag_mode: {other}. Expected 'off' or 'on'."
+                )));
+            }
+        };
+        let st_scope = match structural_tag_scope.as_str() {
+            "auto" => RsStructuralTagScope::Auto,
+            "always" => RsStructuralTagScope::Always,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid structural_tag_scope: {other}. Expected 'auto' or 'always'."
+                )));
+            }
+        };
+        let st_schema = match structural_tag_schema.as_str() {
+            "auto" => RsStructuralTagSchemaMode::Auto,
+            "strict" => RsStructuralTagSchemaMode::Strict,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid structural_tag_schema: {other}. Expected 'auto' or 'strict'."
+                )));
+            }
+        };
+        Ok(Self {
             inner: RsWorkerConfig {
                 namespace,
                 component,
@@ -315,9 +376,13 @@ impl WorkerConfig {
                 enable_kv_routing,
                 metrics_labels,
                 disaggregation_mode: disaggregation_mode.into(),
+                health_check_payload,
+                structural_tag_mode: st_mode,
+                structural_tag_scope: st_scope,
+                structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
             },
-        }
+        })
     }
 }
 
@@ -788,6 +853,31 @@ impl LLMEngine for PyLLMEngine {
             .await
             .map_err(py_err_to_dynamo)?;
         Ok(())
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        let py_obj = self
+            .call_method0_async("health_check_payload")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        Python::with_gil(|py| -> PyResult<Option<serde_json::Value>> {
+            let bound = py_obj.bind(py);
+            if bound.is_none() {
+                return Ok(None);
+            }
+            let value: serde_json::Value = depythonize(bound).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "health_check_payload must return a JSON-serializable dict or None: {e}"
+                ))
+            })?;
+            if !value.is_object() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "health_check_payload must return a JSON object (dict) or None",
+                ));
+            }
+            Ok(Some(value))
+        })
+        .map_err(py_err_to_dynamo)
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<RsKvEventSource>, DynamoError> {

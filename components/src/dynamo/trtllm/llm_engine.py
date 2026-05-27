@@ -41,10 +41,15 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.health_check import (
+    bos_token_id_or,
+    build_health_check_payload,
+)
 from dynamo.common.backend.metrics import register_global_registry
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, PushSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
@@ -774,6 +779,23 @@ class TrtllmLLMEngine(LLMEngine):
         # vendor metrics independent of KV-event publishing.
         register_global_registry(metrics, engine_prefix="trtllm_")
 
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            logger.warning(
+                "DECODE worker: health-check canary disabled — synthesizing a "
+                "prefill_result that survives DisaggregatedParamsCodec.decode "
+                "is non-trivial. Endpoint readiness will rely on real request traffic."
+            )
+            return None
+        tokenizer = None
+        if self._engine is not None and self._engine._llm is not None:
+            tokenizer = self._engine.llm.tokenizer
+        # priority=1.0 is TRT-LLM's max — keeps the canary off the starvation path.
+        return build_health_check_payload(
+            bos_token_id=bos_token_id_or(tokenizer),
+            extras={"priority": 1.0},
+        )
+
     async def drain(self) -> None:
         """Prefill-only: poll until in-flight requests finish so a
         decode peer's NIXL pull doesn't see freed GPU memory (#7319).
@@ -858,7 +880,9 @@ class TrtllmLLMEngine(LLMEngine):
                 regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
-                structural_tag=guided_decoding.get("structural_tag"),
+                structural_tag=serialize_structural_tag(
+                    guided_decoding.get("structural_tag")
+                ),
             )
 
         n = overrides.get("n")

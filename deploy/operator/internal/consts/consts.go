@@ -42,6 +42,12 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that
+	// controls whether the mutating webhook injects an istio-proxy sidecar into
+	// a pod. Setting it to "false" opts the pod out of sidecar injection even
+	// when the namespace carries istio-injection=enabled.
+	KubeAnnotationIstioSidecarInject = "sidecar.istio.io/inject"
+
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
@@ -85,6 +91,17 @@ const (
 	EnvKvTransferDomain          = "DYN_KV_TRANSFER_DOMAIN"
 	EnvKvTransferEnforcement     = "DYN_KV_TRANSFER_ENFORCEMENT"
 	EnvKvTransferPreferredWeight = "DYN_KV_TRANSFER_PREFERRED_WEIGHT"
+
+	// Topology env vars (worker) injected when
+	// spec.experimental.kvTransferPolicy is configured.
+	EnvTopologyEnabled   = "DYN_TOPOLOGY_ENABLED"
+	EnvTopologyMountPath = "DYN_TOPOLOGY_MOUNT_PATH"
+
+	// KubeAnnotationTopologyLabelKey is set on worker pods when
+	// spec.experimental.kvTransferPolicy.labelKey is configured. The topology
+	// label controller watches for pods with this annotation and copies the
+	// corresponding node label onto the pod after scheduling.
+	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
 
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"

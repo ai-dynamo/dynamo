@@ -91,7 +91,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: auto
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.0.2"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 ```bash

@@ -32,8 +32,8 @@ pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
-    FinishReason, GenerateContext, KvEventPublisher, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, Metrics, MetricsBindings, MetricsCtx, OnPublisherReady,
+    FinishReason, GenerateContext, HEALTH_CHECK_KEY, KvEventPublisher, KvEventSource, LLMEngine,
+    LLMEngineOutput, LLMEngineOutputExt, Metrics, MetricsBindings, MetricsCtx, OnPublisherReady,
     OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions,
     StopConditions, chunk, usage,
 };

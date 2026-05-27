@@ -70,6 +70,13 @@ pub enum ModelManagerError {
     ModelAlreadyExists(String),
 }
 
+/// Sentinel label value used in frontend Prometheus metrics for requests
+/// that target an unregistered model. Bounds label cardinality so arbitrary
+/// client-supplied model strings cannot create unbounded Prometheus series.
+/// The `_model` suffix makes accidental collision with a real model name
+/// implausible while keeping the value readable in Grafana dropdowns.
+pub const UNKNOWN_METRIC_MODEL: &str = "unknown_model";
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -185,6 +192,45 @@ impl ModelManager {
     /// Check if any model (decode or prefill) is registered.
     pub fn has_model_any(&self, model: &str) -> bool {
         self.has_decode_model(model) || self.has_prefill_model(model)
+    }
+
+    /// Check if any engine (chat, completions, embeddings, images, etc.) is
+    /// registered under this exact model name. Case-sensitive. Distinct from
+    /// [`has_model_any`](Self::has_model_any), which checks specifically for a
+    /// decode or prefill engine.
+    pub fn has_registered_model(&self, model: &str) -> bool {
+        self.models.contains_key(model)
+    }
+
+    /// Resolve the model name to use in frontend Prometheus metrics.
+    ///
+    /// Returns the user-supplied name if a model is registered under it
+    /// (preserving original casing), otherwise returns the bounded sentinel
+    /// [`UNKNOWN_METRIC_MODEL`]. Callers should use this resolved name
+    /// for every metric child created before engine lookup so unknown-model
+    /// requests do not pollute Prometheus label cardinality.
+    pub fn metric_model_for<'a>(&self, model: &'a str) -> &'a str {
+        if self.has_registered_model(model) {
+            model
+        } else {
+            UNKNOWN_METRIC_MODEL
+        }
+    }
+
+    /// Whether `model` has at least one WorkerSet that can serve an inference
+    /// request right now. See [`Model::is_ready_to_serve`].
+    pub fn is_model_ready_to_serve(&self, model: &str) -> bool {
+        self.models
+            .get(model)
+            .is_some_and(|m| m.is_ready_to_serve())
+    }
+
+    /// Whether any registered model can serve at least one inference request
+    /// right now. See [`Model::is_ready_to_serve`].
+    pub fn has_any_ready_model(&self) -> bool {
+        self.models
+            .iter()
+            .any(|entry| entry.value().is_ready_to_serve())
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {
@@ -1186,6 +1232,35 @@ mod tests {
     }
 
     #[test]
+    fn test_metric_model_for_resolves_to_sentinel_for_unknown() {
+        let mm = ModelManager::new();
+        mm.add_worker_set(
+            "Llama-3.1-8B-Instruct",
+            "ns1",
+            make_worker_set("ns1", "abc"),
+        );
+
+        // Registered models preserve their original casing.
+        assert_eq!(
+            mm.metric_model_for("Llama-3.1-8B-Instruct"),
+            "Llama-3.1-8B-Instruct"
+        );
+
+        // Case mismatches and unregistered strings collapse to the sentinel so
+        // arbitrary client-supplied values cannot create unbounded Prometheus
+        // series.
+        assert_eq!(
+            mm.metric_model_for("llama-3.1-8b-instruct"),
+            UNKNOWN_METRIC_MODEL
+        );
+        assert_eq!(
+            mm.metric_model_for("nonexistent-model-1"),
+            UNKNOWN_METRIC_MODEL
+        );
+        assert_eq!(mm.metric_model_for(""), UNKNOWN_METRIC_MODEL);
+    }
+
+    #[test]
     fn test_model_display_names_includes_prefill() {
         let mm = ModelManager::new();
         mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
@@ -1546,5 +1621,89 @@ mod tests {
             mm.model_display_names().contains("llama"),
             "model must be visible again after prefill rejoin"
         );
+    }
+
+    // -- is_model_ready_to_serve / has_any_ready_model tests --
+    //
+    // Regression coverage for the KServe gRPC race where `model_ready` returned
+    // true as soon as a ModelDeploymentCard was saved -- before the WorkerSet
+    // with engines was attached. These checks must stay false until at least
+    // one WorkerSet carries an actual serving engine.
+
+    fn make_chat_engine()
+    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+        Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ))
+    }
+
+    #[test]
+    fn test_is_model_ready_to_serve_false_for_unknown_model() {
+        let mm = ModelManager::new();
+        assert!(!mm.is_model_ready_to_serve("llama"));
+        assert!(!mm.has_any_ready_model());
+    }
+
+    #[test]
+    fn test_is_model_ready_to_serve_false_for_card_only() {
+        // Reproduces the KServe race: a ModelDeploymentCard is saved before the
+        // WorkerSet is registered. `is_model_ready_to_serve` must still be false.
+        let mm = ModelManager::new();
+        let mut card = ModelDeploymentCard::default();
+        card.display_name = "llama".to_string();
+        mm.save_model_card("instance-1", card).unwrap();
+
+        assert!(!mm.get_model_cards().is_empty(), "card was saved");
+        assert!(
+            !mm.is_model_ready_to_serve("llama"),
+            "card-only registration must not report ready"
+        );
+        assert!(
+            !mm.has_any_ready_model(),
+            "card-only registration must not flip server_ready"
+        );
+    }
+
+    #[test]
+    fn test_is_model_ready_to_serve_false_for_prefill_only_worker_set() {
+        // Worker set exists but has no engines attached (the lifecycle state
+        // between save_model_card and engine wire-up).
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+
+        assert!(
+            !mm.is_model_ready_to_serve("llama"),
+            "WorkerSet without engines must not report ready"
+        );
+        assert!(!mm.has_any_ready_model());
+    }
+
+    #[test]
+    fn test_is_model_ready_to_serve_true_after_chat_engine_added() {
+        let mm = ModelManager::new();
+        mm.add_chat_completions_model("llama", "abc", make_chat_engine())
+            .unwrap();
+
+        assert!(mm.is_model_ready_to_serve("llama"));
+        assert!(mm.has_any_ready_model());
+    }
+
+    #[test]
+    fn test_has_any_ready_model_with_mixed_models() {
+        // One model is fully wired, another is only card-registered. The
+        // server-wide check must report ready as soon as any one model is.
+        let mm = ModelManager::new();
+        let mut card = ModelDeploymentCard::default();
+        card.display_name = "pending-llama".to_string();
+        mm.save_model_card("instance-pending", card).unwrap();
+
+        assert!(!mm.has_any_ready_model());
+
+        mm.add_chat_completions_model("ready-llama", "abc", make_chat_engine())
+            .unwrap();
+
+        assert!(mm.has_any_ready_model());
+        assert!(mm.is_model_ready_to_serve("ready-llama"));
+        assert!(!mm.is_model_ready_to_serve("pending-llama"));
     }
 }
