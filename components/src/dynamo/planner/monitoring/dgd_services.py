@@ -27,6 +27,10 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+MAIN_CONTAINER_NAME = "main"
+V1BETA1_COMPONENT_TYPES = {"prefill", "decode"}
+GPU_RESOURCE_KEY = "nvidia.com/gpu"
+
 
 def break_arguments(args: list[str] | None) -> list[str]:
     ans: list[str] = []
@@ -43,6 +47,46 @@ def break_arguments(args: list[str] | None) -> list[str]:
     return ans
 
 
+def _main_container_from_pod_template(component: dict) -> dict:
+    containers = (
+        component.get("podTemplate", {})
+        .get("spec", {})
+        .get("containers", [])
+        or []
+    )
+    for container in containers:
+        if container.get("name") == MAIN_CONTAINER_NAME:
+            return container
+    return {}
+
+
+def get_main_container(component: dict) -> dict:
+    """Return the planner-relevant v1beta1 main container."""
+    return _main_container_from_pod_template(component)
+
+
+def get_components_by_name(deployment: dict) -> dict[str, dict]:
+    """Return v1beta1 DGD components keyed by logical name.
+
+    v1beta1 exposes components as ``spec.components[]`` with ``name`` and
+    ``type``. The planner consumes this map so the rest of the code does not
+    have to work with list traversal.
+    """
+    components = deployment.get("spec", {}).get("components") or []
+    return {component["name"]: component for component in components}
+
+
+def get_component_type(component: dict) -> str:
+    return component.get("type", "")
+
+
+def get_planner_component_role(component: dict) -> str:
+    component_type = get_component_type(component)
+    if component_type in V1BETA1_COMPONENT_TYPES:
+        return component_type
+    return ""
+
+
 class Service(BaseModel):
     name: str
     service: dict
@@ -51,11 +95,7 @@ class Service(BaseModel):
         return self.service.get("replicas", 0)
 
     def get_model_name(self) -> Optional[str]:
-        args = (
-            self.service.get("extraPodSpec", {})
-            .get("mainContainer", {})
-            .get("args", [])
-        )
+        args = get_main_container(self.service).get("args", [])
 
         args = break_arguments(args)
         if (
@@ -83,11 +123,7 @@ class Service(BaseModel):
         the backend default. Returns ``None`` if ``--endpoint`` is not
         present or malformed.
         """
-        args = (
-            self.service.get("extraPodSpec", {})
-            .get("mainContainer", {})
-            .get("args", [])
-        )
+        args = get_main_container(self.service).get("args", [])
         args = break_arguments(args)
         if "--endpoint" not in args:
             return None
@@ -101,46 +137,45 @@ class Service(BaseModel):
             return None
 
     def get_gpu_count(self) -> int:
-        """Get the GPU count from the service's resource specification.
+        """Get the GPU count from the component's resource specification.
 
-        GPU count is read from spec.services.[ServiceName].resources.limits.gpu,
-        falling back to requests.gpu if limits is not specified.
+        GPU count is read from the v1beta1 main container resources
+        (``nvidia.com/gpu``).
 
         Returns:
-            The number of GPUs configured for this service
+            The number of GPUs configured for this component
 
         Raises:
             ValueError: If GPU count is not specified or invalid
         """
-        resources = self.service.get("resources", {})
+        resources = get_main_container(self.service).get("resources", {})
         limits = resources.get("limits", {})
         requests = resources.get("requests", {})
 
         # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
         # typically treat requests and limits as equivalent since GPUs are
         # non-compressible and allocated exclusively (no fractional sharing).
-        gpu_str = limits.get("gpu") or requests.get("gpu")
+        gpu_str = limits.get(GPU_RESOURCE_KEY) or requests.get(GPU_RESOURCE_KEY)
 
         if gpu_str is None:
             raise ValueError(
-                f"No GPU count specified for service '{self.name}'. "
-                f"Please set resources.limits.gpu or resources.requests.gpu in the DGD."
+                f"No GPU count specified for component '{self.name}'. "
+                f"Please set main container resources.limits.{GPU_RESOURCE_KEY} "
+                f"or resources.requests.{GPU_RESOURCE_KEY} in the DGD."
             )
 
         try:
             return int(gpu_str)
         except (ValueError, TypeError):
             raise ValueError(
-                f"Invalid GPU count '{gpu_str}' for service '{self.name}'. "
+                f"Invalid GPU count '{gpu_str}' for component '{self.name}'. "
                 f"GPU count must be an integer."
             )
 
 
-# TODO: still supporting framework component names for backwards compatibility
-# Should be deprecated in favor of service subComponentType
-def get_service_from_sub_component_type_or_name(
+def get_component_from_type_or_name(
     deployment: dict,
-    sub_component_type: SubComponentType,
+    component_type: SubComponentType,
     component_name: Optional[str] = None,
 ) -> Service:
     """
@@ -149,39 +184,31 @@ def get_service_from_sub_component_type_or_name(
     Returns: Service object
 
     Raises:
-        SubComponentNotFoundError: If no service with the specified subComponentType is found
-        DuplicateSubComponentError: If multiple services with the same subComponentType are found
+        SubComponentNotFoundError: If no component with the specified role is found
+        DuplicateSubComponentError: If multiple components have the same role
     """
-    services = deployment.get("spec", {}).get("services", {})
+    components = get_components_by_name(deployment)
 
-    # Collect all available subComponentTypes for better error messages
-    available_types = []
-    matching_services = []
+    matching_components = []
 
-    for curr_name, curr_service in services.items():
-        service_sub_type = curr_service.get("subComponentType", "")
-        if service_sub_type:
-            available_types.append(service_sub_type)
-
-        if service_sub_type == sub_component_type.value:
-            matching_services.append((curr_name, curr_service))
+    for curr_name, curr_component in components.items():
+        component_role = get_planner_component_role(curr_component)
+        if component_role == component_type.value:
+            matching_components.append((curr_name, curr_component))
 
     # Check for duplicates
-    if len(matching_services) > 1:
-        service_names = [name for name, _ in matching_services]
-        raise DuplicateSubComponentError(sub_component_type.value, service_names)
+    if len(matching_components) > 1:
+        component_names = [name for name, _ in matching_components]
+        raise DuplicateSubComponentError(component_type.value, component_names)
 
-    # If no service found with subCompontType and fallback component_name is not provided or not found,
-    # or if the fallback component has a non-empty subComponentType, raise error
-    if not matching_services and (
-        not component_name
-        or component_name not in services
-        or services[component_name].get("subComponentType", "") != ""
-    ):
-        raise SubComponentNotFoundError(sub_component_type.value)
-    # If fallback component_name is provided and exists within services, add to matching_services
-    elif not matching_services and component_name in services:
-        matching_services.append((component_name, services[component_name]))
+    if not matching_components and component_name in components:
+        component = components[component_name]
+        explicit_type = get_component_type(component)
+        if explicit_type and explicit_type != component_type.value:
+            raise SubComponentNotFoundError(component_type.value)
+        matching_components.append((component_name, component))
+    elif not matching_components:
+        raise SubComponentNotFoundError(component_type.value)
 
-    name, service = matching_services[0]
-    return Service(name=name, service=service)
+    name, component = matching_components[0]
+    return Service(name=name, service=component)
