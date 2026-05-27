@@ -267,6 +267,11 @@ async def _get_runtime_config(
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )
+    runtime_config.set_structural_tag_mode(
+        "on" if dynamo_args.dyn_enable_structural_tag else "off"
+    )
+    runtime_config.set_structural_tag_scope(dynamo_args.dyn_structural_tag_scope)
+    runtime_config.set_structural_tag_schema(dynamo_args.dyn_structural_tag_schema)
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (

@@ -573,6 +573,7 @@ mod tests {
                     "location": {"type": "string"}
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;

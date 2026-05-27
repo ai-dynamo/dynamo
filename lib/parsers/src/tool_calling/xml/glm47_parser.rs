@@ -684,6 +684,7 @@ mod tests {
         let tools = vec![ToolDefinition {
             name: "get_weather".to_string(),
             parameters: None,
+            strict: None,
         }];
 
         // Tool call block references a function not in the tools list — the
@@ -739,6 +740,7 @@ mod tests {
                     "label": {"type": "string"}
                 }
             })),
+            strict: None,
         }];
 
         let message = "<tool_call>set_temperature<arg_key>degrees</arg_key><arg_value>72.5</arg_value><arg_key>enabled</arg_key><arg_value>true</arg_value><arg_key>count</arg_key><arg_value>3</arg_value><arg_key>label</arg_key><arg_value>warm</arg_value></tool_call>";
@@ -770,6 +772,7 @@ mod tests {
                     "tags": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
 
         // Model emits comma-separated values without JSON brackets
@@ -796,6 +799,7 @@ mod tests {
                     "ids": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
 
         // Model emits proper JSON array
@@ -820,6 +824,7 @@ mod tests {
                     "count": {"type": "integer"}
                 }
             })),
+            strict: None,
         }];
 
         // "not_a_number" can't be parsed as integer — should fall back to string
