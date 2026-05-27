@@ -85,11 +85,18 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         pass
 
 
-class _NoopStatLogger(StatLoggerBase):
-    """Stat logger that drops every record. Installed on embedding workers,
-    where vLLM still calls the factory during engine init but the
-    chat-shaped publish path (KV cache usage, scheduler gauges) has no
-    meaning on a pooling engine."""
+class NoopStatLogger(StatLoggerBase):
+    """Stat logger that drops every record.
+
+    vLLM's ``AsyncLLM`` always invokes a ``StatLoggerBase`` subclass
+    during engine init, but for some worker shapes the chat-style
+    publish path (KV cache usage, scheduler gauges) is meaningless --
+    embedding/pooling workers are the current driver, but the same
+    no-op semantics fit any future worker that wants to satisfy vLLM's
+    factory contract without registering Prometheus collectors. Reach
+    for this class instead of writing a new throwaway subclass each
+    time.
+    """
 
     def __init__(
         self,
@@ -99,7 +106,7 @@ class _NoopStatLogger(StatLoggerBase):
         # vLLM's ``StatLoggerBase`` declares ``__init__`` as abstract, so
         # subclasses must provide one even when they hold no state.
         # Without this, instantiation raises ``TypeError: Can't
-        # instantiate abstract class _NoopStatLogger without an
+        # instantiate abstract class NoopStatLogger without an
         # implementation for abstract method '__init__'``. The
         # ``(vllm_config, engine_index)`` signature mirrors what vLLM
         # passes to concrete ``StatLoggerBase`` subclasses, so this
@@ -141,7 +148,7 @@ class StatLoggerFactory:
         # publishing -- short-circuit before constructing the chat-shaped
         # WorkerMetricsPublisher and skipping the component_gauges check.
         if self.embedding_worker:
-            return _NoopStatLogger()
+            return NoopStatLogger()
         # component_gauges must be set by setup_vllm_engine() before vLLM
         # calls create_stat_logger() during engine initialization.
         assert (
