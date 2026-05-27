@@ -1006,13 +1006,16 @@ def test_embedding_multi_worker_same_model_load_balance(
         marks=[],  # markers at function level
         model=_EMBED_SAME_MODEL,
         timeout=420,
-        # Poll each worker's ``/health`` until 200 before sending
-        # traffic. The embedding worker registers a canary
-        # ``VllmEmbeddingHealthCheckPayload`` with ``serve_endpoint``,
-        # so the runtime drives /health to 200 once the engine produces
-        # a real embedding -- not a fixed-time sleep that races against
-        # variable per-worker cold-load latency.
+        # ``DYN_HEALTH_CHECK_ENABLED=true`` flips the runtime's canary
+        # on. Without it ``/health`` returns 200 the moment the endpoint
+        # is registered (before the engine has produced anything), so
+        # ``health_check_workers=True`` would gate on a constant-true
+        # signal and we'd race startup just like the old ``delayed_start``
+        # path. Setting the flag plus the embedding-shaped probe payload
+        # in ``_create_embedding_worker`` is what actually makes
+        # readiness mean "engine produced an embedding".
         health_check_workers=True,
+        env={"DYN_HEALTH_CHECK_ENABLED": "true"},
         request_payloads=[
             _embedding_warmup_payload(_EMBED_SAME_MODEL),
             burst,
@@ -1082,13 +1085,12 @@ def test_embedding_multi_worker_multi_model_dispatch(
         # — applying the script's default ``MAX_MODEL_LEN=2048`` to it crashes
         # the second worker at engine init. Drop the cap to BGE's native max;
         # Qwen3-Embedding-0.6B happily accepts the lower cap.
-        env={"MAX_MODEL_LEN": "512"},
+        # ``DYN_HEALTH_CHECK_ENABLED=true`` is required for
+        # ``health_check_workers=True`` below to gate on the canary
+        # rather than on endpoint registration (see same-model test for
+        # the full rationale).
+        env={"MAX_MODEL_LEN": "512", "DYN_HEALTH_CHECK_ENABLED": "true"},
         timeout=420,
-        # Poll each worker's ``/health`` until 200 before sending
-        # traffic -- same canary mechanism as the same-model test.
-        # Both workers register an embedding-shaped probe via
-        # ``VllmEmbeddingHealthCheckPayload``, so the framework only
-        # advances once each engine has produced a real embedding.
         health_check_workers=True,
         request_payloads=[
             _embedding_warmup_payload(_EMBED_MODEL_A),
