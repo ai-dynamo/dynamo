@@ -106,6 +106,8 @@ on:
         required: true
       HF_TOKEN:
         required: false
+      DD_API_KEY:
+        required: true
 
 jobs:
   test:
@@ -144,6 +146,12 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+      - name: Configure Datadog Test Optimization
+        uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
+        with:
+          languages: python
+          api_key: ${{ secrets.DD_API_KEY }}
+          site: us3.datadoghq.com
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
