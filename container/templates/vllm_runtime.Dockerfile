@@ -111,6 +111,19 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
+{% if device == "xpu" %}
+ADD --checksum=sha256:f60e802b6f41350393e34b24793db888a8be514054769bd17e7a6e9c0c058b87 \
+    https://github.com/intel/xpumanager/releases/download/v1.3.6/xpu-smi_1.3.6_20260206.143628.1004f6cb.u24.04_amd64.deb \
+    /tmp/xpu-smi.deb
+
+# Install xpu-smi in the runtime stage so dev/local-dev inherit it, without
+# explicitly changing the Intel compute runtime stack.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends /tmp/xpu-smi.deb && \
+    rm -f /tmp/xpu-smi.deb && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+{% endif %}
+
 # Copy attribution files and wheels
 COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
@@ -219,11 +232,6 @@ RUN apt-get update && \
     wget \
     vim \
     linux-libc-dev && \
-    # Install Intel GPU runtime packages
-    apt-get install -y --allow-downgrades libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing \
-    intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 \
-    xpu-smi=1.3.6-1~24.04~ppa1 libxpum1=1.3.6-1~24.04~ppa1 \
-    libigsc0=0.9.5-1~24.04~ppa2 libmetee5=5.0.0-1~24.04~ppa2 libmetee-dev=5.0.0-1~24.04~ppa2 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
