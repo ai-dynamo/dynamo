@@ -5,7 +5,7 @@ title: "Recipes"
 subtitle: "Pick a model, choose the hardware/runtime target, and deploy the matching Dynamo recipe."
 ---
 
-Start with the model, runtime, hardware, and workload you need to run. Use [Benchmarks](/dynamo/dev/resources/benchmarks) when you want to compare a feature or topology under controlled traffic.
+Start with the model, runtime, hardware, and workload you need to run. Model cards are sorted newest to oldest by release date. Use [Benchmarks](/dynamo/dev/resources/benchmarks) when you want to compare a feature or topology under controlled traffic.
 
 <form className="dynamo-recipe-catalog-shell">
 <input className="dynamo-filter-input" type="radio" id="provider-all" name="provider" defaultChecked />
@@ -92,61 +92,13 @@ Start with the model, runtime, hardware, and workload you need to run. Use [Benc
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-32b" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing" data-workload="long-context-reuse static-generation deployment-only">
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/nemotron-3-nano-omni" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="gpu" data-technique="aggregated" data-workload="deployment-only">
     <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-      <div><h3>Qwen3-32B</h3><p>Qwen</p></div>
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
+      <div><h3>Nemotron 3 Nano Omni</h3><p>NVIDIA</p></div>
     </div>
-    <p className="dynamo-model-summary">Disaggregated vLLM recipe for Mooncake-style conversation traces on 16x H200, plus a separate KVBM deploy target.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>16x H200</span><span>Long-context reuse</span><span>Related benchmark</span></div>
-  </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/deepseek-v3-2-nvfp4" data-recipe-card data-provider="deepseek" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated kv-routing expert-parallel" data-workload="long-context-reuse static-generation">
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
-      <div><h3>DeepSeek V3.2 NVFP4</h3><p>NVIDIA checkpoint / DeepSeek</p></div>
-    </div>
-    <p className="dynamo-model-summary">32x GB200 TensorRT-LLM recipe with P/D split, KV-aware routing, and WideEP for long-context coding traces.</p>
-    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>32x GB200</span><span>Long-context reuse</span><span>Related benchmark</span></div>
-  </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-vl-30b" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 gb200" data-technique="aggregated embedding-cache" data-workload="multimodal-reuse">
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-      <div><h3>Qwen3-VL-30B</h3><p>Qwen</p></div>
-    </div>
-    <p className="dynamo-model-summary">Single-GB200 vLLM recipe for repeated-image multimodal traffic with embedding cache enabled.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>1x GB200</span><span>Multimodal reuse</span><span>Related benchmark</span></div>
-  </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/kimi-k2-5" data-recipe-card data-provider="moonshot" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding">
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
-      <div><h3>Kimi-K2.5 NVFP4</h3><p>Moonshot / NVIDIA</p></div>
-    </div>
-    <p className="dynamo-model-summary">24x GB200 TensorRT-LLM recipe combining disaggregation, KV-aware routing, Eagle3, and KV offload for agentic coding traces.</p>
-    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>24x GB200</span><span>Agentic coding trace</span><span>Related benchmark</span></div>
-  </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/glm-5-nvfp4" data-recipe-card data-provider="zai" data-runtime="sglang" data-hardware="b200 gb200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/zai-org.webp" alt="" />
-      <div><h3>GLM-5 NVFP4</h3><p>NVIDIA / Z.AI</p></div>
-    </div>
-    <p className="dynamo-model-summary">20x GB200 SGLang P/D recipe for 1K input / 8K output traffic with EAGLE speculative decoding.</p>
-    <div className="dynamo-model-tags"><span>SGLang</span><span>20x GB200</span><span>Long output / static ISL-OSL</span></div>
-  </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/gpt-oss-120b" data-recipe-card data-provider="openai" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/openai.webp" alt="" />
-      <div><h3>GPT-OSS-120B</h3><p>OpenAI</p></div>
-    </div>
-    <p className="dynamo-model-summary">TensorRT-LLM GB200 recipe pair organized by traffic target rather than as an agg-vs-disagg benchmark.</p>
-    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>4x GB200</span><span>Static ISL-OSL</span></div>
-  </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/deepseek-r1" data-recipe-card data-provider="deepseek" data-runtime="sglang trtllm vllm" data-hardware="b200 gb200 h200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation deployment-only">
-    <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
-      <div><h3>DeepSeek-R1</h3><p>DeepSeek</p></div>
-    </div>
-    <p className="dynamo-model-summary">DeepSeek-R1 recipe set spanning backend and hardware targets, with benchmark coverage for TensorRT-LLM WideEP on GB200.</p>
-    <div className="dynamo-model-tags"><span>SGLang</span><span>16x H200</span><span>Deployment only</span></div>
+    <p className="dynamo-model-summary">Single-GPU multimodal deployment recipe for Nemotron 3 Nano Omni with custom runtime image requirements.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>1 GPU</span><span>Deployment only</span></div>
   </a>
   <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/deepseek-v4-pro" data-recipe-card data-provider="deepseek" data-runtime="sglang vllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation long-output deployment-only">
     <div className="dynamo-model-card-top">
@@ -164,21 +116,21 @@ Start with the model, runtime, hardware, and workload you need to run. Use [Benc
     <p className="dynamo-model-summary">Deploy-only V4-Flash recipe set across vLLM/SGLang and B200/GB200 aggregate targets.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>4x B200</span><span>Deployment only</span></div>
   </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/llama-3-3-70b" data-recipe-card data-provider="meta" data-runtime="vllm" data-hardware="h100 h200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-6-35b" data-recipe-card data-provider="qwen" data-runtime="dynamo vllm" data-hardware="b200 gb200 h100" data-technique="embedding-cache frontend-decoding" data-workload="multimodal-reuse">
     <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/meta-llama.webp" alt="" />
-      <div><h3>Llama-3.3-70B FP8</h3><p>Meta / Red Hat</p></div>
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3.6-35B-A3B FP8</h3><p>Qwen</p></div>
     </div>
-    <p className="dynamo-model-summary">Llama FP8 topology recipe set for 8K input / 1K output traffic on H100/H200.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>4x H100/H200</span><span>Long output / static ISL-OSL</span><span>Related benchmark</span></div>
+    <p className="dynamo-model-summary">Single-GPU multimodal recipe using Dynamo frontend decoding plus an 8 GiB embedding cache.</p>
+    <div className="dynamo-model-tags"><span>Dynamo + vLLM</span><span>1x H100 or GB200</span><span>Multimodal reuse</span><span>Related benchmark</span></div>
   </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/nemotron-3-nano-omni" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="gpu" data-technique="aggregated" data-workload="deployment-only">
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/glm-5-nvfp4" data-recipe-card data-provider="zai" data-runtime="sglang" data-hardware="b200 gb200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
     <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
-      <div><h3>Nemotron 3 Nano Omni</h3><p>NVIDIA</p></div>
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/zai-org.svg" alt="" />
+      <div><h3>GLM-5 NVFP4</h3><p>NVIDIA / Z.AI</p></div>
     </div>
-    <p className="dynamo-model-summary">Single-GPU multimodal deployment recipe for Nemotron 3 Nano Omni with custom runtime image requirements.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>1 GPU</span><span>Deployment only</span></div>
+    <p className="dynamo-model-summary">20x GB200 SGLang P/D recipe for 1K input / 8K output traffic with EAGLE speculative decoding.</p>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>20x GB200</span><span>Long output / static ISL-OSL</span></div>
   </a>
   <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/nemotron-3-super-fp8" data-recipe-card data-provider="nvidia" data-runtime="sglang trtllm vllm" data-hardware="h100 h200" data-technique="aggregated disaggregated kv-routing expert-parallel" data-workload="deployment-only">
     <div className="dynamo-model-card-top">
@@ -187,6 +139,46 @@ Start with the model, runtime, hardware, and workload you need to run. Use [Benc
     </div>
     <p className="dynamo-model-summary">Nemotron-3-Super backend recipe set for 4x H100/H200 targets with hybrid-cache caveats.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>4x H100/H200</span><span>Deployment only</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/kimi-k2-5" data-recipe-card data-provider="moonshot" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
+      <div><h3>Kimi-K2.5 NVFP4</h3><p>Moonshot / NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">24x GB200 TensorRT-LLM recipe combining disaggregation, KV-aware routing, Eagle3, and KV offload for agentic coding traces.</p>
+    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>24x GB200</span><span>Agentic coding trace</span><span>Related benchmark</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/deepseek-v3-2-nvfp4" data-recipe-card data-provider="deepseek" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated kv-routing expert-parallel" data-workload="long-context-reuse static-generation">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek V3.2 NVFP4</h3><p>NVIDIA checkpoint / DeepSeek</p></div>
+    </div>
+    <p className="dynamo-model-summary">32x GB200 TensorRT-LLM recipe with P/D split, KV-aware routing, and WideEP for long-context coding traces.</p>
+    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>32x GB200</span><span>Long-context reuse</span><span>Related benchmark</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-vl-30b" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 gb200" data-technique="aggregated embedding-cache" data-workload="multimodal-reuse">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3-VL-30B</h3><p>Qwen</p></div>
+    </div>
+    <p className="dynamo-model-summary">Single-GB200 vLLM recipe for repeated-image multimodal traffic with embedding cache enabled.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>1x GB200</span><span>Multimodal reuse</span><span>Related benchmark</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/gpt-oss-120b" data-recipe-card data-provider="openai" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/openai.webp" alt="" />
+      <div><h3>GPT-OSS-120B</h3><p>OpenAI</p></div>
+    </div>
+    <p className="dynamo-model-summary">TensorRT-LLM GB200 recipe pair organized by traffic target rather than as an agg-vs-disagg benchmark.</p>
+    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>4x GB200</span><span>Static ISL-OSL</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-32b" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing" data-workload="long-context-reuse static-generation deployment-only">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3-32B</h3><p>Qwen</p></div>
+    </div>
+    <p className="dynamo-model-summary">Disaggregated vLLM recipe for Mooncake-style conversation traces on 16x H200, plus a separate KVBM deploy target.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>16x H200</span><span>Long-context reuse</span><span>Related benchmark</span></div>
   </a>
   <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-235b-a22b-fp8" data-recipe-card data-provider="qwen" data-runtime="trtllm" data-hardware="b200 h100 h200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation">
     <div className="dynamo-model-card-top">
@@ -204,13 +196,21 @@ Start with the model, runtime, hardware, and workload you need to run. Use [Benc
     <p className="dynamo-model-summary">FP8 recipe set spanning TensorRT-LLM aggregate, TensorRT-LLM P/D, and vLLM P/D targets.</p>
     <div className="dynamo-model-tags"><span>TRT-LLM</span><span>2x GPU</span><span>Static ISL-OSL</span></div>
   </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/qwen3-6-35b" data-recipe-card data-provider="qwen" data-runtime="dynamo vllm" data-hardware="b200 gb200 h100" data-technique="embedding-cache frontend-decoding" data-workload="multimodal-reuse">
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/deepseek-r1" data-recipe-card data-provider="deepseek" data-runtime="sglang trtllm vllm" data-hardware="b200 gb200 h200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation deployment-only">
     <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-      <div><h3>Qwen3.6-35B-A3B FP8</h3><p>Qwen</p></div>
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek-R1</h3><p>DeepSeek</p></div>
     </div>
-    <p className="dynamo-model-summary">Single-GPU multimodal recipe using Dynamo frontend decoding plus an 8 GiB embedding cache.</p>
-    <div className="dynamo-model-tags"><span>Dynamo + vLLM</span><span>1x H100 or GB200</span><span>Multimodal reuse</span><span>Related benchmark</span></div>
+    <p className="dynamo-model-summary">DeepSeek-R1 recipe set spanning backend and hardware targets, with benchmark coverage for TensorRT-LLM WideEP on GB200.</p>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>16x H200</span><span>Deployment only</span></div>
+  </a>
+  <a className="dynamo-model-card" href="/dynamo/dev/resources/recipes/llama-3-3-70b" data-recipe-card data-provider="meta" data-runtime="vllm" data-hardware="h100 h200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/meta-llama.webp" alt="" />
+      <div><h3>Llama-3.3-70B FP8</h3><p>Meta / Red Hat</p></div>
+    </div>
+    <p className="dynamo-model-summary">Llama FP8 topology recipe set for 8K input / 1K output traffic on H100/H200.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>4x H100/H200</span><span>Long output / static ISL-OSL</span><span>Related benchmark</span></div>
   </a>
 </div>
 

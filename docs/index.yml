@@ -47,51 +47,51 @@ navigation:
       - section: Recipes
         path: recipes/README.mdx
         contents:
-          - page: Qwen3-32B
-            slug: qwen3-32b
-            path: recipes/qwen3-32b.mdx
-          - page: DeepSeek V3.2 NVFP4
-            slug: deepseek-v3-2-nvfp4
-            path: recipes/deepseek-v3-2-nvfp4.mdx
-          - page: Qwen3-VL-30B
-            slug: qwen3-vl-30b
-            path: recipes/qwen3-vl-30b.mdx
-          - page: Kimi-K2.5 NVFP4
-            slug: kimi-k2-5
-            path: recipes/kimi-k2-5.mdx
-          - page: GLM-5 NVFP4
-            slug: glm-5-nvfp4
-            path: recipes/glm-5-nvfp4.mdx
-          - page: GPT-OSS-120B
-            slug: gpt-oss-120b
-            path: recipes/gpt-oss-120b.mdx
-          - page: DeepSeek-R1
-            slug: deepseek-r1
-            path: recipes/deepseek-r1.mdx
+          - page: Nemotron 3 Nano Omni
+            slug: nemotron-3-nano-omni
+            path: recipes/nemotron-3-nano-omni.mdx
           - page: DeepSeek-V4-Pro
             slug: deepseek-v4-pro
             path: recipes/deepseek-v4-pro.mdx
           - page: DeepSeek-V4-Flash
             slug: deepseek-v4-flash
             path: recipes/deepseek-v4-flash.mdx
-          - page: Llama-3.3-70B FP8
-            slug: llama-3-3-70b
-            path: recipes/llama-3-3-70b.mdx
-          - page: Nemotron 3 Nano Omni
-            slug: nemotron-3-nano-omni
-            path: recipes/nemotron-3-nano-omni.mdx
+          - page: Qwen3.6-35B-A3B FP8
+            slug: qwen3-6-35b
+            path: recipes/qwen3-6-35b.mdx
+          - page: GLM-5 NVFP4
+            slug: glm-5-nvfp4
+            path: recipes/glm-5-nvfp4.mdx
           - page: Nemotron-3-Super FP8
             slug: nemotron-3-super-fp8
             path: recipes/nemotron-3-super-fp8.mdx
+          - page: Kimi-K2.5 NVFP4
+            slug: kimi-k2-5
+            path: recipes/kimi-k2-5.mdx
+          - page: DeepSeek V3.2 NVFP4
+            slug: deepseek-v3-2-nvfp4
+            path: recipes/deepseek-v3-2-nvfp4.mdx
+          - page: Qwen3-VL-30B
+            slug: qwen3-vl-30b
+            path: recipes/qwen3-vl-30b.mdx
+          - page: GPT-OSS-120B
+            slug: gpt-oss-120b
+            path: recipes/gpt-oss-120b.mdx
+          - page: Qwen3-32B
+            slug: qwen3-32b
+            path: recipes/qwen3-32b.mdx
           - page: Qwen3-235B-A22B FP8
             slug: qwen3-235b-a22b-fp8
             path: recipes/qwen3-235b-a22b-fp8.mdx
           - page: Qwen3-32B FP8
             slug: qwen3-32b-fp8
             path: recipes/qwen3-32b-fp8.mdx
-          - page: Qwen3.6-35B-A3B FP8
-            slug: qwen3-6-35b
-            path: recipes/qwen3-6-35b.mdx
+          - page: DeepSeek-R1
+            slug: deepseek-r1
+            path: recipes/deepseek-r1.mdx
+          - page: Llama-3.3-70B FP8
+            slug: llama-3-3-70b
+            path: recipes/llama-3-3-70b.mdx
       - section: Benchmarks
         path: benchmarks/README.mdx
         contents:
