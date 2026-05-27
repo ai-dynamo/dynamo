@@ -21,6 +21,7 @@ from dynamo.common.backend.engine import (
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.args import parse_args
@@ -292,13 +293,7 @@ def _guided_decoding_params(guided_decoding: dict[str, Any]) -> dict[str, Any]:
         params["ebnf"] = grammar
 
     if structural_tag is not None:
-        if hasattr(structural_tag, "model_dump"):
-            structural_tag = structural_tag.model_dump()
-        params["structural_tag"] = (
-            structural_tag
-            if isinstance(structural_tag, str)
-            else json.dumps(structural_tag)
-        )
+        params["structural_tag"] = serialize_structural_tag(structural_tag)
 
     return params
 

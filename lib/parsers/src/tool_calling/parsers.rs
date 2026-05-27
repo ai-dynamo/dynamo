@@ -188,6 +188,7 @@ async fn detect_and_parse_tool_call_with_recovery_options(
     };
     let cfg = ToolCallConfig {
         parser_config: recovery_config,
+        structural_tag_builder: None,
     };
     try_tool_call_parse(message, &cfg, tools).await
 }
@@ -440,6 +441,7 @@ mod tests {
                     tool_call_end_tokens: vec!["".to_string()],
                     ..Default::default()
                 }),
+                structural_tag_builder: None,
             },
             None,
         )
@@ -788,6 +790,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -1236,6 +1239,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -3131,6 +3135,7 @@ fahrenheit
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -3169,6 +3174,7 @@ true
                     "enabled": {"type": "bool"},
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -3291,6 +3297,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -3347,6 +3354,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -3398,6 +3406,7 @@ weather forecasting
                     "query_list": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3490,6 +3499,7 @@ weather forecasting
                     "enabled": {"type": "boolean"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3516,6 +3526,7 @@ weather forecasting
                     "items": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
