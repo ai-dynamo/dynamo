@@ -37,6 +37,9 @@ from typing import Any, Optional
 
 from .target_rpc_client import _TargetRpcClient
 
+REMOTE_G2_STATUS_PROMOTED_PRIMARY = "promoted_primary"
+REMOTE_G2_RELEASE_REASON_PROMOTED_PRIMARY = "promoted_primary"
+
 
 class _LeaseSourceMap:
     """Thread-safe ``lease_id → source_worker_id`` map.
@@ -61,6 +64,45 @@ class _LeaseSourceMap:
 
 def _ipc_socket_path() -> str:
     return f"/tmp/dynamo_remote_g2_target_{os.getpid()}.sock"
+
+
+def _per_block_status_value(entry: Any) -> Optional[str]:
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        status = entry.get("status")
+        return str(status) if status is not None else None
+    return None
+
+
+def _has_promoted_primary_status(per_block_status: Any) -> bool:
+    if not isinstance(per_block_status, list):
+        return False
+    for entry in per_block_status:
+        if _per_block_status_value(entry) == REMOTE_G2_STATUS_PROMOTED_PRIMARY:
+            return True
+    return False
+
+
+def _release_promoted_primary_lease(
+    client: _TargetRpcClient,
+    lease_id: str,
+    source_worker_id: int,
+    loop: asyncio.AbstractEventLoop,
+    timeout_s: float,
+) -> None:
+    coro = client.release_lease(
+        lease_id,
+        source_worker_id,
+        REMOTE_G2_RELEASE_REASON_PROMOTED_PRIMARY,
+    )
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        future.result(timeout=timeout_s)
+    except Exception:
+        logging.exception(
+            "remote_g2: failed to release lease after promoted-primary resolve"
+        )
 
 
 def _dispatch_resolve(
@@ -102,8 +144,6 @@ def _dispatch_resolve(
         return {"ok": False, "error": f"non_dict_response:{type(response).__name__}"}
     inner = response.get("result") if isinstance(response.get("result"), dict) else {}
     lease_id = inner.get("lease_id")
-    if lease_id:
-        lease_map.put(str(lease_id), source_worker_id)
     # PROBE: dump the resolved descriptors so we can verify the source-side
     # registry actually returned matching blocks. Trim each descriptor for log readability.
     descs = inner.get("descriptors") or []
@@ -121,6 +161,22 @@ def _dispatch_resolve(
                                 "pool_id", "byte_offset", "byte_length")}
          for d in descs[:3]],
     )
+    if _has_promoted_primary_status(pbs):
+        if lease_id:
+            _release_promoted_primary_lease(
+                client, str(lease_id), source_worker_id, loop, timeout_s
+            )
+        logging.info(
+            "remote_g2: resolve found promoted-primary block; rejecting plan "
+            "so target falls back"
+        )
+        return {
+            "ok": False,
+            "error": REMOTE_G2_STATUS_PROMOTED_PRIMARY,
+            "result": inner,
+        }
+    if lease_id:
+        lease_map.put(str(lease_id), source_worker_id)
     return response
 
 
