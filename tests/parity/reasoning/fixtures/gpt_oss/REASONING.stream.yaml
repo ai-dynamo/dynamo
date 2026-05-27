@@ -117,7 +117,8 @@ cases:
       dynamo:
         reasoning_text: ''
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
-        reason: Dynamo's streaming reasoning parser uses `normal_text` as the internal handoff to the downstream Harmony tool-call parser. The full directed commentary envelope remains parseable as a tool call, so this is a reasoning-layer divergence from vLLM rather than a final response leak.
+        reason: >-
+          This is expected in Dynamo today because streaming reasoning parsing and tool-call parsing are separate stages, and `normal_text` is the only handoff path between them. If the reasoning parser removed the directed commentary envelope here, the downstream Harmony tool-call parser would never see the call. Matching vLLM's reasoning-layer output would require an architectural change to carry tool-call candidates through a structured side channel instead of reusing `normal_text`.
       vllm:
         reasoning_text: ''
         normal_text: ''
@@ -133,7 +134,8 @@ cases:
       dynamo:
         reasoning_text: ''
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{"tz":"PST"}<|call|>
-        reason: Dynamo's streaming reasoning parser uses `normal_text` as the internal handoff to the downstream Harmony tool-call parser. The full directed commentary envelopes remain parseable as tool calls, so this is a reasoning-layer divergence from vLLM rather than a final response leak.
+        reason: >-
+          This is expected in Dynamo today because streaming reasoning parsing and tool-call parsing are separate stages, and `normal_text` is the only handoff path between them. If the reasoning parser removed the directed commentary envelopes here, the downstream Harmony tool-call parser would never see the calls. Matching vLLM's reasoning-layer output would require an architectural change to carry tool-call candidates through a structured side channel instead of reusing `normal_text`.
       vllm:
         reasoning_text: ''
         normal_text: ''
