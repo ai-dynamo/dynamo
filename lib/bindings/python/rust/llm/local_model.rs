@@ -4,9 +4,19 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use dynamo_kv_router::protocols::RoutingConstraints as RsRoutingConstraints;
+use dynamo_kv_router::protocols::{
+    KvTransferEnforcement as RsKvTransferEnforcement, RoutingConstraints as RsRoutingConstraints,
+};
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMode;
+use llm_rs::local_model::runtime_config::StructuralTagSchemaMode as RsStructuralTagSchemaMode;
+use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
+use pyo3::exceptions::PyValueError;
+
+fn validate_model_runtime_config(config: &RsModelRuntimeConfig) -> PyResult<()> {
+    config.validate_config().map_err(PyValueError::new_err)
+}
 
 #[pyclass]
 #[derive(Clone, Debug, Default)]
@@ -56,13 +66,21 @@ pub struct ModelRuntimeConfig {
     pub(crate) inner: RsModelRuntimeConfig,
 }
 
+impl ModelRuntimeConfig {
+    pub(crate) fn validate_config(&self) -> PyResult<()> {
+        validate_model_runtime_config(&self.inner)
+    }
+}
+
 #[pymethods]
 impl ModelRuntimeConfig {
     #[new]
-    fn new() -> Self {
-        Self {
+    fn new() -> PyResult<Self> {
+        let config = Self {
             inner: RsModelRuntimeConfig::new(),
-        }
+        };
+        config.validate_config()?;
+        Ok(config)
     }
 
     #[setter]
@@ -210,6 +228,47 @@ impl ModelRuntimeConfig {
         self.inner.get_engine_specific(key).map_err(to_pyerr)
     }
 
+    fn set_structural_tag_mode(&mut self, mode: &str) -> PyResult<()> {
+        self.inner.structural_tag_mode = match mode {
+            "off" => RsStructuralTagMode::Off,
+            "on" => RsStructuralTagMode::On,
+            _ => {
+                return Err(PyErr::new::<PyException, _>(format!(
+                    "Invalid structural_tag_mode: {mode}. Expected 'off' or 'on'."
+                )));
+            }
+        };
+        Ok(())
+    }
+
+    /// Set the structural tag scope ("auto" or "always").
+    fn set_structural_tag_scope(&mut self, scope: &str) -> PyResult<()> {
+        self.inner.structural_tag_scope = match scope {
+            "auto" => RsStructuralTagScope::Auto,
+            "always" => RsStructuralTagScope::Always,
+            _ => {
+                return Err(PyErr::new::<PyException, _>(format!(
+                    "Invalid structural_tag_scope: {scope}. Expected 'auto' or 'always'."
+                )));
+            }
+        };
+        Ok(())
+    }
+
+    /// Set the structural tag schema mode ("auto" or "strict").
+    fn set_structural_tag_schema(&mut self, schema: &str) -> PyResult<()> {
+        self.inner.structural_tag_schema = match schema {
+            "auto" => RsStructuralTagSchemaMode::Auto,
+            "strict" => RsStructuralTagSchemaMode::Strict,
+            _ => {
+                return Err(PyErr::new::<PyException, _>(format!(
+                    "Invalid structural_tag_schema: {schema}. Expected 'auto' or 'strict'."
+                )));
+            }
+        };
+        Ok(())
+    }
+
     #[pyo3(signature = (bootstrap_host=None, bootstrap_port=None))]
     fn set_disaggregated_endpoint(
         &mut self,
@@ -246,5 +305,83 @@ impl ModelRuntimeConfig {
     #[getter]
     fn taints(&self) -> HashSet<String> {
         self.inner.taints.clone()
+    }
+
+    #[getter]
+    fn topology_domains(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        for (key, value) in &self.inner.topology_domains {
+            dict.set_item(key, value)?;
+        }
+        Ok(dict.into())
+    }
+
+    #[setter]
+    fn set_topology_domains(&mut self, topology_domains: &Bound<'_, PyDict>) -> PyResult<()> {
+        let mut new_topology_domains = HashMap::new();
+        for (key, value) in topology_domains.iter() {
+            let key_str: String = key.extract()?;
+            let value_str: String = value.extract()?;
+            new_topology_domains.insert(key_str, value_str);
+        }
+        self.inner.topology_domains = new_topology_domains;
+        Ok(())
+    }
+
+    #[getter]
+    fn kv_transfer_domain(&self) -> Option<String> {
+        self.inner.kv_transfer_domain.clone()
+    }
+
+    #[setter]
+    fn set_kv_transfer_domain(&mut self, kv_transfer_domain: Option<String>) {
+        self.inner.kv_transfer_domain = kv_transfer_domain;
+    }
+
+    #[getter]
+    fn kv_transfer_enforcement(&self) -> Option<String> {
+        self.inner
+            .kv_transfer_enforcement
+            .map(|enforcement| match enforcement {
+                RsKvTransferEnforcement::Required => "required".to_string(),
+                RsKvTransferEnforcement::Preferred => "preferred".to_string(),
+            })
+    }
+
+    #[setter]
+    fn set_kv_transfer_enforcement(
+        &mut self,
+        kv_transfer_enforcement: Option<String>,
+    ) -> PyResult<()> {
+        let Some(kv_transfer_enforcement) = kv_transfer_enforcement else {
+            self.inner.kv_transfer_enforcement = None;
+            return Ok(());
+        };
+
+        self.inner.kv_transfer_enforcement = match kv_transfer_enforcement.as_str() {
+            "" => None,
+            "required" => Some(RsKvTransferEnforcement::Required),
+            "preferred" => Some(RsKvTransferEnforcement::Preferred),
+            value => {
+                return Err(PyValueError::new_err(format!(
+                    "kv_transfer_enforcement must be 'required' or 'preferred', got {value:?}"
+                )));
+            }
+        };
+        Ok(())
+    }
+
+    #[getter]
+    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
+        self.inner.kv_transfer_preferred_weight
+    }
+
+    #[setter]
+    fn set_kv_transfer_preferred_weight(
+        &mut self,
+        kv_transfer_preferred_weight: Option<f32>,
+    ) -> PyResult<()> {
+        self.inner.kv_transfer_preferred_weight = kv_transfer_preferred_weight;
+        Ok(())
     }
 }

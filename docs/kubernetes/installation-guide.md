@@ -157,7 +157,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 
 #### LWS + Volcano
 
-If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) (>= v0.7.0) with [Volcano](https://volcano.sh/en/docs/installation/) for gang scheduling. Both must be installed before deploying multinode workloads.
+If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) (>= v0.7.0) with [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide) for gang scheduling. Both must be installed before deploying multinode workloads.
 
 1. Install Volcano:
 
@@ -179,7 +179,7 @@ helm install lws oci://registry.k8s.io/lws/charts/lws \
   --wait --timeout 300s
 ```
 
-See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://volcano.sh/en/docs/) for configuration options, and the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for orchestrator selection.
+See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options, and the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for orchestrator selection.
 
 ### Network Operator / RDMA
 

@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -107,10 +108,14 @@ func CreateOrGetAutoCheckpoint(
 	namespace string,
 	identity nvidiacomv1alpha1.DynamoCheckpointIdentity,
 	podTemplate corev1.PodTemplateSpec,
+	targetContainerName string,
 	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	if err := ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gpuMemoryService); err != nil {
 		return nil, err
+	}
+	if targetContainerName == "" {
+		targetContainerName = commonconsts.MainContainerName
 	}
 
 	hash, err := ComputeIdentityHash(identity)
@@ -133,7 +138,8 @@ func CreateOrGetAutoCheckpoint(
 			Identity:         identity,
 			GPUMemoryService: gpuMemoryService,
 			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
-				PodTemplateSpec: podTemplate,
+				PodTemplateSpec:     podTemplate,
+				TargetContainerName: targetContainerName,
 			},
 		},
 	}

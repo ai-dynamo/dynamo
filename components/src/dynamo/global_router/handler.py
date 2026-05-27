@@ -222,9 +222,13 @@ class GlobalRouterHandler:
         token_ids = request.get("token_ids", [])
         isl = len(token_ids)
 
-        # Extract TTFT target from extra_args if provided, fallback to CLI default
-        extra_args = request.get("extra_args") or {}
-        ttft_target_ms = extra_args.get("ttft_target") or self.default_ttft_target_ms
+        # Extract TTFT target from nvext.router (forwarded by the preprocessor
+        # as the `router` field on PreprocessedRequest), fallback to CLI default.
+        # Use `is None` to preserve explicit 0 (routes to the fastest bucket).
+        router_params = request.get("router") or {}
+        ttft_target_ms = router_params.get("ttft_target")
+        if ttft_target_ms is None:
+            ttft_target_ms = self.default_ttft_target_ms
 
         # Extract priority from routing hints (set by nvext.agent_hints.priority)
         routing = request.get("routing") or {}
@@ -278,9 +282,10 @@ class GlobalRouterHandler:
         # TODO: predict OSL based on ISL
         context_length = len(token_ids)
 
-        # Extract ITL target from extra_args if provided, fallback to CLI default
-        extra_args = request.get("extra_args") or {}
-        itl_target_ms = extra_args.get("itl_target") or self.default_itl_target_ms
+        router_params = request.get("router") or {}
+        itl_target_ms = router_params.get("itl_target")
+        if itl_target_ms is None:
+            itl_target_ms = self.default_itl_target_ms
 
         # Extract priority from routing hints (set by nvext.agent_hints.priority)
         routing = request.get("routing") or {}
@@ -330,13 +335,14 @@ class GlobalRouterHandler:
         assert self.config.agg_pool_selection_strategy is not None
         assert self.config.agg_pool_dynamo_namespaces is not None
 
-        # Extract SLA targets from extra_args, fallback to CLI defaults.
+        # Extract SLA targets from nvext.router (forwarded by the preprocessor
+        # as the `router` field on PreprocessedRequest), fallback to CLI defaults.
         # Use `is None` checks to preserve explicit 0 values.
-        extra_args = request.get("extra_args") or {}
-        ttft_target_ms = extra_args.get("ttft_target")
+        router_params = request.get("router") or {}
+        ttft_target_ms = router_params.get("ttft_target")
         if ttft_target_ms is None:
             ttft_target_ms = self.default_ttft_target_ms
-        itl_target_ms = extra_args.get("itl_target")
+        itl_target_ms = router_params.get("itl_target")
         if itl_target_ms is None:
             itl_target_ms = self.default_itl_target_ms
 
