@@ -821,6 +821,10 @@ impl MockOffloadEngine {
         // This is a planning pass only. `check_presence` does not acquire
         // blocks, so the later G2-ready path must still call `match_blocks`
         // to pin the source blocks it will onboard.
+        // This local mocker planner is tier-prioritized: contiguous G2
+        // blocks, then one contiguous G3 run, then one contiguous G4 run. It
+        // does not interleave lower tiers when, for example, a G4 hit appears
+        // before a later G3 hit.
         let g2_presence = self.g2_manager.block_registry().check_presence::<G2>(plhs);
         let g2_prefix_blocks = g2_presence.iter().take_while(|(_, in_g2)| *in_g2).count();
 

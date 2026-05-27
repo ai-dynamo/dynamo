@@ -705,7 +705,10 @@ impl Worker for MockWorker {
     }
 }
 
-// Mock implementation of the G4 ObjectBlockOps trait.
+// Mock implementation of the G4 ObjectBlockOps trait. This models object
+// presence and G2<->G4 transfer bandwidth only; object-store request latency,
+// HEAD/list overhead, retries, failures, and consistency effects are outside
+// this mocker's fidelity boundary.
 impl ObjectBlockOps for MockWorker {
     fn has_blocks(
         &self,
