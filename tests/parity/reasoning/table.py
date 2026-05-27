@@ -693,7 +693,7 @@ def _markdown(rows: dict[str, dict[str, Any]], columns: list[str]) -> str:
     no_vllm, no_sglang = _derive_no_peer_sets(rows)
     header = [
         "model",
-        "Reasoning Parser Family",
+        "Reasoning family",
         *[_display_case_id(c) for c in columns],
     ]
     out.append("| " + " | ".join(header) + " |")
@@ -791,10 +791,8 @@ def _column_control_header_html(
 
 def _case_group_headers_html(columns: list[str]) -> str:
     headers = [
-        _column_control_header_html("model", "Model", default_visible=False),
-        _column_control_header_html(
-            "parser", "Reasoning Parser Family", default_visible=True
-        ),
+        _column_control_header_html("model", "Model", default_visible=True),
+        _column_control_header_html("parser", "Reasoning family", default_visible=True),
     ]
     for run in _case_runs(columns):
         label = _case_group_label(run[0])
@@ -2045,7 +2043,7 @@ def _html(
         _make_jinja_env()
         .get_template("parity_table.html.j2")
         .render(
-            title="Dynamo Reasoning - Parity Table",
+            title="Dynamo Reasoning Parser - Parity Table",
             stamp=generated,
             sha=sha,
             short_sha=sha[:12] if sha else "",
