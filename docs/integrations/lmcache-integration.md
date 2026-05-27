@@ -117,7 +117,8 @@ The system automatically configures KV transfer based on the deployment mode and
 ```python
 kv_transfer_config = KVTransferConfig(
     kv_connector="LMCacheMPConnector",
-    kv_role="kv_both"
+    kv_role="kv_both",
+    kv_connector_extra_config={"lmcache.mp.port": 5555},
 )
 ```
 
