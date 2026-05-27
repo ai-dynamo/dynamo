@@ -100,7 +100,7 @@ log = logging.getLogger(__name__)
 
 # Matches ``PlannerStateMachine._MERGE_TOLERANCE_S`` so adapter next_tick
 # computation is bit-identical to PSM when both cadences are due.
-_MERGE_TOLERANCE_S = 1e-9
+_MERGE_TOLERANCE_S = 0.5
 
 
 class OrchestratorEngineAdapter:
@@ -339,7 +339,7 @@ class OrchestratorEngineAdapter:
         self._next_load_s = start_s + self._config.load_adjustment_interval_seconds
         if self._config.enable_throughput_scaling:
             self._next_throughput_s = (
-                start_s + self._config.throughput_adjustment_interval
+                start_s + self._config.throughput_adjustment_interval_seconds
             )
         return self._compute_next_scheduled_tick()
 
@@ -371,7 +371,7 @@ class OrchestratorEngineAdapter:
         #    output aligned when returning PlannerEffects.next_tick.
         if scheduled_tick.run_throughput_scaling:
             self._next_throughput_s = (
-                tick_input.now_s + self._config.throughput_adjustment_interval
+                tick_input.now_s + self._config.throughput_adjustment_interval_seconds
             )
         if scheduled_tick.run_load_scaling:
             self._next_load_s = (
@@ -589,7 +589,7 @@ class OrchestratorEngineAdapter:
         is_throughput = self._next_throughput_s <= at_s + _MERGE_TOLERANCE_S
         if is_throughput:
             need_traffic = True
-            traffic_duration_s = float(self._config.throughput_adjustment_interval)
+            traffic_duration_s = float(self._config.throughput_adjustment_interval_seconds)
         elif is_load and not self._config.enable_throughput_scaling:
             need_traffic = True
             traffic_duration_s = float(self._config.load_adjustment_interval_seconds)
