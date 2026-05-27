@@ -1,96 +1,50 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="680" viewBox="0 0 1280 680">
-<rect width="1280" height="680" fill="#000000"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="430" viewBox="0 0 1280 430">
+<rect width="1280" height="430" fill="#000000"/>
 <style>
   .title { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 36px; font-weight: 300; fill: #ffffff; }
   .subtitle { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 17px; font-weight: 300; fill: #cdcdcd; }
-  .model { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 500; fill: #ffffff; }
-  .strategy { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 11px; font-weight: 400; fill: #cdcdcd; }
-  .num { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 500; fill: #ffffff; }
-  .num-overflow { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 500; fill: #cdcdcd; }
-  .speedup { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 14px; font-weight: 600; fill: #74b711; }
+  .model { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 500; fill: #ffffff; }
+  .strategy { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 400; fill: #cdcdcd; }
+  .num { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; fill: #ffffff; }
+  .speedup { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 16px; font-weight: 600; fill: #74b711; }
   .speedup-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10px; font-weight: 400; fill: #8c8c8c; }
   .axis { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #8c8c8c; }
-  .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
+  .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 400; fill: #cdcdcd; }
 </style>
-<text class="title" x="40" y="58">Startup time across strategies and model sizes</text>
-<text class="subtitle" x="40" y="88">GMS over sharded NVMe is 18&#8211;21&#215; faster than cold across all three models</text>
-<line x1="170.0" y1="160" x2="170.0" y2="586" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="170.0" y="604" text-anchor="middle">0s</text>
-<line x1="328.3" y1="160" x2="328.3" y2="586" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="328.3" y="604" text-anchor="middle">15s</text>
-<line x1="486.7" y1="160" x2="486.7" y2="586" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="486.7" y="604" text-anchor="middle">30s</text>
-<line x1="645.0" y1="160" x2="645.0" y2="586" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="645.0" y="604" text-anchor="middle">45s</text>
-<line x1="803.3" y1="160" x2="803.3" y2="586" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="803.3" y="604" text-anchor="middle">60s</text>
-<line x1="961.7" y1="160" x2="961.7" y2="586" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="961.7" y="604" text-anchor="middle">75s</text>
-<line x1="1120.0" y1="160" x2="1120.0" y2="586" stroke="#1a1a1a" stroke-width="1"/>
-<text class="axis" x="1120.0" y="604" text-anchor="middle">90s+</text>
-<text class="model" x="40" y="178">Qwen3 0.6B</text>
-<text class="strategy" x="160" y="201" text-anchor="end">Cold start</text>
-<rect x="170" y="188" width="556.1" height="18" fill="#4a4a4a"/>
-<text class="num" x="448.1" y="201" text-anchor="middle">52.7s</text>
-<text class="strategy" x="160" y="223" text-anchor="end">Snapshot (unopt)</text>
-<rect x="170" y="210" width="84.7" height="18" fill="#6a6a6a"/>
-<text class="num" x="212.4" y="223" text-anchor="middle">8.0s</text>
-<text class="strategy" x="160" y="245" text-anchor="end">Snapshot (opt)</text>
-<rect x="170" y="232" width="36.9" height="18" fill="#8a8a8a"/>
-<text class="num" x="188.5" y="245" text-anchor="middle">3.5s</text>
-<text class="strategy" x="160" y="267" text-anchor="end">GMS / NFS</text>
-<rect x="170" y="254" width="33.1" height="18" fill="#74b711"/>
-<text class="num" x="186.6" y="267" text-anchor="middle">3.1s</text>
-<text class="strategy" x="160" y="289" text-anchor="end">GMS / NVMe</text>
-<rect x="170" y="276" width="31.0" height="18" fill="#9ed649"/>
-<text class="num" x="185.5" y="289" text-anchor="middle">2.9s</text>
-<text class="speedup" x="1180" y="178" text-anchor="middle">18&#215;</text>
-<text class="speedup-label" x="1180" y="192" text-anchor="middle">faster than cold</text>
-<text class="model" x="40" y="326">Qwen3 8B</text>
-<text class="strategy" x="160" y="349" text-anchor="end">Cold start</text>
-<rect x="170" y="336" width="619.2" height="18" fill="#4a4a4a"/>
-<text class="num" x="479.6" y="349" text-anchor="middle">58.7s</text>
-<text class="strategy" x="160" y="371" text-anchor="end">Snapshot (unopt)</text>
-<rect x="170" y="358" width="295.1" height="18" fill="#6a6a6a"/>
-<text class="num" x="317.6" y="371" text-anchor="middle">28.0s</text>
-<text class="strategy" x="160" y="393" text-anchor="end">Snapshot (opt)</text>
-<rect x="170" y="380" width="85.1" height="18" fill="#8a8a8a"/>
-<text class="num" x="212.6" y="393" text-anchor="middle">8.1s</text>
-<text class="strategy" x="160" y="415" text-anchor="end">GMS / NFS</text>
-<rect x="170" y="402" width="40.0" height="18" fill="#74b711"/>
-<text class="num" x="190.0" y="415" text-anchor="middle">3.8s</text>
-<text class="strategy" x="160" y="437" text-anchor="end">GMS / NVMe</text>
-<rect x="170" y="424" width="32.4" height="18" fill="#9ed649"/>
-<text class="num" x="186.2" y="437" text-anchor="middle">3.1s</text>
-<text class="speedup" x="1180" y="326" text-anchor="middle">19&#215;</text>
-<text class="speedup-label" x="1180" y="340" text-anchor="middle">faster than cold</text>
-<text class="model" x="40" y="474">gpt-oss-120b</text>
-<text class="strategy" x="160" y="497" text-anchor="end">Cold start</text>
-<rect x="170" y="484" width="902.2" height="18" fill="#4a4a4a"/>
-<text class="num" x="621.1" y="497" text-anchor="middle">85.5s</text>
-<text class="strategy" x="160" y="519" text-anchor="end">Snapshot (unopt)</text>
-<rect x="170" y="506" width="950.0" height="18" fill="#6a6a6a"/>
-<polygon points="1125,508 1133,515.0 1125,522" fill="#6a6a6a"/>
-<text class="num-overflow" x="1139" y="520">135.2s</text>
-<text class="strategy" x="160" y="541" text-anchor="end">Snapshot (opt)</text>
-<rect x="170" y="528" width="328.6" height="18" fill="#8a8a8a"/>
-<text class="num" x="334.3" y="541" text-anchor="middle">31.1s</text>
-<text class="strategy" x="160" y="563" text-anchor="end">GMS / NFS</text>
-<rect x="170" y="550" width="110.4" height="18" fill="#74b711"/>
-<text class="num" x="225.2" y="563" text-anchor="middle">10.5s</text>
-<text class="strategy" x="160" y="585" text-anchor="end">GMS / NVMe</text>
-<rect x="170" y="572" width="42.9" height="18" fill="#9ed649"/>
-<text class="num" x="191.5" y="585" text-anchor="middle">4.1s</text>
-<text class="speedup" x="1180" y="474" text-anchor="middle">21&#215;</text>
-<text class="speedup-label" x="1180" y="488" text-anchor="middle">faster than cold</text>
-<rect x="352.5" y="640" width="12" height="12" fill="#4a4a4a"/>
-<text class="legend" x="370.5" y="650">Cold start</text>
-<rect x="458.5" y="640" width="12" height="12" fill="#6a6a6a"/>
-<text class="legend" x="476.5" y="650">Snapshot (unopt)</text>
-<rect x="606.5" y="640" width="12" height="12" fill="#8a8a8a"/>
-<text class="legend" x="624.5" y="650">Snapshot (opt)</text>
-<rect x="740.5" y="640" width="12" height="12" fill="#74b711"/>
-<text class="legend" x="758.5" y="650">GMS / NFS</text>
-<rect x="839.5" y="640" width="12" height="12" fill="#9ed649"/>
-<text class="legend" x="857.5" y="650">GMS / NVMe</text>
+<text class="title" x="40" y="58">gpt-oss-120b Startup Time by Strategy</text>
+<text class="subtitle" x="40" y="88">Single-GPU (1xB200); GMS uses the sharded SSD backend</text>
+<line x1="320.0" y1="140" x2="320.0" y2="322" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="320.0" y="342" text-anchor="middle">0s</text>
+<line x1="453.3" y1="140" x2="453.3" y2="322" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="453.3" y="342" text-anchor="middle">15s</text>
+<line x1="586.7" y1="140" x2="586.7" y2="322" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="586.7" y="342" text-anchor="middle">30s</text>
+<line x1="720.0" y1="140" x2="720.0" y2="322" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="720.0" y="342" text-anchor="middle">45s</text>
+<line x1="853.3" y1="140" x2="853.3" y2="322" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="853.3" y="342" text-anchor="middle">60s</text>
+<line x1="986.7" y1="140" x2="986.7" y2="322" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="986.7" y="342" text-anchor="middle">75s</text>
+<line x1="1120.0" y1="140" x2="1120.0" y2="322" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="1120.0" y="342" text-anchor="middle">90s</text>
+<text class="model" x="40" y="139">gpt-oss-120b</text>
+<text class="strategy" x="300" y="184" text-anchor="end">Cold Start</text>
+<rect x="320" y="162" width="759.8" height="32" rx="2" fill="#4a4a4a"/>
+<text class="num" x="699.9" y="183" text-anchor="middle">85.5s</text>
+<text class="strategy" x="300" y="242" text-anchor="end">Snapshot Restore (without GMS)</text>
+<rect x="320" y="220" width="276.7" height="32" rx="2" fill="#4a7500"/>
+<text class="num" x="458.4" y="241" text-anchor="middle">31.1s</text>
+<text class="speedup" x="1190" y="238" text-anchor="middle">2.7&#215;</text>
+<text class="speedup-label" x="1190" y="252" text-anchor="middle">faster than cold</text>
+<text class="strategy" x="300" y="300" text-anchor="end">Snapshot Restore (GMS + sharded SSD)</text>
+<rect x="320" y="278" width="36.2" height="32" rx="2" fill="#0a4a80"/>
+<text class="num" x="338.1" y="299" text-anchor="middle">4.1s</text>
+<text class="speedup" x="1190" y="296" text-anchor="middle">21&#215;</text>
+<text class="speedup-label" x="1190" y="310" text-anchor="middle">faster than cold</text>
+<rect x="355" y="392" width="12" height="12" fill="#4a4a4a"/>
+<text class="legend" x="373" y="403">Cold Start</text>
+<rect x="485" y="392" width="12" height="12" fill="#4a7500"/>
+<text class="legend" x="503" y="403">Snapshot Restore</text>
+<rect x="670" y="392" width="12" height="12" fill="#0a4a80"/>
+<text class="legend" x="688" y="403">Snapshot Restore + GMS / sharded SSD</text>
 </svg>
