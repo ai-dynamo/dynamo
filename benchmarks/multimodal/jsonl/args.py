@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_IMAGES_PER_REQUEST = 3
+DEFAULT_VIDEOS_PER_REQUEST = 1
 USER_TEXT_TOKENS = 300
 COCO_ANNOTATIONS = Path(__file__).parent / "annotations" / "image_info_test2017.json"
 
@@ -83,9 +84,23 @@ def _image_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _video_parser() -> argparse.ArgumentParser:
+    """Args for video URL workloads."""
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument(
+        "--video-manifest",
+        type=Path,
+        required=True,
+        help="Text/JSON/JSONL manifest of video URLs. Each record can be a URL string "
+        'or an object with "url", "video", or "video_url".',
+    )
+    return p
+
+
 def parse_args(description: str = "") -> argparse.Namespace:
     common = _common_parser()
     image = _image_parser()
+    video = _video_parser()
 
     parser = argparse.ArgumentParser(
         description=description,
@@ -146,10 +161,68 @@ def parse_args(description: str = "") -> argparse.Namespace:
         "with window_size-1 overlap between consecutive turns (default: 5)",
     )
 
+    # --- video-single-turn ---
+    vst = sub.add_parser(
+        "video-single-turn",
+        parents=[common, video],
+        help="Independent requests with random video sampling",
+    )
+    vst.add_argument(
+        "-n",
+        "--num-requests",
+        type=int,
+        default=200,
+        help="Number of requests to generate (default: 200)",
+    )
+    vst.add_argument(
+        "--videos-per-request",
+        type=int,
+        default=DEFAULT_VIDEOS_PER_REQUEST,
+        help=f"Number of videos per request (default: {DEFAULT_VIDEOS_PER_REQUEST})",
+    )
+    vst.add_argument(
+        "--videos-pool",
+        type=int,
+        default=None,
+        help="Unique videos in pool. Smaller pool = more cross-request reuse. "
+        "Default: num_requests * videos_per_request (all unique).",
+    )
+
+    # --- video-sliding-window ---
+    vsw = sub.add_parser(
+        "video-sliding-window",
+        parents=[common, video],
+        help="Causal sessions with sliding-window video overlap",
+    )
+    vsw.add_argument(
+        "--num-users",
+        type=_positive_int,
+        default=10,
+        help="Number of concurrent user sessions (default: 10)",
+    )
+    vsw.add_argument(
+        "--turns-per-user",
+        type=_positive_int,
+        default=10,
+        help="Number of requests per user (default: 10)",
+    )
+    vsw.add_argument(
+        "--window-size",
+        type=_positive_int,
+        default=2,
+        help="Sliding window width — each turn sees this many videos, "
+        "with window_size-1 overlap between consecutive turns (default: 2)",
+    )
+
     # Default to single-turn when no subcommand given, but let top-level
     # `-h`/`--help` flow through the main parser so users see both
     # subcommands and the module description.
-    known_strategies = {"single-turn", "sliding-window"}
+    known_strategies = {
+        "single-turn",
+        "sliding-window",
+        "video-single-turn",
+        "video-sliding-window",
+    }
     argv = sys.argv[1:]
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
     if not help_requested and (not argv or argv[0] not in known_strategies):

@@ -134,3 +134,95 @@ class TestSlidingWindow:
             assert (
                 prev[1:] == curr[:-1]
             ), f"Turn {i} and {i + 1} should share 3/4 images"
+
+
+class TestVideoSingleTurn:
+    """video-single-turn mirrors image pool reuse across requests."""
+
+    @staticmethod
+    def _write_manifest(tmp_path: Path, count: int) -> Path:
+        manifest = tmp_path / "videos.txt"
+        manifest.write_text(
+            "\n".join(
+                f"https://example.com/video_{idx:04d}.mp4" for idx in range(count)
+            )
+            + "\n"
+        )
+        return manifest
+
+    def test_video_pool_reuse_with_multiple_videos_per_request(
+        self, tmp_path: Path
+    ) -> None:
+        manifest = self._write_manifest(tmp_path, count=5)
+        lines = _run_main(
+            tmp_path,
+            [
+                "video-single-turn",
+                "--video-manifest",
+                str(manifest),
+                "-n",
+                "6",
+                "--videos-per-request",
+                "2",
+                "--videos-pool",
+                "3",
+                "--seed",
+                "11",
+                "-o",
+                str(tmp_path / "videos.jsonl"),
+            ],
+        )
+
+        assert len(lines) == 6
+        all_videos = []
+        for line in lines:
+            assert "text" in line
+            assert "session_id" not in line
+            assert len(line["videos"]) == 2
+            assert len(set(line["videos"])) == 2
+            all_videos.extend(line["videos"])
+
+        assert len(all_videos) == 12
+        assert len(set(all_videos)) == 3
+
+
+class TestVideoSlidingWindow:
+    """video-sliding-window mirrors image overlap semantics."""
+
+    @staticmethod
+    def _write_manifest(tmp_path: Path, count: int) -> Path:
+        manifest = tmp_path / "videos.txt"
+        manifest.write_text(
+            "\n".join(
+                f"https://example.com/video_{idx:04d}.mp4" for idx in range(count)
+            )
+            + "\n"
+        )
+        return manifest
+
+    def test_video_overlap(self, tmp_path: Path) -> None:
+        manifest = self._write_manifest(tmp_path, count=5)
+        lines = _run_main(
+            tmp_path,
+            [
+                "video-sliding-window",
+                "--video-manifest",
+                str(manifest),
+                "--num-users",
+                "1",
+                "--turns-per-user",
+                "4",
+                "--window-size",
+                "2",
+                "--seed",
+                "13",
+                "-o",
+                str(tmp_path / "video_overlap.jsonl"),
+            ],
+        )
+
+        assert len(lines) == 4
+        for i in range(len(lines) - 1):
+            prev = lines[i]["videos"]
+            curr = lines[i + 1]["videos"]
+            assert prev[1:] == curr[:-1]
