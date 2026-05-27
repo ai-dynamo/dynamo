@@ -5,8 +5,8 @@
 
 from gpu_memory_service.integrations.common.patches import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
-    GMSWriteFinalizeResult,
     GMS_TAGS,
+    GMSWriteFinalizeResult,
     finalize_gms_write,
     setup_meta_tensor_workaround,
 )

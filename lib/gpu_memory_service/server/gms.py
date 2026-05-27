@@ -179,9 +179,7 @@ class GMS:
             sorted(allocations, key=lambda info: info.layout_slot)
         ):
             allocation_ranks_by_id[info.allocation_id] = rank
-            h.update(
-                f"{rank}:{info.size}:{info.aligned_size}:{info.tag}".encode()
-            )
+            h.update(f"{rank}:{info.size}:{info.aligned_size}:{info.tag}".encode())
 
         for key in sorted(self._metadata):
             entry = self._metadata[key]
