@@ -48,6 +48,8 @@ pub struct GptOssReasoningParser {
     pending_text: String,
     emitted_reasoning_text: bool,
     insert_reasoning_separator: bool,
+    emitted_normal_text: bool,
+    insert_normal_separator: bool,
 }
 
 /// Implement Debug for GptOssReasoningParser separately because StreamableParser does not implement Debug
@@ -81,6 +83,8 @@ impl GptOssReasoningParser {
             pending_text: String::new(),
             emitted_reasoning_text: false,
             insert_reasoning_separator: false,
+            emitted_normal_text: false,
+            insert_normal_separator: false,
         })
     }
 }
@@ -176,7 +180,10 @@ fn append_text_content(target: &mut String, content: &[Content]) {
 fn append_message_by_channel(reasoning_text: &mut String, normal_text: &mut String, msg: &Message) {
     match msg.channel.as_deref() {
         Some("analysis") => append_text_content(reasoning_text, &msg.content),
-        Some("final") | Some("commentary") => append_text_content(normal_text, &msg.content),
+        Some("final") => append_text_content(normal_text, &msg.content),
+        Some("commentary") if msg.recipient.is_none() => {
+            append_text_content(normal_text, &msg.content)
+        }
         _ => {}
     }
 }
@@ -189,9 +196,15 @@ fn append_current_by_channel(
 ) {
     match channel.as_deref() {
         Some("analysis") => append_separated(reasoning_text, &current),
-        Some("final") | Some("commentary") => append_separated(normal_text, &current),
+        Some("final") => append_separated(normal_text, &current),
+        Some("commentary") => append_separated(normal_text, &current),
         _ => {}
     }
+}
+
+fn is_visible_normal_channel(channel: Option<&str>, recipient: Option<&str>) -> bool {
+    matches!(channel, Some("final"))
+        || (matches!(channel, Some("commentary")) && recipient.is_none())
 }
 
 impl ReasoningParser for GptOssReasoningParser {
@@ -255,12 +268,16 @@ impl ReasoningParser for GptOssReasoningParser {
         }
 
         let current = parser.current_content().unwrap_or_default();
-        append_current_by_channel(
-            &mut reasoning_text,
-            &mut normal_text,
-            parser.current_channel(),
-            current,
-        );
+        let current_channel = parser.current_channel();
+        if current_channel.as_deref() != Some("commentary") || parser.current_recipient().is_none()
+        {
+            append_current_by_channel(
+                &mut reasoning_text,
+                &mut normal_text,
+                current_channel,
+                current,
+            );
+        }
 
         tracing::debug!(
             "Final result - normal_text: {} chars, reasoning_text: {} chars",
@@ -323,11 +340,13 @@ impl ReasoningParser for GptOssReasoningParser {
                 token_id
             );
             let previous_channel = parser.current_channel();
+            let previous_recipient = parser.current_recipient();
             if let Err(e) = parser.process(*token_id) {
                 tracing::warn!("Harmony parse error for token_id {token_id}: {e}");
                 return ParserResult::default();
             }
             let current_channel = parser.current_channel();
+            let current_recipient = parser.current_recipient();
 
             if previous_channel.as_deref() != Some("analysis")
                 && current_channel.as_deref() == Some("analysis")
@@ -336,15 +355,31 @@ impl ReasoningParser for GptOssReasoningParser {
                 self.insert_reasoning_separator = true;
             }
 
+            if is_visible_normal_channel(current_channel.as_deref(), current_recipient.as_deref())
+                && !is_visible_normal_channel(
+                    previous_channel.as_deref(),
+                    previous_recipient.as_deref(),
+                )
+                && self.emitted_normal_text
+            {
+                self.insert_normal_separator = true;
+            }
+
             if let (Some(delta), Some(channel)) = (
                 parser.last_content_delta().unwrap_or_default(),
                 current_channel,
             ) {
-                // `last_content_delta` only exposes the newest token slice, so we forward
-                // `final`/`analysis` chunks immediately; commentary is reconstructed in the
-                // fallback path below because it needs the stripped metadata.
+                // `last_content_delta` only exposes the newest token slice, so directed
+                // commentary still falls through to the raw handoff path for tool parsing.
                 match channel.as_str() {
-                    "final" => normal_delta.push_str(&delta),
+                    "final" => {
+                        if self.insert_normal_separator {
+                            normal_delta.push('\n');
+                            self.insert_normal_separator = false;
+                        }
+                        normal_delta.push_str(&delta);
+                        self.emitted_normal_text = true;
+                    }
                     "analysis" => {
                         if self.insert_reasoning_separator {
                             reasoning_delta.push('\n');
@@ -353,7 +388,16 @@ impl ReasoningParser for GptOssReasoningParser {
                         reasoning_delta.push_str(&delta);
                         self.emitted_reasoning_text = true;
                     }
-                    "commentary" => {}
+                    "commentary" => {
+                        if current_recipient.is_none() {
+                            if self.insert_normal_separator {
+                                normal_delta.push('\n');
+                                self.insert_normal_separator = false;
+                            }
+                            normal_delta.push_str(&delta);
+                            self.emitted_normal_text = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -474,6 +518,24 @@ mod tests {
         assert_eq!(result.normal_text, "done");
     }
 
+    #[test]
+    fn test_gpt_oss_recipient_commentary_is_not_normal_text() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let text = "<|channel|>analysis<|message|>think<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny.";
+        let result = parser.detect_and_parse_reasoning(text, &[]);
+        assert_eq!(result.reasoning_text, "think");
+        assert_eq!(result.normal_text, "It is sunny.");
+    }
+
+    #[test]
+    fn test_gpt_oss_recipientless_commentary_is_normal_text() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let text = "<|channel|>commentary<|message|>I will check that.<|end|><|start|>assistant<|channel|>final<|message|>Done.";
+        let result = parser.detect_and_parse_reasoning(text, &[]);
+        assert_eq!(result.reasoning_text, "");
+        assert_eq!(result.normal_text, "I will check that.\nDone.");
+    }
+
     #[test] // REASONING.stream.2.a, REASONING.batch.2.c, TOOLCALLING.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
@@ -557,6 +619,24 @@ mod tests {
         }
         assert_eq!(reasoning_text_incr, "first\nsecond");
         assert_eq!(normal_text_incr, "done");
+    }
+
+    #[test]
+    fn test_gpt_oss_reasoning_parser_streaming_recipientless_commentary() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let chunks = vec![
+            "<|channel|>commentary<|message|>I will check that.<|end|><|start|>assistant",
+            "<|channel|>final<|message|>Done.",
+        ];
+        let mut reasoning_text_incr = String::new();
+        let mut normal_text_incr = String::new();
+        for chunk in chunks {
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
+            normal_text_incr.push_str(&result.normal_text);
+            reasoning_text_incr.push_str(&result.reasoning_text);
+        }
+        assert_eq!(reasoning_text_incr, "");
+        assert_eq!(normal_text_incr, "I will check that.\nDone.");
     }
 
     #[test] // REASONING.stream.2.a, REASONING.batch.2.c, TOOLCALLING.harmony.1

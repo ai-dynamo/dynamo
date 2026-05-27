@@ -38,11 +38,54 @@ cases:
     expected:
       dynamo: &d_2
         reasoning_text: choose tool
-        normal_text: '{"city":"SF"}'
-      vllm:
-        reasoning_text: choose tool
         normal_text: ''
-        reason: vLLM gpt-oss reasoning keeps recipient commentary tool-call payload out of normal_text for the tool parser path.
+      vllm: *d_2
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.3.c:
+    description: Recipientless Harmony commentary is visible normal text
+    ref: *upstream_ref
+    model_text: <|channel|>commentary<|message|>I will check that.<|end|><|start|>assistant<|channel|>final<|message|>Done.
+    expected:
+      dynamo: &d_10
+        reasoning_text: ''
+        normal_text: |-
+          I will check that.
+          Done.
+      vllm: *d_10
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.3.d:
+    description: Directed Harmony commentary tool call is not visible normal text
+    ref: *upstream_ref
+    model_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
+    expected:
+      dynamo: &d_11
+        reasoning_text: ''
+        normal_text: ''
+      vllm: *d_11
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.3.e:
+    description: Directed Harmony analysis tool call stays in reasoning text
+    ref: *upstream_ref
+    model_text: <|channel|>analysis to=functions.search <|constrain|>json<|message|>{"q":"x"}<|call|>
+    expected:
+      dynamo: &d_12
+        reasoning_text: '{"q":"x"}'
+        normal_text: ''
+      vllm: *d_12
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.3.f:
+    description: Harmony analysis, directed commentary tool call, then final answer
+    ref: *upstream_ref
+    model_text: <|channel|>analysis<|message|>think<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny.
+    expected:
+      dynamo: &d_13
+        reasoning_text: think
+        normal_text: It is sunny.
+      vllm: *d_13
       sglang:
         unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
   REASONING.batch.2.c:
