@@ -27,22 +27,20 @@ import (
 	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 const (
-	// maxCombinedResourceNameLength is the maximum allowed combined length for Grove resource names.
-	// This constraint comes from Grove's PodCliqueSet webhook validation which enforces a 45-character
-	// limit on the combined length of PodCliqueSet name + PodCliqueScalingGroup name + PodClique name.
-	// Pod names follow formats like: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
-	// The random string and hyphens consume additional characters, leaving 45 for the resource names.
-	maxCombinedResourceNameLength = 45
+	// maxCombinedResourceNameLength is kept as a local alias for readability.
+	maxCombinedResourceNameLength = consts.MaxCombinedGroveResourceNameLength
 
 	// backendFrameworkVLLM is the spec.backendFramework value that identifies
 	// a vLLM deployment. Duplicated here (instead of importing from
@@ -103,6 +101,11 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 
 	// Validate topology constraints
 	if err := v.validateTopologyConstraints(ctx); err != nil {
+		return nil, err
+	}
+
+	// Validate KV transfer policy
+	if err := v.validateKvTransferPolicy(); err != nil {
 		return nil, err
 	}
 
@@ -382,13 +385,16 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 	return sharedValidator.Validate(ctx)
 }
 
-// validateServiceNameLength validates that the service name combined with the DGD name
-// won't exceed Grove's 45-character limit for resource naming.
+// validateServiceNameLength validates that the service name combined with the
+// auto-truncated PCS name won't exceed Grove's 45-character limit.
 //
-// Grove generates PodCliqueSet resources with the following naming patterns:
-// - PodCliqueSet name: DGD name (e.g., "vllm-agg")
+// The operator auto-truncates the PCS name (see PCSNameForDGD), so this
+// validation acts as a safety net — it should rarely fire in practice.
+//
+// Grove generates resource names from:
+// - PodCliqueSet name: auto-truncated from DGD name
 // - For multinode services:
-//   - PodCliqueScalingGroup name: lowercase(serviceName) (e.g., "vllmprefillworker")
+//   - PodCliqueScalingGroup name: lowercase(serviceName)
 //   - PodClique names: lowercase(serviceName + "-ldr") and lowercase(serviceName + "-wkr")
 //
 // - For single-node services:
@@ -396,7 +402,7 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 //
 // The combined length of these names must not exceed 45 characters.
 func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
-	dgdName := v.deployment.Name
+	pcsName := dynamo.PCSNameForAlphaDGDServices(v.deployment.Name, v.deployment.Spec.Services)
 	lowerServiceName := strings.ToLower(serviceName)
 
 	isMultinode := service.GetNumberOfNodes() > 1
@@ -429,27 +435,31 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 
 	default:
 		// Single-node non-GMS: no PCSG, only PCS + PCLQ
-		combinedLength := len(dgdName) + len(lowerServiceName)
+		combinedLength := len(pcsName) + len(lowerServiceName)
 		if combinedLength > maxCombinedResourceNameLength {
 			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
 				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
-				"The combined length of DGD name + service name must not exceed %d characters",
+				"The combined length of PCS name + service name must not exceed %d characters. "+
+				"The PCS name '%s' was auto-truncated from DGD name '%s'",
 				serviceName, combinedLength, maxCombinedResourceNameLength,
-				dgdName, len(dgdName), serviceName, len(serviceName),
-				maxCombinedResourceNameLength)
+				v.deployment.Name, len(v.deployment.Name), serviceName, len(serviceName),
+				maxCombinedResourceNameLength,
+				pcsName, v.deployment.Name)
 		}
 		return nil
 	}
 
 	// For services with PCSG: PCS name + PCSG name + longest PCLQ name
-	combinedLength := len(dgdName) + len(pcsgName) + len(longestPCLQName)
+	combinedLength := len(pcsName) + len(pcsgName) + len(longestPCLQName)
 	if combinedLength > maxCombinedResourceNameLength {
 		return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
 			"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
-			"The combined length of DGD name + PCSG name + longest PodClique name ('%s') must not exceed %d characters",
+			"The combined length of PCS name + PCSG name + longest PodClique name ('%s') must not exceed %d characters. "+
+			"The PCS name '%s' was auto-truncated from DGD name '%s'",
 			serviceName, combinedLength, maxCombinedResourceNameLength,
-			dgdName, len(dgdName), serviceName, len(serviceName),
-			longestPCLQName, maxCombinedResourceNameLength)
+			v.deployment.Name, len(v.deployment.Name), serviceName, len(serviceName),
+			longestPCLQName, maxCombinedResourceNameLength,
+			pcsName, v.deployment.Name)
 	}
 
 	return nil
@@ -900,6 +910,64 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 	}
 
 	return nil
+}
+
+// validateKvTransferPolicy validates the spec.experimental.kvTransferPolicy
+// configuration when set. In this phase only the `labelKey` path is supported
+// (clusterTopologyName is added in a future PR).
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
+	if v.deployment.Spec.Experimental == nil {
+		return nil
+	}
+	kvt := v.deployment.Spec.Experimental.KvTransferPolicy
+	if kvt == nil {
+		return nil
+	}
+
+	var errs []error
+	const fieldPath = "spec.experimental.kvTransferPolicy"
+
+	// labelKey is required (only supported path in this phase)
+	if kvt.LabelKey == "" {
+		errs = append(errs, fmt.Errorf("%s.labelKey is required", fieldPath))
+	} else if labelKeyErrs := k8svalidation.IsQualifiedName(kvt.LabelKey); len(labelKeyErrs) > 0 {
+		errs = append(errs, fmt.Errorf("%s.labelKey %q is not a valid Kubernetes label key: %s",
+			fieldPath, kvt.LabelKey, strings.Join(labelKeyErrs, "; ")))
+	}
+
+	// domain is required and must be a valid topology domain format
+	if kvt.Domain == "" {
+		errs = append(errs, fmt.Errorf("%s.domain is required", fieldPath))
+	} else if !nvidiacomv1alpha1.IsValidTopologyDomainFormat(kvt.Domain) {
+		errs = append(errs, fmt.Errorf("%s.domain %q is not a valid topology domain; "+
+			"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", fieldPath, kvt.Domain))
+	}
+
+	enforcement := kvt.Enforcement
+	if enforcement == "" {
+		enforcement = nvidiacomv1alpha1.KvTransferEnforcementRequired
+	}
+	if enforcement != nvidiacomv1alpha1.KvTransferEnforcementRequired &&
+		enforcement != nvidiacomv1alpha1.KvTransferEnforcementPreferred {
+		errs = append(errs, fmt.Errorf("%s.enforcement %q is invalid; "+
+			"must be \"required\" or \"preferred\"", fieldPath, kvt.Enforcement))
+	}
+
+	if enforcement == nvidiacomv1alpha1.KvTransferEnforcementPreferred && kvt.PreferredWeight == nil {
+		errs = append(errs, fmt.Errorf("%s.preferredWeight is required when enforcement is \"preferred\"", fieldPath))
+	}
+
+	if kvt.PreferredWeight != nil {
+		if *kvt.PreferredWeight < 0 || *kvt.PreferredWeight > 1 {
+			errs = append(errs, fmt.Errorf("%s.preferredWeight %g is invalid; "+
+				"must be >= 0 and <= 1", fieldPath, *kvt.PreferredWeight))
+		}
+		if enforcement == nvidiacomv1alpha1.KvTransferEnforcementRequired {
+			errs = append(errs, fmt.Errorf("%s.preferredWeight must not be set when enforcement is \"required\"", fieldPath))
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // validateFailoverRequiresDiscoveryMode checks that when any service has

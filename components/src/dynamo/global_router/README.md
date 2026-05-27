@@ -14,7 +14,7 @@ The Global Router supports two modes:
 - **Disagg mode** (default): Registers as both prefill and decode worker. Routes prefill requests based on (ISL, TTFT) and decode requests based on (context_length, ITL) to separate pool types.
 - **Agg mode**: Registers as a single generate worker. Routes all requests based on (TTFT target, ITL target) to unified pools that handle both prefill and decode.
 
-Both modes support priority-based pool overrides from agent hints.
+Both modes support priority-based pool overrides from agent hints and optional priority retry to faster pools.
 
 ## Supported Backends
 
@@ -90,8 +90,8 @@ All options can be set via CLI flags or environment variables. CLI flags take pr
 | `--model-name` | Yes | `DYN_GLOBAL_ROUTER_MODEL_NAME` | - | Model name for registration (must match workers) |
 | `--namespace` | No | `DYN_NAMESPACE` | "dynamo" | Namespace for global router |
 | `--component-name` | No | `DYN_GLOBAL_ROUTER_COMPONENT_NAME` | "global_router" | Component name |
-| `--default-ttft-target` | No | `DYN_GLOBAL_ROUTER_DEFAULT_TTFT_TARGET` | None | Default TTFT target (ms) for prefill pool selection |
-| `--default-itl-target` | No | `DYN_GLOBAL_ROUTER_DEFAULT_ITL_TARGET` | None | Default ITL target (ms) for pool selection |
+| `--default-ttft-target-ms` | No | `DYN_GLOBAL_ROUTER_DEFAULT_TTFT_TARGET_MS` | None | Default TTFT target (ms) for prefill pool selection |
+| `--default-itl-target-ms` | No | `DYN_GLOBAL_ROUTER_DEFAULT_ITL_TARGET_MS` | None | Default ITL target (ms) for pool selection |
 
 ## Configuration
 
@@ -102,17 +102,20 @@ The configuration file format depends on the mode. The `mode` field determines w
 ```jsonc
 {
     "mode": "disagg",                     // Optional, defaults to "disagg"
+    "enable_priority_retry": false,        // Optional, retry failed requests on faster pools
     "num_prefill_pools": <int>,
     "num_decode_pools": <int>,
     "prefill_pool_dynamo_namespaces": [],
     "decode_pool_dynamo_namespaces": [],
+    "prefill_pool_priorities": [],         // Optional, lower integer = faster pool
+    "decode_pool_priorities": [],          // Optional, lower integer = faster pool
 
     "prefill_pool_selection_strategy": {
         "isl_min": <int>,
         "isl_max": <int>,
         "isl_resolution": <int>,
-        "ttft_min": <float>,
-        "ttft_max": <float>,
+        "ttft_min_ms": <float>,
+        "ttft_max_ms": <float>,
         "ttft_resolution": <int>,
         "prefill_pool_mapping": [[]],     // 2D array [isl_resolution][ttft_resolution] -> pool index
         "priority_overrides": []          // Optional
@@ -122,8 +125,8 @@ The configuration file format depends on the mode. The `mode` field determines w
         "context_length_min": <int>,
         "context_length_max": <int>,
         "context_length_resolution": <int>,
-        "itl_min": <float>,
-        "itl_max": <float>,
+        "itl_min_ms": <float>,
+        "itl_max_ms": <float>,
         "itl_resolution": <int>,
         "decode_pool_mapping": [[]],      // 2D array [context_length_resolution][itl_resolution] -> pool index
         "priority_overrides": []          // Optional
@@ -136,15 +139,17 @@ The configuration file format depends on the mode. The `mode` field determines w
 ```jsonc
 {
     "mode": "agg",
+    "enable_priority_retry": false,        // Optional, retry failed requests on faster pools
     "num_agg_pools": <int>,
     "agg_pool_dynamo_namespaces": [],
+    "agg_pool_priorities": [],             // Optional, lower integer = faster pool
 
     "agg_pool_selection_strategy": {
-        "ttft_min": <float>,              // Minimum TTFT target (ms)
-        "ttft_max": <float>,              // Maximum TTFT target (ms)
+        "ttft_min_ms": <float>,              // Minimum TTFT target (ms)
+        "ttft_max_ms": <float>,              // Maximum TTFT target (ms)
         "ttft_resolution": <int>,         // Number of grid rows for TTFT dimension
-        "itl_min": <float>,              // Minimum ITL target (ms)
-        "itl_max": <float>,              // Maximum ITL target (ms)
+        "itl_min_ms": <float>,              // Minimum ITL target (ms)
+        "itl_max_ms": <float>,              // Maximum ITL target (ms)
         "itl_resolution": <int>,          // Number of grid columns for ITL dimension
         "agg_pool_mapping": [[]],         // 2D array [ttft_resolution][itl_resolution] -> pool index
         "priority_overrides": []          // Optional
@@ -172,10 +177,10 @@ The pool selection uses a 2D grid lookup. Each dimension is divided into buckets
 **Prefill Pool Selection** (disagg mode, based on ISL and TTFT target):
 
 1. Compute `isl_step = (isl_max - isl_min) / isl_resolution`
-2. Compute `ttft_step = (ttft_max - ttft_min) / ttft_resolution`
+2. Compute `ttft_step_ms = (ttft_max_ms - ttft_min_ms) / ttft_resolution`
 3. For a request with input sequence length `ISL` and target TTFT:
    - `isl_idx = clamp((ISL - isl_min) / isl_step, 0, isl_resolution - 1)`
-   - `ttft_idx = clamp((ttft_target - ttft_min) / ttft_step, 0, ttft_resolution - 1)`
+   - `ttft_idx = clamp((ttft_target_ms - ttft_min_ms) / ttft_step_ms, 0, ttft_resolution - 1)`
 4. Lookup pool: `pool_index = prefill_pool_mapping[isl_idx][ttft_idx]`
 
 **Decode Pool Selection** (disagg mode, based on context length and ITL target):
@@ -215,58 +220,43 @@ Priority is set by the client via the NVIDIA OpenAI extension:
 }
 ```
 
-### Priority-Based Pool Override
+### Priority Retry
 
-Both prefill and decode strategies support optional `priority_overrides` rules.
-When a request carries a priority value (from `nvext.agent_hints.priority`), the
-global router evaluates the override rules **after** the grid lookup. The first
-rule whose `[min_priority, max_priority]` range contains the request priority
-wins, and the request is routed to that rule's `target_pool` instead of the
-grid result. If no rule matches (or no priority is present), the grid result
-is used as normal.
+Set `enable_priority_retry` to `true` to retry a request on faster pools when forwarding to the selected pool fails before any response has been streamed. Pool speed is configured with `prefill_pool_priorities`, `decode_pool_priorities`, or `agg_pool_priorities` depending on the mode. Lower integer values mean faster pools.
 
-This is useful for straggler mitigation in RL workloads: the RL framework can
-tag slow requests with a high priority, and the global router redirects them to
-a dedicated min-latency pool.
+If a priority list is omitted, the global router uses pool order as the default priority: pool `0` has priority `0`, pool `1` has priority `1`, and so on. With default priorities, pool `0` is the fastest pool.
+
+Retry order starts with the selected pool and then walks faster pools from slow to fast. For example:
 
 ```jsonc
-"priority_overrides": [
-    {
-        "min_priority": 10,     // inclusive lower bound
-        "max_priority": 100,    // inclusive upper bound
-        "target_pool": 1        // pool index to route to
-    }
-]
+{
+    "enable_priority_retry": true,
+    "prefill_pool_dynamo_namespaces": ["prefill-fast", "prefill-mid", "prefill-slow"],
+    "prefill_pool_priorities": [0, 1, 2]
+}
 ```
 
-Priority is set by the client via the NVIDIA OpenAI extension:
+If the grid selects `prefill-slow` (pool `2`) and that request fails, the global router retries pool `1` and then pool `0`. If the grid selects the fastest pool, there is no faster pool to retry.
+
+In disaggregated mode, prefill and decode retry are independent. A prefill failure retries through `prefill_pool_priorities`; a decode failure retries through `decode_pool_priorities`. If a failed decode attempt already caused the prefill engine to retire or drop the request's KV cache, the retry is still allowed; the backend should handle any resulting cache miss or failure on the new attempt. Current Dynamo backends do not support this yet.
+
+### Passing SLA Targets
+
+Clients can pass TTFT and ITL targets via `nvext.router` in the request:
 
 ```json
 {
     "messages": [...],
     "nvext": {
-        "agent_hints": {
-            "priority": 50
+        "router": {
+            "ttft_target": 100,
+            "itl_target": 20
         }
     }
 }
 ```
 
-### Passing SLA Targets
-
-Clients can pass TTFT and ITL targets via `extra_args` in the request:
-
-```json
-{
-    "messages": [...],
-    "extra_args": {
-        "ttft_target": 100,
-        "itl_target": 20
-    }
-}
-```
-
-If not provided, the middle of the configured range is used as default. For disagg mode, `ttft_target` drives prefill pool selection and `itl_target` drives decode pool selection. For agg mode, both `ttft_target` and `itl_target` drive pool selection.
+The preprocessor forwards `nvext.router` to the backend as the typed `router` field on `PreprocessedRequest`. If not provided, the middle of the configured range is used as default. For disagg mode, `ttft_target` drives prefill pool selection and `itl_target` drives decode pool selection. For agg mode, both `ttft_target` and `itl_target` drive pool selection.
 
 ## Request Flow
 
@@ -275,20 +265,23 @@ If not provided, the middle of the configured range is used as default. For disa
 1. Frontend receives request and sends to Global Router (registered as prefill)
 2. Global Router selects prefill pool based on (ISL, TTFT_target, priority)
 3. Request is forwarded to local router in the selected prefill pool namespace
-4. Local router forwards to a prefill worker
-5. Prefill response returns with `disaggregated_params`
-6. Frontend sends decode request to Global Router (registered as decode)
-7. Global Router selects decode pool based on (context_length, ITL_target, priority)
-8. Request is forwarded to local router in the selected decode pool namespace
-9. Tokens stream back through the chain
+4. If forwarding fails before streaming a response and priority retry is enabled, Global Router retries faster prefill pools
+5. Local router forwards to a prefill worker
+6. Prefill response returns with `disaggregated_params`
+7. Frontend sends decode request to Global Router (registered as decode)
+8. Global Router selects decode pool based on (context_length, ITL_target, priority)
+9. Request is forwarded to local router in the selected decode pool namespace
+10. If forwarding fails before streaming tokens and priority retry is enabled, Global Router retries faster decode pools
+11. Tokens stream back through the chain
 
 ### Agg Mode
 
 1. Frontend receives request and sends to Global Router (registered as Chat + Completions)
 2. Global Router selects agg pool based on (TTFT_target, ITL_target, priority)
 3. Request is forwarded to local router in the selected agg pool namespace
-4. Local router forwards to a worker that handles both prefill and decode
-5. Tokens stream back through the chain
+4. If forwarding fails before streaming tokens and priority retry is enabled, Global Router retries faster agg pools
+5. Local router forwards to a worker that handles both prefill and decode
+6. Tokens stream back through the chain
 
 ## Example
 

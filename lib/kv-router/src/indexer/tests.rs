@@ -150,10 +150,10 @@ impl TreeSizeTestIndexer {
                 let _ = index.apply_event(event);
             }
             Self::Concurrent(index) => {
-                index.apply_event(event).await;
+                KvIndexerInterface::apply_event(index, event).await;
             }
             Self::ConcurrentCompressed(index) => {
-                index.apply_event(event).await;
+                KvIndexerInterface::apply_event(index, event).await;
             }
         }
     }
@@ -238,9 +238,11 @@ impl TreeSizeTestIndexer {
     async fn snapshot_tree(&self) -> Vec<RouterEvent> {
         match self {
             Self::Single(index) => snapshot_events(index.dump_tree_as_events()),
-            Self::Concurrent(index) => snapshot_events(index.dump_events().await.unwrap()),
+            Self::Concurrent(index) => {
+                snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
+            }
             Self::ConcurrentCompressed(index) => {
-                snapshot_events(index.dump_events().await.unwrap())
+                snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
             }
         }
     }
@@ -817,6 +819,51 @@ mod interface_tests {
         route_approx_tokens(index.as_ref(), &tokens, worker).await;
 
         assert_request_score(index.as_ref(), &tokens, worker, 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_compressed_approx_records_precomputed_hashes() {
+        let index = ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            4,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        );
+        let tokens = vec![1, 2, 3, 4];
+        let worker = WorkerWithDpRank::new(7, 0);
+        let block_hashes = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        index
+            .process_routing_decision_with_hashes(worker, block_hashes, sequence_hashes)
+            .await
+            .unwrap();
+        flush_and_settle(&index).await;
+
+        assert_request_score(&index, &tokens, worker, 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_compressed_approx_rejects_mismatched_hash_lengths() {
+        let index = ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            4,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        );
+        let worker = WorkerWithDpRank::new(7, 0);
+        let local_hashes = [LocalBlockHash(1), LocalBlockHash(2)];
+        let sequence_hashes = [1];
+
+        let result = index
+            .process_routing_decision_hash_slices(worker, &local_hashes, &sequence_hashes)
+            .await;
+
+        assert!(matches!(result, Err(KvRouterError::IndexerDroppedRequest)));
     }
 
     #[tokio::test]
@@ -2382,6 +2429,53 @@ mod local_indexer_tests {
             }
             other => panic!("Expected TreeDump, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_buffer_response_starts_at_last_clear() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            16,
+        );
+
+        for event in [
+            make_local_store_event(10, 10),
+            make_local_clear_event(11),
+            make_local_store_event(12, 12),
+            make_local_store_event(13, 13),
+            make_local_clear_event(14),
+            make_local_store_event(15, 15),
+        ] {
+            indexer.apply_event_with_buffer(event).await.unwrap();
+        }
+        indexer.flush().await;
+
+        let event_ids = |response: WorkerKvQueryResponse| -> (Vec<u64>, u64) {
+            match response {
+                WorkerKvQueryResponse::Events {
+                    events,
+                    last_event_id,
+                } => (
+                    events.iter().map(|event| event.event.event_id).collect(),
+                    last_event_id,
+                ),
+                other => panic!("Expected Events, got: {other:?}"),
+            }
+        };
+
+        let (ids, last_event_id) = event_ids(indexer.get_events_in_id_range(Some(10), None).await);
+        assert_eq!(ids, vec![14, 15]);
+        assert_eq!(last_event_id, 15);
+
+        let (ids, last_event_id) = event_ids(indexer.get_events_in_id_range(Some(12), None).await);
+        assert_eq!(ids, vec![14, 15]);
+        assert_eq!(last_event_id, 15);
+
+        let (ids, last_event_id) = event_ids(indexer.get_events_in_id_range(Some(15), None).await);
+        assert_eq!(ids, vec![15]);
+        assert_eq!(last_event_id, 15);
     }
 
     #[tokio::test]

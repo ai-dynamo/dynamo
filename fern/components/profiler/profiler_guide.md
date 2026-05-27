@@ -50,13 +50,8 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 
 ### Kubernetes Deployment (DGDR)
 
-The recommended deployment method is through DGDRs. Sample configurations are provided in `benchmarks/profiler/deploy/`:
-
-| Sample | Description |
-|--------|-------------|
-| `profile_sla_dgdr.yaml` | Standard online profiling with AIPerf |
-| `profile_sla_aic_dgdr.yaml` | Fast offline profiling with AI Configurator |
-| `profile_sla_moe_dgdr.yaml` | MoE model profiling (SGLang) |
+The recommended deployment method is through DGDRs. For copyable manifests, see the
+profiler and planner examples in the current documentation.
 
 #### Container Images
 
@@ -66,7 +61,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -83,7 +78,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 
   workload:
     isl: 3000
@@ -229,7 +224,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 
   workload: { ... }
   sla: { ... }
@@ -371,6 +366,20 @@ When using DGDR, the Dynamo Operator:
 2. Stores profiling data in ConfigMaps (`planner-profile-data`)
 3. Generates optimized DGD configurations
 4. Deploys the DGD with SLA Planner integration
+
+#### Failure Handling
+
+Profiling failures are not retried at the Kubernetes Job level (`backoffLimit: 0`).
+Most profiler errors — validation failures, unsupported model/hardware combinations,
+missing configs — are deterministic and will never succeed on retry, so re-running
+the full profiling cycle would only waste GPU time.
+
+When the profiler reports failure, the output-copier sidecar writes the error
+details (phase, error message, profiler status) to the output ConfigMap and exits
+successfully. The DGDR controller reads the failure from the ConfigMap and
+transitions the DGDR directly to the `Failed` phase with the specific sub-phase
+failure reason (e.g., `SweepingDecodeFailed`, `GeneratingDGDFailed`). Use
+`kubectl describe dgdr <name>` to see the failure details in the conditions.
 
 The generated DGD is tracked via labels:
 ```yaml

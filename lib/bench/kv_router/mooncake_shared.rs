@@ -13,17 +13,16 @@ use dynamo_kv_router::protocols::{
     KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier, TokensWithHashes, WorkerWithDpRank,
 };
 use dynamo_kv_router::{
-    AnchorAwareBranchShardedIndexer, BranchShardedIndexer, ConcurrentRadixTree,
-    ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
+    BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
+    ThreadPoolIndexer,
 };
 use dynamo_mocker::loadgen::Trace;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{
-    BenchmarkRun, WorkerReplayArtifacts, compute_benchmark_run,
-    trace_gen::{OrderedMerge, ReplayStartGate, WorkerTimelines},
-};
+use dynamo_bench::kv_router_common::replay::WorkerReplayArtifacts;
+use dynamo_bench::kv_router_common::results::{BenchmarkRun, compute_benchmark_run};
+use dynamo_bench::kv_router_common::trace_gen::{OrderedMerge, ReplayStartGate, WorkerTimelines};
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +32,6 @@ pub enum MooncakeIndexerKind {
     ConcurrentRadixTree,
     ConcurrentRadixTreeCompressed,
     BranchShardedCrtc,
-    AnchorAwareBranchShardedCrtc,
 }
 
 #[derive(Clone, Debug)]
@@ -98,20 +96,6 @@ impl MooncakeIndexerConfig {
         }
     }
 
-    pub fn anchor_aware_branch_sharded_crtc(
-        num_shards: usize,
-        num_event_workers_per_shard: usize,
-        prefix_depth: usize,
-    ) -> Self {
-        Self {
-            kind: MooncakeIndexerKind::AnchorAwareBranchShardedCrtc,
-            num_shards,
-            num_event_workers_per_shard,
-            prefix_depth,
-            ..Self::radix_tree()
-        }
-    }
-
     pub fn short_name(&self) -> &'static str {
         match self.kind {
             MooncakeIndexerKind::RadixTree => "radix-tree",
@@ -121,7 +105,6 @@ impl MooncakeIndexerConfig {
                 "concurrent-radix-tree-compressed"
             }
             MooncakeIndexerKind::BranchShardedCrtc => "branch-sharded-crtc",
-            MooncakeIndexerKind::AnchorAwareBranchShardedCrtc => "anchor-aware-branch-sharded-crtc",
         }
     }
 
@@ -132,7 +115,6 @@ impl MooncakeIndexerConfig {
                 | MooncakeIndexerKind::ConcurrentRadixTree
                 | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
                 | MooncakeIndexerKind::BranchShardedCrtc
-                | MooncakeIndexerKind::AnchorAwareBranchShardedCrtc
         )
     }
 
@@ -141,11 +123,7 @@ impl MooncakeIndexerConfig {
     }
 
     pub fn supports_approximate(&self) -> bool {
-        !matches!(
-            self.kind,
-            MooncakeIndexerKind::BranchShardedCrtc
-                | MooncakeIndexerKind::AnchorAwareBranchShardedCrtc
-        )
+        !matches!(self.kind, MooncakeIndexerKind::BranchShardedCrtc)
     }
 
     pub fn from_short_name(name: &str, num_event_workers: usize) -> anyhow::Result<Self> {
@@ -157,11 +135,8 @@ impl MooncakeIndexerConfig {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
-            "anchor-aware-branch-sharded-crtc" => {
-                Self::anchor_aware_branch_sharded_crtc(2, num_event_workers, 2)
-            }
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc, anchor-aware-branch-sharded-crtc",
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc",
                 name
             ),
         };
@@ -213,23 +188,6 @@ impl MooncakeIndexerConfig {
                     })
                     .collect();
                 Arc::new(BranchShardedIndexer::new_with_options(
-                    shards,
-                    self.prefix_depth,
-                    block_size,
-                ))
-            }
-            MooncakeIndexerKind::AnchorAwareBranchShardedCrtc => {
-                let shards = (0..self.num_shards)
-                    .map(|_| {
-                        ThreadPoolIndexer::new_with_metrics(
-                            ConcurrentRadixTreeCompressed::new(),
-                            self.num_event_workers_per_shard,
-                            block_size,
-                            Some(Arc::clone(&metrics)),
-                        )
-                    })
-                    .collect();
-                Arc::new(AnchorAwareBranchShardedIndexer::new_with_options(
                     shards,
                     self.prefix_depth,
                     block_size,
@@ -289,11 +247,6 @@ impl MooncakeIndexerConfig {
             }
             MooncakeIndexerKind::BranchShardedCrtc => {
                 anyhow::bail!("branch-sharded-crtc does not support approximate pruning")
-            }
-            MooncakeIndexerKind::AnchorAwareBranchShardedCrtc => {
-                anyhow::bail!(
-                    "anchor-aware-branch-sharded-crtc does not support approximate pruning"
-                )
             }
         };
         Ok(indexer)
@@ -400,21 +353,6 @@ fn merge_event_worker_traces(
     Ok(WorkerTimelines::new(worker_traces))
 }
 
-fn synthesized_tokens(
-    turn: &dynamo_mocker::loadgen::TurnTrace,
-    trace_block_size: usize,
-) -> Vec<u32> {
-    let mut tokens = Vec::with_capacity(turn.input_length);
-    for &hash_id in &turn.hash_ids {
-        tokens.extend((0..trace_block_size).map(|_| hash_id as u32));
-        if tokens.len() >= turn.input_length {
-            tokens.truncate(turn.input_length);
-            break;
-        }
-    }
-    tokens
-}
-
 fn merge_approx_worker_traces(
     traces: &[Trace],
     block_size: u32,
@@ -430,7 +368,7 @@ fn merge_approx_worker_traces(
                     timestamp_ms += turn.delay_after_previous_ms;
                 }
                 let replay_hashes = turn.to_replay_hashes(trace_block_size, block_size as usize)?;
-                let tokens = synthesized_tokens(turn, trace_block_size);
+                let tokens = turn.synthesize_tokens(trace_block_size)?;
                 let timestamp_us = (timestamp_ms.max(0.0) * 1000.0) as u64;
                 entries.push(WorkerTrace {
                     timestamp_us,

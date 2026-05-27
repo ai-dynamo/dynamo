@@ -7,9 +7,6 @@ mod support;
 #[path = "support/mooncake_g2_lower_tier.rs"]
 mod g2_lower_tier;
 
-#[path = "../kv_router/common/mod.rs"]
-mod common;
-
 #[path = "../kv_router/mooncake_shared.rs"]
 mod mooncake_shared;
 
@@ -20,8 +17,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 #[cfg(feature = "mocker-kvbm-offload")]
-use common::generate_g2_replay_artifacts_with_capacity;
-use common::{WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace};
+use dynamo_bench::kv_router_common::replay::generate_g2_replay_artifacts_with_capacity;
+use dynamo_bench::kv_router_common::replay::{
+    WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace,
+};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
@@ -89,18 +88,6 @@ fn collect_replay_entries(artifacts: &[WorkerReplayArtifacts]) -> Vec<ReplayEntr
     entries
 }
 
-fn synthesize_tokens(turn: &TurnTrace, trace_block_size: usize) -> Vec<u32> {
-    let mut tokens = Vec::with_capacity(turn.input_length);
-    for &hash_id in &turn.hash_ids {
-        tokens.extend((0..trace_block_size).map(|_| hash_id as u32));
-        if tokens.len() >= turn.input_length {
-            tokens.truncate(turn.input_length);
-            break;
-        }
-    }
-    tokens
-}
-
 fn collect_approx_replay_entries(traces: &[Trace]) -> anyhow::Result<Vec<ReplayEntry>> {
     let mut entries = Vec::new();
     for (worker_id, trace) in traces.iter().enumerate() {
@@ -123,7 +110,7 @@ fn collect_approx_replay_entries(traces: &[Trace]) -> anyhow::Result<Vec<ReplayE
                     timestamp_us,
                     worker_id: worker_id as u64,
                     kind_rank: 1,
-                    kind: ReplayEntryKind::ApproxWrite(synthesize_tokens(turn, trace_block_size)),
+                    kind: ReplayEntryKind::ApproxWrite(turn.synthesize_tokens(trace_block_size)?),
                 });
             }
         }
@@ -401,6 +388,18 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
     Ok(())
 }
 
+#[test]
+fn removed_legacy_branch_sharded_name_is_rejected() {
+    let removed_name = format!("{}-{}-branch-sharded-crtc", "anchor", "aware");
+    let error = MooncakeIndexerConfig::from_short_name(&removed_name, 4).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("Unknown indexer"));
+    assert!(message.contains("branch-sharded-crtc"));
+    let valid_names = message.split("Valid names: ").nth(1).unwrap_or("");
+    assert!(!valid_names.contains(&removed_name));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Result<()> {
     let trace = Trace {
@@ -509,7 +508,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::anchor_aware_branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
+        MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
 
     for mode in [MooncakeReplayMode::KvEvents, MooncakeReplayMode::Approx] {
@@ -572,6 +571,20 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
     assert_overlap_score_parity(&variants, &traces, &artifacts).await?;
 
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mooncake_trace_branch_sharded_depth4_matches_baseline() -> anyhow::Result<()> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let traces =
+        process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, NUM_UNIQUE_INFERENCE_WORKERS, 42)?;
+    let artifacts = generate_replay_artifacts(&traces, NUM_GPU_BLOCKS, BLOCK_SIZE, None).await?;
+    let variants = [
+        MooncakeIndexerConfig::radix_tree(),
+        MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 4),
+    ];
+
+    assert_overlap_score_parity(&variants, &traces, &artifacts).await
 }
 
 #[cfg(feature = "mocker-kvbm-offload")]

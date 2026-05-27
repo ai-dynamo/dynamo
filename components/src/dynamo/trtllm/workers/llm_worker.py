@@ -43,11 +43,15 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
+    MediaDecoder,
+    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     register_model,
 )
 from dynamo.runtime import DistributedRuntime
@@ -62,18 +66,6 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerFactory,
 )
 from dynamo.trtllm.utils.trtllm_utils import deep_update
-
-# Optional imports for Rust frontend media decoding support
-MediaDecoder: type | None = None
-MediaFetcher: type | None = None
-try:
-    from dynamo.llm import MediaDecoder, MediaFetcher
-
-    MEDIA_DECODER_AVAILABLE = True
-except ImportError:
-    MediaDecoder = None
-    MediaFetcher = None
-    MEDIA_DECODER_AVAILABLE = False
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
@@ -131,6 +123,13 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     raise ValueError(
         "--model-loader-extra-config must be a JSON object string or a dict"
     )
+
+
+def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
+    """Sync MDC-visible config fields from final TensorRT-LLM engine args."""
+    for field_name in ("max_seq_len", "max_num_tokens", "max_batch_size"):
+        if field_name in engine_args:
+            setattr(config, field_name, engine_args[field_name])
 
 
 def _register_memory_routes(runtime, handler) -> None:
@@ -298,6 +297,8 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    _sync_config_from_engine_args(config, arg_map)
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
@@ -305,14 +306,21 @@ async def init_llm_worker(
         if isinstance(current_kv_config, KvCacheConfig):
             # Convert KvCacheConfig object to dict, preserving ALL existing settings
             # This ensures YAML overrides are not lost when adding event_buffer_max_size
-            kv_config_dict = current_kv_config.model_dump(exclude_none=True)
-            kv_config_dict["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
-            arg_map["kv_cache_config"] = kv_config_dict
-        elif isinstance(current_kv_config, dict):
-            # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
-            current_kv_config[
-                "event_buffer_max_size"
-            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            current_kv_config = current_kv_config.model_dump(exclude_none=True)
+            arg_map["kv_cache_config"] = current_kv_config
+
+        if isinstance(current_kv_config, dict):
+            # Preserve a user-specified event_buffer_max_size from YAML/overrides;
+            # only apply the default when it is unset or zero (TRTLLM's disabled value).
+            existing = current_kv_config.get("event_buffer_max_size")
+            if existing:
+                logging.info(
+                    f"Using existing event_buffer_max_size={existing} from kv_cache_config"
+                )
+            else:
+                current_kv_config[
+                    "event_buffer_max_size"
+                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
@@ -430,8 +438,31 @@ async def init_llm_worker(
         default_sampling_params.detokenize = False
 
     connector = None
-    logging.info("Initializing NIXL Connect.")
-    connector = nixl_connect.Connector()
+    needs_nixl = config.disaggregation_mode != DisaggregationMode.AGGREGATED or (
+        config.modality == Modality.MULTIMODAL
+        and (
+            config.frontend_decoding
+            or config.disaggregation_mode == DisaggregationMode.ENCODE
+            or (
+                config.disaggregation_mode == DisaggregationMode.PREFILL
+                and bool(config.encode_endpoint)
+            )
+        )
+    )
+    if needs_nixl:
+        try:
+            logging.info("Initializing NIXL Connect.")
+            connector = nixl_connect.Connector()
+            await connector._create_connection()
+        except Exception:
+            logging.warning(
+                "Failed to initialize NIXL Connect; "
+                "KV-cache transfer will be unavailable.",
+                exc_info=True,
+            )
+            connector = None
+    else:
+        logging.info("Skipping NIXL Connect initialization (aggregated mode).")
 
     dump_config(
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
@@ -491,6 +522,11 @@ async def init_llm_worker(
         runtime_config.exclude_tools_when_tool_choice_none = (
             config.exclude_tools_when_tool_choice_none
         )
+        runtime_config.set_structural_tag_mode(
+            "on" if config.dyn_enable_structural_tag else "off"
+        )
+        runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
+        runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer
@@ -501,6 +537,9 @@ async def init_llm_worker(
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
         attention_dp_size = engine.get_attention_dp_size()
         runtime_config.data_parallel_size = attention_dp_size
+
+        # Set topology and KV transfer policy for topology-aware routing
+        apply_topology_config(runtime_config)
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
@@ -601,12 +640,6 @@ async def init_llm_worker(
         media_decoder = None
         media_fetcher = None
         if config.frontend_decoding:
-            if not MEDIA_DECODER_AVAILABLE:
-                raise RuntimeError(
-                    "--frontend-decoding requires MediaDecoder support. "
-                    "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
-                )
-            assert MediaDecoder is not None and MediaFetcher is not None
             media_decoder = MediaDecoder()
             media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
             media_fetcher = MediaFetcher()
@@ -616,9 +649,21 @@ async def init_llm_worker(
             media_fetcher.allow_direct_port(allow_internal)
 
         # Register the model with runtime config
-        # Encode workers do NOT register - they're internal workers only
-        # Prefill and decode workers register - frontend detects their role via ModelType
+        # Encode workers do NOT register - they're internal workers only.
+        # Prefill and decode workers register
         if config.disaggregation_mode != DisaggregationMode.ENCODE:
+            if config.disaggregation_mode == DisaggregationMode.PREFILL:
+                worker_type = WorkerType.Prefill
+                needs_set: list[WorkerType] = [WorkerType.Decode]
+            elif config.disaggregation_mode == DisaggregationMode.DECODE:
+                worker_type = WorkerType.Decode
+                needs_set = [WorkerType.Prefill]
+            else:
+                # AGGREGATED ("prefill_and_decode")
+                worker_type = WorkerType.Aggregated
+                needs_set = []
+            needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
             await register_model(
                 model_input,
                 model_type,
@@ -631,6 +676,8 @@ async def init_llm_worker(
                 custom_template_path=config.custom_jinja_template,
                 media_decoder=media_decoder,
                 media_fetcher=media_fetcher,
+                worker_type=worker_type,
+                needs=needs,
             )
 
         health_check_payload = TrtllmHealthCheckPayload(

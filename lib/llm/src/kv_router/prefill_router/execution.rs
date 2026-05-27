@@ -8,14 +8,26 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
-use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId};
+use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
 use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
-use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
+use super::{
+    InnerPrefillRouter, PrefillError, PrefillQueryOutcome, PrefillResolveDecision, PrefillRouter,
+};
 use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
-    preprocessor::{BootstrapInfo, PrefillResult},
+    preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
 };
+
+pub(super) struct PrefillCompletion {
+    pub result: PrefillResult,
+    /// (worker_id, dp_rank) parsed out of the engine's `disaggregated_params`.
+    /// Computed but unused today; kept here so adding a caller is a struct
+    /// field read rather than a return-type widening.
+    #[allow(dead_code)]
+    pub worker_info: Option<(u64, Option<u32>)>,
+    pub worker_link: Option<TraceLink>,
+}
 
 impl PrefillRouter {
     /// Select a prefill worker and resolve its bootstrap connection info.
@@ -23,6 +35,7 @@ impl PrefillRouter {
     /// Otherwise, query for the best worker (KV mode) or select next worker (non-KV modes).
     pub(super) async fn resolve_prefill_worker(
         &self,
+        context_id: &str,
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
     ) -> PrefillResolveDecision {
@@ -33,8 +46,23 @@ impl PrefillRouter {
             return PrefillResolveDecision::NotActivated;
         }
 
+        // Treat a preselected prefill worker as a caller/external pin. Otherwise,
+        // sticky affinity wins before this router writes generated bootstrap hints.
+        let sticky_worker = if preselected_worker.is_none() {
+            self.resolve_sticky_prefill_worker(context_id, req).await
+        } else {
+            None
+        };
+
         // Worker selection
-        let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
+        let (worker_id, dp_rank) = if let Some(worker) = sticky_worker {
+            tracing::debug!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                "Using sticky prefill worker for bootstrap"
+            );
+            (worker.worker_id, Some(worker.dp_rank))
+        } else if let Some(id) = preselected_worker {
             let dp_rank = req
                 .routing
                 .as_ref()
@@ -58,6 +86,11 @@ impl PrefillRouter {
                 .routing
                 .as_ref()
                 .and_then(|r| r.allowed_worker_ids.clone());
+            let routing_constraints = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.routing_constraints.clone())
+                .unwrap_or_default();
             let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
             match self
                 .query_prefill_worker(
@@ -67,10 +100,22 @@ impl PrefillRouter {
                     lora_name,
                     priority_jump,
                     allowed_worker_ids,
+                    routing_constraints,
                 )
                 .await
             {
-                Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
+                Ok(PrefillQueryOutcome::Routed { worker_id, dp_rank }) => (worker_id, dp_rank),
+                Ok(PrefillQueryOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                }) => {
+                    return PrefillResolveDecision::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    };
+                }
                 Err(_) => return PrefillResolveDecision::Unavailable,
             }
         };
@@ -89,7 +134,11 @@ impl PrefillRouter {
             return PrefillResolveDecision::NoBootstrapEndpoint;
         };
 
-        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
+        let dp_size: Option<u32> = self
+            .model_manager
+            .get_data_parallel_size(endpoint_id, worker_id);
+        let r: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
+        let bootstrap_room = compute_bootstrap_room(dp_rank, dp_size, r);
 
         tracing::debug!(
             worker_id = worker_id,
@@ -112,6 +161,41 @@ impl PrefillRouter {
         }
     }
 
+    async fn resolve_sticky_prefill_worker(
+        &self,
+        context_id: &str,
+        req: &PreprocessedRequest,
+    ) -> Option<dynamo_kv_router::protocols::WorkerWithDpRank> {
+        let router = self.prefill_router.get()?;
+        let worker = router.sticky_worker_for_prefill(req)?;
+        if router.unbind_ineligible_sticky_prefill_worker(context_id, req, worker) {
+            return None;
+        }
+
+        match router
+            .validate_sticky_prefill_worker(context_id, req, worker)
+            .await
+        {
+            Ok(worker) => {
+                router.refresh_sticky_prefill_worker(req);
+                Some(worker)
+            }
+            Err(error) => {
+                let unbound =
+                    router.unbind_ineligible_sticky_prefill_worker(context_id, req, worker);
+                tracing::warn!(
+                    request_id = %context_id,
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    error = %error,
+                    unbound_due_to_ineligibility = unbound,
+                    "Sticky prefill worker routing failed; falling back to normal prefill routing"
+                );
+                None
+            }
+        }
+    }
+
     /// Execute prefill with the given router and extract structured result.
     ///
     /// Uses direct routing to target_worker when specified (for non-KV modes with bootstrap optimization).
@@ -119,14 +203,12 @@ impl PrefillRouter {
     /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
     /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
     /// the prefill route must finish worker recording before the phase can change to Decode.
-    ///
-    /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     pub(super) async fn execute_prefill(
         router: Option<InnerPrefillRouter>,
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(PrefillResult, Option<(u64, Option<u32>)>), PrefillError> {
+    ) -> Result<PrefillCompletion, PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         // Clone tracker before request is consumed by generate_to_worker.
         // Used to record prefill_complete_time for KV transfer latency metric.
@@ -194,27 +276,29 @@ impl PrefillRouter {
             ));
         };
 
+        let worker_link = output.worker_trace_link.clone();
+
         // Extract prefill worker ID and dp_rank from disaggregated_params
-        let prefill_worker_info =
-            disaggregated_params
-                .get("worker_id")
-                .and_then(|worker_id_json| {
-                    let worker_id = worker_id_json
-                        .get("prefill_worker_id")
-                        .and_then(|v| v.as_u64())?;
-                    let dp_rank = worker_id_json
-                        .get("prefill_dp_rank")
-                        .and_then(|v| v.as_u64())
-                        .map(|r| r as u32);
-                    Some((worker_id, dp_rank))
-                });
-        Ok((
-            PrefillResult {
+        let worker_info = disaggregated_params
+            .get("worker_id")
+            .and_then(|worker_id_json| {
+                let worker_id = worker_id_json
+                    .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64())?;
+                let dp_rank = worker_id_json
+                    .get("prefill_dp_rank")
+                    .and_then(|v| v.as_u64())
+                    .map(|r| r as u32);
+                Some((worker_id, dp_rank))
+            });
+        Ok(PrefillCompletion {
+            result: PrefillResult {
                 disaggregated_params,
                 prompt_tokens_details,
             },
-            prefill_worker_info,
-        ))
+            worker_info,
+            worker_link,
+        })
     }
 
     /// Spawn prefill as a background task.
@@ -256,10 +340,12 @@ impl PrefillRouter {
     }
 
     /// Query the best prefill worker without executing a request.
-    /// Returns (worker_id, dp_rank).
     ///
-    /// This is the shared worker selection logic used by both `resolve_prefill_worker`
-    /// and `query_route`.
+    /// Returns `PrefillQueryOutcome::Routed` for the selected worker, or
+    /// `PrefillQueryOutcome::Backpressure` when the prefill scheduler queue is
+    /// saturated. This is the shared worker selection logic used by both
+    /// `resolve_prefill_worker` and `query_route`.
+    #[expect(clippy::too_many_arguments)]
     pub async fn query_prefill_worker(
         &self,
         token_ids: &[u32],
@@ -268,7 +354,8 @@ impl PrefillRouter {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Result<(u64, Option<u32>)> {
+        routing_constraints: RoutingConstraints,
+    ) -> Result<PrefillQueryOutcome> {
         let prefill_router = self
             .prefill_router
             .get()
@@ -276,21 +363,40 @@ impl PrefillRouter {
 
         match prefill_router {
             InnerPrefillRouter::KvRouter(r) => {
-                let (worker, _overlap) = r
+                let outcome = r
                     .chooser
-                    .find_best_match(
+                    .find_best_match_details(
                         None,
                         token_ids,
                         block_mm_infos,
                         None,
                         update_states,
+                        false,
                         lora_name,
                         priority_jump,
                         None,
+                        None,
                         allowed_worker_ids,
+                        routing_constraints,
                     )
                     .await?;
-                Ok((worker.worker_id, Some(worker.dp_rank)))
+                match outcome {
+                    crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
+                        Ok(PrefillQueryOutcome::Routed {
+                            worker_id: worker.worker_id,
+                            dp_rank: Some(worker.dp_rank),
+                        })
+                    }
+                    crate::kv_router::FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    } => Ok(PrefillQueryOutcome::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    }),
+                }
             }
             InnerPrefillRouter::SimpleRouter(r) => {
                 let worker_id = if update_states {
@@ -299,7 +405,10 @@ impl PrefillRouter {
                     r.peek_next_worker()
                 }
                 .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-                Ok((worker_id, None))
+                Ok(PrefillQueryOutcome::Routed {
+                    worker_id,
+                    dp_rank: None,
+                })
             }
         }
     }
@@ -320,6 +429,156 @@ impl PrefillRouter {
     /// Whether disaggregated mode is strictly enforced (fail if no prefill workers).
     pub fn enforce_disagg(&self) -> bool {
         self.enforce_disagg
+    }
+}
+
+/// Derive a `bootstrap_room` from a pre-sampled `r` such that
+/// `room % dp_size == dp_rank` and `room <= i64::MAX`. The 63-bit cap is the
+/// existing room contract on the SGLang side. Falls back to `r` when
+/// `dp_rank` or `dp_size` is unavailable. `r` must be in `[0, i64::MAX]`.
+fn compute_bootstrap_room(dp_rank: Option<u32>, dp_size: Option<u32>, r: u64) -> u64 {
+    let max_room = i64::MAX.cast_unsigned();
+    debug_assert!(r <= max_room);
+    match (dp_rank, dp_size) {
+        (Some(rank), Some(size)) if size > 0 => {
+            let size = size as u64;
+            let rank = rank as u64;
+            // Bound the quotient so `q * size + rank <= i64::MAX`.
+            let max_q = (max_room - rank) / size;
+            let q = r % (max_q + 1);
+            q * size + rank
+        }
+        _ => r,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAX_ROOM: u64 = i64::MAX as u64;
+
+    #[test]
+    fn bootstrap_room_falls_back_when_dp_unavailable() {
+        // Missing rank, missing size, or both -> return r unchanged.
+        assert_eq!(compute_bootstrap_room(None, None, 12345), 12345);
+        assert_eq!(compute_bootstrap_room(Some(3), None, 12345), 12345);
+        assert_eq!(compute_bootstrap_room(None, Some(8), 12345), 12345);
+        // size=0 is a guard against divide-by-zero; treated as unavailable.
+        assert_eq!(compute_bootstrap_room(Some(0), Some(0), 12345), 12345);
+    }
+
+    #[test]
+    fn bootstrap_room_respects_63bit_cap_at_max_r() {
+        // Sweep ranks for the sizes that overflowed in the buggy version:
+        //   - size = 48 (i64::MAX % 48 = 31, so ranks 32..47 overflowed)
+        //   - size = 49 (49 divides i64::MAX, so ranks 1..48 overflowed)
+        //   - size = 7  (7 divides i64::MAX, so ranks 1..6 overflowed)
+        for size in [3u32, 5, 6, 7, 9, 16, 32, 48, 49, 64, 128] {
+            for rank in 0..size {
+                let room = compute_bootstrap_room(Some(rank), Some(size), MAX_ROOM);
+                assert!(
+                    room <= MAX_ROOM,
+                    "size={size} rank={rank} r=MAX produced {room} > i64::MAX",
+                );
+                assert_eq!(
+                    room % size as u64,
+                    rank as u64,
+                    "size={size} rank={rank} broke modulo contract",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bootstrap_room_modulo_contract_across_r() {
+        // Across many `r` values, the modulo contract must hold and the
+        // result must stay within the 63-bit cap.
+        let r_samples = [
+            0u64,
+            1,
+            47,
+            48,
+            49,
+            1_000_000,
+            1u64 << 32,
+            (1u64 << 62) - 1,
+            1u64 << 62,
+            MAX_ROOM - 1,
+            MAX_ROOM,
+        ];
+        for size in [3u32, 8, 48, 49] {
+            for rank in [0u32, 1, size / 2, size - 1] {
+                for &r in &r_samples {
+                    let room = compute_bootstrap_room(Some(rank), Some(size), r);
+                    assert!(
+                        room <= MAX_ROOM,
+                        "size={size} rank={rank} r={r} produced {room} > i64::MAX",
+                    );
+                    assert_eq!(
+                        room % size as u64,
+                        rank as u64,
+                        "size={size} rank={rank} r={r} broke modulo contract",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bootstrap_room_balances_dp_rank_assignments() {
+        // For a non-power-of-two dp_size, sampling many rooms with the real
+        // RNG must (a) put every room in its requested rank's modulo bucket
+        // and (b) leave no rank starved -- each rank should claim roughly its
+        // fair share when assignments cycle round-robin.
+        let dp_size: u32 = 48;
+        let trials_per_rank: usize = 2_000;
+
+        let mut per_rank_counts = vec![0usize; dp_size as usize];
+        let mut max_room_seen = 0u64;
+        let mut min_room_seen = u64::MAX;
+
+        for rank in 0..dp_size {
+            for _ in 0..trials_per_rank {
+                let r = rand::random_range(0..=MAX_ROOM);
+                let room = compute_bootstrap_room(Some(rank), Some(dp_size), r);
+
+                assert!(room <= MAX_ROOM, "room {room} exceeds i64::MAX");
+                assert_eq!(
+                    room % dp_size as u64,
+                    rank as u64,
+                    "room {room} did not land in rank {rank}'s bucket",
+                );
+
+                per_rank_counts[rank as usize] += 1;
+                max_room_seen = max_room_seen.max(room);
+                min_room_seen = min_room_seen.min(room);
+            }
+        }
+
+        // Every rank received its requested share (nothing was silently dropped).
+        for (rank, &count) in per_rank_counts.iter().enumerate() {
+            assert_eq!(count, trials_per_rank, "rank {rank} count mismatch");
+        }
+
+        // Sanity check that the quotient sampler is not collapsing onto a
+        // tiny region: with 96k samples in [0, i64::MAX], the spread should
+        // cover most of the 63-bit range.
+        let span = max_room_seen - min_room_seen;
+        assert!(
+            span > MAX_ROOM / 2,
+            "rooms clustered in span={span}, expected wide spread across [0, i64::MAX]",
+        );
+    }
+
+    #[test]
+    fn bootstrap_room_is_deterministic_in_r() {
+        // Same (rank, size, r) -> same room. Guards against accidental
+        // re-introduction of an internal random call inside the helper.
+        let room_a = compute_bootstrap_room(Some(7), Some(48), 123_456_789);
+        let room_b = compute_bootstrap_room(Some(7), Some(48), 123_456_789);
+        assert_eq!(room_a, room_b);
+        assert_eq!(room_a % 48, 7);
     }
 }
 

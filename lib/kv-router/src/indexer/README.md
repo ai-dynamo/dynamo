@@ -342,3 +342,63 @@ let workers_at_64 = index.get(&(64, local_hashes[64]));  // O(1) lookup
 let workers_at_128 = index.get(&(128, local_hashes[128]));  // O(1) lookup
 // Skip positions 1-63, 65-127 entirely!
 ```
+
+---
+
+## Indexer Selection Guide
+
+There are four main production indexer shapes. This section maps deployment scenarios to the right choice.
+
+### Variant Summary
+
+| Variant | Struct | Concurrency | Routing | When to use |
+|---------|--------|-------------|---------|-------------|
+| `RadixTree` | `RadixTree` | Single-threaded | N/A (local) | Worker-side `LocalKvIndexer`, unit tests |
+| `ConcurrentRadixTree` (CRT) | `ConcurrentRadixTree` | Thread-safe reads | N/A (local) | Single-node, moderate traffic |
+| `ThreadPoolIndexer<CRT>` (CRTC) | `ThreadPoolIndexer<ConcurrentRadixTree>` | N write threads + inline reads | Full-mesh, all workers | Default for most deployments |
+| `BranchShardedIndexer<CRTC>` (BSI) | `BranchShardedIndexer<ThreadPoolIndexer<CRT>>` | Sharded write pools | Prefix TRIE + anchors | High worker counts, correctness-first sharding |
+
+### When to use each
+
+**`RadixTree` (non-concurrent)**
+- Never use on the router/scheduler side.
+- Correct choice inside `LocalKvIndexer` — worker-side, single-tokio-task access, no lock needed.
+- Also useful in unit tests where you want a simple, deterministic index.
+
+**`ConcurrentRadixTree` alone (not inside a ThreadPoolIndexer)**
+- Only if you have a single dedicated writer with many concurrent readers and prefer simpler code over maximum throughput.
+- In practice, `ThreadPoolIndexer<CRT>` dominates: it gives you both safe concurrent writes *and* higher throughput.
+
+**`ThreadPoolIndexer<ConcurrentRadixTree>` (CRTC)**
+- The default. Start here.
+- One global index, all workers. Read path (`find_matches`) is always O(depth × workers).
+- Works well up to ~1 000 workers. Above that, `find_matches` p99 climbs because every query scans all workers.
+- Does not shard; a single hot branch can become a write bottleneck at extreme scale.
+
+**`BranchShardedIndexer<CRTC>` (BSI)**
+- Uses a bounded routing TRIE. Router-owned nodes track live workers for shallow reads, and deeper suffixes are dispatched to one shard through explicit backend anchors.
+- Before dispatching a continuation across the routing-depth boundary, BSI pre-installs the parent anchor on the target shard so the CRTC already has the parent chain at lookup time.
+- This prevents the stale shallow-prefix failure mode where a continuation is written to one shard while lookups for the finalized prefix route to another.
+- Trade-off: BSI does **not** support approximate pruning. Router anchors and shard state must stay consistent, so a shard cannot independently prune its anchored subtree without coordinating with the routing TRIE.
+- Known issue: static divergent-child assignment can still collapse a dominant hot branch onto one shard. Adaptive hot-branch splitting/rebalancing is future work.
+- Use when: worker count is high enough that one global CRTC scan is too expensive, and routing correctness is more important than approximate pruning.
+
+### Quick decision tree
+
+```text
+Start
+  │
+  ├─ Single worker or worker-side local index?
+  │      └─ RadixTree
+  │
+  ├─ < ~1 000 workers, no sharding needed?
+  │      └─ CRTC (ThreadPoolIndexer<ConcurrentRadixTree>)
+  │
+  └─ ≥ ~1 000 workers or need one-shard lookups?
+         │
+         ├─ Need approximate pruning?
+         │      └─ CRTC or a future coordinated-pruning design
+         │
+         └─ Need routing-correct sharding without approximate pruning?
+                └─ BranchShardedIndexer<CRTC>
+```

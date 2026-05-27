@@ -145,7 +145,7 @@ class DiffusionEngine:
 
         Maps dynamo's DiffusionConfig fields to TensorRT-LLM's VisualGenArgs
         structure with its nested sub-configs (PipelineConfig, TorchCompileConfig,
-        CudaGraphConfig, AttentionConfig, ParallelConfig, TeaCacheConfig,
+        CudaGraphConfig, AttentionConfig, ParallelConfig, optional cache config,
         quant_config).
 
         Returns:
@@ -199,14 +199,14 @@ class DiffusionEngine:
                 dit_cfg_size=self.config.dit_cfg_size,
                 dit_fsdp_size=self.config.dit_fsdp_size,
             ),
-            teacache=TeaCacheConfig(
-                enable_teacache=self.config.enable_teacache,
-                use_ret_steps=self.config.teacache_use_ret_steps,
-                teacache_thresh=self.config.teacache_thresh,
-            ),
         )
 
         # Add optional fields
+        if self.config.enable_teacache:
+            args_kwargs["cache"] = TeaCacheConfig(
+                use_ret_steps=self.config.teacache_use_ret_steps,
+                teacache_thresh=self.config.teacache_thresh,
+            )
         if self.config.revision:
             args_kwargs["revision"] = self.config.revision
         if quant_config is not None:
@@ -259,7 +259,9 @@ class DiffusionEngine:
 
         logger.info(
             f"Generating: prompt='{prompt[:50]}...', "
-            f"size={width}x{height}, frames={num_frames}, steps={num_inference_steps}"
+            f"size={width}x{height}, frames={num_frames}, "
+            f"num_images_per_prompt={num_images_per_prompt}, "
+            f"steps={num_inference_steps}"
         )
 
         # Use TRT-LLM's DiffusionRequest dataclass so that all defaults
@@ -267,10 +269,9 @@ class DiffusionEngine:
         # guidance_scale_2, boundary_ratio) are owned by TRT-LLM rather
         # than hardcoded here.
         from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
+        from tensorrt_llm.visual_gen.params import VisualGenParams
 
-        req = DiffusionRequest(
-            request_id=0,
-            prompt=[prompt],
+        params = VisualGenParams(
             negative_prompt=negative_prompt,
             height=height,
             width=width,
@@ -281,6 +282,26 @@ class DiffusionEngine:
             seed=seed if seed is not None else random.randint(0, 2**32 - 1),
         )
 
+        req = DiffusionRequest(
+            request_id=0,
+            prompt=[prompt],
+            params=params,
+        )
+
+        # Replicate the TRTLLM's visual_gen executor's _merge_defaults: fill None fields in
+        # req.params with pipeline-specific defaults (universal + extra_param
+        # specs), since we call pipeline.infer() directly instead of going
+        # through DiffusionExecutor.
+        for name, default in self._pipeline.default_generation_params.items():
+            if hasattr(req.params, name) and getattr(req.params, name) is None:
+                setattr(req.params, name, default)
+        specs = self._pipeline.extra_param_specs
+        if specs:
+            if req.params.extra_params is None:
+                req.params.extra_params = {}
+            for key, spec in specs.items():
+                req.params.extra_params.setdefault(key, spec.default)
+
         # Run the pipeline — infer() wraps forward() with torch.no_grad()
         output = self._pipeline.infer(req)
 
@@ -289,6 +310,12 @@ class DiffusionEngine:
                 logger.info(f"Generated video output with shape {output.video.shape}")
             elif output.image is not None:
                 logger.info(f"Generated image output with shape {output.image.shape}")
+                actual_num_images = output.image.shape[0]
+                if actual_num_images != num_images_per_prompt:
+                    logger.warning(
+                        f"Pipeline returned {actual_num_images} image(s) but "
+                        f"{num_images_per_prompt} were requested."
+                    )
 
         return output
 

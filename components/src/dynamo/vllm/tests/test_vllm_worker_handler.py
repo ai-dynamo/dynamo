@@ -131,6 +131,155 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
     return resp
 
 
+class TestReasoningParserForwarding:
+    def test_request_reasoning_metadata_reads_extra_args(self):
+        request = {
+            "extra_args": {
+                "reasoning_ended": False,
+                "reasoning_parser_kwargs": {
+                    "chat_template_kwargs": {"reasoning_effort": "high"}
+                },
+            }
+        }
+
+        assert mod._request_reasoning_metadata(request) == (
+            False,
+            {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        )
+
+    def test_generate_signature_support_is_cached(self, monkeypatch):
+        class EngineClient:
+            def generate(
+                self,
+                prompt,
+                sampling_params,
+                request_id,
+                *,
+                reasoning_ended=None,
+                reasoning_parser_kwargs=None,
+            ):
+                pass
+
+        engine_client = EngineClient()
+        signature_calls = 0
+        original_signature = mod.inspect.signature
+
+        def counting_signature(obj):
+            nonlocal signature_calls
+            signature_calls += 1
+            return original_signature(obj)
+
+        monkeypatch.setattr(mod.inspect, "signature", counting_signature)
+
+        assert mod._engine_generate_reasoning_kwargs(
+            engine_client,
+            False,
+            {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        ) == {
+            "reasoning_ended": False,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+        }
+        assert mod._engine_generate_reasoning_kwargs(
+            engine_client,
+            True,
+            {"chat_template_kwargs": {"reasoning_effort": "low"}},
+        ) == {
+            "reasoning_ended": True,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "low"}
+            },
+        }
+        assert signature_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_forwards_reasoning_parser_metadata(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        calls = {}
+
+        async def fake_generate(
+            prompt,
+            sampling_params,
+            request_id,
+            *,
+            lora_request=None,
+            data_parallel_rank=None,
+            trace_headers=None,
+            priority=0,
+            reasoning_ended=None,
+            reasoning_parser_kwargs=None,
+        ):
+            calls["reasoning_ended"] = reasoning_ended
+            calls["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+            if False:
+                yield None
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=1),
+            "req-1",
+            reasoning_ended=False,
+            reasoning_parser_kwargs={
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+        ):
+            chunks.append(chunk)
+
+        assert chunks == []
+        assert calls == {
+            "reasoning_ended": False,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_drops_reasoning_metadata_for_old_vllm(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        calls = {}
+
+        async def fake_generate(
+            prompt,
+            sampling_params,
+            request_id,
+            *,
+            lora_request=None,
+            data_parallel_rank=None,
+            trace_headers=None,
+            priority=0,
+        ):
+            calls["called"] = True
+            if False:
+                yield None
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=1),
+            "req-1",
+            reasoning_ended=True,
+            reasoning_parser_kwargs={
+                "chat_template_kwargs": {"reasoning_effort": "low"}
+            },
+        ):
+            chunks.append(chunk)
+
+        assert chunks == []
+        assert calls == {"called": True}
+
+
 # ── Tests ────────────────────────────────────────────────────────────
 
 
@@ -879,3 +1028,63 @@ class TestDeferredAbort:
         handler.engine_client.abort.assert_not_called()
         if guard._abort_task is not None:
             assert guard._abort_task.done()
+
+
+class TestClassifyEmbeddingInput:
+    """Unit tests for the embedding input classifier.
+
+    Covers the four OpenAI-spec input shapes (str / list[str] / list[int] /
+    list[list[int]]) and the previous bug where `[1, 2, 3]` was silently
+    coerced to three text prompts via `str(item)`. Pure-function logic, no
+    async / vLLM engine needed.
+    """
+
+    def test_single_string(self):
+        assert mod._classify_embedding_input("hello") == ["hello"]
+
+    def test_list_of_strings(self):
+        result = mod._classify_embedding_input(["a", "b", "c"])
+        assert result == ["a", "b", "c"]
+
+    def test_list_of_ints_is_one_tokenized_prompt(self):
+        # The bug: previously this returned ["1", "2", "3"] (three text
+        # prompts). Correct behavior is one tokenized prompt.
+        result = mod._classify_embedding_input([1, 2, 3])
+        assert result == [[1, 2, 3]]
+
+    def test_list_of_list_of_ints_is_batch_of_tokenized_prompts(self):
+        result = mod._classify_embedding_input([[1, 2], [3, 4, 5]])
+        assert result == [[1, 2], [3, 4, 5]]
+
+    def test_mixed_str_and_int_rejected(self):
+        with pytest.raises(TypeError, match="mixes str and non-str"):
+            mod._classify_embedding_input(["hello", 42])
+
+    def test_mixed_int_and_str_rejected(self):
+        with pytest.raises(TypeError, match="mixes int and non-int"):
+            mod._classify_embedding_input([1, "two"])
+
+    def test_mixed_list_of_lists_with_str_rejected(self):
+        with pytest.raises(TypeError, match="must be a list of"):
+            mod._classify_embedding_input([[1, 2], "three"])
+
+    def test_inner_list_with_non_int_rejected(self):
+        with pytest.raises(TypeError, match="must be a list of"):
+            mod._classify_embedding_input([[1, 2], [3.5, 4]])
+
+    def test_bool_is_not_treated_as_int(self):
+        # `bool` is a subclass of `int`; token ids must be real ints.
+        with pytest.raises(TypeError):
+            mod._classify_embedding_input([True, False])
+
+    def test_empty_list_rejected(self):
+        with pytest.raises(ValueError, match="must be non-empty"):
+            mod._classify_embedding_input([])
+
+    def test_unsupported_top_level_type_rejected(self):
+        with pytest.raises(TypeError, match="Invalid 'input' type"):
+            mod._classify_embedding_input({"text": "hi"})
+
+    def test_unsupported_element_type_rejected(self):
+        with pytest.raises(TypeError, match="Unsupported 'input' element"):
+            mod._classify_embedding_input([3.14, 2.71])

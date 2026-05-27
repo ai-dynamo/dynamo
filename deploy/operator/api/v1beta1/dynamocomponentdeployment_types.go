@@ -49,9 +49,8 @@ const (
 // DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDeployment.
 type DynamoComponentDeploymentSpec struct {
 	// backendFramework specifies the backend framework.
-	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
-	BackendFramework string `json:"backendFramework"`
+	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
 	// settings that apply to the component.
@@ -86,7 +85,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// RBAC, EPP filters) depend on.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$`
 	ComponentName string `json:"name"`
 
 	// type indicates the role of this component within a Dynamo graph. Drives
@@ -253,8 +253,11 @@ func init() {
 	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
-// IsReady returns true if the component is `Available`.
+// IsReady returns true if the component has processed its latest spec and is `Available`.
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
+	if s.Status.ObservedGeneration < s.Generation {
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", s.Generation, s.Status.ObservedGeneration)
+	}
 	return s.Status.IsReady()
 }
 
@@ -289,6 +292,36 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 		return s.Multinode.NodeCount
 	}
 	return 1
+}
+
+// IsInterPodGMSEnabled reports whether the inter-pod GMS layout is requested.
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
+	return s.Experimental != nil &&
+		s.Experimental.GPUMemoryService != nil &&
+		s.Experimental.GPUMemoryService.Mode == GMSModeInterPod
+}
+
+// IsInterPodFailoverEnabled reports whether inter-pod GMS failover is configured.
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodFailoverEnabled() bool {
+	return s.Experimental != nil &&
+		s.Experimental.Failover != nil &&
+		s.Experimental.Failover.Mode == GMSModeInterPod
+}
+
+// GetNumShadows returns the configured number of inter-pod failover shadow engines.
+func (s *DynamoComponentDeploymentSharedSpec) GetNumShadows() int32 {
+	if !s.IsInterPodFailoverEnabled() {
+		return 0
+	}
+	if s.Experimental.Failover.NumShadows < 1 {
+		return 1
+	}
+	return s.Experimental.Failover.NumShadows
+}
+
+// GetTotalEnginePods returns the primary engine plus any configured shadows.
+func (s *DynamoComponentDeploymentSharedSpec) GetTotalEnginePods() int32 {
+	return s.GetNumShadows() + 1
 }
 
 // IsFrontendComponent reports whether this DCD is the Dynamo frontend component.
@@ -349,7 +382,11 @@ func (s *DynamoComponentDeployment) GetComponentStatuses() map[string]ComponentR
 	if s.Status.Component == nil {
 		return map[string]ComponentReplicaStatus{}
 	}
-	return map[string]ComponentReplicaStatus{s.GetName(): *s.Status.Component}
+	componentName := s.Spec.ComponentName
+	if componentName == "" {
+		componentName = s.GetName()
+	}
+	return map[string]ComponentReplicaStatus{componentName: *s.Status.Component}
 }
 
 // GetState returns "ready" or "not_ready" based on status conditions.

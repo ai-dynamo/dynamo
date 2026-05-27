@@ -5,11 +5,29 @@ use dynamo_kv_router::protocols::KvCacheEventData;
 #[allow(unused_imports)]
 pub use dynamo_kv_router::test_utils::NoopSequencePublisher;
 use dynamo_mocker::common::protocols::MockEngineArgs;
-use dynamo_mocker::loadgen::Trace;
+use dynamo_mocker::loadgen::{SessionPartitionSpec, Trace};
 pub use dynamo_mocker::replay::ReplayWorkerArtifacts as WorkerReplayArtifacts;
 use indicatif::ProgressBar;
 
-use super::make_progress_bar;
+use super::progress::make_progress_bar;
+
+/// Load, transform, and partition the mooncake trace into per-worker request lists.
+pub fn process_mooncake_trace(
+    path: &str,
+    block_size: u32,
+    trace_length_factor: usize,
+    trace_duplication_factor: usize,
+    num_workers: usize,
+    seed: u64,
+) -> anyhow::Result<Vec<Trace>> {
+    let trace = Trace::from_mooncake(std::path::Path::new(path), block_size as usize)?
+        .expand_hash_prefix_depth(trace_length_factor)
+        .duplicate_hash_space(trace_duplication_factor);
+    Ok(trace.partition_by_session(SessionPartitionSpec::Random {
+        num_partitions: num_workers,
+        seed,
+    }))
+}
 
 pub fn maybe_rescale_ready_span(
     trace: Trace,

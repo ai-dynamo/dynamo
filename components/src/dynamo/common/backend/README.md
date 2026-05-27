@@ -1,21 +1,33 @@
 # Dynamo Python Backend
 
-> **Work in progress.** The unified backend currently supports minimal
-> aggregated inference only. See [Feature Gaps](#feature-gaps) at the bottom
-> for what remains to be implemented.
+**Supported today:** aggregated inference, disaggregated
+(prefill/decode) serving with bootstrap (SGLang) or internal KV
+transport (vLLM, TRT-LLM), request cancellation, graceful shutdown,
+`drain()` hook, error chain wrapping.
+
+> **Work in progress.** Multimodal, LoRA, logprobs, guided decoding,
+> and engine-level metrics are still on the non-unified path. See
+> [Feature Gaps](#feature-gaps) for the full matrix.
+
+> **Looking for a walkthrough?** Start with the
+> [Writing a Python Unified Backend](../../../../../docs/development/python-backend-guide.md)
+> guide. This README is the in-tree reference: file layout, per-engine
+> cancellation cookbook, disaggregation contract, error-handling table,
+> and the feature-gap matrix.
 
 A two-class abstraction that separates **runtime integration** (common across
 all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
 
 ## Architecture
 
-```
+```text
 LLMEngine (ABC)                <-- engine boundary (engine.py)
     |   - from_args(argv) -> (LLMEngine, WorkerConfig)  (factory)
-    |   - start() -> EngineConfig        (start engine, return metadata)
-    |   - generate(request, context)    (streaming inference)
-    |   - abort(context)                (cancel request, optional)
-    |   - cleanup()                     (shutdown)
+    |   - start(worker_id) -> EngineConfig    (start engine, return metadata)
+    |   - generate(request, context)         (streaming inference)
+    |   - abort(context)                     (cancel request, optional)
+    |   - drain()                            (pre-cleanup drain, optional)
+    |   - cleanup()                          (shutdown)
     |
     +-- VllmLLMEngine          <-- vllm/llm_engine.py
     +-- SglangLLMEngine        <-- sglang/llm_engine.py
@@ -26,9 +38,9 @@ Worker                  <-- runtime integration (worker.py)
     - receives WorkerConfig from from_args()
     - creates DistributedRuntime
     - sets up endpoints, signal handlers
-    - calls engine.start(), registers model
+    - calls engine.start(worker_id), registers model
     - serves generate endpoint with cancellation monitoring
-    - calls engine.cleanup() on shutdown
+    - calls engine.drain() then engine.cleanup() on shutdown
 ```
 
 ## Quick Start
@@ -80,13 +92,16 @@ class MyEngine(LLMEngine):
         )
         return engine, worker_config
 
-    async def start(self) -> EngineConfig:
+    async def start(self, worker_id: int) -> EngineConfig:
         # Start the engine, return metadata for model registration.
         # After this returns, generate() MUST be ready to accept calls.
+        # `worker_id` is an opaque per-worker key; most engines ignore it.
         return EngineConfig(
             model="my-model",
             context_length=4096,
             kv_cache_block_size=16,
+            # Populate `bootstrap_host` / `bootstrap_port` here on prefill
+            # workers that advertise a Dynamo-level handshake address.
         )
 
     async def generate(self, request, context):
@@ -210,33 +225,205 @@ from dynamo.llm.exceptions import (
 )
 ```
 
+## Disaggregated Serving
+
+The unified path supports the canonical PD-disagg roles via a single
+`--disaggregation-mode` flag. The mode flows from CLI → `WorkerConfig` →
+the Rust `Worker`, which uses it to decide model registration
+(`ModelType::Prefill` for prefill workers, the parsed `endpoint_types`
+for everyone else) and to disable the local KV indexer on decode
+workers. Engines read the same field on their runtime config to switch
+per-mode behavior in `generate()`.
+
+```text
++-----------+   --disaggregation-mode prefill    +------------------+
+|  CLI args |  ------------------------------->  |  WorkerConfig    |
++-----------+                                    +------------------+
+                                                          |
+                                                          v
+                                          ModelType::Prefill registration
+                                          (Rust Worker)
+
+                                                          |
+                                                          v
+                                          generate(): build context_only
+                                          handoff payload → terminal carries
+                                          disaggregated_params (engine-specific)
+```
+
+Each backend's protocol is different:
+
+| Backend | Prefill | Decode |
+|---------|---------|--------|
+| **vLLM** | Sets `kv_transfer_params.do_remote_decode=True`, caps `max_tokens=1`, packs the connector's transfer handle into the response. | Pulls `kv_transfer_params` from `request.prefill_result` and feeds it back through `sampling_params.extra_args` so the `NixlConnector` imports KV. |
+| **SGLang** | Yields `{bootstrap_host, bootstrap_port, bootstrap_room}` as the first chunk, then drains the engine stream silently. Warmup happens in `start()`. | Reads bootstrap info from `request.prefill_result`, passes it to `engine.async_generate` so SGLang's NIXL transport pulls KV. |
+| **TRT-LLM** | Builds `LlmDisaggregatedParams(request_type="context_only")`, generates one token, packs the encoded handoff into the response. `drain()` polls the scheduler until idle so in-flight NIXL transfers finish before GPU memory is freed (issue #7319). | Decodes `request.prefill_result.disaggregated_params`, flips `request_type` to `generation_only`, generates normally. |
+
+### Smoke testing without GPUs
+
+The sample backend implements the full disagg dispatch in pure Python
+with synthetic handoff payloads — no real KV transfer, but the wire
+format is exercised end-to-end. This makes it a fast CI smoke test for
+the unified path:
+
+```bash
+examples/backends/sample/launch/disagg.sh
+```
+
+Spawns the frontend plus a sample prefill worker and a sample decode
+worker; the frontend's `PrefillRouter` forwards the synthetic
+`disaggregated_params` from prefill to decode.
+
+### Switching production backends to the unified path
+
+Each backend's `disagg.sh` accepts `--unified` to swap in the unified
+entry point. With it, the launch script exercises the same disagg flow
+through `dynamo.<backend>.unified_main` instead of the legacy
+`dynamo.<backend>` dispatch:
+
+```bash
+examples/backends/vllm/launch/disagg.sh --unified
+examples/backends/sglang/launch/disagg.sh --unified
+examples/backends/trtllm/launch/disagg.sh --unified
+```
+
+### Helpers
+
+`dynamo.common.backend.disagg` ships small utilities engines can call
+directly: `enforce_prefill_max_tokens(request)`,
+`extract_prefill_result(request)`, and
+`require_prefill_result(request, mode)`. These are optional — engines
+are free to inline the logic when their generate path is shaped
+differently.
+
+## Metrics
+
+Two surfaces:
+
+1. **`dynamo_component_*` gauges + router-input signal** — engines declare
+   their DP rank shape via `component_metrics_dp_ranks()`. The framework
+   constructs a Rust-owned `SnapshotPublisher` and hands it back through
+   `attach_snapshot_publisher(publisher)`. Engine code calls
+   `publisher.publish(dp_rank, ComponentSnapshot(...))` from its natural
+   push surface (stat-logger / ZMQ recv / poll thread) — event-driven,
+   no framework poll loop, no GIL on the gauge write path.
+2. **Vendor-prefixed metrics** (`vllm:`, `sglang:`, `trtllm_`,
+   `lmcache:`) — engines bridge their own
+   `prometheus_client.CollectorRegistry` into the runtime's combined
+   `/metrics` output via `register_prometheus(metrics)` using
+   `register_global_registry` (or `register_engine_registry` for a
+   private registry).
+
+`ComponentSnapshot.kv_cache_hit_rate` is tri-state: `None` means "no data
+yet" or "no prefix cache" (gauge skipped); `0.0` is a legitimate
+zero-hit measurement.
+
+## Telemetry
+
+> **Requires `DYN_LOGGING_JSONL=1` + `OTEL_EXPORT_ENABLED=1`** for engine
+> telemetry to record anything. In any other configuration the calls
+> silently no-op; one process-level `WARN` fires on first such call so the
+> misconfiguration is visible at default log levels. Trace propagation
+> (`context.trace_headers()`) and the auto-recorded `engine.generate`
+> attributes are NOT subject to this gate — they work regardless.
+
+The framework opens an `engine.generate` span around every `generate()` call
+(see the Rust backend-common README for the full attribute table). Engine
+code reaches the recording surface through the
+`dynamo.common.backend.telemetry` facade, which mirrors the OpenTelemetry
+`Span` API — no Dynamo-specific vocabulary:
+
+```python
+from dynamo.common.backend import telemetry
+
+async def generate(self, request, context):
+    # Trace headers for the downstream inference engine (W3C traceparent).
+    trace_headers = context.trace_headers()
+    ...
+
+    # Handle on the framework's engine.generate span. Use it to add
+    # attributes, events, or set status. Any attribute key is accepted.
+    span = telemetry.current_span(context)
+    span.set_attribute("kv_cache_hit_blocks", 8)
+    span.add_event("nixl_transfer_complete", {"bytes": 1048576})
+
+    # Open a child span with a dynamic name (real OTel span — renders as
+    # a distinct node in Tempo / Jaeger flame charts).
+    with telemetry.start_span(context, "tokenize", batch_size=8) as s:
+        tokens = self.tokenizer.encode(prompt)
+        s.add_event("encoder_warmup_complete")
+        s.set_attribute("token_count", len(tokens))
+
+    # On error paths, mark the auto-span as failed (Tempo/Jaeger render
+    # this natively).
+    if failed:
+        span.set_status("error", "kv_transfer_timeout")
+```
+
+Two entry points, one `SpanProxy` returned by both:
+
+- `telemetry.current_span(context)` — handle on the auto-span. Not a context
+  manager (the framework owns lifecycle). Use freely.
+- `telemetry.start_span(context, name, **attrs)` — opens a child span; use
+  with `with` so the span ends on exit.
+
+`SpanProxy` methods: `set_attribute(key, value)`, `add_event(name, attrs)`,
+`set_status(status, description)`, `close()`.
+
+**Bridge dependency.** The recording surface needs the
+`tracing-opentelemetry` layer installed, which today happens only when
+`DYN_LOGGING_JSONL=1` AND `OTEL_EXPORT_ENABLED=1`. Without the bridge:
+
+- `current_span(...)` returns a no-op `SpanProxy` (all method calls silent).
+- `start_span(...)` returns a no-op `SpanProxy`.
+- A `tracing::warn!` fires once per process the first time any of these
+  hit the missing-bridge path, so operators can discover the missing
+  configuration. Subsequent no-ops in the same process are silent.
+
+Trace propagation (`context.trace_headers()`) and the `Context` cancellation
+/ identity surface do NOT depend on the bridge — those work regardless of
+mode.
+
+Performance note: attribute values are rendered via Python `repr()` for
+non-primitive types. Don't pass large objects per-token inside hot loops;
+record summary attributes instead.
+
 ## File Index
 
-```
+```text
 common/backend/
     __init__.py          # Re-exports: LLMEngine, EngineConfig,
+                         #   GenerateChunk, GenerateRequest,
                          #   Worker, WorkerConfig
-    engine.py            # LLMEngine ABC + EngineConfig dataclass
-    worker.py            # Worker + WorkerConfig
+    engine.py            # LLMEngine ABC + EngineConfig dataclass +
+                         #   GenerateRequest/GenerateChunk TypedDicts
+    worker.py            # Worker + WorkerConfig (incl. disaggregation_mode)
+    disagg.py            # Disagg request helpers (prefill clamp,
+                         #   prefill_result extraction)
+    metrics.py           # Prometheus helpers (gather_with_labels,
+                         #   ensure_prometheus_multiproc_dir, registration)
+    publisher.py         # ComponentSnapshot dataclass (push payload)
     run.py               # Common entry point: run(engine_cls)
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
+    tests/               # test_backend_bindings, test_disagg_helpers,
+                         #   test_sample_engine
+    CLAUDE.md            # Design notes (rationale, invariants)
 
-vllm/llm_engine.py       # VllmLLMEngine
+vllm/llm_engine.py       # VllmLLMEngine (agg + disagg)
 vllm/unified_main.py     # Entry point -> run(VllmLLMEngine)
 
-sglang/llm_engine.py     # SglangLLMEngine
+sglang/llm_engine.py     # SglangLLMEngine (agg + disagg, bootstrap handshake)
 sglang/unified_main.py   # Entry point -> run(SglangLLMEngine)
 
-trtllm/llm_engine.py     # TrtllmLLMEngine
+trtllm/llm_engine.py     # TrtllmLLMEngine (agg + disagg)
 trtllm/unified_main.py   # Entry point -> run(TrtllmLLMEngine)
 ```
 
 ## Feature Gaps
 
-The unified path currently supports **minimal aggregated inference** only.
-Below is a summary of what the existing (non-unified) backends provide that
-the unified path does not yet support.
+Below is a summary of what the existing (non-unified) backends provide
+that the unified path does not yet support.
 
 ### What works today
 
@@ -246,13 +433,18 @@ the unified path does not yet support.
 - `DynamoException` error chain wrapping
 - Graceful shutdown with signal handling
 - Finish reason normalization handled by Rust layer
+- **Disaggregated serving** (`agg`/`prefill`/`decode`) — see
+  [Disaggregated Serving](#disaggregated-serving) below
+- **Metrics & Prometheus** — engine-native metrics passthrough
+  (`vllm:`, `sglang:`, `trtllm_`), `dynamo_component_*` gauges
+  (total_blocks, gpu_cache_usage, model_load_time), TRT-LLM
+  `AdditionalMetricsCollector` (abort, KV transfer, request types).
+  See [Metrics](#metrics) below.
 
 ### Common gaps (all engines)
 
 | Feature | Description |
 |---------|-------------|
-| Disaggregated serving | Prefill/decode worker split, bootstrap coordination, KV transfer |
-| Metrics & Prometheus | Engine-level metrics, KV cache utilization gauges, Prometheus multiprocess registry |
 | KV event publishing | Prefix cache events (BlockStored/Removed) to router via ZMQ or NATS |
 | Health check payloads | Per-engine custom health check payloads (BOS token probe, etc.) |
 | Logprobs | Selected token + top-k log probability extraction and streaming |
@@ -268,8 +460,8 @@ the unified path does not yet support.
 
 | Feature | Description |
 |---------|-------------|
-| LoRA adapters | Dynamic load/unload/list, ModelDeploymentCard publishing, per-LoRA serialization locks |
-| Multimodal (images/video) | Image/video loading, embedding caching, NIXL RDMA transfer, Qwen VL mRoPE |
+| LoRA adapters | Dynamic load/unload/list, ModelDeploymentCard publishing, per-LoRA serialization locks. Also: unified prefill does not currently thread per-request LoRA adapters into the engine call. |
+| Multimodal (images/video) | Image/video loading, embedding caching, NIXL RDMA transfer, Qwen VL mRoPE. Also: unified prefill does not pack `embedding_params` into the response's `disaggregated_params` — disagg multimodal flows still need the legacy path. |
 | Separate encode worker | `EncodeWorkerHandler` for multimodal encode-only disaggregation |
 | Sleep/wake/quiesce | 3-level engine lifecycle control (weights, buffers, everything) |
 | Elastic EP scaling | `scale_elastic_ep` with Ray node management |

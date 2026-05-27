@@ -21,7 +21,13 @@
 # Set to false if CRDs are managed externally (e.g., via GitOps or a separate pipeline).
 upgradeCRD: true
 
+featureGates:
+  # -- Temporary internal gate for GMS + Snapshot.
+  gmsSnapshot: false
+
 # Environment variables to pass to operator Deployment.
+#
+# Prefer featureGates.gmsSnapshot for the temporary GMS + Snapshot gate.
 env: []
 
 # -- DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments.
@@ -43,6 +49,18 @@ gpuDiscovery:
 controllerManager:
   tolerations: []
   affinity: {}
+
+  # -- Extra labels to add to the controller-manager pod template.
+  # Useful for unified service tagging conventions
+  # (e.g. Datadog `tags.datadoghq.com/manager.{service,env,version}`)
+  # and external selectors that target the controller pods directly.
+  podLabels: {}
+
+  # -- Extra annotations to add to the controller-manager pod template.
+  # Useful for autodiscovery integrations that key off pod annotations
+  # (e.g. Datadog `ad.datadoghq.com/manager.checks`, Prometheus
+  # `prometheus.io/scrape`) without forking the chart.
+  podAnnotations: {}
 
   # Leader election configuration
   leaderElection:
@@ -126,15 +144,12 @@ metricsService:
 natsAddr: ""
 etcdAddr: ""
 
-nats:
-  # Whether the NATS is enabled
-  enabled: true
-
 modelExpressURL: ""
 
-# Checkpoint configuration for fast pod restore
-# NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
-# using the snapshot Helm chart in each namespace where checkpointing is needed.
+# Checkpoint configuration for fast pod restore.
+# In legacy agentMount mode, install the snapshot chart in each workload
+# namespace. In podMount mode, install one shared snapshot-agent DaemonSet and
+# configure storage below so the operator mounts/ensures namespace-local PVCs.
 checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
@@ -147,6 +162,23 @@ checkpoint:
   seccomp:
     disabled: false
     profile: profiles/block-iouring.json
+  # Optional PVC storage used when the snapshot-agent is installed outside
+  # workload namespaces with snapshot.storage.accessMode=podMount. Set
+  # create=true for operator-managed namespace PVCs, or omit/create=false to
+  # require an already-present PVC with the configured name.
+  # Example:
+  # storage:
+  #   type: pvc
+  #   pvc:
+  #     pvcName: snapshot-pvc
+  #     basePath: /checkpoints
+  #     create: true
+  #     size: 1Ti
+  #     storageClassName: ""
+  #     # ReadWriteMany is safest. ReadWriteOnce can be used with podMount for
+  #     # sequential checkpoint/restore on suitable storage backends.
+  #     accessMode: ReadWriteMany
+  storage: {}
 
 # Webhook configuration
 webhook:

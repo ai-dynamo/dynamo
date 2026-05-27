@@ -88,31 +88,54 @@ In the current implementation, the single-endpoint pattern is composed from mult
 
 ## Architecture
 
-```text
-Client
-  |
-  v
-Frontend (single public endpoint)
-  |
-  v
-GlobalRouter
-  |
-  +--> Prefill pool 0 Dynamo namespace --> LocalRouter --> Prefill workers --> Pool Planner
-  +--> Prefill pool 1 Dynamo namespace --> LocalRouter --> Prefill workers --> Pool Planner
-  |
-  +--> Decode pool 0 Dynamo namespace  --> LocalRouter --> Decode workers  --> Pool Planner
-  +--> Decode pool 1 Dynamo namespace  --> LocalRouter --> Decode workers  --> Pool Planner
+```mermaid
+flowchart LR
+    client["Client"]
+    prometheus["Prometheus<br/>per-pool router metrics"]
+    operator["Kubernetes operator<br/>DGD replica updates"]
 
-Pool Planners
-  |
-  v
-GlobalPlanner
-  |
-  v
-Kubernetes scaling updates on the target DGDs
+    subgraph control["Control DGD"]
+        frontend["Frontend<br/>single public endpoint"]
+        global_router["GlobalRouter<br/>selects a pool"]
+        global_planner["GlobalPlanner<br/>policy, budget, scale execution"]
+    end
+
+    subgraph prefill0["Prefill pool DGD: short prompts"]
+        prefill_router0["LocalRouter"] --> prefill_workers0["Prefill workers"]
+        prefill_planner0["Pool Planner"]
+    end
+
+    subgraph prefill1["Prefill pool DGD: long prompts"]
+        prefill_router1["LocalRouter"] --> prefill_workers1["Prefill workers"]
+        prefill_planner1["Pool Planner"]
+    end
+
+    subgraph decode0["Decode pool DGD"]
+        decode_router0["LocalRouter"] --> decode_workers0["Decode workers"]
+        decode_planner0["Pool Planner"]
+    end
+
+    prometheus -.-> prefill_planner0
+    prometheus -.-> prefill_planner1
+    prometheus -.-> decode_planner0
+
+    client --> frontend
+    frontend --> global_router
+    global_router --> prefill_router0
+    global_router --> prefill_router1
+    global_router --> decode_router0
+
+    prefill_planner0 -- scale request --> global_planner
+    prefill_planner1 -- scale request --> global_planner
+    decode_planner0 -- scale request --> global_planner
+
+    global_planner --> operator
+    operator --> prefill_workers0
+    operator --> prefill_workers1
+    operator --> decode_workers0
 ```
 
-The `Frontend` exposes a single model endpoint. `GlobalRouter` selects the best pool for each request. Each pool-local `Planner` decides how much capacity its own pool needs. `GlobalPlanner` receives those scale requests and applies the Kubernetes replica changes centrally.
+Read the diagram left to right for request traffic: clients call the control `Frontend`, `GlobalRouter` selects a private pool, and each pool's `LocalRouter` sends the request to workers. Read the dotted and lower paths for scaling: each pool-local `Planner` reads that pool's router metrics, sends a scale request to `GlobalPlanner`, and `GlobalPlanner` applies the Kubernetes replica changes centrally.
 
 ## Prerequisites
 
@@ -159,7 +182,7 @@ metadata:
 spec:
   model: meta-llama/Llama-3.3-70B-Instruct
   backend: vllm
-  image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:<tag>
+  image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1  # dynamo-frontend for Dynamo < 1.1.0
   workload:
     isl: 2048
     osl: 256
@@ -245,6 +268,8 @@ The planner inside each pool must be configured for `global-planner` mode so it 
 
 `global_planner_namespace` must point to the control stack's **Dynamo namespace**. In the reference manifests, that is the namespace string passed to the control `Frontend` and `GlobalRouter`.
 
+`throughput_metrics_source: "router"` is required for pool-local Planner in GlobalPlanner deployments. The pool Planner should forecast demand from its own `LocalRouter` `dynamo_component_router_*` Prometheus metrics, not from the shared public `Frontend`. See the [Planner overview](README.md#prometheus-metrics) for the exact frontend and router metric sources.
+
 Use:
 
 - `mode: "prefill"` for prefill-only pools
@@ -268,6 +293,7 @@ Example:
 
 ```json
 {
+  "enable_priority_retry": true,
   "num_prefill_pools": 2,
   "num_decode_pools": 1,
   "prefill_pool_dynamo_namespaces": [
@@ -277,6 +303,8 @@ Example:
   "decode_pool_dynamo_namespaces": [
     "${K8S_NAMESPACE}-gp-decode-0"
   ],
+  "prefill_pool_priorities": [0, 1],
+  "decode_pool_priorities": [0],
   "prefill_pool_selection_strategy": {
     "ttft_min": 10,
     "ttft_max": 3000,
@@ -305,6 +333,7 @@ Important runtime behavior:
 - Prefill pool selection uses **ISL + TTFT target**
 - Decode pool selection uses **context length + ITL target**
 - OSL is useful for **designing and profiling pools**, but it is **not a direct routing key** in the current `GlobalRouter`
+- Optional priority retry is enabled with `enable_priority_retry`; lower values in `*_pool_priorities` are faster pools, and omitted priority lists default to pool order (`0`, `1`, ...)
 
 Clients can pass request targets through `extra_args`:
 

@@ -89,6 +89,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
     def validate(self) -> None:
+        if self.load_aware:
+            self.router_mode = "kv"
+        self.apply_load_aware_preset()
+
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
@@ -145,6 +149,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
+        self.apply_admission_control()
 
 
 @register_encoder(FrontendConfig)
@@ -350,9 +355,9 @@ class FrontendArgGroup(ArgGroup):
             default="tcp",
             help=(
                 "Determines how requests are distributed from routers to workers. "
-                "'tcp' is fastest [nats|http|tcp]"
+                "'tcp' is fastest [nats|tcp]"
             ),
-            choices=["nats", "http", "tcp"],
+            choices=["nats", "tcp"],
         )
         add_argument(
             g,

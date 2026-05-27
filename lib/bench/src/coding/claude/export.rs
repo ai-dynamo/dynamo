@@ -5,16 +5,14 @@
 //!
 //! Handles session scheduling, parallel tokenization with text-overlap reuse,
 //! and global ordering across sessions. The actual row schema, hash-id
-//! mapping, and JSONL writer all live in [`crate::coding::mooncake`] so that
-//! other producers can reuse them without depending on Claude parser types.
+//! mapping, and JSONL writer all live in [`dynamo_data_gen`] so that other
+//! producers can reuse them without depending on Claude parser types.
 
 use crate::coding::claude::parser::{SessionTurnBuilder, TraceRecord, TurnDraft};
-use crate::coding::mooncake::{
-    MooncakeJsonlWriter, MooncakeRow, RollingHashIdMapper, write_empty_files,
-};
 use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker, last_word_overlap_start};
 use anyhow::{Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use dynamo_data_gen::{MooncakeJsonlWriter, MooncakeRow, RollingHashIdMapper, write_empty_files};
 use rustc_hash::FxHashMap;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
@@ -214,15 +212,15 @@ where
 
         let hash_ids = hasher.hash_token_blocks(&ready_turn.tokens);
         let row = MooncakeRow {
-            session_id: turn.export_session_id.clone(),
-            input_length: ready_turn.tokens.len(),
-            output_length: turn.output_length,
-            hash_ids,
+            session_id: Some(turn.export_session_id.clone()),
+            input_length: Some(ready_turn.tokens.len()),
+            output_length: Some(turn.output_length),
+            hash_ids: Some(hash_ids),
             timestamp: turn
                 .delay_ms
                 .is_none()
-                .then_some(turn.assistant_start_ms - global_trace_start_ms),
-            delay: turn.delay_ms,
+                .then_some((turn.assistant_start_ms - global_trace_start_ms) as f64),
+            delay: turn.delay_ms.map(|delay| delay as f64),
         };
 
         writer.write_row(&row)?;
@@ -657,8 +655,8 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(sidecar_rows.len(), 3);
         assert_eq!(rows[0]["session_id"], json!("session-b"));
-        assert_eq!(rows[0]["timestamp"], json!(0));
+        assert_eq!(rows[0]["timestamp"], json!(0.0));
         assert_eq!(rows[1]["session_id"], json!("session-a"));
-        assert_eq!(rows[2]["delay"], json!(200));
+        assert_eq!(rows[2]["delay"], json!(200.0));
     }
 }

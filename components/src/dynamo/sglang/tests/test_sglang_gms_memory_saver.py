@@ -46,8 +46,8 @@ class _FakeManager:
         self.calls.append("abort")
         self.granted_lock_type = None
 
-    def connect(self, lock_type) -> None:
-        self.calls.append(("connect", lock_type))
+    def connect(self, lock_type, timeout_ms=None) -> None:
+        self.calls.append(("connect", lock_type, timeout_ms))
         self.granted_lock_type = GrantedLockType(lock_type.value)
         self.is_unmapped = False
 
@@ -141,13 +141,13 @@ def test_pause_resume_routes_only_managed_tags(build_impl):
     assert weights.calls == [
         "unmap_all_vas",
         "abort",
-        ("connect", RequestedLockType.RO),
+        ("connect", RequestedLockType.RO, None),
         "remap_all_vas",
     ]
     assert kv_cache.calls == [
         "unmap_all_vas",
         "abort",
-        ("connect", RequestedLockType.RW),
+        ("connect", RequestedLockType.RW, None),
         ("reallocate_all_handles", "kv_cache"),
         "remap_all_vas",
     ]

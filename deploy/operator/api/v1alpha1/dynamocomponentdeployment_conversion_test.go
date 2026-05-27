@@ -565,6 +565,16 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 }
 
 func TestDCD_RoundTrip_Experimental(t *testing.T) {
+	clientPodTemplate := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "loader"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "gms-loader",
+				Image:   "loader:latest",
+				Command: []string{"/bin/loader"},
+			}},
+		},
+	}
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "exp", Namespace: "ns"},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
@@ -573,8 +583,32 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 				ComponentType: v1beta1.ComponentTypeWorker,
 				Experimental: &v1beta1.ExperimentalSpec{
 					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
-						Mode:            v1beta1.GMSModeIntraPod,
-						DeviceClassName: "gpu.nvidia.com",
+						Mode:                  v1beta1.GMSModeIntraPod,
+						DeviceClassName:       "gpu.nvidia.com",
+						ExtraClientContainers: []string{"gms-loader"},
+						ExtraClientPods: []v1beta1.GMSClientPodSpec{{
+							Name:        "loader",
+							PodTemplate: *clientPodTemplate.DeepCopy(),
+						}},
+					},
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Mode:                v1beta1.CheckpointModeAuto,
+						TargetContainerName: "worker",
+						Identity: &v1beta1.DynamoCheckpointIdentity{
+							Model:            "model",
+							BackendFramework: "vllm",
+						},
+						Job: &v1beta1.ComponentCheckpointJobConfig{
+							GMSClientContainers: []string{"gms-saver"},
+							PodTemplate: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{{
+										Name:  "gms-saver",
+										Image: "saver:latest",
+									}},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -688,6 +722,88 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 	got := dcdRoundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_FromV1alpha1_StatusComponentNameWithoutComponentNames(t *testing.T) {
+	src := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "status-alpha", Namespace: "ns"},
+		Status: DynamoComponentDeploymentStatus{
+			Service: &ServiceReplicaStatus{
+				ComponentName:   "dcd-current",
+				Replicas:        1,
+				UpdatedReplicas: 1,
+			},
+		},
+	}
+	beta := &v1beta1.DynamoComponentDeployment{}
+	if err := src.ConvertTo(beta); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	got := &DynamoComponentDeployment{}
+	if err := got.ConvertFrom(beta); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if got.Status.Service.ComponentName != "dcd-current" {
+		t.Fatalf("componentName = %q, want dcd-current", got.Status.Service.ComponentName)
+	}
+	if len(got.Status.Service.ComponentNames) != 0 {
+		t.Fatalf("componentNames = %#v, want empty", got.Status.Service.ComponentNames)
+	}
+}
+
+func TestDCD_FromExistingHubStatusPreservationRestoresComponentName(t *testing.T) {
+	hub := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "status-existing-hub", Namespace: "ns"},
+		Status: v1beta1.DynamoComponentDeploymentStatus{
+			Component: &v1beta1.ComponentReplicaStatus{
+				Replicas:        1,
+				UpdatedReplicas: 1,
+			},
+		},
+	}
+	if err := setJSONAnnOnObj(&hub.ObjectMeta, annDCDStatus, &DynamoComponentDeploymentStatus{
+		Service: &ServiceReplicaStatus{
+			ComponentName: "dcd-current",
+		},
+	}); err != nil {
+		t.Fatalf("set status annotation: %v", err)
+	}
+
+	got := &DynamoComponentDeployment{}
+	if err := got.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if got.Status.Service.ComponentName != "dcd-current" {
+		t.Fatalf("componentName = %q, want dcd-current", got.Status.Service.ComponentName)
+	}
+	if len(got.Status.Service.ComponentNames) != 0 {
+		t.Fatalf("componentNames = %#v, want empty", got.Status.Service.ComponentNames)
+	}
+}
+
+func TestDCD_IntermediateHubStatusComponentNamesWinOverPreservedSpoke(t *testing.T) {
+	src := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "status-edit", Namespace: "ns"},
+		Status: DynamoComponentDeploymentStatus{
+			Service: &ServiceReplicaStatus{
+				ComponentName: "dcd-old",
+			},
+		},
+	}
+	hub := &v1beta1.DynamoComponentDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+
+	hub.Status.Component.ComponentNames = []string{"dcd-new"}
+
+	restored := &DynamoComponentDeployment{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if got := restored.Status.Service.ComponentName; got != "dcd-new" {
+		t.Fatalf("componentName = %q, want dcd-new", got)
 	}
 }
 

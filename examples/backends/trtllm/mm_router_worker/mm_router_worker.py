@@ -15,7 +15,7 @@ Usage:
         --namespace default \
         --component mm_router \
         --endpoint generate \
-        --downstream-component trtllm \
+        --downstream-component backend \
         --downstream-endpoint generate
 """
 
@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--downstream-component",
         type=str,
-        default="trtllm",
+        default="backend",
         help="Downstream TRT-LLM workers' component name",
     )
     parser.add_argument(

@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use dynamo_tokens::{SequenceHash, Token, compute_hash_v2};
+use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_hash};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
@@ -125,31 +127,15 @@ pub fn compute_block_hash_for_seq(
 }
 
 /// Compute the next rolling sequence hash from a parent sequence hash and the
-/// current block hash.
+/// current block hash. Delegates to [`dynamo_tokens::compute_next_sequence_hash`] — the
+/// single source of truth for the chain recurrence shared across kv-router,
+/// kvbm-logical, and the universal hashing crate.
+#[inline]
 pub fn compute_next_seq_hash(
     parent_seq_hash: SequenceHash,
     current_block_hash: LocalBlockHash,
 ) -> SequenceHash {
-    let combined = [parent_seq_hash, current_block_hash.0];
-    #[cfg(target_endian = "little")]
-    {
-        // SAFETY: `u64` is plain-old-data, and on little-endian targets its in-memory
-        // representation matches the `to_le_bytes()` sequence used by the portable path.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                combined.as_ptr().cast::<u8>(),
-                std::mem::size_of_val(&combined),
-            )
-        };
-        compute_hash_v2(bytes, XXH3_SEED)
-    }
-    #[cfg(not(target_endian = "little"))]
-    {
-        let mut bytes = [0_u8; std::mem::size_of::<u64>() * 2];
-        bytes[..8].copy_from_slice(&parent_seq_hash.to_le_bytes());
-        bytes[8..].copy_from_slice(&current_block_hash.0.to_le_bytes());
-        compute_hash_v2(&bytes, XXH3_SEED)
-    }
+    compute_next_sequence_hash(parent_seq_hash, current_block_hash.0)
 }
 
 /// Compute rolling sequence hashes for a vector of block hashes.
@@ -180,7 +166,117 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
+
+    fn taints(&self) -> &HashSet<String> {
+        &EMPTY_WORKER_TAINTS
+    }
+
+    /// Stable identifier for the worker, preserved across process restarts.
+    ///
+    /// In Kubernetes StatefulSet deployments this is the pod hostname (`worker-0`, `worker-1`,
+    /// …). Used by rendezvous-style routing (HRW hashing) so cache assignments survive worker
+    /// restarts and minimise cache movement when the set of live workers churns. Returns
+    /// `None` when the worker did not publish a stable id, in which case callers should fall
+    /// back to the (ephemeral) `worker_id`.
+    fn stable_routing_id(&self) -> Option<&str> {
+        None
+    }
+
+    /// Returns the worker's topology domain labels (e.g. {"zone": "us-east-1a", "rack": "rack1"}).
+    /// Topology-aware routing turns these labels into canonical worker taints such as
+    /// `dynamo.topology/zone=us-east-1a`.
+    /// Returns `None` by default for backward compatibility.
+    fn topology_domains(&self) -> Option<&HashMap<String, String>> {
+        None
+    }
+
+    /// Returns the topology domain to enforce for KV-cache transfers (e.g. "zone").
+    /// When set, decode worker selection is constrained to workers sharing the same
+    /// topology domain value as the prefill worker.
+    fn kv_transfer_domain(&self) -> Option<&str> {
+        None
+    }
+
+    /// Returns the KV transfer topology enforcement mode.
+    fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
+        None
+    }
+
+    /// Returns the taint preference weight used when KV transfer topology enforcement is preferred.
+    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
+        None
+    }
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KvTransferEnforcement {
+    /// Put the generated topology taint in `RoutingConstraints.required_taints`.
+    Required,
+    /// Put the generated topology taint in `RoutingConstraints.preferred_taints`.
+    Preferred,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct RoutingConstraints {
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub required_taints: HashSet<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub preferred_taints: HashMap<String, f32>,
+}
+
+impl RoutingConstraints {
+    pub fn is_empty(&self) -> bool {
+        self.required_taints.is_empty() && self.preferred_taints.is_empty()
+    }
+
+    pub fn has_hard_constraints(&self) -> bool {
+        !self.required_taints.is_empty()
+    }
+
+    pub fn is_compatible_with_worker_taints(&self, worker_taints: &HashSet<String>) -> bool {
+        if self.required_taints.is_empty() {
+            return true;
+        }
+
+        self.required_taints
+            .iter()
+            .all(|taint| worker_taints.contains(taint))
+    }
+
+    pub fn preferred_taint_matches(&self, worker_taints: &HashSet<String>) -> usize {
+        if self.preferred_taints.is_empty() {
+            return 0;
+        }
+
+        self.preferred_taints
+            .keys()
+            .filter(|taint| worker_taints.contains(*taint))
+            .count()
+    }
+
+    pub fn preferred_taint_multiplier(&self, worker_taints: &HashSet<String>) -> Option<f64> {
+        if self.preferred_taints.is_empty() {
+            return None;
+        }
+
+        // Use exp(-tanh(sum)) so equal-magnitude positive and negative preferences
+        // have reciprocal effect around the neutral multiplier 1.0, while keeping the
+        // multiplier strictly positive and bounded to [exp(-1), exp(1)] ~= [0.368, 2.718]
+        // for numerically stable composition with the existing linear work score.
+        let bias = self
+            .preferred_taints
+            .iter()
+            .filter(|(taint, _)| worker_taints.contains(*taint))
+            .map(|(_, weight)| f64::from(*weight))
+            .sum::<f64>()
+            .tanh();
+
+        Some((-bias).exp())
+    }
+}
+
+static EMPTY_WORKER_TAINTS: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
 
 /// Transport abstraction for publishing batched router-visible KV cache events.
 pub trait RouterEventSink: Send + Sync {
@@ -323,6 +419,8 @@ pub enum RouterRequest {
         tokens: Vec<Token>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(default, skip_serializing_if = "RoutingConstraints::is_empty")]
+        routing_constraints: RoutingConstraints,
     },
     MarkPrefill,
     MarkFree {
@@ -338,8 +436,16 @@ impl Default for RouterRequest {
         RouterRequest::New {
             tokens: vec![],
             block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouterBackpressureReason {
+    /// The configured cap on total queued ISL tokens has been reached.
+    MaxQueuedIslTokensExceeded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +456,12 @@ pub enum RouterResponse {
         #[serde(default)]
         dp_rank: DpRank,
         overlap_blocks: u32,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_queued_isl_tokens: Option<usize>,
     },
     PrefillMarked {
         success: bool,
@@ -375,7 +487,7 @@ pub struct WorkerSelectionResult {
     pub cached_tokens: usize,
 }
 
-/// Active load metrics for a worker, used for busy detection.
+/// Active load metrics for a worker, used for overload detection.
 ///
 /// Published by workers (with `kv_used_blocks`) and by the scheduler (with
 /// `active_decode_blocks` and `active_prefill_tokens`).
@@ -391,7 +503,7 @@ pub struct ActiveLoad {
     /// Total KV blocks currently in use on the worker.
     ///
     /// This is published by workers only and is the authoritative signal for
-    /// backend KV occupancy used by busy detection.
+    /// backend KV occupancy used by overload detection.
     #[serde(default)]
     pub kv_used_blocks: Option<u64>,
 }
@@ -1343,6 +1455,57 @@ mod tests {
         assert_eq!(hits.hits_beyond(6), 2);
         // from_position=8 => nothing
         assert_eq!(hits.hits_beyond(8), 0);
+    }
+
+    #[test]
+    fn test_kv_transfer_enforcement_serde() {
+        assert_eq!(
+            serde_json::to_string(&KvTransferEnforcement::Required).unwrap(),
+            r#""required""#
+        );
+        assert_eq!(
+            serde_json::from_str::<KvTransferEnforcement>(r#""preferred""#).unwrap(),
+            KvTransferEnforcement::Preferred
+        );
+        assert!(serde_json::from_str::<KvTransferEnforcement>(r#""fallback""#).is_err());
+    }
+
+    #[test]
+    fn test_worker_config_like_topology_domains_default() {
+        // A minimal implementor that does NOT override topology_domains()
+        struct MinimalConfig;
+        impl WorkerConfigLike for MinimalConfig {
+            fn data_parallel_start_rank(&self) -> u32 {
+                0
+            }
+            fn data_parallel_size(&self) -> u32 {
+                1
+            }
+            fn max_num_batched_tokens(&self) -> Option<u64> {
+                None
+            }
+            fn total_kv_blocks(&self) -> Option<u64> {
+                None
+            }
+        }
+
+        let config = MinimalConfig;
+        assert!(
+            config.topology_domains().is_none(),
+            "Default topology_domains() should return None"
+        );
+        assert!(
+            config.kv_transfer_domain().is_none(),
+            "Default kv_transfer_domain() should return None"
+        );
+        assert!(
+            config.kv_transfer_enforcement().is_none(),
+            "Default kv_transfer_enforcement() should return None"
+        );
+        assert!(
+            config.kv_transfer_preferred_weight().is_none(),
+            "Default kv_transfer_preferred_weight() should return None"
+        );
     }
 
     #[test]

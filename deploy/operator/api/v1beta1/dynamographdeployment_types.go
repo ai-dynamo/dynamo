@@ -44,6 +44,7 @@ type DynamoGraphDeploymentSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=25
 	// +kubebuilder:validation:XValidation:rule="self.filter(c, has(c.type) && c.type == 'epp').size() <= 1",message="at most one component may have type epp"
+	// +kubebuilder:validation:XValidation:rule="self.all(c1, !has(c1.name) || self.filter(c2, has(c2.name) && c2.name.lowerAscii() == c1.name.lowerAscii()).size() == 1)",message="component names must be unique case-insensitively"
 	Components []DynamoComponentDeploymentSharedSpec `json:"components,omitempty"`
 
 	// env is prepended to every component's environment. Component-specific
@@ -67,6 +68,22 @@ type DynamoGraphDeploymentSpec struct {
 	// Components without their own `topologyConstraint` inherit from this value.
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// experimental groups graph-level preview features whose API shape and
+	// behavior may change in breaking ways between v1beta1 releases.
+	// +optional
+	Experimental *DynamoGraphDeploymentExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+// features whose API shape and behavior may change in breaking ways between
+// v1beta1 releases. Component-level experimental features live under
+// `spec.components[*].experimental`.
+type DynamoGraphDeploymentExperimentalSpec struct {
+	// kvTransferPolicy configures topology-aware routing for KV-cache
+	// transfers between prefill and decode workers.
+	// +optional
+	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }
 
 // DynamoGraphDeploymentStatus defines the observed state of a DynamoGraphDeployment.

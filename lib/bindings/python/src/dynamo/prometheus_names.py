@@ -76,6 +76,8 @@ class frontend_service:
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
+    # Total number of LLM requests accepted by the frontend handler
+    REQUESTS_STARTED_TOTAL = "requests_started_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
@@ -106,6 +108,10 @@ class frontend_service:
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Inter-token latency in seconds
     INTER_TOKEN_LATENCY_SECONDS = "inter_token_latency_seconds"
+    # End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
+    # Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
+    # pooling-model latencies (sub-second) without sacrificing resolution.
+    EMBEDDING_LATENCY_SECONDS = "embedding_latency_seconds"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
     # Total KV blocks available for a worker serving the model
@@ -161,6 +167,14 @@ class kv_publisher:
 
     # Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     ENGINES_DROPPED_EVENTS_TOTAL = "kv_publisher_engines_dropped_events_total"
+    # Total number of ZMQ KV events seen by the relay, labeled by stage and event type
+    ZMQ_EVENTS_TOTAL = "kv_publisher_zmq_events_total"
+    # Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
+    ZMQ_FILTERED_EVENTS_TOTAL = "kv_publisher_zmq_filtered_events_total"
+    # Total number of ZMQ KV events dropped due to conversion issues, labeled by event type and reason
+    ZMQ_CONVERSION_ISSUES_TOTAL = "kv_publisher_zmq_conversion_issues_total"
+    # Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
+    ZMQ_SUSPICIOUS_EVENTS_TOTAL = "kv_publisher_zmq_suspicious_events_total"
 
 
 class kvbm:
@@ -223,6 +237,16 @@ class kvstats:
     TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
     GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
+    # Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    KV_CACHE_HIT_RATE = "kv_cache_hit_rate"
+
+
+class lifecycle:
+    """Worker-lifecycle timing gauges. Set once per worker run by the
+    framework, not by the engine."""
+
+    CLEANUP_TIME_SECONDS = "cleanup_time_seconds"
+    DRAIN_TIME_SECONDS = "drain_time_seconds"
 
 
 class labels:
@@ -249,7 +273,7 @@ class labels:
     # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
     # When a metric already has a label, injection does not overwrite it (original is preserved).
     MODEL_NAME = "model_name"
-    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"

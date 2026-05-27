@@ -50,9 +50,12 @@ const (
 	annDGDStatus = "nvidia.com/dgd-status"
 )
 
-type dgdConversionContext struct {
-	includeOriginSplits bool
-	saveHubOrigin       bool
+// DynamoGraphDeploymentConversionContext carries DGD-level conversion context
+// that component converters cannot derive from their local inputs.
+// +kubebuilder:object:generate=false
+type DynamoGraphDeploymentConversionContext struct {
+	IncludeOriginSplits bool
+	SaveHubOrigin       bool
 }
 
 // ConvertTo converts this DynamoGraphDeployment (v1alpha1) into the hub
@@ -73,17 +76,17 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	hubOrigin := restoredHubSpec != nil
 	scrubDGDInternalAnnotations(&dst.ObjectMeta)
 
-	ctx := dgdConversionContext{
-		includeOriginSplits: !hubOrigin,
+	ctx := DynamoGraphDeploymentConversionContext{
+		IncludeOriginSplits: !hubOrigin,
 	}
 	var spokeSave DynamoGraphDeploymentSpec
-	if err := convertDGDSpecToHub(&src.Spec, &dst.Spec, restoredHubSpec, &spokeSave, ctx); err != nil {
+	if err := ConvertFromDynamoGraphDeploymentSpec(&src.Spec, &dst.Spec, restoredHubSpec, &spokeSave, ctx); err != nil {
 		return err
 	}
 	var statusSave DynamoGraphDeploymentStatus
 	saveDGDAlphaOnlyStatus(&src.Status, &statusSave)
 
-	convertDGDStatusToHub(&src.Status, &dst.Status, nil, nil, ctx)
+	ConvertFromDynamoGraphDeploymentStatus(&src.Status, &dst.Status)
 	if !dgdAlphaSpecSaveIsZero(&spokeSave) || !dgdAlphaStatusSaveIsZero(&statusSave) {
 		if err := saveDGDSpokeAnnotations(&spokeSave, &statusSave, dst); err != nil {
 			return err
@@ -92,11 +95,9 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	return nil
 }
 
-func convertDGDSpecToHub(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGraphDeploymentSpec, restored *v1beta1.DynamoGraphDeploymentSpec, save *DynamoGraphDeploymentSpec, ctx dgdConversionContext) error {
-	if src == nil || dst == nil {
-		return nil
-	}
-
+// ConvertFromDynamoGraphDeploymentSpec converts the DGD spec from v1alpha1 to
+// v1beta1.
+func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGraphDeploymentSpec, restored *v1beta1.DynamoGraphDeploymentSpec, save *DynamoGraphDeploymentSpec, ctx DynamoGraphDeploymentConversionContext) error {
 	// Convert fields represented by both versions from the live source.
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
@@ -104,13 +105,15 @@ func convertDGDSpecToHub(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGrap
 
 	if src.Restart != nil {
 		dst.Restart = &v1beta1.Restart{}
-		convertRestartToHub(src.Restart, dst.Restart, nil, nil, ctx)
+		ConvertFromRestart(src.Restart, dst.Restart)
 	}
 	if src.TopologyConstraint != nil {
-		dst.TopologyConstraint = &v1beta1.SpecTopologyConstraint{
-			ClusterTopologyName: src.TopologyConstraint.TopologyProfile,
-			PackDomain:          v1beta1.TopologyDomain(src.TopologyConstraint.PackDomain),
-		}
+		dst.TopologyConstraint = &v1beta1.SpecTopologyConstraint{}
+		ConvertFromSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
+	}
+	if src.Experimental != nil {
+		dst.Experimental = &v1beta1.DynamoGraphDeploymentExperimentalSpec{}
+		ConvertFromDynamoGraphDeploymentExperimentalSpec(src.Experimental, dst.Experimental)
 	}
 	dst.Env = src.Envs
 	if save != nil && len(src.PVCs) > 0 {
@@ -143,11 +146,11 @@ func convertDGDSpecToHub(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGrap
 			if save != nil {
 				compSave = &DynamoComponentDeploymentSharedSpec{}
 			}
-			sharedCtx := sharedSpecConversionContext{
-				includeOriginSplits: ctx.includeOriginSplits,
-				podTemplateOrigin:   restoredShared != nil && restoredShared.PodTemplate != nil,
+			sharedCtx := DynamoComponentDeploymentSharedSpecConversionContext{
+				IncludeOriginSplits: ctx.IncludeOriginSplits,
+				PodTemplateOrigin:   restoredShared != nil && restoredShared.PodTemplate != nil,
 			}
-			if err := convertSharedSpecToHub(compSrc, &compDst, restoredShared, compSave, sharedCtx); err != nil {
+			if err := ConvertFromDynamoComponentDeploymentSharedSpec(compSrc, &compDst, restoredShared, compSave, sharedCtx); err != nil {
 				return fmt.Errorf("component %q: %w", name, err)
 			}
 			// In v1alpha1 DGD, the services-map key is the canonical name and
@@ -271,8 +274,9 @@ func restoreDGDAlphaOnlyStatusFromSaved(dstStatus *DynamoGraphDeploymentStatus, 
 		if !ok {
 			continue
 		}
-		if shouldRestoreSavedComponentName(&dstSvc, &savedSvc) {
+		if shouldRestoreSavedServiceReplicaStatus(&dstSvc, &savedSvc) {
 			dstSvc.ComponentName = savedSvc.ComponentName
+			dstSvc.ComponentNames = slices.Clone(savedSvc.ComponentNames)
 		}
 		dstStatus.Services[name] = dstSvc
 	}
@@ -322,10 +326,27 @@ func serviceStatusComponentNameNeedsPreservation(src *ServiceReplicaStatus) bool
 	return src.ComponentNames[len(src.ComponentNames)-1] != src.ComponentName
 }
 
-func shouldRestoreSavedComponentName(dst, saved *ServiceReplicaStatus) bool {
-	return serviceStatusComponentNameNeedsPreservation(saved) &&
-		dst != nil &&
-		dst.ComponentName != saved.ComponentName
+func shouldRestoreSavedServiceReplicaStatus(dst, saved *ServiceReplicaStatus) bool {
+	if !serviceStatusComponentNameNeedsPreservation(saved) || dst == nil {
+		return false
+	}
+	if slices.Equal(dst.ComponentNames, componentNamesToHub(saved)) {
+		return true
+	}
+	return saved.ComponentName != "" &&
+		len(saved.ComponentNames) == 0 &&
+		len(dst.ComponentNames) == 0
+}
+
+func componentNamesToHub(src *ServiceReplicaStatus) []string {
+	if src == nil {
+		return nil
+	}
+	componentNames := slices.Clone(src.ComponentNames)
+	if len(componentNames) == 0 && src.ComponentName != "" {
+		componentNames = []string{src.ComponentName}
+	}
+	return componentNames
 }
 
 func restoreDGDSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentSpec, *DynamoGraphDeploymentStatus, error) {
@@ -361,13 +382,13 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 	scrubDGDInternalAnnotations(&dst.ObjectMeta)
 
-	ctx := dgdConversionContext{saveHubOrigin: !spokeOrigin}
+	ctx := DynamoGraphDeploymentConversionContext{SaveHubOrigin: !spokeOrigin}
 	var hubSave v1beta1.DynamoGraphDeploymentSpec
-	if err := convertDGDSpecFromHub(&src.Spec, &dst.Spec, restoredSpokeSpec, &hubSave, ctx); err != nil {
+	if err := ConvertToDynamoGraphDeploymentSpec(&src.Spec, &dst.Spec, restoredSpokeSpec, &hubSave, ctx); err != nil {
 		return err
 	}
 
-	convertDGDStatusFromHub(&src.Status, &dst.Status, nil, nil, ctx)
+	ConvertToDynamoGraphDeploymentStatus(&src.Status, &dst.Status)
 	restoreDGDAlphaOnlySpecFromSaved(&dst.Spec, restoredSpokeSpec)
 	restoreDGDAlphaOnlyStatusFromSaved(&dst.Status, restoredSpokeStatus)
 	if !dgdHubSpecSaveIsZero(&hubSave) {
@@ -380,11 +401,9 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	return nil
 }
 
-func convertDGDSpecFromHub(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGraphDeploymentSpec, restored *DynamoGraphDeploymentSpec, save *v1beta1.DynamoGraphDeploymentSpec, ctx dgdConversionContext) error {
-	if src == nil || dst == nil {
-		return nil
-	}
-
+// ConvertToDynamoGraphDeploymentSpec converts the DGD spec from v1beta1 to
+// v1alpha1.
+func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGraphDeploymentSpec, restored *DynamoGraphDeploymentSpec, save *v1beta1.DynamoGraphDeploymentSpec, ctx DynamoGraphDeploymentConversionContext) error {
 	// Convert fields represented by both versions from the live source.
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
@@ -392,13 +411,15 @@ func convertDGDSpecFromHub(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGr
 
 	if src.Restart != nil {
 		dst.Restart = &Restart{}
-		convertRestartFromHub(src.Restart, dst.Restart, nil, nil, ctx)
+		ConvertToRestart(src.Restart, dst.Restart)
 	}
 	if src.TopologyConstraint != nil {
-		dst.TopologyConstraint = &SpecTopologyConstraint{
-			TopologyProfile: src.TopologyConstraint.ClusterTopologyName,
-			PackDomain:      TopologyDomain(src.TopologyConstraint.PackDomain),
-		}
+		dst.TopologyConstraint = &SpecTopologyConstraint{}
+		ConvertToSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
+	}
+	if src.Experimental != nil {
+		dst.Experimental = &DynamoGraphDeploymentExperimentalSpec{}
+		ConvertToDynamoGraphDeploymentExperimentalSpec(src.Experimental, dst.Experimental)
 	}
 	dst.Envs = src.Env
 
@@ -427,8 +448,7 @@ func convertDGDSpecFromHub(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGr
 					ComponentName: compSrc.ComponentName,
 				}
 			}
-			sharedCtx := sharedSpecConversionContext{}
-			if err := convertSharedSpecFromHub(compSrc, compDst, preservedShared, compSave, sharedCtx); err != nil {
+			if err := ConvertToDynamoComponentDeploymentSharedSpec(compSrc, compDst, preservedShared, compSave); err != nil {
 				return fmt.Errorf("component %q: %w", compSrc.ComponentName, err)
 			}
 			// In v1alpha1 the services-map key is the canonical name; the
@@ -437,7 +457,7 @@ func convertDGDSpecFromHub(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGr
 			// spec conversion.
 			compDst.ServiceName = ""
 			dst.Services[compSrc.ComponentName] = compDst
-			if save != nil && (preserveComponentOrder || !dgdHubComponentSaveIsZero(compSave) || ctx.saveHubOrigin && dgdHubComponentOriginSaveNeeded(compSrc)) {
+			if save != nil && (preserveComponentOrder || !dgdHubComponentSaveIsZero(compSave) || ctx.SaveHubOrigin && dgdHubComponentOriginSaveNeeded(compSrc)) {
 				save.Components = append(save.Components, *compSave)
 			}
 		}
@@ -505,49 +525,107 @@ func scrubDGDInternalAnnotations(obj metav1.Object) {
 	}
 }
 
-// convertRestartToHub / convertRestartFromHub handle the Restart struct pair,
-// which is structurally identical across versions but uses version-specific types.
-//
-//nolint:unparam // Keep the structural conversion signature; this leaf has no preserved fields.
-func convertRestartToHub(src *Restart, dst *v1beta1.Restart, restored *v1beta1.Restart, save *Restart, ctx dgdConversionContext) {
-	_, _, _ = restored, save, ctx
-
-	if src == nil || dst == nil {
-		return
-	}
+// ConvertFromRestart converts the restart spec from v1alpha1 to v1beta1.
+func ConvertFromRestart(src *Restart, dst *v1beta1.Restart) {
 	*dst = v1beta1.Restart{ID: src.ID}
 	if src.Strategy != nil {
-		dst.Strategy = &v1beta1.RestartStrategy{
-			Type:  v1beta1.RestartStrategyType(src.Strategy.Type),
-			Order: slices.Clone(src.Strategy.Order),
-		}
+		dst.Strategy = &v1beta1.RestartStrategy{}
+		ConvertFromRestartStrategy(src.Strategy, dst.Strategy)
 	}
 }
 
-//nolint:unparam // Keep the structural conversion signature; this leaf has no preserved fields.
-func convertRestartFromHub(src *v1beta1.Restart, dst *Restart, restored *Restart, save *v1beta1.Restart, ctx dgdConversionContext) {
-	_, _, _ = restored, save, ctx
-
-	if src == nil || dst == nil {
-		return
-	}
+// ConvertToRestart converts the restart spec from v1beta1 to v1alpha1.
+func ConvertToRestart(src *v1beta1.Restart, dst *Restart) {
 	*dst = Restart{ID: src.ID}
 	if src.Strategy != nil {
-		dst.Strategy = &RestartStrategy{
-			Type:  RestartStrategyType(src.Strategy.Type),
-			Order: slices.Clone(src.Strategy.Order),
-		}
+		dst.Strategy = &RestartStrategy{}
+		ConvertToRestartStrategy(src.Strategy, dst.Strategy)
 	}
 }
 
-// convertDGDStatusToHub / convertDGDStatusFromHub copy the status sub-struct.
-// Status fields are structurally identical; version types differ so each field
-// is copied explicitly.
-//
-//nolint:unparam // Keep the structural conversion signature; this leaf has no preserved fields.
-func convertDGDStatusToHub(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeploymentStatus, restored *v1beta1.DynamoGraphDeploymentStatus, save *DynamoGraphDeploymentStatus, ctx dgdConversionContext) {
-	_, _, _ = restored, save, ctx
+// ConvertFromRestartStrategy converts the restart strategy from v1alpha1 to
+// v1beta1.
+func ConvertFromRestartStrategy(src *RestartStrategy, dst *v1beta1.RestartStrategy) {
+	*dst = v1beta1.RestartStrategy{
+		Type:  v1beta1.RestartStrategyType(src.Type),
+		Order: slices.Clone(src.Order),
+	}
+}
 
+// ConvertToRestartStrategy converts the restart strategy from v1beta1 to
+// v1alpha1.
+func ConvertToRestartStrategy(src *v1beta1.RestartStrategy, dst *RestartStrategy) {
+	*dst = RestartStrategy{
+		Type:  RestartStrategyType(src.Type),
+		Order: slices.Clone(src.Order),
+	}
+}
+
+// ConvertFromDynamoGraphDeploymentExperimentalSpec converts graph-level
+// experimental config from v1alpha1 to v1beta1.
+func ConvertFromDynamoGraphDeploymentExperimentalSpec(src *DynamoGraphDeploymentExperimentalSpec, dst *v1beta1.DynamoGraphDeploymentExperimentalSpec) {
+	if src.KvTransferPolicy != nil {
+		dst.KvTransferPolicy = &v1beta1.KvTransferPolicy{}
+		ConvertFromKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
+	}
+}
+
+// ConvertToDynamoGraphDeploymentExperimentalSpec converts graph-level
+// experimental config from v1beta1 to v1alpha1.
+func ConvertToDynamoGraphDeploymentExperimentalSpec(src *v1beta1.DynamoGraphDeploymentExperimentalSpec, dst *DynamoGraphDeploymentExperimentalSpec) {
+	if src.KvTransferPolicy != nil {
+		dst.KvTransferPolicy = &KvTransferPolicy{}
+		ConvertToKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
+	}
+}
+
+// ConvertFromKvTransferPolicy converts KV transfer policy from v1alpha1 to
+// v1beta1.
+func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferPolicy) {
+	*dst = v1beta1.KvTransferPolicy{
+		LabelKey:    src.LabelKey,
+		Domain:      v1beta1.TopologyDomain(src.Domain),
+		Enforcement: v1beta1.KvTransferEnforcement(src.Enforcement),
+	}
+	if src.PreferredWeight != nil {
+		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
+	}
+}
+
+// ConvertToKvTransferPolicy converts KV transfer policy from v1beta1 to
+// v1alpha1.
+func ConvertToKvTransferPolicy(src *v1beta1.KvTransferPolicy, dst *KvTransferPolicy) {
+	*dst = KvTransferPolicy{
+		LabelKey:    src.LabelKey,
+		Domain:      TopologyDomain(src.Domain),
+		Enforcement: KvTransferEnforcement(src.Enforcement),
+	}
+	if src.PreferredWeight != nil {
+		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
+	}
+}
+
+// ConvertFromSpecTopologyConstraint converts deployment topology constraints
+// from v1alpha1 to v1beta1.
+func ConvertFromSpecTopologyConstraint(src *SpecTopologyConstraint, dst *v1beta1.SpecTopologyConstraint) {
+	*dst = v1beta1.SpecTopologyConstraint{
+		ClusterTopologyName: src.TopologyProfile,
+		PackDomain:          v1beta1.TopologyDomain(src.PackDomain),
+	}
+}
+
+// ConvertToSpecTopologyConstraint converts deployment topology constraints
+// from v1beta1 to v1alpha1.
+func ConvertToSpecTopologyConstraint(src *v1beta1.SpecTopologyConstraint, dst *SpecTopologyConstraint) {
+	*dst = SpecTopologyConstraint{
+		TopologyProfile: src.ClusterTopologyName,
+		PackDomain:      TopologyDomain(src.PackDomain),
+	}
+}
+
+// ConvertFromDynamoGraphDeploymentStatus converts the DGD status from
+// v1alpha1 to v1beta1.
+func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = v1beta1.DGDState(src.State)
 	if len(src.Conditions) > 0 {
@@ -560,41 +638,31 @@ func convertDGDStatusToHub(src *DynamoGraphDeploymentStatus, dst *v1beta1.Dynamo
 		dst.Components = make(map[string]v1beta1.ComponentReplicaStatus, len(src.Services))
 		for k, v := range src.Services {
 			var component v1beta1.ComponentReplicaStatus
-			convertReplicaStatusToHub(&v, &component, nil, nil, replicaStatusConversionContext{})
+			ConvertFromServiceReplicaStatus(&v, &component)
 			dst.Components[k] = component
 		}
 	}
 	if src.Restart != nil {
-		dst.Restart = &v1beta1.RestartStatus{
-			ObservedID: src.Restart.ObservedID,
-			Phase:      v1beta1.RestartPhase(src.Restart.Phase),
-			InProgress: slices.Clone(src.Restart.InProgress),
-		}
+		dst.Restart = &v1beta1.RestartStatus{}
+		ConvertFromRestartStatus(src.Restart, dst.Restart)
 	}
 	if len(src.Checkpoints) > 0 {
 		dst.Checkpoints = make(map[string]v1beta1.ComponentCheckpointStatus, len(src.Checkpoints))
 		for k, v := range src.Checkpoints {
-			dst.Checkpoints[k] = v1beta1.ComponentCheckpointStatus{
-				CheckpointName: v.CheckpointName,
-				IdentityHash:   v.IdentityHash,
-				Ready:          v.Ready,
-			}
+			var checkpoint v1beta1.ComponentCheckpointStatus
+			ConvertFromServiceCheckpointStatus(&v, &checkpoint)
+			dst.Checkpoints[k] = checkpoint
 		}
 	}
 	if src.RollingUpdate != nil {
-		dst.RollingUpdate = &v1beta1.RollingUpdateStatus{
-			Phase:             v1beta1.RollingUpdatePhase(src.RollingUpdate.Phase),
-			StartTime:         src.RollingUpdate.StartTime.DeepCopy(),
-			EndTime:           src.RollingUpdate.EndTime.DeepCopy(),
-			UpdatedComponents: slices.Clone(src.RollingUpdate.UpdatedServices),
-		}
+		dst.RollingUpdate = &v1beta1.RollingUpdateStatus{}
+		ConvertFromRollingUpdateStatus(src.RollingUpdate, dst.RollingUpdate)
 	}
 }
 
-//nolint:unparam // Keep the structural conversion signature; this leaf has no preserved fields.
-func convertDGDStatusFromHub(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoGraphDeploymentStatus, restored *DynamoGraphDeploymentStatus, save *v1beta1.DynamoGraphDeploymentStatus, ctx dgdConversionContext) {
-	_, _, _ = restored, save, ctx
-
+// ConvertToDynamoGraphDeploymentStatus converts the DGD status from v1beta1 to
+// v1alpha1.
+func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = DGDState(src.State)
 	if len(src.Conditions) > 0 {
@@ -607,49 +675,94 @@ func convertDGDStatusFromHub(src *v1beta1.DynamoGraphDeploymentStatus, dst *Dyna
 		dst.Services = make(map[string]ServiceReplicaStatus, len(src.Components))
 		for k, v := range src.Components {
 			var service ServiceReplicaStatus
-			convertReplicaStatusFromHub(&v, &service, nil, nil, replicaStatusConversionContext{})
+			ConvertToServiceReplicaStatus(&v, &service)
 			dst.Services[k] = service
 		}
 	}
 	if src.Restart != nil {
-		dst.Restart = &RestartStatus{
-			ObservedID: src.Restart.ObservedID,
-			Phase:      RestartPhase(src.Restart.Phase),
-			InProgress: slices.Clone(src.Restart.InProgress),
-		}
+		dst.Restart = &RestartStatus{}
+		ConvertToRestartStatus(src.Restart, dst.Restart)
 	}
 	if len(src.Checkpoints) > 0 {
 		dst.Checkpoints = make(map[string]ServiceCheckpointStatus, len(src.Checkpoints))
 		for k, v := range src.Checkpoints {
-			dst.Checkpoints[k] = ServiceCheckpointStatus{
-				CheckpointName: v.CheckpointName,
-				IdentityHash:   v.IdentityHash,
-				Ready:          v.Ready,
-			}
+			var checkpoint ServiceCheckpointStatus
+			ConvertToServiceCheckpointStatus(&v, &checkpoint)
+			dst.Checkpoints[k] = checkpoint
 		}
 	}
 	if src.RollingUpdate != nil {
-		dst.RollingUpdate = &RollingUpdateStatus{
-			Phase:           RollingUpdatePhase(src.RollingUpdate.Phase),
-			StartTime:       src.RollingUpdate.StartTime.DeepCopy(),
-			EndTime:         src.RollingUpdate.EndTime.DeepCopy(),
-			UpdatedServices: slices.Clone(src.RollingUpdate.UpdatedComponents),
-		}
+		dst.RollingUpdate = &RollingUpdateStatus{}
+		ConvertToRollingUpdateStatus(src.RollingUpdate, dst.RollingUpdate)
 	}
 }
 
-type replicaStatusConversionContext struct{}
-
-//nolint:unparam // Keep the structural conversion signature; this leaf has no preserved fields.
-func convertReplicaStatusToHub(src *ServiceReplicaStatus, dst *v1beta1.ComponentReplicaStatus, restored *v1beta1.ComponentReplicaStatus, save *ServiceReplicaStatus, ctx replicaStatusConversionContext) {
-	_, _, _ = restored, save, ctx
-
-	if src == nil || dst == nil {
-		return
+// ConvertFromRestartStatus converts restart status from v1alpha1 to v1beta1.
+func ConvertFromRestartStatus(src *RestartStatus, dst *v1beta1.RestartStatus) {
+	*dst = v1beta1.RestartStatus{
+		ObservedID: src.ObservedID,
+		Phase:      v1beta1.RestartPhase(src.Phase),
+		InProgress: slices.Clone(src.InProgress),
 	}
+}
+
+// ConvertToRestartStatus converts restart status from v1beta1 to v1alpha1.
+func ConvertToRestartStatus(src *v1beta1.RestartStatus, dst *RestartStatus) {
+	*dst = RestartStatus{
+		ObservedID: src.ObservedID,
+		Phase:      RestartPhase(src.Phase),
+		InProgress: slices.Clone(src.InProgress),
+	}
+}
+
+// ConvertFromServiceCheckpointStatus converts checkpoint status from v1alpha1
+// to v1beta1.
+func ConvertFromServiceCheckpointStatus(src *ServiceCheckpointStatus, dst *v1beta1.ComponentCheckpointStatus) {
+	*dst = v1beta1.ComponentCheckpointStatus{
+		CheckpointName: src.CheckpointName,
+		IdentityHash:   src.IdentityHash,
+		Ready:          src.Ready,
+	}
+}
+
+// ConvertToServiceCheckpointStatus converts checkpoint status from v1beta1 to
+// v1alpha1.
+func ConvertToServiceCheckpointStatus(src *v1beta1.ComponentCheckpointStatus, dst *ServiceCheckpointStatus) {
+	*dst = ServiceCheckpointStatus{
+		CheckpointName: src.CheckpointName,
+		IdentityHash:   src.IdentityHash,
+		Ready:          src.Ready,
+	}
+}
+
+// ConvertFromRollingUpdateStatus converts rolling-update status from v1alpha1
+// to v1beta1.
+func ConvertFromRollingUpdateStatus(src *RollingUpdateStatus, dst *v1beta1.RollingUpdateStatus) {
+	*dst = v1beta1.RollingUpdateStatus{
+		Phase:             v1beta1.RollingUpdatePhase(src.Phase),
+		StartTime:         src.StartTime.DeepCopy(),
+		EndTime:           src.EndTime.DeepCopy(),
+		UpdatedComponents: slices.Clone(src.UpdatedServices),
+	}
+}
+
+// ConvertToRollingUpdateStatus converts rolling-update status from v1beta1 to
+// v1alpha1.
+func ConvertToRollingUpdateStatus(src *v1beta1.RollingUpdateStatus, dst *RollingUpdateStatus) {
+	*dst = RollingUpdateStatus{
+		Phase:           RollingUpdatePhase(src.Phase),
+		StartTime:       src.StartTime.DeepCopy(),
+		EndTime:         src.EndTime.DeepCopy(),
+		UpdatedServices: slices.Clone(src.UpdatedComponents),
+	}
+}
+
+// ConvertFromServiceReplicaStatus converts replica status from v1alpha1 to
+// v1beta1.
+func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.ComponentReplicaStatus) {
 	*dst = v1beta1.ComponentReplicaStatus{
 		ComponentKind:   v1beta1.ComponentKind(src.ComponentKind),
-		ComponentNames:  slices.Clone(src.ComponentNames),
+		ComponentNames:  componentNamesToHub(src),
 		Replicas:        src.Replicas,
 		UpdatedReplicas: src.UpdatedReplicas,
 	}
@@ -661,13 +774,9 @@ func convertReplicaStatusToHub(src *ServiceReplicaStatus, dst *v1beta1.Component
 	}
 }
 
-//nolint:unparam // Keep the structural conversion signature; this leaf has no preserved fields.
-func convertReplicaStatusFromHub(src *v1beta1.ComponentReplicaStatus, dst *ServiceReplicaStatus, restored *ServiceReplicaStatus, save *v1beta1.ComponentReplicaStatus, ctx replicaStatusConversionContext) {
-	_, _, _ = restored, save, ctx
-
-	if src == nil || dst == nil {
-		return
-	}
+// ConvertToServiceReplicaStatus converts replica status from v1beta1 to
+// v1alpha1.
+func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *ServiceReplicaStatus) {
 	componentNames := slices.Clone(src.ComponentNames)
 
 	*dst = ServiceReplicaStatus{

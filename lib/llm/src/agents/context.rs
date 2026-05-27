@@ -21,22 +21,22 @@ where
 /// Identity metadata for agentic workloads.
 #[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
 pub struct AgentContext {
-    /// Reusable workflow/profile class.
+    /// Reusable session/profile class.
     #[serde(deserialize_with = "deserialize_non_empty_string")]
-    pub workflow_type_id: String,
+    pub session_type_id: String,
 
-    /// Top-level workflow/run identifier.
+    /// Top-level agent run/session identifier.
     #[serde(deserialize_with = "deserialize_non_empty_string")]
-    pub workflow_id: String,
+    pub session_id: String,
 
     /// Schedulable reasoning/tool trajectory identifier.
     #[serde(deserialize_with = "deserialize_non_empty_string")]
-    pub program_id: String,
+    pub trajectory_id: String,
 
-    /// Optional parent program for subagents.
+    /// Optional parent trajectory for subagents.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_program_id: Option<String>,
+    pub parent_trajectory_id: Option<String>,
 }
 
 impl AgentContext {
@@ -52,11 +52,11 @@ mod tests {
     #[test]
     fn test_agent_context_deserialize_rejects_empty_required_ids() {
         let err = serde_json::from_value::<AgentContext>(serde_json::json!({
-            "workflow_type_id": "deep_research",
-            "workflow_id": "",
-            "program_id": "program-1"
+            "session_type_id": "deep_research",
+            "session_id": "",
+            "trajectory_id": "trajectory-1"
         }))
-        .expect_err("empty workflow_id should fail deserialization");
+        .expect_err("empty session_id should fail deserialization");
 
         assert!(
             err.to_string()
