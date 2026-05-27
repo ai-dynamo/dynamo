@@ -55,10 +55,10 @@ spec:
     spec:
       restartPolicy: Always
       # Hostname pin + image come from hw/${HW}.env (sibling to this
-      # recipe's vllm-serve/ dir). All three configs (vllm-serve,
-      # dynamo-fd, dynamo-fd-ec) share that file so they land on the
-      # same node and benchmark on identical hardware. envsubst in
-      # run-benchmark.sh resolves these placeholders at apply time.
+      # recipe's deploy/ dir). All three configs (vllm-serve, dynamo-fd,
+      # dynamo-fd-ec) share that file so they land on the same node and
+      # serve from identical hardware. envsubst in deploy.sh resolves
+      # these placeholders at apply time.
       nodeSelector: ${HW_NODE_SELECTOR}
       tolerations: ${HW_TOLERATIONS}
       securityContext:
@@ -138,7 +138,7 @@ spec:
               # standard `hub/models--Qwen--Qwen3.6-...` layout.
             - name: shared-model-cache
               mountPath: /home/dynamo/.cache/vllm
-              subPath: qwen36-bench/vllm-cache
+              subPath: qwen36-deploy/vllm-cache
             - name: shm
               mountPath: /dev/shm
       volumes:

@@ -134,5 +134,5 @@ spec:
           # benefit from already-downloaded weights. Compilation cache
           # is NOT persisted here (single PVC, single mount point in
           # DGD's volumeMounts grammar); we eat a ~1 min torch.compile +
-          # DeepGEMM JIT penalty per pod restart. Acceptable for bench
-          # runs that stay up for the entire sweep.
+          # DeepGEMM JIT penalty per pod restart, acceptable for a
+          # long-running serve.

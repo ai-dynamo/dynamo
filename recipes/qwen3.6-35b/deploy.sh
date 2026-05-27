@@ -2,20 +2,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Unified driver for the Qwen3.6-35B-A3B-FP8 3-way benchmark.
+# Deploy driver for the Qwen3.6-35B-A3B-FP8 recipe.
 # Idempotent — re-running steps that already completed is a no-op.
 #
 # Two axes:
 #   --hw <name>      → sources hw/<name>.env (VLLM_IMAGE, HW_NODE_SELECTOR, HW_TOLERATIONS)
-#   --config <name>  → resolves to DEPLOY_KIND, DEPLOY_NAME, BENCH_POD inline (see CONFIGS table below)
+#   --config <name>  → resolves to DEPLOY_KIND, DEPLOY_NAME inline (see CONFIGS table below)
 #
 # Usage:
-#   ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve
-#   ./run-benchmark.sh -n <namespace> --hw gb200 --config dynamo-fd-ec --step deploy
+#   ./deploy.sh -n <namespace> --hw h100 --config vllm-serve
+#   ./deploy.sh -n <namespace> --hw gb200 --config dynamo-fd-ec --step deploy
+#   ./deploy.sh -n <namespace> --hw h100 --config dynamo-fd --step clean
 #
-# Steps: pvc | download | dataset | deploy | bench | retrieve | clean | all
-#   pvc/download/dataset are config-agnostic (idempotent prep).
-#   deploy/bench/retrieve/clean are config-specific.
+# Steps: pvc | download | deploy | clean | all
+#   pvc/download are config-agnostic (idempotent prep, share state across configs).
+#   deploy/clean are config-specific.
 set -euo pipefail
 
 NAMESPACE=""
@@ -43,33 +44,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 #   DEPLOY_KIND branches deploy() + clean():
 #     deployment → kubectl rollout status + delete Deployment+Service
 #     dgd        → kubectl wait on operator-stamped DGD pod labels + delete DGD
-#   BENCH_POD       — name of the aiperf Pod for this config.
-#   BENCH_FRONTEND  — service name the bench Pod hits at $FRONTEND:8000.
-#                     vllm-serve: a plain Service; DGDs: `<dgd-name>-frontend`
-#                     created automatically by the dynamo operator.
-#   BENCH_RUN_LABEL — sub-directory written under /perf-cache/artifacts/
-#                     so the 3 configs' aiperf artifacts don't collide.
 case "$CONFIG" in
   vllm-serve)
     DEPLOY_KIND="deployment"
     DEPLOY_NAME="qwen36-vllm-serve"
-    BENCH_POD="qwen36-bench"
-    BENCH_FRONTEND="qwen36-vllm-serve"
-    BENCH_RUN_LABEL="vllm-serve"
     ;;
   dynamo-fd)
     DEPLOY_KIND="dgd"
     DEPLOY_NAME="qwen36-dynamo-fd"
-    BENCH_POD="qwen36-fd-bench"
-    BENCH_FRONTEND="qwen36-dynamo-fd-frontend"
-    BENCH_RUN_LABEL="dynamo-fd"
     ;;
   dynamo-fd-ec)
     DEPLOY_KIND="dgd"
     DEPLOY_NAME="qwen36-dynamo-fd-ec"
-    BENCH_POD="qwen36-fd-ec-bench"
-    BENCH_FRONTEND="qwen36-dynamo-fd-ec-frontend"
-    BENCH_RUN_LABEL="dynamo-fd-ec"
     ;;
   "")
     echo "ERROR: --config <name> required" >&2
@@ -80,7 +66,6 @@ case "$CONFIG" in
     echo "Available: vllm-serve dynamo-fd dynamo-fd-ec" >&2
     exit 2 ;;
 esac
-export BENCH_POD BENCH_FRONTEND BENCH_RUN_LABEL
 
 HW_ENV="$HERE/hw/${HW}.env"
 if [[ ! -f "$HW_ENV" ]]; then
@@ -98,14 +83,12 @@ fi
 # shellcheck disable=SC1090
 set -a; . "$HW_ENV"; set +a
 echo "[hw]     $HW → image=$VLLM_IMAGE node=$HW_NODE_SELECTOR"
-echo "[config] $CONFIG → kind=$DEPLOY_KIND deploy=$DEPLOY_NAME bench-pod=$BENCH_POD"
+echo "[config] $CONFIG → kind=$DEPLOY_KIND deploy=$DEPLOY_NAME"
 
 K="kubectl -n $NAMESPACE"
-# Limit envsubst to our own template vars so embedded ${MODEL_NAME} /
-# ${KEEP_INPUTS_JSON:-} shell vars inside perf.yaml's inline bash stay
-# literal. $BENCH_* drive the shared perf.yaml; $VLLM_IMAGE / $HW_*
-# drive deploy.yaml + perf.yaml.
-TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL'
+# Limit envsubst to our own template vars so any literal ${...} placeholders
+# (e.g. ${MODEL_NAME} in an inline bash command) stay intact.
+TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS'
 APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 
 # ---------------- config-agnostic prep ----------------
@@ -135,19 +118,6 @@ download() {
   $K wait --for=condition=Complete job/qwen36-model-download --timeout=3600s
 }
 
-dataset() {
-  if $K get job qwen36-generate-datasets >/dev/null 2>&1; then
-    if [[ "$($K get job qwen36-generate-datasets -o jsonpath='{.status.succeeded}')" == "1" ]]; then
-      echo "[dataset] already complete"
-      return
-    fi
-    $K delete job qwen36-generate-datasets
-  fi
-  $K apply -f "$HERE/data-gen-job.yaml"
-  $K wait --for=condition=Complete job/qwen36-generate-datasets --timeout=1800s
-  $K logs job/qwen36-generate-datasets | tail -20
-}
-
 # ---------------- config-specific lifecycle ----------------
 
 deploy() {
@@ -169,29 +139,7 @@ deploy() {
   esac
 }
 
-bench() {
-  $K delete pod "$BENCH_POD" --ignore-not-found
-  APPLY_TPL "$HERE/perf.yaml"
-  $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
-  echo "[bench] streaming logs — Ctrl-C to detach (the run continues in pod)"
-  $K logs -f "$BENCH_POD" || true
-}
-
-retrieve() {
-  # Override the destination root via $BENCHMARK_RESULTS_DIR if your
-  # workspace layout differs from the default.
-  local base="${BENCHMARK_RESULTS_DIR:-$HOME/workspace/dynamo-tmp/logs}"
-  local dest="$base/$(date +%m-%d)/qwen36-fp8-${HW}/${CONFIG}"
-  mkdir -p "$dest"
-  $K exec "$BENCH_POD" -- \
-      tar c --exclude='inputs.json' -C /perf-cache artifacts \
-    | tar x -C "$dest"
-  echo "[retrieve] landed at $dest"
-  find "$dest" -name 'profile_export_aiperf.json' -print
-}
-
 clean() {
-  $K delete pod "$BENCH_POD" --ignore-not-found
   case "$DEPLOY_KIND" in
     deployment)
       $K delete deploy "$DEPLOY_NAME" --ignore-not-found
@@ -209,13 +157,10 @@ clean() {
 all() {
   pvc
   download
-  dataset
   deploy
-  bench
-  retrieve
 }
 
 case "$STEP" in
-  pvc|download|dataset|deploy|bench|retrieve|clean|all) "$STEP" ;;
+  pvc|download|deploy|clean|all) "$STEP" ;;
   *) echo "unknown step: $STEP" >&2; exit 2 ;;
 esac
