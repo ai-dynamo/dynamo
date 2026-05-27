@@ -60,7 +60,7 @@ be operating within your distributed runtime.
 
 The current examples use a hard-coded `namespace`. We will address the `namespace` collisions later.
 
-Most examples require `etcd` for service discovery. `nats.io` is required for KV-aware routing with event tracking; for approximate mode (`--no-router-kv-events`), NATS is optional.
+Most examples require `etcd` for service discovery. KV-aware routing with event tracking uses the configured event plane; `nats.io` is required only when using NATS-backed events. For approximate mode (`--no-router-kv-events`) or ZMQ-backed events, NATS is optional.
 
 #### Rust `hello_world`
 
