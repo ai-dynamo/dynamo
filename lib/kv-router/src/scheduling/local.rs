@@ -1305,4 +1305,74 @@ mod tests {
 
         cancel_token.cancel();
     }
+
+    // Regression tests for ai-dynamo/dynamo#8534.
+    #[tokio::test]
+    async fn test_new_worker_discovered_when_monitoring_enabled() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            1,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        let (_scheduler, slots, cfg_tx, cancel_token) =
+            make_scheduler(workers.clone(), None, true, None);
+
+        workers.insert(
+            2,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        cfg_tx.send(workers).unwrap();
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while !slots
+                .active_tokens(Instant::now())
+                .keys()
+                .any(|w| w.worker_id == 2)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("scheduler did not pick up new worker");
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_new_worker_not_discovered_when_monitoring_disabled() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            1,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        let (_scheduler, slots, cfg_tx, cancel_token) =
+            make_scheduler(workers.clone(), None, false, None);
+
+        workers.insert(
+            2,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        cfg_tx.send(workers).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            !slots
+                .active_tokens(Instant::now())
+                .keys()
+                .any(|w| w.worker_id == 2)
+        );
+        cancel_token.cancel();
+    }
 }

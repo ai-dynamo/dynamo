@@ -82,10 +82,9 @@ where
         .await
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
-        let watch_worker_configs = !kv_router_config.skip_initial_worker_wait;
-        if !watch_worker_configs {
-            tracing::info!("skipping discovery-based worker monitoring");
-        }
+        // Always watch: skip_initial_worker_wait only gates boot-time
+        // blocking, not runtime discovery. See ai-dynamo/dynamo#8534.
+        let watch_worker_configs = true;
 
         let policy = RouterSchedulingPolicy::new(kv_router_config.router_queue_policy);
         tracing::info!(
