@@ -52,7 +52,12 @@ EXTRA_ARGS=("$@")
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-8081}"
+# Fall through to ``DYN_SYSTEM_PORT`` (the single-worker convention used by
+# sibling launch scripts like ``agg_embed.sh``) for worker 1 so callers
+# that only set the non-numbered env var still drive the first worker's
+# port. ``SYSTEM_PORT2`` stays numbered-only -- there's no single-worker
+# equivalent for it.
+SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}}"
 SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
 
 print_launch_banner --no-curl "Launching Multi-Worker Embeddings (2 GPUs)" "${MODEL1} + ${MODEL2}" "$HTTP_PORT"
