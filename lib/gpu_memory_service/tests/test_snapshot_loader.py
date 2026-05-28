@@ -21,19 +21,26 @@ pytestmark = [
 ]
 
 
-def test_list_checkpoint_devices_discovers_device_directories(tmp_path, monkeypatch):
+def test_list_checkpoint_devices_uses_cuda_visible_devices(tmp_path, monkeypatch):
     (tmp_path / "device-2").mkdir()
     (tmp_path / "device-0").mkdir()
     (tmp_path / "device-0-copy").mkdir()
     (tmp_path / "not-a-device").mkdir()
     (tmp_path / "device-1").write_text("not a directory", encoding="utf-8")
-    monkeypatch.setattr(
-        loader.cuda_utils,
-        "list_devices",
-        lambda: pytest.fail("CUDA/NVML discovery should not run"),
-    )
+    monkeypatch.setattr(loader.cuda_utils, "list_devices", lambda: [0, 2])
 
     assert loader._list_checkpoint_devices(str(tmp_path)) == [0, 2]
+
+
+def test_list_checkpoint_devices_rejects_missing_visible_device_checkpoint(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "device-0").mkdir()
+    monkeypatch.setattr(loader.cuda_utils, "list_devices", lambda: [0, 1])
+
+    with pytest.raises(RuntimeError, match="missing.*device-"):
+        loader._list_checkpoint_devices(str(tmp_path))
 
 
 def test_list_checkpoint_devices_falls_back_to_cuda_discovery(tmp_path, monkeypatch):

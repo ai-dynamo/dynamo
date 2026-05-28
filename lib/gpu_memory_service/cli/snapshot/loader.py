@@ -118,34 +118,52 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
+    devices = cuda_utils.list_devices()
     if not checkpoint_dir:
-        return cuda_utils.list_devices()
+        return devices
 
     checkpoint_path = Path(checkpoint_dir)
-    devices: set[int] = set()
+    checkpoint_devices: set[int] = set()
     for child in checkpoint_path.iterdir():
         if not child.is_dir() or not child.name.startswith("device-"):
             continue
 
         suffix = child.name.removeprefix("device-")
         if suffix.isdigit():
-            devices.add(int(suffix))
+            checkpoint_devices.add(int(suffix))
 
-    if devices:
-        discovered = sorted(devices)
+    if not checkpoint_devices:
         logger.info(
-            "Discovered GMS checkpoint devices from %s: %s",
+            "No device-* checkpoint directories found under %s; using "
+            "CUDA/NVML device discovery: %s",
             checkpoint_path,
-            ",".join(str(device) for device in discovered),
+            ",".join(str(device) for device in devices),
         )
-        return discovered
+        return devices
+
+    visible_devices = set(devices)
+    missing_devices = sorted(visible_devices - checkpoint_devices)
+    extra_devices = sorted(checkpoint_devices - visible_devices)
+    if missing_devices:
+        raise RuntimeError(
+            "Checkpoint directory is missing device-* subdirectories for "
+            "CUDA/NVML-visible device(s): "
+            f"{','.join(str(device) for device in missing_devices)}"
+        )
+    if extra_devices:
+        logger.warning(
+            "Ignoring checkpoint device directories not visible to CUDA/NVML "
+            "under %s: %s",
+            checkpoint_path,
+            ",".join(str(device) for device in extra_devices),
+        )
 
     logger.info(
-        "No device-* checkpoint directories found under %s; falling back to "
-        "CUDA/NVML device discovery",
+        "Using CUDA/NVML-visible checkpoint devices from %s: %s",
         checkpoint_path,
+        ",".join(str(device) for device in devices),
     )
-    return cuda_utils.list_devices()
+    return devices
 
 
 def main(argv: list[str] | None = None) -> None:
