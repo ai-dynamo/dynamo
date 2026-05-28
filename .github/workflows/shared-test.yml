@@ -126,15 +126,20 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        # ARC schedules job container + service containers as sidecars in one
+        # pod, so they share a network namespace and localhost works.
         NATS_SERVER: nats://localhost:4222
         ETCD_ENDPOINTS: http://localhost:2379
     permissions:
       contents: read
     services:
+      # GHA services cannot override container CMD, so this sidecar runs without -js.
+      # Tests that require JetStream fall back to spawning a local nats-server with -js
+      # via the conftest probe in _configured_runtime_services.
       nats:
         image: ${{ vars.RUNNERS_REGISTRY }}/dockerhub/library/nats:2.11.4
       etcd:
-        image: ${{ vars.RUNNERS_REGISTRY }}/quay/coreos/etcd:v3.5.18
+        image: ${{ vars.RUNNERS_REGISTRY }}/quay/coreos/etcd:v3.5.30
         env:
           ETCD_DATA_DIR: /tmp/etcd-data
       minio:

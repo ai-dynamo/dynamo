@@ -289,6 +289,7 @@ markers = [
     "k8s: marks tests as requiring Kubernetes",
     "fault_tolerance: marks tests as fault tolerance tests",
     "deploy: marks tests as deployment tests",
+    "isolated_runtime_services: forces runtime_services fixtures to spawn their own NATS/etcd, ignoring ambient services even when NATS_SERVER/ETCD_ENDPOINTS are set. Use when the test controls service lifecycle (e.g. .stop()/.start()) or needs empty state.",
     "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
     "unified: marks unified-backend e2e tests (LLMEngine ABC + Worker, DEP #8251)",

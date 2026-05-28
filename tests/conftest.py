@@ -989,9 +989,97 @@ class ExternalRuntimeService:
         self.host = parsed.hostname or "localhost"
         self.port = parsed.port or default_port
 
+    def stop(self):
+        raise NotImplementedError(
+            "Ambient runtime service cannot be stopped from the test process. "
+            "Mark the test with @pytest.mark.isolated_runtime_services to spawn a local instance."
+        )
 
-def _configured_runtime_services(discovery_backend: str, request_plane: str):
-    """Return externally configured runtime services, if all required endpoints exist."""
+    def start(self):
+        raise NotImplementedError(
+            "Ambient runtime service cannot be started from the test process. "
+            "Mark the test with @pytest.mark.isolated_runtime_services to spawn a local instance."
+        )
+
+
+_AMBIENT_PROBE_CACHE: dict[str, bool] = {}
+
+
+def _probe_nats_with_jetstream(endpoint: str, timeout: float = 3.0) -> bool:
+    """Confirm ambient NATS is reachable AND has JetStream enabled.
+
+    Local NatsServer spawns with -js by default; ambient must match or
+    JS-dependent tests fail confusingly mid-run.
+    """
+    cache_key = f"nats:{endpoint}"
+    if cache_key in _AMBIENT_PROBE_CACHE:
+        return _AMBIENT_PROBE_CACHE[cache_key]
+
+    import asyncio
+
+    import nats as nats_client
+
+    async def probe():
+        try:
+            nc = await nats_client.connect(
+                endpoint, connect_timeout=min(timeout, 2.0)
+            )
+            try:
+                await nc.jetstream().account_info()
+                return True
+            except Exception:
+                return False
+            finally:
+                await nc.close()
+        except Exception:
+            return False
+
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            result = pool.submit(asyncio.run, probe()).result(timeout=timeout * 2)
+    except RuntimeError:
+        result = asyncio.run(probe())
+
+    _AMBIENT_PROBE_CACHE[cache_key] = result
+    return result
+
+
+def _probe_etcd(endpoint: str, timeout: float = 3.0) -> bool:
+    """Confirm ambient etcd is reachable via /health (first endpoint in CSV)."""
+    cache_key = f"etcd:{endpoint}"
+    if cache_key in _AMBIENT_PROBE_CACHE:
+        return _AMBIENT_PROBE_CACHE[cache_key]
+
+    import urllib.request
+
+    first = endpoint.split(",", 1)[0].rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{first}/health", timeout=timeout) as resp:
+            result = resp.status < 500
+    except Exception:
+        result = False
+
+    _AMBIENT_PROBE_CACHE[cache_key] = result
+    return result
+
+
+def _configured_runtime_services(request, discovery_backend: str, request_plane: str):
+    """Return externally configured runtime services if usable.
+
+    Falls back (returns None → fixture spawns its own) when:
+    - test is marked @pytest.mark.isolated_runtime_services,
+    - required env vars are missing,
+    - ambient services are unreachable, or
+    - ambient NATS lacks JetStream (local-spawn has it; behavior must match).
+    """
+    if request is not None:
+        node = getattr(request, "node", None)
+        if node is not None and node.get_closest_marker("isolated_runtime_services"):
+            return None
+
     needs_nats = request_plane == "nats"
     needs_etcd = discovery_backend == "etcd"
 
@@ -999,6 +1087,11 @@ def _configured_runtime_services(discovery_backend: str, request_plane: str):
     etcd_endpoint = os.environ.get("ETCD_ENDPOINTS")
 
     if (needs_nats and not nats_endpoint) or (needs_etcd and not etcd_endpoint):
+        return None
+
+    if needs_nats and not _probe_nats_with_jetstream(nats_endpoint):
+        return None
+    if needs_etcd and not _probe_etcd(etcd_endpoint):
         return None
 
     nats = ExternalRuntimeService(nats_endpoint, 4222) if needs_nats else None
@@ -1087,7 +1180,9 @@ def runtime_services(request, discovery_backend, request_plane):
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
-    configured_services = _configured_runtime_services(discovery_backend, request_plane)
+    configured_services = _configured_runtime_services(
+        request, discovery_backend, request_plane
+    )
     if configured_services is not None:
         yield configured_services
         return
@@ -1166,15 +1261,21 @@ def runtime_services_session(request, tmp_path_factory):
     For tests that need to restart NATS (e.g. indexer sync), use `runtime_services_dynamic_ports`
     which provides per-test isolated instances.
     """
+    # request.node is the Session object at this scope; the marker check inside
+    # _configured_runtime_services no-ops there, which is correct — session scope
+    # is inherently shared, so opt-out is per-test only via the function-scoped fixtures.
+    configured = _configured_runtime_services(None, "etcd", "nats")
+    if configured is not None:
+        yield configured
+        return
+
     with SharedNatsServer(request, tmp_path_factory) as nats:
         with SharedEtcdServer(request, tmp_path_factory) as etcd:
-            # Set environment variables for Rust/Python runtime to use
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats.port}"
             os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd.port}"
 
             yield nats, etcd
 
-            # Clean up environment variables
             os.environ.pop("NATS_SERVER", None)
             os.environ.pop("ETCD_ENDPOINTS", None)
 
