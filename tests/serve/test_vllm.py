@@ -342,7 +342,10 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_023_525_000
             ),  # KV cache cap (2x safety over min=511_762_432)
-            pytest.mark.timeout(300),  # ~6x observed 50s
+            # MEASUREMENT-ONLY (DO NOT MERGE): raised from timeout(300) so the
+            # harness 600s readiness budget can play out and we can read the
+            # real startup elapsed from the health-check logs. Revert before merge.
+            pytest.mark.timeout(900),  # was timeout(300)  # ~6x observed 50s
             # post_merge: cumulative sequential test time exceeds 35-min job budget.
             # Move back to pre_merge once GPU tests run in parallel.
             pytest.mark.post_merge,
@@ -363,10 +366,10 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(7.3),
             pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
-            # DYN_CHAT_PROCESSOR=vllm adds startup overhead on the vLLM
-            # chat-processor path; 300s could trip the pytest marker before
-            # the engine-readiness budget (default 600s) completed on slower CI.
-            pytest.mark.timeout(420),
+            # MEASUREMENT-ONLY (DO NOT MERGE): raised from timeout(420) so the
+            # harness 600s readiness budget can play out and we can read the
+            # real startup elapsed from the health-check logs. Revert before merge.
+            pytest.mark.timeout(900),  # was timeout(420)
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
