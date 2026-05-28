@@ -31,6 +31,7 @@ pub use dynamo_llm::protocols::common::{
 };
 pub use dynamo_protocols::types::CompletionUsage;
 pub use dynamo_runtime::engine::AsyncEngineContext;
+pub use dynamo_runtime::engine_routes::EngineRouteCallback;
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
 /// `dyn AsyncEngineContext` so engine code uses it transparently.
@@ -323,6 +324,18 @@ pub trait LLMEngine: Send + Sync + 'static {
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         Ok(None)
     }
+
+    /// Engine-management routes exposed under `/engine/{route}` by the
+    /// runtime system server. Empty by default.
+    async fn engine_routes(&self) -> Result<Vec<EngineRoute>, DynamoError> {
+        Ok(Vec::new())
+    }
+}
+
+/// One `/engine/{route}` callback supplied by an engine.
+pub struct EngineRoute {
+    pub route: String,
+    pub callback: EngineRouteCallback,
 }
 
 /// Marker key stamped on canary payloads. Handlers may inspect it to branch

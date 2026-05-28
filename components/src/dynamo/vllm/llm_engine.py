@@ -9,10 +9,11 @@ and feature gap details.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from vllm.config import VllmConfig
@@ -52,7 +53,11 @@ from dynamo.vllm.cache_info import (
 )
 from dynamo.vllm.capacity import per_rank_kv_blocks
 
-from .handlers import build_sampling_params, get_dp_range_for_worker
+from .handlers import (
+    VllmEngineQuiesceController,
+    build_sampling_params,
+    get_dp_range_for_worker,
+)
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -150,6 +155,9 @@ class VllmLLMEngine(LLMEngine):
         # factory call sees a valid object. `num_gpu_blocks` is patched
         # after KV profiling finishes.
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
+        self._quiesce_controller: VllmEngineQuiesceController | None = None
+        self._quiesce_lock = asyncio.Lock()
+        self._scale_ep_lock = asyncio.Lock()
 
     @classmethod
     async def from_args(
@@ -164,9 +172,9 @@ class VllmLLMEngine(LLMEngine):
             )
 
         if not config.served_model_name:
-            config.served_model_name = (
-                config.engine_args.served_model_name
-            ) = config.model
+            config.served_model_name = config.engine_args.served_model_name = (
+                config.model
+            )
 
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type
@@ -211,6 +219,7 @@ class VllmLLMEngine(LLMEngine):
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
         )
+        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
         per_rank_num_gpu_blocks = per_rank_kv_blocks(num_gpu_blocks, self._dp_range[1])
         if per_rank_num_gpu_blocks is None:
@@ -332,9 +341,9 @@ class VllmLLMEngine(LLMEngine):
             for output in res.outputs:
                 output_idx = getattr(output, "index", 0) or 0
                 token_ids = list(output.token_ids or [])
-                total_output_tokens_by_index[
-                    output_idx
-                ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                total_output_tokens_by_index[output_idx] = (
+                    total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                )
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
@@ -424,6 +433,134 @@ class VllmLLMEngine(LLMEngine):
                 multiproc_only_prefixes=["lmcache:"],
             )
 
+    async def engine_routes(self) -> dict[str, Callable[[dict], Any]]:
+        routes: dict[str, Callable[[dict], Any]] = {
+            "start_profile": self.start_profile,
+            "stop_profile": self.stop_profile,
+            "sleep": self.sleep,
+            "wake_up": self.wake_up,
+        }
+        if self.engine_client is not None and hasattr(
+            self.engine_client, "scale_elastic_ep"
+        ):
+            routes["scale_elastic_ep"] = self.scale_elastic_ep
+        return routes
+
+    async def sleep(self, body: dict) -> dict:
+        body = body or {}
+        level = body.get("level", 1)
+        controller = self._quiesce_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        async with self._quiesce_lock:
+            if controller.is_quiesced:
+                return {"status": "ok", "message": "Engine already sleeping"}
+            try:
+                if not await controller.quiesce(level):
+                    return {"status": "ok", "message": "Engine already sleeping"}
+                return {"status": "ok", "message": f"Engine slept (level={level})"}
+            except Exception as e:
+                logger.error("Failed to sleep engine: %s", e)
+                return {"status": "error", "message": str(e)}
+
+    async def wake_up(self, body: dict) -> dict:
+        body = body or {}
+        tags = body.get("tags")
+        controller = self._quiesce_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        async with self._quiesce_lock:
+            if not controller.is_quiesced:
+                return {"status": "ok", "message": "Engine already awake"}
+            try:
+                await controller.resume(tags)
+                controller.mark_resumed()
+                return {"status": "ok", "message": "Engine woke"}
+            except Exception as e:
+                logger.error("Failed to wake up engine: %s", e)
+                return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        body = body or {}
+        if self.engine_client is None:
+            return {"status": "error", "message": "engine is not initialized"}
+        profile_prefix = body.get("profile_prefix")
+        try:
+            await self.engine_client.start_profile(profile_prefix=profile_prefix)
+            return {"status": "ok", "message": "Profiling started"}
+        except Exception as e:
+            logger.error("Failed to start profiling: %s", e)
+            return {"status": "error", "message": str(e)}
+
+    async def stop_profile(self, body: dict) -> dict:
+        if self.engine_client is None:
+            return {"status": "error", "message": "engine is not initialized"}
+        try:
+            await self.engine_client.stop_profile()
+            return {"status": "ok", "message": "Profiling stopped"}
+        except Exception as e:
+            logger.error("Failed to stop profiling: %s", e)
+            return {"status": "error", "message": str(e)}
+
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        body = body or {}
+        if self.engine_client is None:
+            return {"status": "error", "message": "engine is not initialized"}
+        new_dp_size = body.get("new_data_parallel_size")
+        if new_dp_size is None:
+            return {
+                "status": "error",
+                "message": "Missing required field: new_data_parallel_size",
+            }
+        try:
+            new_dp_size = int(new_dp_size)
+        except (TypeError, ValueError):
+            return {
+                "status": "error",
+                "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
+            }
+        if new_dp_size < 2:
+            return {
+                "status": "error",
+                "message": "new_data_parallel_size must be >= 2 when elastic EP/ePLB is enabled",
+            }
+
+        if self._scale_ep_lock.locked():
+            msg = (
+                "A scale_elastic_ep operation is already in progress; "
+                f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
+            )
+            logger.warning("[ElasticEP] %s", msg)
+            return {"status": "error", "message": msg}
+
+        async with self._scale_ep_lock:
+            try:
+                import ray
+                import ray.util.state as _ray_util_state
+
+                class _NodeInfo:
+                    __slots__ = ("node_id", "node_ip")
+
+                    def __init__(self, d: dict) -> None:
+                        self.node_ip: str = d["NodeManagerAddress"]
+                        self.node_id: str = d["NodeID"]
+
+                _ray_util_state.list_nodes = lambda **kw: [
+                    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+                ]
+
+                await self.engine_client.scale_elastic_ep(new_dp_size)
+                return {
+                    "status": "ok",
+                    "message": f"Scaled to data_parallel_size={new_dp_size}",
+                    "new_data_parallel_size": new_dp_size,
+                }
+            except Exception as e:
+                logger.error("[ElasticEP] Scaling failed: %s", e)
+                return {"status": "error", "message": str(e)}
+
     async def abort(self, context: Context) -> None:
         request_id = context.id()
         if self.engine_client is not None and request_id is not None:
@@ -447,6 +584,7 @@ class VllmLLMEngine(LLMEngine):
                 self.engine_client.shutdown()
         finally:
             self.engine_client = None
+            self._quiesce_controller = None
             if self._prometheus_temp_dir is not None:
                 if (
                     os.environ.get("PROMETHEUS_MULTIPROC_DIR")

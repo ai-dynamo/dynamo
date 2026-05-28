@@ -377,3 +377,9 @@ def test_python_processor_spec_is_carried_through():
         spec, disaggregation_mode=DisaggregationMode.DECODE
     )
     assert activation == [desc]
+
+
+async def test_default_engine_routes_is_empty():
+    """Engines opt into system-server management routes explicitly."""
+    engine = _Complete()
+    assert await engine.engine_routes() == {}
