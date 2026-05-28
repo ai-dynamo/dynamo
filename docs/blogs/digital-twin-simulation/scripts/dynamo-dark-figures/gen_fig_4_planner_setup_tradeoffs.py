@@ -22,7 +22,6 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -76,22 +75,34 @@ def _static_line(fig, row, col, y_index):
         row=row, col=col,
     )
 
-    # Direct GPU-count labels on each static point so the reader sees that
-    # the line is a sweep across deployment sizes, not a continuous variable.
+    # Direct GPU-count labels on each static point. Uses a text-mode Scatter
+    # with data-coord y offsets (log multiplier for TTFT, linear add for ITL)
+    # so each label sits a controlled distance above its marker — kaleido
+    # has a dedup bug with multi-subplot annotations that suppresses one
+    # subplot's set, hence the trace-based approach.
     LABELED = {4, 8, 12, 16}
-    gpu_xs, gpu_ys, gpu_texts = [], [], []
+
+    def y_offset(y):
+        # TTFT log axis: multiply by 10^delta to lift in pixels.
+        # ITL linear axis: additive lift in data units.
+        return y * (10 ** 0.18) if y_index == 1 else y + 50
+    gpu_xs, gpu_ys, gpu_texts, gpu_pos = [], [], [], []
     for r in AGG_STATIC:
         if r[3] not in LABELED:
             continue
         gpu_xs.append(r[0])
-        gpu_ys.append(r[y_index])
+        gpu_ys.append(y_offset(r[y_index]))
         gpu_texts.append(f"{r[3]} GPU")
+        # All labels anchor right of the point except the right-edge one (16)
+        # which anchors left to keep the text inside the panel.
+        gpu_pos.append("middle left" if r[3] == 16 else "middle right")
     fig.add_trace(
         go.Scatter(
             x=gpu_xs, y=gpu_ys, mode="text",
-            text=gpu_texts, textposition="top right",
-            textfont=dict(family=MONO, size=10, color=CPU_BLUE),
+            text=gpu_texts, textposition=gpu_pos,
+            textfont=dict(family=MONO, size=10, color=TEXT_PRIMARY),
             showlegend=False, hoverinfo="skip",
+            cliponaxis=False,
         ),
         row=row, col=col,
     )
@@ -171,7 +182,7 @@ def main() -> None:
         ),
         legend=dict(
             orientation="h",
-            x=1.0, xanchor="right",
+            x=0.5, xanchor="center",
             y=-0.18, yanchor="top",
             bgcolor="rgba(0,0,0,0)",
             font=dict(family=SANS, size=11, color=TEXT_SECONDARY),
@@ -218,9 +229,9 @@ def main() -> None:
                      row=1, col=1)
     fig.update_yaxes(title=dict(text="p90 ITL (ms)",
                                 font=dict(family=SANS, size=11, color=TEXT_MUTED)),
-                     tickvals=[0, 200, 400, 600, 700],
-                     ticktext=["0", "200", "400", "600", "700"],
-                     range=[-50, 750],
+                     tickvals=[0, 200, 400, 600, 800],
+                     ticktext=["0", "200", "400", "600", "800"],
+                     range=[-50, 800],
                      row=1, col=2)
 
     out_svg = HERE.parent / "images" / "fig-4-planner-setup-tradeoffs.svg"
