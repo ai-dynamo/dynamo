@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from tests.parity.common import _FAMILY_TO_SGLANG_REASONING, _FAMILY_TO_VLLM_REASONING
 from tests.parity.common import TOP_N_TOOL_CALLING_FAMILIES as TOP_N_FAMILIES
 from tests.parity.common import (
     build_parity_tooltip_html,
@@ -26,8 +27,6 @@ from tests.parity.common import (
     parity_cell_class,
 )
 from tests.parity.markup import colorize_markup
-from tests.parity.reasoning.sglang import _FAMILY_TO_SGLANG_REASONING
-from tests.parity.reasoning.vllm import _FAMILY_TO_VLLM_REASONING
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = REPO_ROOT / "tests/parity/reasoning/fixtures"

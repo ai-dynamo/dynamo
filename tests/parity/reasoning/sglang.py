@@ -9,21 +9,7 @@ from typing import Any
 
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
-from tests.parity.common import ReasoningResult
-
-_FAMILY_TO_SGLANG_REASONING = {
-    "deepseek_r1": "deepseek-r1",
-    "deepseek_v3": "deepseek-v3",
-    "deepseek_v4": "deepseek-v4",
-    "gemma4": "gemma4",
-    "gpt_oss": "gpt-oss",
-    "kimi": "kimi",
-    "kimi_k25": "kimi_k2",
-    "minimax_append_think": "minimax-append-think",
-    "mistral": "mistral",
-    "nemotron_deci": "glm45",
-    "qwen3": "qwen3",
-}
+from tests.parity.common import _FAMILY_TO_SGLANG_REASONING, ReasoningResult
 
 
 def _make_parser(parser_name: str, fixture: dict[str, Any]) -> ReasoningParser:
