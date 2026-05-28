@@ -149,13 +149,12 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let worker_assignments = Arc::new(DashMap::with_hasher(FxBuildHasher));
         let worker_assignment_count = Arc::new(AtomicUsize::new(0));
         let synthetic_event_id = Arc::new(AtomicU64::new(0));
-        for _ in 0..num_workers {
+        for worker_idx in 0..num_workers {
             let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
 
             let backend = Arc::clone(&backend);
             let metrics = metrics.clone();
-            let worker_idx = thread_handles.len();
 
             let handle = std::thread::spawn(move || {
                 // This is observability, not recovery: if the worker panics, log
