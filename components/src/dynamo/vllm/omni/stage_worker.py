@@ -565,12 +565,23 @@ def _uses_nixl_connector(stage_configs_path: str, stage_configs: list[Any]) -> b
     """Check if any stage connector uses NixlConnector."""
     try:
         with open(stage_configs_path) as f:
-            deploy_config = yaml.safe_load(f) or {}
-    except (OSError, Exception):
+            raw = f.read()
+    except OSError:
         return False
 
+    try:
+        deploy_config = yaml.safe_load(raw) or {}
+    except Exception as exc:
+        logger.error(
+            "_uses_nixl_connector: failed to parse %s: %s", stage_configs_path, exc
+        )
+        raise
+
     if not isinstance(deploy_config, dict):
-        return False
+        raise ValueError(
+            f"_uses_nixl_connector: {stage_configs_path} did not yield a mapping "
+            f"(got {type(deploy_config).__name__})"
+        )
 
     # Check both root-level connectors and runtime.connectors (YAML structure varies)
     connectors_list = []

@@ -199,6 +199,8 @@ class DynamoOmniNixlConnector:
                         logger.debug(
                             "[DynamoOmniNixlConnector.put] RDMA complete req=%s", req_id
                         )
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as exc:
                         logger.warning(
                             "[DynamoOmniNixlConnector.put] wait_for_completion req=%s: %s",

@@ -145,11 +145,11 @@ class OmniStageRouter:
         # Accept either connector-based output (multi-node) or SHM (single-node legacy).
         # Connector path: final stage wrote via connector.put(to_stage="router") and
         # returned stage_connector_refs[last_stage_id] = metadata.
-        final_stage_id = str(len(self.stage_configs) - 1)
+        final_stage_id = self.stage_configs[-1].stage_id
         has_connector_output = (
             final.stage_connector_refs is not None
-            and final_stage_id in final.stage_connector_refs
-            and self.connectors.get(_connector_key(int(final_stage_id), "router"))
+            and str(final_stage_id) in final.stage_connector_refs
+            and self.connectors.get(_connector_key(final_stage_id, "router"))
             is not None
         )
         if not has_connector_output and not final.shm_meta:
@@ -189,7 +189,7 @@ class OmniStageRouter:
             request_id,
             request_type,
             fmt_ctx,
-            final_stage_id=len(self.stage_configs) - 1,
+            final_stage_id=self.stage_configs[-1].stage_id,
         ):
             yield chunk
 
@@ -204,59 +204,49 @@ class OmniStageRouter:
         """Read OmniRequestOutput from connector (multi-node) or SHM (single-node) and format."""
         # --- Connector path (multi-node: router and final stage on different machines) ---
         router_connector = self.connectors.get(_connector_key(final_stage_id, "router"))
-        if router_connector is not None and stage_output.stage_connector_refs:
-            meta_k = stage_output.stage_connector_refs.get(str(final_stage_id))
-            if meta_k is not None:
-                try:
-                    get_result = await ensure_awaited(
-                        router_connector.get(
-                            str(final_stage_id),
-                            "router",
-                            request_id,
-                            metadata=meta_k,
-                        )
+        meta_k = (
+            stage_output.stage_connector_refs.get(str(final_stage_id))
+            if stage_output.stage_connector_refs
+            else None
+        )
+        if router_connector is not None and meta_k is not None:
+            try:
+                get_result = await ensure_awaited(
+                    router_connector.get(
+                        str(final_stage_id),
+                        "router",
+                        request_id,
+                        metadata=meta_k,
                     )
-                    payload_data = unwrap_connector_payload(get_result)
-
-                    if is_tensor_payload(payload_data):
-                        payload_data = _restore_stage_to_router_tensor_payload(
-                            payload_data
-                        )
-
-                    if (
-                        isinstance(payload_data, dict)
-                        and payload_data.get("_dynamo_payload_type")
-                        == "stage_to_router_output"
-                    ):
-                        result = _payload_dict_to_result(payload_data)
-                    elif (
-                        isinstance(payload_data, dict)
-                        and "engine_inputs" in payload_data
-                    ):
-                        result = payload_data["engine_inputs"]
-                        _restore_completion_output_attrs(
-                            result,
-                            payload_data.get("_dynamo_completion_output_attrs"),
-                        )
-                    else:
-                        result = payload_data
-                    logger.debug(
-                        "Router: fetched final output via connector for %s", request_id
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Router: connector.get() failed for %s: %s", request_id, e
-                    )
-                    yield {
-                        "error": f"Router connector.get() failed: {e}",
-                        "finished": True,
-                    }
-                    return
-            else:
-                logger.warning(
-                    "Router: no connector ref for final stage %d", final_stage_id
                 )
-                yield {"error": "No connector ref for final stage", "finished": True}
+                payload_data = unwrap_connector_payload(get_result)
+
+                if is_tensor_payload(payload_data):
+                    payload_data = _restore_stage_to_router_tensor_payload(payload_data)
+
+                if (
+                    isinstance(payload_data, dict)
+                    and payload_data.get("_dynamo_payload_type")
+                    == "stage_to_router_output"
+                ):
+                    result = _payload_dict_to_result(payload_data)
+                elif isinstance(payload_data, dict) and "engine_inputs" in payload_data:
+                    result = payload_data["engine_inputs"]
+                    _restore_completion_output_attrs(
+                        result,
+                        payload_data.get("_dynamo_completion_output_attrs"),
+                    )
+                else:
+                    result = payload_data
+                logger.debug(
+                    "Router: fetched final output via connector for %s", request_id
+                )
+            except Exception as e:
+                logger.error("Router: connector.get() failed for %s: %s", request_id, e)
+                yield {
+                    "error": f"Router connector.get() failed: {e}",
+                    "finished": True,
+                }
                 return
         else:
             # --- SHM fallback (single-node: router and final stage on same machine) ---

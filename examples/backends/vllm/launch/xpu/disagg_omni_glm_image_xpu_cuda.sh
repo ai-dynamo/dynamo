@@ -25,10 +25,11 @@
 #   DiT on XPU:     ZE_AFFINITY_MASK=0 ROLE=dit DIT_TP=1 DIT_DEVICE_TYPE=xpu
 
 set -e
-trap dynamo_exit_trap EXIT
+trap 'kill 0 2>/dev/null; exit' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+trap dynamo_exit_trap EXIT
 
 # Default device types for cross-device disaggregation (CUDA AR + XPU DiT)
 AR_DEVICE_TYPE="${AR_DEVICE_TYPE:-cuda}"
@@ -101,7 +102,7 @@ CURL
 
     AR_TP=${AR_TP} \
     AR_GPUS=${ar_devices} \
-    DYN_SYSTEM_PORT=8081 \
+    DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_AR:-8081} \
     NATS_SERVER=${NATS_SERVER} \
     ETCD_ENDPOINTS=${ETCD_ENDPOINTS} \
         python -m dynamo.vllm.omni \
@@ -111,7 +112,6 @@ CURL
         --output-modalities image \
         --media-output-fs-url file:///tmp/dynamo_media \
         "${EXTRA_ARGS[@]}" &
-    sleep 20
 
     # Router
     echo "Starting Router..."
@@ -119,7 +119,7 @@ CURL
     AR_GPUS=${ar_devices} \
     DIT_GPUS=0 \
     DIT_TP=${DIT_TP} \
-    DYN_SYSTEM_PORT=8083 \
+    DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_ROUTER:-8083} \
     NATS_SERVER=${NATS_SERVER} \
     ETCD_ENDPOINTS=${ETCD_ENDPOINTS} \
         python -m dynamo.vllm.omni \
@@ -129,7 +129,6 @@ CURL
         --output-modalities image \
         --media-output-fs-url file:///tmp/dynamo_media \
         "${EXTRA_ARGS[@]}" &
-    sleep 5
 
     # Frontend
     echo "Starting Frontend..."
@@ -149,7 +148,7 @@ elif [[ "${ROLE,,}" == "dit" ]]; then
 
     DIT_GPUS=${dit_devices} \
     DIT_TP=${DIT_TP} \
-    DYN_SYSTEM_PORT=8082 \
+    DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_DIT:-8082} \
     NATS_SERVER=${NATS_SERVER} \
     ETCD_ENDPOINTS=${ETCD_ENDPOINTS} \
         python -m dynamo.vllm.omni \
