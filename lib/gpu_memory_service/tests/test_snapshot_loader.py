@@ -21,7 +21,10 @@ pytestmark = [
 ]
 
 
-def test_list_checkpoint_devices_uses_cuda_visible_devices(tmp_path, monkeypatch):
+def test_list_checkpoint_devices_requires_exact_visible_device_match(
+    tmp_path,
+    monkeypatch,
+):
     (tmp_path / "device-2").mkdir()
     (tmp_path / "device-0").mkdir()
     (tmp_path / "device-0-copy").mkdir()
@@ -32,21 +35,28 @@ def test_list_checkpoint_devices_uses_cuda_visible_devices(tmp_path, monkeypatch
     assert loader._list_checkpoint_devices(str(tmp_path)) == [0, 2]
 
 
-def test_list_checkpoint_devices_rejects_missing_visible_device_checkpoint(
+@pytest.mark.parametrize(
+    ("visible_devices", "checkpoint_dirs", "expected"),
+    [
+        ([0, 1], ["device-0"], "missing=1"),
+        ([0], ["device-0", "device-1"], "extra=1"),
+        ([7], [], "missing=7"),
+        ([2], ["device-02"], "missing=2"),
+    ],
+)
+def test_list_checkpoint_devices_rejects_mismatched_checkpoints(
     tmp_path,
     monkeypatch,
+    visible_devices,
+    checkpoint_dirs,
+    expected,
 ):
-    (tmp_path / "device-0").mkdir()
-    monkeypatch.setattr(loader.cuda_utils, "list_devices", lambda: [0, 1])
+    for dirname in checkpoint_dirs:
+        (tmp_path / dirname).mkdir()
+    monkeypatch.setattr(loader.cuda_utils, "list_devices", lambda: visible_devices)
 
-    with pytest.raises(RuntimeError, match="missing.*device-"):
+    with pytest.raises(RuntimeError, match=expected):
         loader._list_checkpoint_devices(str(tmp_path))
-
-
-def test_list_checkpoint_devices_falls_back_to_cuda_discovery(tmp_path, monkeypatch):
-    monkeypatch.setattr(loader.cuda_utils, "list_devices", lambda: [7])
-
-    assert loader._list_checkpoint_devices(str(tmp_path)) == [7]
 
 
 def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):

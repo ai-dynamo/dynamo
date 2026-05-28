@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOAD_WORKERS = 16
 
 
+def _format_devices(devices: list[int]) -> str:
+    return ",".join(str(device) for device in devices) or "-"
+
+
 def _load_device(
     checkpoint_dir: str,
     device: int,
@@ -129,39 +133,26 @@ def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
             continue
 
         suffix = child.name.removeprefix("device-")
-        if suffix.isdigit():
+        if suffix.isdigit() and suffix == str(int(suffix)):
             checkpoint_devices.add(int(suffix))
-
-    if not checkpoint_devices:
-        logger.info(
-            "No device-* checkpoint directories found under %s; using "
-            "CUDA/NVML device discovery: %s",
-            checkpoint_path,
-            ",".join(str(device) for device in devices),
-        )
-        return devices
 
     visible_devices = set(devices)
     missing_devices = sorted(visible_devices - checkpoint_devices)
     extra_devices = sorted(checkpoint_devices - visible_devices)
-    if missing_devices:
+    if missing_devices or extra_devices:
         raise RuntimeError(
-            "Checkpoint directory is missing device-* subdirectories for "
-            "CUDA/NVML-visible device(s): "
-            f"{','.join(str(device) for device in missing_devices)}"
-        )
-    if extra_devices:
-        logger.warning(
-            "Ignoring checkpoint device directories not visible to CUDA/NVML "
-            "under %s: %s",
-            checkpoint_path,
-            ",".join(str(device) for device in extra_devices),
+            "Checkpoint device directories under "
+            f"{checkpoint_path} do not match CUDA/NVML-visible devices: "
+            f"visible={_format_devices(devices)} "
+            f"checkpoint={_format_devices(sorted(checkpoint_devices))} "
+            f"missing={_format_devices(missing_devices)} "
+            f"extra={_format_devices(extra_devices)}"
         )
 
     logger.info(
         "Using CUDA/NVML-visible checkpoint devices from %s: %s",
         checkpoint_path,
-        ",".join(str(device) for device in devices),
+        _format_devices(devices),
     )
     return devices
 
