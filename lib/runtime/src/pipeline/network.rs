@@ -514,7 +514,6 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     fn metrics(&self) -> Option<&Arc<WorkHandlerMetrics>> {
         self.metrics.get()
     }
-
 }
 
 #[async_trait]

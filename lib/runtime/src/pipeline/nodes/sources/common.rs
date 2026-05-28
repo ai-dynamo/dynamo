@@ -36,7 +36,9 @@ macro_rules! impl_frontend {
         }
 
         #[async_trait]
-        impl<In: PipelineIO + Sync, Out: PipelineIO> AsyncEngine<In, Out, Error> for $type<In, Out> {
+        impl<In: PipelineIO + Sync, Out: PipelineIO> AsyncEngine<In, Out, Error>
+            for $type<In, Out>
+        {
             async fn generate(&self, request: In) -> Result<Out, Error> {
                 self.inner.generate(request).await
             }
