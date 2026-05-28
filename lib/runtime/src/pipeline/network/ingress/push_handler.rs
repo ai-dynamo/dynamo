@@ -138,6 +138,102 @@ impl Drop for RequestMetricsGuard {
     }
 }
 
+impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
+    /// Pump every chunk from the engine's response stream out to the
+    /// upstream-side `StreamSender`, plus the terminal complete-final
+    /// frame. Captures the per-frame metrics, the publish-failure error
+    /// classification (client-side disconnect vs. real failure), and the
+    /// health-check notifier policy (notify only on non-error chunks and
+    /// at clean stream end).
+    async fn pump_response_stream<U>(&self, mut stream: ManyOut<U>, publisher: &StreamSender)
+    where
+        U: Data + Serialize + MaybeError + std::fmt::Debug,
+    {
+        let context = stream.context();
+
+        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
+        let mut send_complete_final = true;
+        let mut saw_error_response = false;
+        while let Some(resp) = stream.next().await {
+            tracing::trace!("Sending response: {:?}", resp);
+            let is_error = resp.err().is_some();
+            if is_error {
+                saw_error_response = true;
+            }
+            let resp_wrapper = NetworkStreamWrapper {
+                data: Some(resp),
+                complete_final: false,
+            };
+            let resp_bytes = serde_json::to_vec(&resp_wrapper)
+                .expect("fatal error: invalid response object - this should never happen");
+            if let Some(m) = self.metrics() {
+                m.response_bytes.inc_by(resp_bytes.len() as u64);
+            }
+            if (publisher.send(resp_bytes.into()).await).is_err() {
+                send_complete_final = false;
+                if context.is_stopped() {
+                    // Say there are 2 threads accessing `context`, the sequence can be either:
+                    // 1. context.stop_generating (other) -> publisher.send failure (this)
+                    //    -> context.is_stopped (this)
+                    // 2. publisher.send failure (this) -> context.stop_generating (other)
+                    //    -> context.is_stopped (this)
+                    // Case 1 can happen when client closed the connection after receiving the
+                    // complete response from frontend. Hence, send failure can be expected in this
+                    // case.
+                    tracing::warn!("Failed to publish response for stream {}", context.id());
+                } else {
+                    // Otherwise, this is an error.
+                    tracing::error!("Failed to publish response for stream {}", context.id());
+                    context.stop_generating();
+                }
+                // Account errors in all cases, including cancellation. Therefore this metric can be
+                // inflated.
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
+                        .inc();
+                }
+                break;
+            } else if !is_error {
+                // Only notify on non-error chunks — error responses don't prove
+                // the engine is healthy and should not reset the canary timer.
+                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                    notifier.notify_one();
+                }
+            }
+        }
+        if send_complete_final {
+            let resp_wrapper = NetworkStreamWrapper::<U> {
+                data: None,
+                complete_final: true,
+            };
+            let resp_bytes = serde_json::to_vec(&resp_wrapper)
+                .expect("fatal error: invalid response object - this should never happen");
+            if let Some(m) = self.metrics() {
+                m.response_bytes.inc_by(resp_bytes.len() as u64);
+            }
+            if (publisher.send(resp_bytes.into()).await).is_err() {
+                tracing::error!(
+                    "Failed to publish complete final for stream {}",
+                    context.id()
+                );
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                        .inc();
+                }
+            }
+            // Only notify on stream completion if no error responses were seen
+            if let (false, Some(notifier)) = (
+                saw_error_response,
+                self.endpoint_health_check_notifier.get(),
+            ) {
+                notifier.notify_one();
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
 where
@@ -285,7 +381,7 @@ where
 
         // the prolouge is sent to the client to indicate that the stream is ready to receive data
         // or if the generate call failed, the error is sent to the client
-        let mut stream = match stream {
+        let stream = match stream {
             Ok(stream) => {
                 tracing::trace!("Successfully generated response stream; sending prologue");
                 let _result = publisher.send_prologue(None).await;
@@ -313,88 +409,7 @@ where
             }
         };
 
-        let context = stream.context();
-
-        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
-        let mut send_complete_final = true;
-        let mut saw_error_response = false;
-        while let Some(resp) = stream.next().await {
-            tracing::trace!("Sending response: {:?}", resp);
-            let is_error = resp.err().is_some();
-            if is_error {
-                saw_error_response = true;
-            }
-            let resp_wrapper = NetworkStreamWrapper {
-                data: Some(resp),
-                complete_final: false,
-            };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
-                .expect("fatal error: invalid response object - this should never happen");
-            if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
-            }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
-                send_complete_final = false;
-                if context.is_stopped() {
-                    // Say there are 2 threads accessing `context`, the sequence can be either:
-                    // 1. context.stop_generating (other) -> publisher.send failure (this)
-                    //    -> context.is_stopped (this)
-                    // 2. publisher.send failure (this) -> context.stop_generating (other)
-                    //    -> context.is_stopped (this)
-                    // Case 1 can happen when client closed the connection after receiving the
-                    // complete response from frontend. Hence, send failure can be expected in this
-                    // case.
-                    tracing::warn!("Failed to publish response for stream {}", context.id());
-                } else {
-                    // Otherwise, this is an error.
-                    tracing::error!("Failed to publish response for stream {}", context.id());
-                    context.stop_generating();
-                }
-                // Account errors in all cases, including cancellation. Therefore this metric can be
-                // inflated.
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
-                        .inc();
-                }
-                break;
-            } else if !is_error {
-                // Only notify on non-error chunks — error responses don't prove
-                // the engine is healthy and should not reset the canary timer.
-                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-                    notifier.notify_one();
-                }
-            }
-        }
-        if send_complete_final {
-            let resp_wrapper = NetworkStreamWrapper::<U> {
-                data: None,
-                complete_final: true,
-            };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
-                .expect("fatal error: invalid response object - this should never happen");
-            if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
-            }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
-                tracing::error!(
-                    "Failed to publish complete final for stream {}",
-                    context.id()
-                );
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
-                        .inc();
-                }
-            }
-            // Only notify on stream completion if no error responses were seen
-            if let (false, Some(notifier)) = (
-                saw_error_response,
-                self.endpoint_health_check_notifier.get(),
-            ) {
-                notifier.notify_one();
-            }
-        }
+        self.pump_response_stream(stream, &publisher).await;
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.
