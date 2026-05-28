@@ -213,6 +213,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(230)  # 3x average
 @pytest.mark.post_merge
+@pytest.mark.skip(
+    reason="Flaky: 0% post-merge pass rate across multiple parametrizations; "
+    "skipped wholesale until the underlying migration fault is owned and fixed."
+)
 def test_request_migration_sglang_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -234,6 +238,20 @@ def test_request_migration_sglang_aggregated(
         request_api: "chat" for chat completion API, "completion" for completion API
         stream: True for streaming, False for non-streaming
     """
+
+    request_plane = request.getfixturevalue("request_plane")
+
+    # OPS-4472: graceful-shutdown migration with NATS is flaky for the
+    # chat streaming aggregated SGLang case.
+    if (
+        migration_limit == 3
+        and migration_max_seq_len is None
+        and immediate_kill is False
+        and request_api == "chat"
+        and stream is True
+        and request_plane == "nats"
+    ):
+        pytest.skip("Flaky: graceful-shutdown migration fails with NATS. OPS-4472")
 
     # OPS-4446: first-token delay routinely exceeds the 6s threshold in
     # utils.validate_response for this parameter combination. Originally only

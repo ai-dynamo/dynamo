@@ -248,7 +248,7 @@ impl LocalKvIndexer {
         buffer.iter().cloned().collect()
     }
 
-    /// Query events by ID range, returning events in `[start_id, end_id]` (both inclusive).
+    /// Query events by ID range, returning a recovery-equivalent suffix for `[start_id, end_id]`.
     ///
     /// ### Arguments
     ///
@@ -259,8 +259,10 @@ impl LocalKvIndexer {
     ///
     /// ### Returns
     ///
-    /// - `Events`: Buffered events with original IDs from `start_id` through the
-    ///   current buffered tail, plus the buffered `last_event_id`
+    /// - `Events`: Buffered events with original IDs through the current buffered tail,
+    ///   plus the buffered `last_event_id`. If the buffered suffix contains one or more
+    ///   `Cleared` events, events before the last clear may be omitted because the clear
+    ///   is a worker-wide recovery barrier.
     /// - `TreeDump`: Full tree dump with synthetic IDs and the worker's latest real event ID (when range is too old or unspecified)
     /// - `TooNew`: Error when requested range is newer than available data
     /// - `InvalidRange`: Error when end_id < start_id
@@ -421,12 +423,21 @@ impl LocalKvIndexer {
             Ok(idx) => idx,
             Err(insertion_point) => insertion_point,
         };
-        let events = buffer.iter().skip(start_idx).cloned().collect();
+        let response_start_idx = Self::buffer_response_start_idx(&buffer, start_idx);
+        let events = buffer.iter().skip(response_start_idx).cloned().collect();
 
         DumpPlan::Immediate(WorkerKvQueryResponse::Events {
             events,
             last_event_id: last_buffered,
         })
+    }
+
+    fn buffer_response_start_idx(buffer: &VecDeque<RouterEvent>, start_idx: usize) -> usize {
+        buffer
+            .iter()
+            .skip(start_idx)
+            .rposition(|event| matches!(&event.event.data, KvCacheEventData::Cleared))
+            .map_or(start_idx, |idx| start_idx + idx)
     }
 
     async fn get_cached_or_fresh_dump(&self, fallback_last_event_id: u64) -> WorkerKvQueryResponse {

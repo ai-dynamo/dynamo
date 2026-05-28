@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mounts shared-model-cache at the standard HF_HOME path so the
+# downloaded weights land at /home/dynamo/.cache/huggingface/hub/
+# models--Qwen--Qwen3.6-35B-A3B-FP8/, sharing the HF Hub cache layout
+# with anything else in the namespace (other downloads in the same
+# namespace are reused — no double download).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen36-model-download
+  labels:
+    app.kubernetes.io/name: qwen3.6-35b
+    app.kubernetes.io/component: model-download
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qwen3.6-35b
+        app.kubernetes.io/component: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.6-35B-A3B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+            - name: MODEL_REVISION
+              value: "main"
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.11.0
+              hf download "$MODEL_NAME" --revision "$MODEL_REVISION"
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /home/dynamo/.cache/huggingface
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

@@ -243,7 +243,7 @@ def test_request_cancellation_trtllm_aggregated(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                     log_offset=frontend_log_offset,
                 )
 
@@ -338,7 +338,7 @@ def test_request_cancellation_trtllm_decode_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 logger.info(
@@ -431,7 +431,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 # Verify decode worker never received the request
@@ -549,7 +549,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 logger.info(

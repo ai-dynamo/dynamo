@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
+import json
 import logging
 import os
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,136 +33,133 @@ logger = logging.getLogger(__name__)
 VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
 
-class SupportedModels:
-    """Supported multimodal model identifiers"""
+class ModelFamily(str, Enum):
+    """Multimodal model families dynamo's encoder pipeline knows how to dispatch."""
 
-    # TODO: Replace this explicit model list with dynamic detection using
-    # HF config `architectures` field or vLLM's model registry, so any
-    # vLLM-supported VLM works without maintaining entries here.
-
-    LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
-    QWEN_2_VL_2B = "Qwen/Qwen2-VL-2B-Instruct"
-    QWEN_2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
-    QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
-    QWEN_2_5_VL_32B = "Qwen/Qwen2.5-VL-32B-Instruct"
-    QWEN_3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
-    QWEN_3_VL_30B_A3B = "Qwen/Qwen3-VL-30B-A3B-Instruct"
-    QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
-    QWEN_3_VL_8B = "Qwen/Qwen3-VL-8B-Instruct"
-    QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
-    QWEN_3_VL_4B = "Qwen/Qwen3-VL-4B-Instruct"
-    QWEN_3_VL_4B_FP8 = "Qwen/Qwen3-VL-4B-Instruct-FP8"
-    QWEN_3_VL_32B = "Qwen/Qwen3-VL-32B-Instruct"
-    QWEN_3_VL_32B_FP8 = "Qwen/Qwen3-VL-32B-Instruct-FP8"
+    QWEN_VL = "qwen-vl"
+    LLAVA = "llava"
 
 
-def normalize_model_name(model_name: str) -> str:
-    """
-    Extract and normalize model name from various formats including HuggingFace cache paths.
+# Per-family registries used by `resolve_model_family`. The encoder reaches
+# into vLLM internals (`model.visual` for Qwen, `vision_tower` +
+# `multi_modal_projector` for LLaVA) whose attribute paths vary per family —
+# entries here must correspond to extractor logic in `encode_utils.py`.
+#
+# Architectures are matched verbatim against `config.json` `architectures`.
+_FAMILY_ARCHITECTURES: Dict[ModelFamily, frozenset[str]] = {
+    ModelFamily.QWEN_VL: frozenset(
+        {
+            "Qwen2VLForConditionalGeneration",
+            "Qwen2_5_VLForConditionalGeneration",
+            "Qwen3VLForConditionalGeneration",
+            "Qwen3VLMoeForConditionalGeneration",
+            # Qwen3.5 subclasses Qwen3VL in vLLM
+            # (`Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration)`)
+            # with the same `self.visual = Qwen3_VisionTransformer(...)` and an
+            # identical preprocessor (`Qwen2VLImageProcessorFast`); the encoder
+            # pipeline is inherited unchanged. Inclusion based on source +
+            # config inspection — pending empirical verification against a
+            # deployed Qwen3.5 model.
+            "Qwen3_5ForConditionalGeneration",
+        }
+    ),
+    ModelFamily.LLAVA: frozenset({"LlavaForConditionalGeneration"}),
+}
+
+# Name-stage substring patterns (lowercase). A new size / quantization /
+# MoE variant of an existing family doesn't require a registry change as
+# long as it shares the family-level prefix; only a genuinely new family
+# (e.g. Qwen4-VL) needs a pattern added.
+_FAMILY_NAME_PATTERNS: Dict[ModelFamily, frozenset[str]] = {
+    ModelFamily.QWEN_VL: frozenset(
+        {
+            "qwen2-vl",
+            "qwen2.5-vl",
+            "qwen3-vl",
+            # Qwen3.5 ids omit "-vl" because it's a unified multimodal
+            # architecture; bare "qwen3.5" matches all variants. Routes to
+            # QWEN_VL via the subclass relationship documented in
+            # _FAMILY_ARCHITECTURES.
+            "qwen3.5",
+        }
+    ),
+    ModelFamily.LLAVA: frozenset({"llava-1.5-7b-hf"}),
+}
+
+
+def _load_model_config(model_name: str) -> Optional[Dict[str, Any]]:
+    """Read `config.json` from a local model directory if available."""
+    try:
+        path = Path(model_name)
+        if not path.is_dir():
+            return None
+        config_path = path / "config.json"
+        if not config_path.is_file():
+            return None
+        return json.loads(config_path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+@functools.lru_cache(maxsize=8)
+def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
+    """Return the multimodal model family for the given identifier, or `None`
+    if no registered family matches.
+
+    Resolution proceeds in two stages: a `config.json` `architectures`
+    lookup when `model_name` is a local directory with config (authoritative
+    when present), falling through to a lowercased substring scan against
+    per-family name patterns (`qwen2-vl`, `qwen3-vl`, `llava-1.5-7b-hf`).
+    Patterns are family-level prefixes, so HF ids, HF cache layouts, and
+    hand-rolled local paths are all handled by the same scan, and new
+    sizes / quantizations of an existing family resolve without a registry
+    change.
 
     Args:
-        model_name: Model identifier which can be:
-            - A simple model name: "Qwen/Qwen2.5-VL-7B-Instruct"
-            - A HuggingFace cache path: "/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/..."
-            - A local path to a model directory
+        model_name: A model identifier. Accepts an HF id, an HF cache
+            snapshot path, or a local directory path (with or without
+            `config.json`, with or without an HF-cache-style parent
+            segment).
 
     Returns:
-        Normalized model name in the format "organization/model-name"
+        The matching `ModelFamily`, or `None` if no registered family
+        matches the input.
 
     Examples:
-        >>> normalize_model_name("Qwen/Qwen2.5-VL-7B-Instruct")
-        "Qwen/Qwen2.5-VL-7B-Instruct"
-        >>> normalize_model_name("/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/...")
-        "Qwen/Qwen2.5-VL-7B-Instruct"
+        All of the following resolve to `ModelFamily.QWEN_VL`:
+
+        >>> resolve_model_family("Qwen/Qwen2-VL-2B-Instruct")
+        >>> resolve_model_family(
+        ...     "/root/.cache/huggingface/hub/"
+        ...     "models--Qwen--Qwen2-VL-2B-Instruct/snapshots/abc123"
+        ... )
+        >>> resolve_model_family("/local_store/Qwen--Qwen2-VL-2B-Instruct/v2")
+        >>> resolve_model_family("/runs/qwen2.5-vl-7b-instruct/v3")
+
+        A local directory containing `config.json` with
+        `{"architectures": ["Qwen2VLForConditionalGeneration"]}` resolves
+        via the metadata stage regardless of the directory's name.
     """
-    # If it's already a simple model name (org/model format), return as-is
-    if "/" in model_name and not model_name.startswith("/"):
-        return model_name
+    config = _load_model_config(model_name)
+    if config is not None:
+        for arch in config.get("architectures") or []:
+            for family, arch_set in _FAMILY_ARCHITECTURES.items():
+                if arch in arch_set:
+                    return family
 
-    # Handle HuggingFace cache paths
-    if "models--" in model_name:
-        # Extract from cache path format: models--ORG--MODEL-NAME
-        # Split on "models--" then on "--" to handle dashes in org/model names
-        parts_after_models = model_name.split("models--", 1)
-        if len(parts_after_models) > 1:
-            # Split the remaining part on "--" and take the last two segments
-            segments = parts_after_models[1].split("--")
-            if len(segments) >= 2:
-                # Take all segments except the last as org (rejoined with dashes)
-                # and the last segment (before any slash) as model name
-                org_segments = segments[:-1]
-                model_segment = segments[-1].split("/")[
-                    0
-                ]  # Remove any path after model name
+    lowered = model_name.lower()
+    for family, patterns in _FAMILY_NAME_PATTERNS.items():
+        if any(pattern in lowered for pattern in patterns):
+            return family
 
-                org = "--".join(org_segments)  # Rejoin org parts with dashes
-                model = model_segment
-                return f"{org}/{model}"
-
-    # Handle local directory paths - extract the last directory name
-    path = Path(model_name)
-    if path.exists() and path.is_dir():
-        return path.name
-
-    # If no pattern matches, return the original name
-    return model_name
-
-
-def is_model_supported(model_name: str, supported_model: str) -> bool:
-    """
-    Check if a model name matches a supported model, handling various naming formats.
-
-    Args:
-        model_name: The model name to check (may be path, cache name, etc.)
-        supported_model: The supported model identifier
-
-    Returns:
-        True if the model is supported, False otherwise
-    """
-    normalized_name = normalize_model_name(model_name).lower()
-    normalized_supported = normalize_model_name(supported_model).lower()
-
-    return normalized_name == normalized_supported
-
-
-# List of all Qwen VL model variants for easy extension
-QWEN_VL_MODELS = [
-    SupportedModels.QWEN_2_VL_2B,
-    SupportedModels.QWEN_2_5_VL_3B,
-    SupportedModels.QWEN_2_5_VL_7B,
-    SupportedModels.QWEN_2_5_VL_32B,
-    SupportedModels.QWEN_3_VL_2B,
-    SupportedModels.QWEN_3_VL_30B_A3B,
-    SupportedModels.QWEN_3_VL_30B_A3B_FP8,
-    SupportedModels.QWEN_3_VL_8B,
-    SupportedModels.QWEN_3_VL_8B_FP8,
-    SupportedModels.QWEN_3_VL_4B,
-    SupportedModels.QWEN_3_VL_4B_FP8,
-    SupportedModels.QWEN_3_VL_32B,
-    SupportedModels.QWEN_3_VL_32B_FP8,
-]
-
-
-def is_qwen_vl_model(model_name: str) -> bool:
-    """
-    Check if a model is any Qwen VL variant.
-
-    Args:
-        model_name: The model name to check
-
-    Returns:
-        True if the model is a Qwen VL variant, False otherwise
-    """
-    return any(
-        is_model_supported(model_name, qwen_model) for qwen_model in QWEN_VL_MODELS
-    )
+    return None
 
 
 def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
     """
-    if VLLM_ENCODER and is_qwen_vl_model(model_id):
+    if VLLM_ENCODER and resolve_model_family(model_id) is ModelFamily.QWEN_VL:
         # Disable to get ViT from the same process
         update_environment_variables(
             {
@@ -210,7 +210,7 @@ def construct_mm_data(
     image_embeds = image_embeds.to(embeddings_dtype)
 
     # Model-specific image handling
-    if is_qwen_vl_model(model):
+    if resolve_model_family(model) is ModelFamily.QWEN_VL:
         return _construct_qwen_image_data(image_embeds, image_grid_thw)
     else:
         # Default image handling for other models (e.g., LLAVA_1_5_7B)

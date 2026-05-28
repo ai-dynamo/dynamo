@@ -39,14 +39,14 @@ class GlobalRouterHandler:
         runtime: DistributedRuntime,
         config_path: str,
         model_name: str,
-        default_ttft_target: Optional[float] = None,
-        default_itl_target: Optional[float] = None,
+        default_ttft_target_ms: Optional[float] = None,
+        default_itl_target_ms: Optional[float] = None,
     ):
         self.runtime = runtime
         self.config = load_config(config_path)
         self.model_name = model_name
-        self.default_ttft_target = default_ttft_target
-        self.default_itl_target = default_itl_target
+        self.default_ttft_target_ms = default_ttft_target_ms
+        self.default_itl_target_ms = default_itl_target_ms
 
         # Clients to local routers in each pool namespace
         # Will be populated in initialize()
@@ -160,7 +160,7 @@ class GlobalRouterHandler:
 
         # Extract TTFT target from extra_args if provided, fallback to CLI default
         extra_args = request.get("extra_args") or {}
-        ttft_target = extra_args.get("ttft_target") or self.default_ttft_target
+        ttft_target_ms = extra_args.get("ttft_target") or self.default_ttft_target_ms
 
         # Extract priority from routing hints (set by nvext.agent_hints.priority)
         routing = request.get("routing") or {}
@@ -168,13 +168,13 @@ class GlobalRouterHandler:
 
         # Select prefill pool
         pool_idx = self.config.prefill_pool_selection_strategy.select_pool(
-            isl=isl, ttft_target=ttft_target, priority=priority
+            isl=isl, ttft_target_ms=ttft_target_ms, priority=priority
         )
         namespace = self.config.prefill_pool_dynamo_namespaces[pool_idx]
         client = self.prefill_clients[namespace]
 
         logger.info(
-            f"Routing prefill request: ISL={isl}, TTFT_target={ttft_target}, "
+            f"Routing prefill request: ISL={isl}, TTFT_target={ttft_target_ms}ms, "
             f"priority={priority} -> pool {pool_idx} ({namespace})"
         )
 
@@ -210,7 +210,7 @@ class GlobalRouterHandler:
 
         # Extract ITL target from extra_args if provided, fallback to CLI default
         extra_args = request.get("extra_args") or {}
-        itl_target = extra_args.get("itl_target") or self.default_itl_target
+        itl_target_ms = extra_args.get("itl_target") or self.default_itl_target_ms
 
         # Extract priority from routing hints (set by nvext.agent_hints.priority)
         routing = request.get("routing") or {}
@@ -219,7 +219,7 @@ class GlobalRouterHandler:
         # Select decode pool
         pool_idx = self.config.decode_pool_selection_strategy.select_pool(
             context_length=context_length,
-            itl_target=itl_target,
+            itl_target_ms=itl_target_ms,
             priority=priority,
         )
         namespace = self.config.decode_pool_dynamo_namespaces[pool_idx]
@@ -227,7 +227,7 @@ class GlobalRouterHandler:
 
         logger.info(
             f"Routing decode request: context_length={context_length}, "
-            f"ITL_target={itl_target}, priority={priority} -> "
+            f"ITL_target={itl_target_ms}ms, priority={priority} -> "
             f"pool {pool_idx} ({namespace})"
         )
 
@@ -258,12 +258,12 @@ class GlobalRouterHandler:
         # Extract SLA targets from extra_args, fallback to CLI defaults.
         # Use `is None` checks to preserve explicit 0 values.
         extra_args = request.get("extra_args") or {}
-        ttft_target = extra_args.get("ttft_target")
-        if ttft_target is None:
-            ttft_target = self.default_ttft_target
-        itl_target = extra_args.get("itl_target")
-        if itl_target is None:
-            itl_target = self.default_itl_target
+        ttft_target_ms = extra_args.get("ttft_target")
+        if ttft_target_ms is None:
+            ttft_target_ms = self.default_ttft_target_ms
+        itl_target_ms = extra_args.get("itl_target")
+        if itl_target_ms is None:
+            itl_target_ms = self.default_itl_target_ms
 
         # Extract priority from routing hints (set by nvext.agent_hints.priority)
         routing = request.get("routing") or {}
@@ -271,14 +271,17 @@ class GlobalRouterHandler:
 
         # Select agg pool
         pool_idx = self.config.agg_pool_selection_strategy.select_pool(
-            ttft_target=ttft_target, itl_target=itl_target, priority=priority
+            ttft_target_ms=ttft_target_ms,
+            itl_target_ms=itl_target_ms,
+            priority=priority,
         )
         namespace = self.config.agg_pool_dynamo_namespaces[pool_idx]
         client = self.agg_clients[namespace]
 
         logger.info(
-            f"Routing agg request: TTFT_target={ttft_target}, ITL_target={itl_target}, "
-            f"priority={priority} -> pool {pool_idx} ({namespace})"
+            f"Routing agg request: TTFT_target={ttft_target_ms}ms, "
+            f"ITL_target={itl_target_ms}ms, priority={priority} -> "
+            f"pool {pool_idx} ({namespace})"
         )
 
         # Forward request to local router and stream back responses

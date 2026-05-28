@@ -511,7 +511,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 		// Service name length validation tests
 		{
-			name:         "service name too long for single-node deployment",
+			name:         "long DGD name auto-truncated for single-node - no error",
 			groveEnabled: true,
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -521,6 +521,25 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"VeryLongServiceNameThatExceedsLimit": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:         "service name so long that even truncated PCS name exceeds limit",
+			groveEnabled: true,
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-long-dgd-name",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						// 38 chars lowercase → pcsBudget = 45-38 = 7 < 8 → clamped to 8.
+						// DGD name 16 chars > 8 → truncated to 8.
+						// Combined: 8 + 38 = 46 > 45 → error even after truncation.
+						"VeryVeryExtremelyLongServiceNameXXXXXX": {},
 					},
 				},
 			},
@@ -743,75 +762,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				},
 			},
 			wantErr: false,
-		},
-		{
-			name:         "checkpoint with inter-pod GMS is temporarily rejected",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms-snapshot",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
-								Enabled: true,
-								Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-									Model:            "model",
-									BackendFramework: "vllm",
-								},
-							},
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Resources: &nvidiacomv1alpha1.Resources{
-								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "checkpointing with gpuMemoryService is temporarily disabled",
-		},
-		{
-			name: "checkpoint with intra-pod GMS is temporarily rejected",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-intrapod-gms-snapshot",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
-								Enabled: true,
-								Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-									Model:            "model",
-									BackendFramework: "vllm",
-								},
-							},
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
-							},
-							Resources: &nvidiacomv1alpha1.Resources{
-								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "checkpointing with gpuMemoryService is temporarily disabled",
 		},
 		{
 			name:         "GMS failover without GPU",

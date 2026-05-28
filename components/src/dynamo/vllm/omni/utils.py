@@ -26,6 +26,89 @@ def shm_deserialize(shm_meta: dict) -> Any:
     return OmniSerializer.deserialize(shm_read_bytes(shm_meta))
 
 
+def image_generation_mm_processor_kwargs(height: int, width: int) -> dict[str, int]:
+    """Build processor kwargs that force image prompts through multimodal preprocessing."""
+    return {"target_h": height, "target_w": width}
+
+
+def image_generation_size_from_request(request: dict) -> tuple[int, int]:
+    """Resolve image output dimensions from OpenAI-style image or chat requests."""
+    extra_body = request.get("extra_body")
+    if not isinstance(extra_body, dict):
+        extra_body = {}
+
+    size = request.get("size") or extra_body.get("size") or DEFAULT_IMAGE_SIZE
+    width, height = parse_size(size, default_w=1024, default_h=1024)
+
+    for source in (extra_body, request):
+        if source.get("width") is not None:
+            width = int(source["width"])
+        if source.get("height") is not None:
+            height = int(source["height"])
+    return width, height
+
+
+def image_generation_sampling_overrides(
+    request: dict, height: int, width: int
+) -> dict[str, Any]:
+    """Collect diffusion sampling overrides for image-generation chat requests."""
+    overrides: dict[str, Any] = {"height": height, "width": width}
+    for source_name in ("extra_body", "nvext"):
+        source = request.get(source_name)
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if key not in {"height", "width", "size"} and value is not None:
+                overrides[key] = value
+    return overrides
+
+
+def image_generation_negative_prompt_from_request(request: dict) -> str | None:
+    """Resolve negative prompt from the places image requests commonly carry it."""
+    for source in (
+        request,
+        request.get("extra_body"),
+        request.get("nvext"),
+    ):
+        if not isinstance(source, dict):
+            continue
+        negative_prompt = source.get("negative_prompt")
+        if negative_prompt is not None:
+            return negative_prompt
+    return None
+
+
+def _normalize_nvext(request: dict) -> dict[str, Any]:
+    nvext = request.get("nvext")
+    if isinstance(nvext, dict):
+        return nvext
+    model_dump = getattr(nvext, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(exclude_none=True)
+    return {}
+
+
+def build_image_generation_prompt(
+    prompt: str,
+    height: int,
+    width: int,
+    *,
+    negative_prompt: str | None = None,
+    multi_modal_data: dict[str, Any] | None = None,
+) -> OmniTextPrompt:
+    """Build the prompt shape expected by AR-to-diffusion image pipelines."""
+    image_prompt = OmniTextPrompt(prompt=prompt)
+    if negative_prompt is not None:
+        image_prompt["negative_prompt"] = negative_prompt
+    if multi_modal_data:
+        image_prompt["multi_modal_data"] = multi_modal_data
+    image_prompt["modalities"] = ["image"]
+    image_prompt["mm_processor_kwargs"] = image_generation_mm_processor_kwargs(
+        height, width
+    )
+    return image_prompt
+
+
 def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -> Any:
     """Build the rich prompt dict that processor functions (ar2diffusion etc.) read."""
     prompt = OmniTextPrompt(
@@ -59,20 +142,38 @@ async def parse_omni_request(
 
     if request_type in (RequestType.VIDEO_GENERATION, RequestType.IMAGE_GENERATION):
         is_video = request_type == RequestType.VIDEO_GENERATION
-        nvext = request.get("nvext") or {}
+        nvext = _normalize_nvext(request)
         default_size = DEFAULT_VIDEO_SIZE if is_video else DEFAULT_IMAGE_SIZE
         size_kwargs = {} if is_video else {"default_w": 1024, "default_h": 1024}
-        width, height = parse_size(request.get("size", default_size), **size_kwargs)
-        sp: dict = {"height": height, "width": width, **nvext}
+        if is_video:
+            width, height = parse_size(request.get("size", default_size), **size_kwargs)
+        else:
+            width, height = image_generation_size_from_request(request)
+            if nvext.get("width") is not None:
+                width = int(nvext["width"])
+            if nvext.get("height") is not None:
+                height = int(nvext["height"])
+        sp: dict = {**nvext, "height": height, "width": width}
         if is_video:
             sp["num_frames"] = compute_num_frames(
                 num_frames=nvext.get("num_frames"),
                 fps=nvext.get("fps"),
                 default_fps=default_video_fps,
             )
+            engine_inputs = OmniTextPrompt(prompt=request.get("prompt", ""))
+            original_prompt = build_original_prompt(request, nvext, height, width)
+        else:
+            engine_inputs = build_image_generation_prompt(
+                request.get("prompt", ""),
+                height,
+                width,
+                negative_prompt=image_generation_negative_prompt_from_request(request),
+                multi_modal_data=request.get("multi_modal_data"),
+            )
+            original_prompt = dict(engine_inputs)
         return {
-            "engine_inputs": OmniTextPrompt(prompt=request.get("prompt", "")),
-            "original_prompt": build_original_prompt(request, nvext, height, width),
+            "engine_inputs": engine_inputs,
+            "original_prompt": original_prompt,
             "sampling_params_list": sp,
         }
 
@@ -97,6 +198,23 @@ async def parse_omni_request(
             logging.getLogger(__name__).debug(
                 "Chat template not available, using raw text"
             )
+
+    if any(str(modality).lower() == "image" for modality in output_modalities):
+        width, height = image_generation_size_from_request(request)
+        engine_prompt = build_image_generation_prompt(
+            text,
+            height,
+            width,
+            negative_prompt=image_generation_negative_prompt_from_request(request),
+            multi_modal_data=request.get("multi_modal_data"),
+        )
+        return {
+            "engine_inputs": engine_prompt,
+            "original_prompt": dict(engine_prompt),
+            "sampling_params_list": image_generation_sampling_overrides(
+                request, height, width
+            ),
+        }
 
     return {
         "engine_inputs": text,

@@ -21,20 +21,22 @@ from typing import List, Optional
 import torch
 from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
 from gpu_memory_service.client.torch.allocator import (
+    ensure_scratch_disabled,
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
+    get_or_create_scratch_manager,
     gms_use_mem_pool,
+    is_scratch,
 )
 from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.utils import get_socket_path, is_scratch_kv_enabled
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, get_gms_lock_mode
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
 from gpu_memory_service.integrations.vllm.patches import (
-    apply_shadow_mode_patches,
+    apply_scratch_kv_patches,
     patch_memory_snapshot,
 )
-from gpu_memory_service.integrations.vllm.utils import is_shadow_mode
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +47,8 @@ register_gms_loader()
 patch_empty_cache()
 patch_memory_snapshot()
 
-# Apply shadow mode patches if shadow mode is enabled
-apply_shadow_mode_patches()
+# Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
+apply_scratch_kv_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
@@ -85,17 +87,6 @@ class GMSWorker(Worker):
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
 
-        # __class__ swap: preserves object identity so vLLM's internal
-        # references see our overrides.
-        if is_shadow_mode() and hasattr(self, "model_runner"):
-            from gpu_memory_service.integrations.vllm.model_runner import (
-                GMSShadowModelRunner,
-            )
-
-            self.model_runner.__class__ = GMSShadowModelRunner
-            self.model_runner.enter_shadow_init()
-            logger.info("[GMS] Injected GMSShadowModelRunner via __class__ swap")
-
     def determine_available_memory(self) -> int:
         """
         Determine actual available memory for the engine.
@@ -103,7 +94,7 @@ class GMSWorker(Worker):
         During a failover scenario, this function may be called while there is an active engine colocated on the same device.
         We want our assessment to ignore the kv cache allocation of the active engine if there is one.
         """
-        if not is_shadow_mode():
+        if not is_scratch_kv_enabled():
             return super().determine_available_memory()
 
         torch.cuda.reset_peak_memory_stats()
@@ -123,7 +114,7 @@ class GMSWorker(Worker):
         projected_available = self.requested_memory - non_kv_cache_memory
 
         msg = (
-            "[GMS] Shadow mode: projected available memory "
+            "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
             "torch_peak=%.2f GiB, weights=%.2f GiB)"
             % (
@@ -140,23 +131,28 @@ class GMSWorker(Worker):
         return int(projected_available)
 
     def initialize_from_config(self, kv_cache_config) -> None:
-        """Allocate KV cache with a dedicated RW-only GMS tag.
+        """Allocate KV cache backing.
 
-        Also validates cudagraph mode for shadow mode compatibility.
+        In scratch-KV mode the tensors are allocated over scratch-aliased
+        backing client-side; wake_up promotes to real per-tensor backing via
+        the standard reallocate+remap path. With enable_sleep_mode the manager
+        connects RW at init and allocates real backing immediately.
         """
         from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        if is_shadow_mode():
-            # GMS client for kv cache is deferred to wake for shadow mode
-            # GMSShadowModelRunner.initialize_kv_cache intercepts and stores config without creating an allocation
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+        device = self.local_rank
+        socket = get_socket_path(device, "kv_cache")
+        if is_scratch_kv_enabled():
+            # Client-local scratch only — no GMS server session at init.
+            # wake_up will connect RW and migrate to real backing.
+            get_or_create_scratch_manager(socket, device, tag="kv_cache")
+            with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
+                self.model_runner.initialize_kv_cache(kv_cache_config)
         elif self.vllm_config.model_config.enable_sleep_mode:
-            # Normal sleep/wake: create kv_cache GMS tag now for unmap/remap
-            device = self.local_rank
             get_or_create_gms_client_memory_manager(
-                get_socket_path(device, "kv_cache"),
+                socket,
                 device,
                 mode=RequestedLockType.RW,
                 tag="kv_cache",
@@ -164,19 +160,7 @@ class GMSWorker(Worker):
             with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
-            # No sleep mode: plain KV cache init
             self.model_runner.initialize_kv_cache(kv_cache_config)
-
-        # Validate cudagraph mode for shadow mode compatibility
-        if is_shadow_mode():
-            from vllm.config import CUDAGraphMode
-
-            mode = self.model_runner.compilation_config.cudagraph_mode
-            if mode not in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
-                raise RuntimeError(
-                    f"Shadow mode requires PIECEWISE cudagraph mode after resolution, "
-                    f"but got {mode.name}. vLLM's config resolution overrode it."
-                )
 
     def load_model(self, *args, **kwargs) -> None:
         """Load model with corrected memory accounting.
@@ -210,37 +194,23 @@ class GMSWorker(Worker):
             logger.debug("[GMS] Could not correct memory accounting: %s", e)
 
     def sleep(self, level: int = 1) -> None:
-        """
-        vLLM sleep implementation with GMS integration.
+        """vLLM sleep implementation with GMS integration.
 
-        NOTE: We do NOT call super().sleep() because it tries to copy GPU buffers to CPU,
-              which segfaults on already-unmapped GMS memory.
-
-        Handles two cases for KV cache:
-        1. Normal: KV cache was allocated via GMS, unmap + abort
-        2. Shadow: KV cache was skipped at startup, manager has no allocations
-           (unmap_all_vas is a no-op, abort disconnects)
+        Skips super().sleep() (which copies GPU buffers to CPU and segfaults
+        on unmapped GMS memory). For both managers: unmap_all_vas + abort.
+        Symmetric for regular and deferred-KV — unmap_all_vas walks both
+        _mappings and _scratch_mappings, releasing physical and preserving VA
+        reservations. Wake reconnects and rebuilds via the standard
+        prepare_scratch_for_reallocation → reallocate → remap pipeline.
         """
         free_bytes_before = torch.cuda.mem_get_info()[0]
 
-        # Unmap GMS weights: synchronize + unmap all VAs + disconnect
-        weights_manager = get_gms_client_memory_manager("weights")
-        assert weights_manager is not None, "GMS weights client is not initialized"
-        assert not weights_manager.is_unmapped, "GMS weights are already unmapped"
-        weights_manager.unmap_all_vas()
-        weights_manager.abort()
-
-        # Unmap GMS KV cache: unmap all VAs + disconnect
-        # In shadow mode, kv_cache manager is deferred to wake — nothing to unmap.
-        kv_cache_manager = get_gms_client_memory_manager("kv_cache")
-        if kv_cache_manager is not None:
-            assert not kv_cache_manager.is_unmapped, "GMS KV cache is already unmapped"
-            kv_cache_manager.unmap_all_vas()
-            kv_cache_manager.abort()
-        else:
-            logger.info(
-                "[GMS] No kv_cache manager (shadow mode), skipping kv_cache sleep"
-            )
+        for tag in ("weights", "kv_cache"):
+            manager = get_gms_client_memory_manager(tag)
+            assert manager is not None, f"GMS {tag} client is not initialized"
+            assert not manager.is_unmapped, f"GMS {tag} is already unmapped"
+            manager.unmap_all_vas()
+            manager.abort()
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -255,18 +225,7 @@ class GMSWorker(Worker):
         )
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
-        """vLLM wake implementation with GMS integration.
-
-        Handles two cases for KV cache:
-        1. Normal: KV cache was allocated at startup, reconnect + reallocate + remap
-        2. Shadow: KV cache was skipped at startup, allocate via allocate_kv_cache_on_wake()
-        """
-        if (
-            hasattr(self.model_runner, "exit_shadow_init")
-            and self.model_runner.in_shadow_init
-        ):
-            self.model_runner.exit_shadow_init()
-
+        """vLLM wake implementation with GMS integration."""
         if tags is None:
             tags = list(GMS_TAGS)
 
@@ -297,39 +256,72 @@ class GMSWorker(Worker):
                 sys.exit(1)
 
         if "kv_cache" in tags:
-            # Check if KV cache was skipped at startup (shadow engine mode)
-            kv_caches = getattr(self.model_runner, "kv_caches", None)
-            if not kv_caches:
-                # Shadow mode: create kv_cache manager now (deferred from init
-                # to avoid RW lock contention between concurrent engines).
-                logger.info("[GMS] KV cache not allocated - allocating on wake")
-                get_or_create_gms_client_memory_manager(
-                    get_socket_path(self.local_rank, "kv_cache"),
-                    self.local_rank,
-                    mode=RequestedLockType.RW,
-                    tag="kv_cache",
-                )
-                with gms_use_mem_pool(
-                    "kv_cache", torch.device("cuda", self.local_rank)
-                ):
-                    self.model_runner.allocate_kv_cache_on_wake()
-                logger.info("[GMS] Successfully allocated KV cache on wake")
-            else:
-                # Normal case: KV cache was allocated via GMS, reconnect + reallocate + remap
-                kv_cache_manager = get_gms_client_memory_manager("kv_cache")
-                assert (
-                    kv_cache_manager is not None
-                ), "GMS KV cache client is not initialized"
-                assert kv_cache_manager.is_unmapped, "GMS KV cache is not unmapped"
-                kv_cache_manager.connect(RequestedLockType.RW)
-                kv_cache_manager.reallocate_all_handles(tag="kv_cache")
-                kv_cache_manager.remap_all_vas()
+            kv_cache_manager = get_gms_client_memory_manager("kv_cache")
+            assert (
+                kv_cache_manager is not None
+            ), "GMS kv_cache client is not initialized"
+            # Capture scratch state BEFORE the flip so we know whether to
+            # migrate and whether to replay the deferred NIXL registration.
+            was_scratch = is_scratch(kv_cache_manager)
+            assert kv_cache_manager.is_unmapped, "GMS kv_cache is not unmapped"
+            kv_cache_manager.connect(RequestedLockType.RW)
+            if was_scratch:
+                # Move scratch entries from _scratch_mappings into _mappings
+                # as preserved-VA records, then flip routing to server-backed
+                # so subsequent torch allocations on this mempool go through
+                # create_mapping. Order matters: migrate first, flip second.
+                kv_cache_manager.prepare_scratch_for_reallocation()
+                ensure_scratch_disabled(kv_cache_manager)
+            kv_cache_manager.reallocate_all_handles(tag="kv_cache")
+            kv_cache_manager.remap_all_vas()
+            if was_scratch:
+                self._register_kv_caches_with_nixl()
 
             # Reinitialize FP8 KV scales if needed
             if self.cache_config.cache_dtype.startswith("fp8") and hasattr(
                 self.model_runner, "init_fp8_kv_scales"
             ):
                 self.model_runner.init_fp8_kv_scales()
+
+    def _register_kv_caches_with_nixl(self) -> None:
+        """Fire the NixlConnector KV-cache registration after deferred KV swap.
+
+        During scratch phase the patches.patch_register_kv_caches gate intercepts
+        register_kv_caches(dict) and stashes the dict on the connector as
+        self._scratch_kv_pending. We replay that here, NOT
+        self.model_runner.kv_caches — the latter is the list-of-tensors view
+        set by vLLM, and NixlConnector.register_kv_caches does kv_caches.values()
+        which requires the dict form.
+
+        Imports from the package root (vllm.distributed.kv_transfer) — the
+        kv_connector.v1.base re-exports were unreliable across vLLM versions
+        and a silent ImportError here would make this a no-op, leaving
+        NixlConnectorWorker.kv_topo=None and crashing on the first
+        scheduler tick.
+        """
+        from vllm.distributed.kv_transfer import (
+            get_kv_transfer_group,
+            has_kv_transfer_group,
+        )
+
+        if not has_kv_transfer_group():
+            return
+        group = get_kv_transfer_group()
+        pending = getattr(group, "_scratch_kv_pending", None)
+        if not pending:
+            # Nothing was stashed — either no deferred registration, or a
+            # non-NixlConnector connector that didn't hit the patched path.
+            return
+        group.register_kv_caches(pending)
+        # Drop the stash so a second call is a no-op.
+        try:
+            delattr(group, "_scratch_kv_pending")
+        except AttributeError:
+            pass
+        logger.info(
+            "[GMS] Registered %d kv_cache tensors with KV transfer group",
+            len(pending),
+        )
 
     def _maybe_get_memory_pool_context(self, tag: str):
         """Route tag-scoped runtime allocations to the right allocator.

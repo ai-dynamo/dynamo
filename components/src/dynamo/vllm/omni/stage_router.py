@@ -8,7 +8,7 @@ import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
-from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
+from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
 from dynamo import prometheus_names
 from dynamo.common.storage import get_fs
@@ -38,7 +38,11 @@ class OmniStageRouter:
         stage_configs_path: str,
     ) -> None:
         self.config = config
-        self.stage_configs = load_stage_configs_from_yaml(stage_configs_path)
+        _, self.stage_configs = load_and_resolve_stage_configs(
+            config.model,
+            stage_configs_path,
+            kwargs={},
+        )
         self.stage_clients: Dict[str, Any] = {}
 
         media_fs = (
@@ -110,10 +114,25 @@ class OmniStageRouter:
         fmt_ctx: Dict[str, Any] = {}
         if nvext.get("fps") is not None:
             fmt_ctx["fps"] = nvext["fps"]
-        if request.get("response_format") is not None:
-            fmt_ctx["response_format"] = request["response_format"]
         if nvext.get("speed") is not None:
             fmt_ctx["speed"] = nvext["speed"]
+        # If the request type is AUDIO_GENERATION,
+        # we need to normalize the data_source and response_format to
+        # align with other modalities.
+        response_format = (
+            request.get("data_source")
+            if request_type == RequestType.AUDIO_GENERATION
+            else request.get("response_format")
+        )
+        output_format = (
+            request.get("response_format")
+            if request_type == RequestType.AUDIO_GENERATION
+            else request.get("output_format")
+        )
+        if response_format is not None:
+            fmt_ctx["response_format"] = response_format
+        if output_format is not None:
+            fmt_ctx["output_format"] = output_format
 
         async for chunk in self._format_output(
             final, request_id, request_type, fmt_ctx

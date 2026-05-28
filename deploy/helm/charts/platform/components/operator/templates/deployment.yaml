@@ -76,6 +76,15 @@ spec:
         command:
         - /manager
         env:
+        {{- range .Values.env }}
+        {{- if eq .name "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT" }}
+        {{- fail "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT is reserved; use featureGates.gmsSnapshot instead" }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.featureGates.gmsSnapshot }}
+        - name: DYN_OPERATOR_ALLOW_GMS_SNAPSHOT
+          value: "1"
+        {{- end }}
         {{- with .Values.env }}
           {{- toYaml . | nindent 8 }}
         {{- end }}

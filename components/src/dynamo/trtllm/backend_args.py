@@ -10,6 +10,9 @@ from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.frontend_decoding_args import (
+    add_frontend_decoding_arg,
+)
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
@@ -208,17 +211,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="Maximum size of downloadable embedding files/Image URLs.",
         )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--frontend-decoding",
-            env_var="DYN_TRTLLM_FRONTEND_DECODING",
-            default=False,
-            help=(
-                "Enable frontend decoding of multimodal images. "
-                "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
-                "Without this flag, images are decoded in the Python backend (default behavior)."
-            ),
-        )
+        add_frontend_decoding_arg(g, env_prefix="TRTLLM")
 
         # --- Guided Decoding ---
         add_argument(

@@ -37,12 +37,12 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"
 AIC_PARITY_VERSIONS = {
-    "vllm": "0.12.0",
+    "vllm": "0.14.0",
     "sglang": "0.5.6.post2",
 }
 AIC_PARITY_BACKENDS = [
-    pytest.param("vllm", marks=pytest.mark.vllm, id="vllm"),
-    pytest.param("sglang", marks=pytest.mark.sglang, id="sglang"),
+    pytest.param("vllm", id="vllm"),
+    pytest.param("sglang", id="sglang"),
 ]
 
 
@@ -71,7 +71,7 @@ def _router_config_payload():
         "router_event_threads": 1,
         "router_queue_policy": "wspt",
         "router_temperature": 0.0,
-        "overlap_score_weight": 1.0,
+        "overlap_score_credit": 1.0,
         "use_kv_events": True,
         "durable_kv_events": False,
         "router_replica_sync": False,
@@ -82,8 +82,6 @@ def _router_config_payload():
         "router_snapshot_threshold": 1000000,
         "router_reset_states": False,
         "router_ttl_secs": 120.0,
-        "router_max_tree_size": 1048576,
-        "router_prune_target_ratio": 0.8,
         "router_enable_cache_control": False,
         "skip_initial_worker_wait": False,
         "use_remote_indexer": False,

@@ -8,6 +8,7 @@ import logging
 from dynamo._core import AicPerfConfig as AicPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
+from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
 from dynamo._core import FpmEventRelay as FpmEventRelay
 from dynamo._core import FpmEventSubscriber as FpmEventSubscriber
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine

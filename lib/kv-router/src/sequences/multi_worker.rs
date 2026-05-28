@@ -11,7 +11,7 @@
 
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+use super::PrefillTokenDeltas;
 #[cfg(any(test, feature = "bench"))]
 use super::prompt_membership_trie::lookup_live_hashes;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
@@ -555,60 +556,22 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.worker_type
     }
 
-    /// Query all workers for the number of new blocks that would be added by a token sequence.
-    pub fn new_blocks(&self, token_sequence: &[SequenceHash]) -> HashMap<WorkerWithDpRank, usize> {
-        let table = self.workers.read();
-        let mut results = HashMap::with_capacity(table.slots.len());
-        for slot in &table.slots {
-            results.insert(
-                slot.worker,
-                slot.sequences.read().new_blocks(token_sequence),
-            );
-        }
-        results
-    }
-
-    /// Query all workers for the total number of blocks (new + active) that would be used.
-    pub fn potential_blocks(
-        &self,
-        token_sequence: &[SequenceHash],
-    ) -> HashMap<WorkerWithDpRank, usize> {
-        let table = self.workers.read();
-        let mut results = HashMap::with_capacity(table.slots.len());
-        for slot in &table.slots {
-            results.insert(
-                slot.worker,
-                slot.sequences.read().potential_blocks(token_sequence),
-            );
-        }
-        results
-    }
-
     /// Query all workers for the potential blocks and tokens.
     pub fn potential_blocks_and_tokens(
         &self,
         token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        prefill_token_deltas: &PrefillTokenDeltas,
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
     ) {
-        self.potential_blocks_and_tokens_with_prefill_tracking(
-            token_sequence,
-            isl,
-            cached_tokens,
-            true,
-            Instant::now(),
-        )
+        self.potential_blocks_and_tokens_at(token_sequence, prefill_token_deltas, Instant::now())
     }
 
-    pub fn potential_blocks_and_tokens_with_prefill_tracking(
+    pub fn potential_blocks_and_tokens_at(
         &self,
         token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        cached_tokens: HashMap<WorkerWithDpRank, usize>,
-        track_prefill_tokens: bool,
+        prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
@@ -617,32 +580,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
-        let table = self.workers.read();
-
         #[cfg(feature = "bench")]
-        let num_workers = table.slots.len();
+        let num_workers = self.workers.read().slots.len();
 
-        let mut potential_blocks =
-            FxHashMap::with_capacity_and_hasher(table.slots.len(), FxBuildHasher);
-        let mut potential_tokens =
-            FxHashMap::with_capacity_and_hasher(table.slots.len(), FxBuildHasher);
-
-        for slot in &table.slots {
-            let worker_cached_tokens = cached_tokens.get(&slot.worker).copied().unwrap_or(0);
-
-            let (blocks, tokens) = slot
-                .sequences
-                .read()
-                .potential_blocks_and_tokens_with_prefill_tracking(
-                    token_sequence,
-                    isl,
-                    worker_cached_tokens,
-                    track_prefill_tokens,
-                    decay_now,
-                );
-            potential_blocks.insert(slot.worker, blocks);
-            potential_tokens.insert(slot.worker, tokens);
-        }
+        let result = self.prompt_registry.potential_blocks_and_tokens(
+            token_sequence,
+            prefill_token_deltas,
+            decay_now,
+        );
 
         #[cfg(feature = "bench")]
         {
@@ -654,7 +599,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             );
         }
 
-        (potential_blocks, potential_tokens)
+        result
     }
 
     /// Query all workers for their current number of active blocks.
@@ -980,8 +925,8 @@ mod tests {
 
     use super::*;
     use crate::protocols::{
-        ActiveSequenceEvent, ActiveSequenceEventData, BlockHashOptions, OverlapScores,
-        PrefillLoadHint, compute_block_hash_for_seq, compute_seq_hash_for_block,
+        ActiveSequenceEvent, ActiveSequenceEventData, BlockHashOptions, PrefillLoadHint,
+        compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
     use crate::test_utils::NoopSequencePublisher;
 
@@ -1023,15 +968,12 @@ mod tests {
     fn naive_potential_loads(
         sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
         token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        overlaps: &OverlapScores,
-        track_prefill_tokens: bool,
+        prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
     ) {
-        let cached_tokens = cached_tokens_from_overlap_scores(overlaps, sequences.block_size);
         let table = sequences.workers.read();
         let mut potential_blocks = FxHashMap::default();
         let mut potential_tokens = FxHashMap::default();
@@ -1046,27 +988,11 @@ mod tests {
             });
             let new_blocks =
                 token_sequence.map_or(0, |query| query.len().saturating_sub(overlap_depth));
-            let worker_cached_tokens = *cached_tokens.get(&slot.worker).unwrap_or(&0);
-            let added_tokens = if track_prefill_tokens {
-                seq.new_tokens(isl, worker_cached_tokens)
-            } else {
-                0
-            };
+            let added_tokens = prefill_token_deltas.tokens_for(slot.worker);
             potential_blocks.insert(slot.worker, seq.active_blocks() + new_blocks);
             potential_tokens.insert(slot.worker, seq.active_tokens(decay_now) + added_tokens);
         }
         (potential_blocks, potential_tokens)
-    }
-
-    fn cached_tokens_from_overlap_scores(
-        overlaps: &OverlapScores,
-        block_size: usize,
-    ) -> HashMap<WorkerWithDpRank, usize> {
-        overlaps
-            .scores
-            .iter()
-            .map(|(worker, overlap_blocks)| (*worker, (*overlap_blocks as usize) * block_size))
-            .collect()
     }
 
     fn seq_hashes_for_tokens(tokens: &[u32], lora_name: Option<&str>) -> Vec<SequenceHash> {
@@ -1179,31 +1105,51 @@ mod tests {
             .unwrap();
 
         let prompt = vec![1, 2, 3, 5];
-        let mut expected_overlaps = OverlapScores::new();
-        expected_overlaps.scores.insert(worker_a, 2);
-        expected_overlaps.scores.insert(worker_b, 1);
-        let expected = naive_potential_loads(
-            &sequences,
-            Some(&prompt),
-            16,
-            &expected_overlaps,
-            true,
-            decay_now,
-        );
+        let mut deltas = FxHashMap::default();
+        deltas.insert(worker_a, 8);
+        deltas.insert(worker_b, 12);
+        let prefill_token_deltas = PrefillTokenDeltas::new(16, deltas);
+        let expected =
+            naive_potential_loads(&sequences, Some(&prompt), &prefill_token_deltas, decay_now);
 
-        let mut actual_overlaps = OverlapScores::new();
-        actual_overlaps.scores.insert(worker_a, 2);
-        actual_overlaps.scores.insert(worker_b, 1);
-        let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+        let actual = sequences.potential_blocks_and_tokens_at(
             Some(&prompt),
-            16,
-            cached_tokens_from_overlap_scores(&actual_overlaps, sequences.block_size),
-            true,
+            &prefill_token_deltas,
             decay_now,
         );
 
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1, expected.1);
+    }
+
+    #[test]
+    fn potential_blocks_use_prefix_membership_not_set_membership() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let decay_now = Instant::now();
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-a".to_string(),
+                    token_sequence: Some(vec![1, 2, 4, 5]),
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                decay_now,
+            )
+            .unwrap();
+
+        let (potential_blocks, _) = sequences.potential_blocks_and_tokens_at(
+            Some(&[1, 2, 3, 5]),
+            &PrefillTokenDeltas::none(),
+            decay_now,
+        );
+
+        assert_eq!(potential_blocks.get(&worker).copied(), Some(6));
     }
 
     #[test]
@@ -1250,16 +1196,12 @@ mod tests {
         let expected = naive_potential_loads(
             &sequences,
             Some(&base_prompt),
-            8,
-            &OverlapScores::default(),
-            false,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+        let actual = sequences.potential_blocks_and_tokens_at(
             Some(&base_prompt),
-            8,
-            HashMap::new(),
-            false,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
 
@@ -1314,16 +1256,12 @@ mod tests {
         let expected = naive_potential_loads(
             &sequences,
             Some(&prompt_b),
-            3,
-            &OverlapScores::default(),
-            false,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+        let actual = sequences.potential_blocks_and_tokens_at(
             Some(&prompt_b),
-            3,
-            cached_tokens_from_overlap_scores(&OverlapScores::default(), sequences.block_size),
-            false,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
         assert_eq!(actual, expected);
@@ -1335,16 +1273,12 @@ mod tests {
         let expected_after_free = naive_potential_loads(
             &sequences,
             Some(&prompt_b),
-            3,
-            &OverlapScores::default(),
-            false,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual_after_free = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+        let actual_after_free = sequences.potential_blocks_and_tokens_at(
             Some(&prompt_b),
-            3,
-            cached_tokens_from_overlap_scores(&OverlapScores::default(), sequences.block_size),
-            false,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
         assert_eq!(actual_after_free, expected_after_free);
@@ -1426,16 +1360,12 @@ mod tests {
         let expected = naive_potential_loads(
             &sequences,
             Some(&[1, 2, 3]),
-            12,
-            &OverlapScores::default(),
-            false,
+            &PrefillTokenDeltas::none(),
             Instant::now(),
         );
-        let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+        let actual = sequences.potential_blocks_and_tokens_at(
             Some(&[1, 2, 3]),
-            12,
-            HashMap::new(),
-            false,
+            &PrefillTokenDeltas::none(),
             Instant::now(),
         );
         assert_eq!(actual, expected);
@@ -1636,13 +1566,8 @@ mod tests {
         let active_tokens = sequences.active_tokens(decay_now);
         assert_eq!(active_tokens.get(&worker).copied(), Some(50));
 
-        let (_, potential_tokens) = sequences.potential_blocks_and_tokens_with_prefill_tracking(
-            None,
-            0,
-            HashMap::new(),
-            false,
-            decay_now,
-        );
+        let (_, potential_tokens) =
+            sequences.potential_blocks_and_tokens_at(None, &PrefillTokenDeltas::none(), decay_now);
         assert_eq!(potential_tokens.get(&worker).copied(), Some(50));
 
         assert!(

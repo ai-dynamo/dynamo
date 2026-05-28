@@ -161,14 +161,19 @@ impl OfflineWorkerState {
     pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
         let core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm => {
-                if capture_kv_events {
-                    EngineCore::Vllm(crate::scheduler::VllmCore::new_with_kv_capture(
-                        args,
-                        worker_idx as u64,
-                    ))
+                #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
+                let mut core = if capture_kv_events {
+                    crate::scheduler::VllmCore::new_with_kv_capture(args, worker_idx as u64)
                 } else {
-                    EngineCore::Vllm(crate::scheduler::VllmCore::new(args))
+                    crate::scheduler::VllmCore::new(args)
+                };
+                #[cfg(feature = "kvbm-offload")]
+                if let Err(e) = core.init_offload_offline() {
+                    tracing::error!(
+                        "kvbm-offload offline init failed for worker {worker_idx}: {e}"
+                    );
                 }
+                EngineCore::Vllm(core)
             }
             crate::common::protocols::EngineType::Sglang => {
                 if capture_kv_events {

@@ -67,7 +67,7 @@ COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/whe
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # Create virtual environment
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
@@ -77,7 +77,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.common.txt \
@@ -86,7 +86,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 # In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \

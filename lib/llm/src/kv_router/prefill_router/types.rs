@@ -48,7 +48,7 @@ pub(super) fn build_decode_router_override(
     existing_override: Option<RouterConfigOverride>,
 ) -> RouterConfigOverride {
     RouterConfigOverride {
-        overlap_score_weight: Some(0.0),
+        overlap_score_credit: Some(0.0),
         assume_kv_reuse: Some(false),
         track_prefill_tokens: Some(false),
         ..existing_override.unwrap_or_default()

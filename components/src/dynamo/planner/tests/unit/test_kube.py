@@ -46,7 +46,16 @@ def mock_custom_api():
 
 
 @pytest.fixture
-def k8s_api(mock_custom_api, mock_config):
+def mock_namespace():
+    with patch(
+        "dynamo.planner.connectors.kubernetes_api.get_current_k8s_namespace",
+        return_value="default",
+    ) as mock:
+        yield mock
+
+
+@pytest.fixture
+def k8s_api(mock_custom_api, mock_config, mock_namespace):
     return KubernetesAPI()
 
 
@@ -61,7 +70,9 @@ def test_kubernetes_api_init_with_namespace(mock_custom_api, mock_config):
     assert api.current_namespace == "custom-namespace"
 
 
-def test_kubernetes_api_init_without_namespace(mock_custom_api, mock_config):
+def test_kubernetes_api_init_without_namespace(
+    mock_custom_api, mock_config, mock_namespace
+):
     """Test KubernetesAPI initialization without custom namespace"""
     api = KubernetesAPI()
     # Should use the default namespace logic

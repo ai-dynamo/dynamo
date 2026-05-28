@@ -101,7 +101,7 @@ pub async fn prepare_engine(
             let model_manager = Arc::new(ModelManager::new());
             // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
             let metrics = Arc::new(Metrics::new());
-            let watch_obj = Arc::new(ModelWatcher::new(
+            let mut watcher = ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
                 RouterConfig::default(),
@@ -110,7 +110,11 @@ pub async fn prepare_engine(
                 None,
                 prefill_load_estimator,
                 metrics,
-            ));
+            );
+            if !local_model.path().as_os_str().is_empty() {
+                watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
+            }
+            let watch_obj = Arc::new(watcher);
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
                 .list_and_watch(

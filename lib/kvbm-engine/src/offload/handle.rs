@@ -203,6 +203,16 @@ impl TransferHandle {
     pub fn subscribe_status(&self) -> watch::Receiver<TransferStatus> {
         self.status_rx.clone()
     }
+
+    /// Subscribe to completed-block progress.
+    pub fn subscribe_completed(&self) -> watch::Receiver<Vec<BlockId>> {
+        self.completed_rx.clone()
+    }
+
+    /// Subscribe to failed-block progress.
+    pub fn subscribe_failed(&self) -> watch::Receiver<Vec<BlockId>> {
+        self.failed_rx.clone()
+    }
 }
 
 impl std::fmt::Debug for TransferHandle {

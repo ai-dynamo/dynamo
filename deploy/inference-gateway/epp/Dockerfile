@@ -81,8 +81,8 @@ COPY --from=dynamo lib/ lib/
 # git caches are content-addressed (safe to persist); no target/ mount --
 # sccache caches compilations in S3 where stale artifacts can't be linked
 # against newer source.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \
-    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH} \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH},sharing=shared \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH},sharing=shared \
     --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
@@ -120,7 +120,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy go mod files first for better caching (from default context = epp/)
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     go mod download
 
 # Copy Go source (from default context = epp/)
@@ -130,8 +130,8 @@ COPY . .
 COPY --from=rust-builder /out/libdynamo_llm_capi.a pkg/plugins/dynamo_kv_scorer/lib/
 COPY --from=rust-builder /out/llm_engine.h pkg/plugins/dynamo_kv_scorer/include/
 
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
     CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags="-X sigs.k8s.io/gateway-api-inference-extension/version.GitVersion=${BUILD_REF} \
               -X sigs.k8s.io/gateway-api-inference-extension/version.GitCommit=${COMMIT_SHA}" \

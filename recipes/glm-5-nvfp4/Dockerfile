@@ -30,8 +30,8 @@ RUN cargo install maturin --locked
 RUN git clone https://github.com/ai-dynamo/dynamo.git /build/dynamo && \
     cd /build/dynamo && git checkout ${DYNAMO_COMMIT}
 
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     cd /build/dynamo/lib/bindings/python && \
     maturin build --release && \
     mkdir -p /build/dist && \

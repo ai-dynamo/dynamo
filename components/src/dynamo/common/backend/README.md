@@ -92,9 +92,10 @@ class MyEngine(LLMEngine):
     async def generate(self, request, context):
         # Yield streaming response dicts.
         async for result in my_engine.run(request):
-            yield {"token_ids": result.token_ids}
+            yield {"token_ids": result.token_ids, "index": 0}
         yield {
             "token_ids": result.token_ids,
+            "index": 0,
             "finish_reason": "stop",
             "completion_usage": {
                 "prompt_tokens": prompt_tokens,
@@ -139,13 +140,14 @@ class GenerateRequest(TypedDict, total=False):
 
 class GenerateChunk(TypedDict, total=False):
     token_ids: Required[list[int]]
+    index: Required[int]           # choice index; use 0 for single-choice chunks
     finish_reason: str             # final chunk only
     completion_usage: dict[str, int]  # final chunk only
 ```
 
 Engines may read additional backend-specific keys from the request dict
-and write additional keys into response chunks — `TypedDict` does not
-reject extra keys at runtime.
+and write backend-specific keys into response chunks if the shared contract
+is extended here first.
 
 Build the `completion_usage` dict inline. Finish reason normalization
 (e.g. `"abort"` → `"cancelled"`) is handled by the Rust layer.
@@ -208,6 +210,77 @@ from dynamo.llm.exceptions import (
 )
 ```
 
+## Disaggregated Serving
+
+The unified path supports the canonical PD-disagg roles via a single
+`--disaggregation-mode` flag. The mode flows from CLI → `WorkerConfig` →
+the Rust `Worker`, which uses it to decide model registration
+(`ModelType::Prefill` for prefill workers, the parsed `endpoint_types`
+for everyone else) and to disable the local KV indexer on decode
+workers. Engines read the same field on their runtime config to switch
+per-mode behavior in `generate()`.
+
+```text
++-----------+   --disaggregation-mode prefill    +------------------+
+|  CLI args |  ------------------------------->  |  WorkerConfig    |
++-----------+                                    +------------------+
+                                                          |
+                                                          v
+                                          ModelType::Prefill registration
+                                          (Rust Worker)
+
+                                                          |
+                                                          v
+                                          generate(): build context_only
+                                          handoff payload → terminal carries
+                                          disaggregated_params (engine-specific)
+```
+
+Each backend's protocol is different:
+
+| Backend | Prefill | Decode |
+|---------|---------|--------|
+| **vLLM** | Sets `kv_transfer_params.do_remote_decode=True`, caps `max_tokens=1`, packs the connector's transfer handle into the response. | Pulls `kv_transfer_params` from `request.prefill_result` and feeds it back through `sampling_params.extra_args` so the `NixlConnector` imports KV. |
+| **SGLang** | Yields `{bootstrap_host, bootstrap_port, bootstrap_room}` as the first chunk, then drains the engine stream silently. Warmup happens in `start()`. | Reads bootstrap info from `request.prefill_result`, passes it to `engine.async_generate` so SGLang's NIXL transport pulls KV. |
+| **TRT-LLM** | Builds `LlmDisaggregatedParams(request_type="context_only")`, generates one token, packs the encoded handoff into the response. `drain()` polls the scheduler until idle so in-flight NIXL transfers finish before GPU memory is freed (issue #7319). | Decodes `request.prefill_result.disaggregated_params`, flips `request_type` to `generation_only`, generates normally. |
+
+### Smoke testing without GPUs
+
+The sample backend implements the full disagg dispatch in pure Python
+with synthetic handoff payloads — no real KV transfer, but the wire
+format is exercised end-to-end. This makes it a fast CI smoke test for
+the unified path:
+
+```bash
+examples/backends/sample/launch/disagg.sh
+```
+
+Spawns the frontend plus a sample prefill worker and a sample decode
+worker; the frontend's `PrefillRouter` forwards the synthetic
+`disaggregated_params` from prefill to decode.
+
+### Switching production backends to the unified path
+
+Each backend's `disagg.sh` accepts `--unified` to swap in the unified
+entry point. With it, the launch script exercises the same disagg flow
+through `dynamo.<backend>.unified_main` instead of the legacy
+`dynamo.<backend>` dispatch:
+
+```bash
+examples/backends/vllm/launch/disagg.sh --unified
+examples/backends/sglang/launch/disagg.sh --unified
+examples/backends/trtllm/launch/disagg.sh --unified
+```
+
+### Helpers
+
+`dynamo.common.backend.disagg` ships small utilities engines can call
+directly: `enforce_prefill_max_tokens(request)`,
+`extract_prefill_result(request)`, and
+`require_prefill_result(request, mode)`. These are optional — engines
+are free to inline the logic when their generate path is shaped
+differently.
+
 ## File Index
 
 ```
@@ -216,6 +289,8 @@ common/backend/
                          #   Worker, WorkerConfig
     engine.py            # LLMEngine ABC + EngineConfig dataclass
     worker.py            # Worker + WorkerConfig
+    disagg.py            # Disagg request helpers (prefill clamp,
+                         #   prefill_result extraction)
     run.py               # Common entry point: run(engine_cls)
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
@@ -244,12 +319,13 @@ the unified path does not yet support.
 - `DynamoException` error chain wrapping
 - Graceful shutdown with signal handling
 - Finish reason normalization handled by Rust layer
+- **Disaggregated serving** (`agg`/`prefill`/`decode`) — see
+  [Disaggregated Serving](#disaggregated-serving) below
 
 ### Common gaps (all engines)
 
 | Feature | Description |
 |---------|-------------|
-| Disaggregated serving | Prefill/decode worker split, bootstrap coordination, KV transfer |
 | Metrics & Prometheus | Engine-level metrics, KV cache utilization gauges, Prometheus multiprocess registry |
 | KV event publishing | Prefix cache events (BlockStored/Removed) to router via ZMQ or NATS |
 | Health check payloads | Per-engine custom health check payloads (BOS token probe, etc.) |
@@ -266,8 +342,8 @@ the unified path does not yet support.
 
 | Feature | Description |
 |---------|-------------|
-| LoRA adapters | Dynamic load/unload/list, ModelDeploymentCard publishing, per-LoRA serialization locks |
-| Multimodal (images/video) | Image/video loading, embedding caching, NIXL RDMA transfer, Qwen VL mRoPE |
+| LoRA adapters | Dynamic load/unload/list, ModelDeploymentCard publishing, per-LoRA serialization locks. Also: unified prefill does not currently thread per-request LoRA adapters into the engine call. |
+| Multimodal (images/video) | Image/video loading, embedding caching, NIXL RDMA transfer, Qwen VL mRoPE. Also: unified prefill does not pack `embedding_params` into the response's `disaggregated_params` — disagg multimodal flows still need the legacy path. |
 | Separate encode worker | `EncodeWorkerHandler` for multimodal encode-only disaggregation |
 | Sleep/wake/quiesce | 3-level engine lifecycle control (weights, buffers, everything) |
 | Elastic EP scaling | `scale_elastic_ep` with Ray node management |

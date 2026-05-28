@@ -6,6 +6,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Environment variables with defaults
@@ -26,6 +27,16 @@ export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 # Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
 # child processes would inherit. Unset it so only workers that need it set their own.
 unset DYN_SYSTEM_PORT
+
+# Profiler/test-harness override applied to KV-cache-bearing workers (prefill, decode).
+# Encode is a multimodal embedding worker without a KV cache, so the override is a no-op
+# there — we still pass it through for consistency, build_trtllm_override_args_with_mem
+# just emits an unused KvCacheConfig field.
+TRTLLM_OVERRIDE_ARGS=()
+OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
+if [[ -n "$OVERRIDE_JSON" ]]; then
+    TRTLLM_OVERRIDE_ARGS=(--override-engine-args "$OVERRIDE_JSON")
+fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --multimodal "Launching Multimodal E/P/D" "$MODEL_PATH" "$HTTP_PORT"
@@ -52,6 +63,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
   --modality "$MODALITY" \
+  "${TRTLLM_OVERRIDE_ARGS[@]}" \
   --disaggregation-mode prefill \
   --encode-endpoint "$ENCODE_ENDPOINT" &
 
@@ -64,6 +76,7 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --modality "$MODALITY" \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
+  "${TRTLLM_OVERRIDE_ARGS[@]}" \
   --disaggregation-mode decode &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

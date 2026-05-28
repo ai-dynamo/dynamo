@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# OpenShift: namespace-scoped "use" grant on the built-in privileged SCC for
+# the agent DS ServiceAccount. CRIU needs every knob privileged exposes;
+# using the shipped SCC matches NTO/LSO/GPU-Operator.
+{{- if and .Values.openshift.enabled .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: snapshot-privileged
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["privileged"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: snapshot-privileged
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: snapshot-privileged
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "snapshot.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

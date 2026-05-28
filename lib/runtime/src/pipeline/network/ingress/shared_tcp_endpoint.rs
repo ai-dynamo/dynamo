@@ -29,11 +29,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 /// Default worker pool size for TCP request handling
-const DEFAULT_WORKER_POOL_SIZE: usize = 1500;
+const DEFAULT_WORKER_POOL_SIZE: usize = 10000;
 
 /// Default work queue size for TCP request handling
 /// this is 4X the worker pool size to handle burst traffic
-const DEFAULT_WORK_QUEUE_SIZE: usize = 6000;
+const DEFAULT_WORK_QUEUE_SIZE: usize = 40000;
 
 /// Get worker pool size from environment or use default
 fn get_worker_pool_size() -> usize {

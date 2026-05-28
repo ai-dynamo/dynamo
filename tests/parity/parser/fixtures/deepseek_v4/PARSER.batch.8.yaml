@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v4
+mode: batch
+cases:
+  PARSER.batch.8.a:
+    description: Narration before tool call only
+    ref: dynamo
+    model_text: |-
+      I will check the weather. <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: 'I will check the weather. '
+  PARSER.batch.8.b:
+    description: Narration after tool call only
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls> Let me know if you need more.
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ' Let me know if you need more.'
+    # TODO(research): vllm diverges — TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: None
+  PARSER.batch.8.c:
+    description: Narration both before and after (sandwich)
+    ref: dynamo
+    model_text: |-
+      I will check the weather. <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls> Let me know if you need more.
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: I will check the weather.  Let me know if you need more.
+    # TODO(research): vllm diverges — TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: 'I will check the weather. '
+  PARSER.batch.8.d:
+    description: Narration between multiple tool calls
+    ref: dynamo
+    model_text: |-
+      I will check the weather. <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls> Then check LA weather. <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">LA</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_weather
+        arguments:
+          location: LA
+      normal_text: 'I will check the weather.  Then check LA weather. '
+    # TODO(research): vllm diverges — TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_weather', 'arguments': {'location': 'LA'}}]
+    #   normal_text: 'I will check the weather. '

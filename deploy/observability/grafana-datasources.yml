@@ -22,3 +22,9 @@ datasources:
     access: proxy
     url: http://prometheus:9090
     isDefault: true
+  - name: prometheus-legacy
+    type: prometheus
+    uid: P1809F7CD0C75ACF3
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false

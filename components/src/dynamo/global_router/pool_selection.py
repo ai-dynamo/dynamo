@@ -18,9 +18,26 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _get_aliased(data: dict, primary: str, *aliases: str) -> Any:
+    """Look up ``primary`` in ``data``; fall back to any alias if absent.
+
+    Logs a deprecation warning when an alias is used so users are nudged
+    toward the unit-suffixed name. Raises KeyError if neither is present.
+    """
+    if primary in data:
+        return data[primary]
+    for alias in aliases:
+        if alias in data:
+            logger.warning(
+                "Config key %r is deprecated; use %r instead.", alias, primary
+            )
+            return data[alias]
+    raise KeyError(primary)
 
 
 @dataclass
@@ -50,8 +67,8 @@ def _apply_priority_overrides(
 class PrefillPoolSelectionStrategy:
     """Strategy for selecting prefill pools based on ISL and TTFT target."""
 
-    ttft_min: float
-    ttft_max: float
+    ttft_min_ms: float
+    ttft_max_ms: float
     ttft_resolution: int
     isl_min: int
     isl_max: int
@@ -60,9 +77,9 @@ class PrefillPoolSelectionStrategy:
     priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
 
     @property
-    def ttft_step(self) -> float:
+    def ttft_step_ms(self) -> float:
         """Step size for TTFT grid."""
-        return (self.ttft_max - self.ttft_min) / self.ttft_resolution
+        return (self.ttft_max_ms - self.ttft_min_ms) / self.ttft_resolution
 
     @property
     def isl_step(self) -> float:
@@ -72,7 +89,7 @@ class PrefillPoolSelectionStrategy:
     def select_pool(
         self,
         isl: int,
-        ttft_target: Optional[float] = None,
+        ttft_target_ms: Optional[float] = None,
         priority: Optional[int] = None,
     ) -> int:
         """
@@ -80,22 +97,23 @@ class PrefillPoolSelectionStrategy:
 
         Args:
             isl: Input sequence length (number of tokens)
-            ttft_target: Target time to first token in ms. If None, uses middle of range.
+            ttft_target_ms: Target time to first token in ms. If None, uses middle of range.
             priority: Request priority from agent hints. If set and a priority
                 override rule matches, the override takes precedence over the grid.
 
         Returns:
             Pool index from prefill_pool_mapping or a priority override
         """
-        if ttft_target is None:
-            ttft_target = (self.ttft_min + self.ttft_max) / 2
+        if ttft_target_ms is None:
+            ttft_target_ms = (self.ttft_min_ms + self.ttft_max_ms) / 2
 
         # Compute grid indices with clamping
         isl_idx = self._clamp_index(
             (isl - self.isl_min) / self.isl_step, self.isl_resolution
         )
         ttft_idx = self._clamp_index(
-            (ttft_target - self.ttft_min) / self.ttft_step, self.ttft_resolution
+            (ttft_target_ms - self.ttft_min_ms) / self.ttft_step_ms,
+            self.ttft_resolution,
         )
 
         pool_idx = self.prefill_pool_mapping[isl_idx][ttft_idx]
@@ -103,7 +121,7 @@ class PrefillPoolSelectionStrategy:
             pool_idx, priority, self.priority_overrides
         )
         logger.debug(
-            f"Prefill pool selection: ISL={isl}, TTFT={ttft_target}, "
+            f"Prefill pool selection: ISL={isl}, TTFT={ttft_target_ms}ms, "
             f"priority={priority} -> pool {pool_idx}"
         )
         return pool_idx
@@ -118,8 +136,8 @@ class PrefillPoolSelectionStrategy:
 class DecodePoolSelectionStrategy:
     """Strategy for selecting decode pools based on context length and ITL target."""
 
-    itl_min: float
-    itl_max: float
+    itl_min_ms: float
+    itl_max_ms: float
     itl_resolution: int
     context_length_min: int
     context_length_max: int
@@ -128,9 +146,9 @@ class DecodePoolSelectionStrategy:
     priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
 
     @property
-    def itl_step(self) -> float:
+    def itl_step_ms(self) -> float:
         """Step size for ITL grid."""
-        return (self.itl_max - self.itl_min) / self.itl_resolution
+        return (self.itl_max_ms - self.itl_min_ms) / self.itl_resolution
 
     @property
     def context_length_step(self) -> float:
@@ -142,7 +160,7 @@ class DecodePoolSelectionStrategy:
     def select_pool(
         self,
         context_length: int,
-        itl_target: Optional[float] = None,
+        itl_target_ms: Optional[float] = None,
         priority: Optional[int] = None,
     ) -> int:
         """
@@ -150,15 +168,15 @@ class DecodePoolSelectionStrategy:
 
         Args:
             context_length: Total context length (prompt + generated tokens so far)
-            itl_target: Target inter-token latency in ms. If None, uses middle of range.
+            itl_target_ms: Target inter-token latency in ms. If None, uses middle of range.
             priority: Request priority from agent hints. If set and a priority
                 override rule matches, the override takes precedence over the grid.
 
         Returns:
             Pool index from decode_pool_mapping or a priority override
         """
-        if itl_target is None:
-            itl_target = (self.itl_min + self.itl_max) / 2
+        if itl_target_ms is None:
+            itl_target_ms = (self.itl_min_ms + self.itl_max_ms) / 2
 
         # Compute grid indices with clamping
         ctx_idx = self._clamp_index(
@@ -166,7 +184,7 @@ class DecodePoolSelectionStrategy:
             self.context_length_resolution,
         )
         itl_idx = self._clamp_index(
-            (itl_target - self.itl_min) / self.itl_step, self.itl_resolution
+            (itl_target_ms - self.itl_min_ms) / self.itl_step_ms, self.itl_resolution
         )
 
         pool_idx = self.decode_pool_mapping[ctx_idx][itl_idx]
@@ -174,7 +192,7 @@ class DecodePoolSelectionStrategy:
             pool_idx, priority, self.priority_overrides
         )
         logger.debug(
-            f"Decode pool selection: context_length={context_length}, ITL={itl_target}, "
+            f"Decode pool selection: context_length={context_length}, ITL={itl_target_ms}ms, "
             f"priority={priority} -> pool {pool_idx}"
         )
         return pool_idx
@@ -199,54 +217,55 @@ class AggPoolSelectionStrategy:
       ITL captures pure decode performance.
     """
 
-    ttft_min: float
-    ttft_max: float
+    ttft_min_ms: float
+    ttft_max_ms: float
     ttft_resolution: int
-    itl_min: float
-    itl_max: float
+    itl_min_ms: float
+    itl_max_ms: float
     itl_resolution: int
     agg_pool_mapping: List[List[int]]
     priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
 
     @property
-    def ttft_step(self) -> float:
+    def ttft_step_ms(self) -> float:
         """Step size for TTFT grid."""
-        return (self.ttft_max - self.ttft_min) / self.ttft_resolution
+        return (self.ttft_max_ms - self.ttft_min_ms) / self.ttft_resolution
 
     @property
-    def itl_step(self) -> float:
+    def itl_step_ms(self) -> float:
         """Step size for ITL grid."""
-        return (self.itl_max - self.itl_min) / self.itl_resolution
+        return (self.itl_max_ms - self.itl_min_ms) / self.itl_resolution
 
     def select_pool(
         self,
-        ttft_target: Optional[float] = None,
-        itl_target: Optional[float] = None,
+        ttft_target_ms: Optional[float] = None,
+        itl_target_ms: Optional[float] = None,
         priority: Optional[int] = None,
     ) -> int:
         """
         Select agg pool based on TTFT target, ITL target, and optional priority.
 
         Args:
-            ttft_target: Target time to first token in ms. If None, uses middle of range.
-            itl_target: Target inter-token latency in ms. If None, uses middle of range.
+            ttft_target_ms: Target time to first token in ms. If None, uses middle of range.
+            itl_target_ms: Target inter-token latency in ms. If None, uses middle of range.
             priority: Request priority from agent hints. If set and a priority
                 override rule matches, the override takes precedence over the grid.
 
         Returns:
             Pool index from agg_pool_mapping or a priority override
         """
-        if ttft_target is None:
-            ttft_target = (self.ttft_min + self.ttft_max) / 2
-        if itl_target is None:
-            itl_target = (self.itl_min + self.itl_max) / 2
+        if ttft_target_ms is None:
+            ttft_target_ms = (self.ttft_min_ms + self.ttft_max_ms) / 2
+        if itl_target_ms is None:
+            itl_target_ms = (self.itl_min_ms + self.itl_max_ms) / 2
 
         # Compute grid indices with clamping
         ttft_idx = self._clamp_index(
-            (ttft_target - self.ttft_min) / self.ttft_step, self.ttft_resolution
+            (ttft_target_ms - self.ttft_min_ms) / self.ttft_step_ms,
+            self.ttft_resolution,
         )
         itl_idx = self._clamp_index(
-            (itl_target - self.itl_min) / self.itl_step, self.itl_resolution
+            (itl_target_ms - self.itl_min_ms) / self.itl_step_ms, self.itl_resolution
         )
 
         pool_idx = self.agg_pool_mapping[ttft_idx][itl_idx]
@@ -254,7 +273,7 @@ class AggPoolSelectionStrategy:
             pool_idx, priority, self.priority_overrides
         )
         logger.debug(
-            f"Agg pool selection: TTFT={ttft_target}, ITL={itl_target}, "
+            f"Agg pool selection: TTFT={ttft_target_ms}ms, ITL={itl_target_ms}ms, "
             f"priority={priority} -> pool {pool_idx}"
         )
         return pool_idx
@@ -340,10 +359,10 @@ class GlobalRouterConfig:
                 f"isl_min ({prefill_strategy.isl_min}) must be less than "
                 f"isl_max ({prefill_strategy.isl_max})"
             )
-        if prefill_strategy.ttft_min >= prefill_strategy.ttft_max:
+        if prefill_strategy.ttft_min_ms >= prefill_strategy.ttft_max_ms:
             raise ValueError(
-                f"ttft_min ({prefill_strategy.ttft_min}) must be less than "
-                f"ttft_max ({prefill_strategy.ttft_max})"
+                f"ttft_min_ms ({prefill_strategy.ttft_min_ms}) must be less than "
+                f"ttft_max_ms ({prefill_strategy.ttft_max_ms})"
             )
 
         # Validate mapping dimensions match resolution
@@ -400,10 +419,10 @@ class GlobalRouterConfig:
                 f"context_length_min ({decode_strategy.context_length_min}) must be less than "
                 f"context_length_max ({decode_strategy.context_length_max})"
             )
-        if decode_strategy.itl_min >= decode_strategy.itl_max:
+        if decode_strategy.itl_min_ms >= decode_strategy.itl_max_ms:
             raise ValueError(
-                f"itl_min ({decode_strategy.itl_min}) must be less than "
-                f"itl_max ({decode_strategy.itl_max})"
+                f"itl_min_ms ({decode_strategy.itl_min_ms}) must be less than "
+                f"itl_max_ms ({decode_strategy.itl_max_ms})"
             )
 
         if (
@@ -468,15 +487,15 @@ class GlobalRouterConfig:
             raise ValueError(
                 f"itl_resolution must be positive, got {agg_strategy.itl_resolution}"
             )
-        if agg_strategy.ttft_min >= agg_strategy.ttft_max:
+        if agg_strategy.ttft_min_ms >= agg_strategy.ttft_max_ms:
             raise ValueError(
-                f"ttft_min ({agg_strategy.ttft_min}) must be less than "
-                f"ttft_max ({agg_strategy.ttft_max})"
+                f"ttft_min_ms ({agg_strategy.ttft_min_ms}) must be less than "
+                f"ttft_max_ms ({agg_strategy.ttft_max_ms})"
             )
-        if agg_strategy.itl_min >= agg_strategy.itl_max:
+        if agg_strategy.itl_min_ms >= agg_strategy.itl_max_ms:
             raise ValueError(
-                f"itl_min ({agg_strategy.itl_min}) must be less than "
-                f"itl_max ({agg_strategy.itl_max})"
+                f"itl_min_ms ({agg_strategy.itl_min_ms}) must be less than "
+                f"itl_max_ms ({agg_strategy.itl_max_ms})"
             )
 
         # Validate mapping dimensions
@@ -558,8 +577,8 @@ def _load_disagg_config(data: dict, mode: str) -> GlobalRouterConfig:
         for rule in prefill_strategy_data.get("priority_overrides", [])
     ]
     prefill_strategy = PrefillPoolSelectionStrategy(
-        ttft_min=prefill_strategy_data["ttft_min"],
-        ttft_max=prefill_strategy_data["ttft_max"],
+        ttft_min_ms=_get_aliased(prefill_strategy_data, "ttft_min_ms", "ttft_min"),
+        ttft_max_ms=_get_aliased(prefill_strategy_data, "ttft_max_ms", "ttft_max"),
         ttft_resolution=prefill_strategy_data["ttft_resolution"],
         isl_min=prefill_strategy_data["isl_min"],
         isl_max=prefill_strategy_data["isl_max"],
@@ -575,8 +594,8 @@ def _load_disagg_config(data: dict, mode: str) -> GlobalRouterConfig:
         for rule in decode_strategy_data.get("priority_overrides", [])
     ]
     decode_strategy = DecodePoolSelectionStrategy(
-        itl_min=decode_strategy_data["itl_min"],
-        itl_max=decode_strategy_data["itl_max"],
+        itl_min_ms=_get_aliased(decode_strategy_data, "itl_min_ms", "itl_min"),
+        itl_max_ms=_get_aliased(decode_strategy_data, "itl_max_ms", "itl_max"),
         itl_resolution=decode_strategy_data["itl_resolution"],
         context_length_min=decode_strategy_data["context_length_min"],
         context_length_max=decode_strategy_data["context_length_max"],
@@ -610,11 +629,11 @@ def _load_agg_config(data: dict, mode: str) -> GlobalRouterConfig:
         for rule in agg_strategy_data.get("priority_overrides", [])
     ]
     agg_strategy = AggPoolSelectionStrategy(
-        ttft_min=agg_strategy_data["ttft_min"],
-        ttft_max=agg_strategy_data["ttft_max"],
+        ttft_min_ms=_get_aliased(agg_strategy_data, "ttft_min_ms", "ttft_min"),
+        ttft_max_ms=_get_aliased(agg_strategy_data, "ttft_max_ms", "ttft_max"),
         ttft_resolution=agg_strategy_data["ttft_resolution"],
-        itl_min=agg_strategy_data["itl_min"],
-        itl_max=agg_strategy_data["itl_max"],
+        itl_min_ms=_get_aliased(agg_strategy_data, "itl_min_ms", "itl_min"),
+        itl_max_ms=_get_aliased(agg_strategy_data, "itl_max_ms", "itl_max"),
         itl_resolution=agg_strategy_data["itl_resolution"],
         agg_pool_mapping=agg_strategy_data["agg_pool_mapping"],
         priority_overrides=agg_priority_overrides,

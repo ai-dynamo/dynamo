@@ -104,22 +104,31 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             # Parse size
-            assert req.size is not None, "Size is required"
+            if req.size is None:
+                raise ValueError("Size is required")
             width, height = self._parse_size(req.size)
 
             # Calculate num_frames if not explicitly provided
-            num_frames = nvext.num_frames
-            assert nvext.fps is not None, "FPS is required"
-            if num_frames is None:
-                assert req.seconds is not None, "Seconds is required"
+            if nvext.fps is None:
+                raise ValueError("FPS is required")
+            if nvext.num_frames is None:
+                if req.seconds is None:
+                    raise ValueError("Seconds is required")
                 num_frames = nvext.fps * req.seconds
+            else:
+                num_frames = nvext.num_frames
 
             # Generate video
             context_id = context.id()
-            assert context_id is not None
-            assert (
-                nvext.num_inference_steps is not None
-            ), "Num inference steps is required"
+            if context_id is None:
+                raise ValueError("Context ID is required")
+            if nvext.num_inference_steps is None:
+                raise ValueError("Num inference steps is required")
+            output_format = req.output_format or "mp4"
+            if output_format != "mp4":
+                raise ValueError(
+                    f"Unsupported output_format: {output_format!r}; only 'mp4' is supported"
+                )
             video_bytes = await self._generate_video(
                 prompt=req.prompt,
                 width=width,
@@ -135,12 +144,17 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             video_data = []
-            if req.response_format == "url":
+            response_format = req.response_format or "b64_json"
+            if response_format == "url":
                 url = await self._upload_to_fs(video_bytes, context_id)
-                video_data.append(VideoData(url=url))
-            else:  # b64_json
+                video_data.append(VideoData(output_format=output_format, url=url))
+            elif response_format == "b64_json":
                 b64 = self._encode_base64(video_bytes)
-                video_data.append(VideoData(b64_json=b64))
+                video_data.append(VideoData(output_format=output_format, b64_json=b64))
+            else:
+                raise ValueError(
+                    f"Unsupported response_format: {response_format!r}; expected 'url' or 'b64_json'"
+                )
 
             inference_time = time.time() - start_time
 

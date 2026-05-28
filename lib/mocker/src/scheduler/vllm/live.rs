@@ -124,6 +124,14 @@ impl Scheduler {
                 capture_deferred_kv_publish_sink(kv_event_publishers.raw_enabled());
             let deferred_fpm = DeferredFpmBuffer::default();
             let mut core = VllmCore::new_with_sink(args, dp_rank, buffering_publishers);
+            #[cfg(feature = "kvbm-offload")]
+            if let Err(e) = core.init_offload_live().await {
+                tracing::error!("kvbm-offload live init failed: {e}");
+            }
+            // Wall-clock origin for this scheduler's simulated time. Drives
+            // `engine.tick(now_ms)` so the PS bandwidth models advance
+            // in real time across passes.
+            let scheduler_start = Instant::now();
 
             loop {
                 if receive_requests(&mut core, &mut request_rx, &cancel_token_clone)
@@ -134,8 +142,10 @@ impl Scheduler {
                 }
 
                 let iteration_start = Instant::now();
-                let pass = core.execute_pass_internal(None, 0.0, admission_tx.as_ref());
-                let total_time = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
+                let now_ms = scheduler_start.elapsed().as_secs_f64() * 1000.0;
+                let pass = core.execute_pass_internal(None, now_ms, admission_tx.as_ref());
+                let total_time =
+                    std::time::Duration::from_secs_f64((pass.end_ms - now_ms).max(0.0) / 1000.0);
                 if let Some(fpm) = pass.fpm {
                     deferred_fpm.push(fpm);
                 }

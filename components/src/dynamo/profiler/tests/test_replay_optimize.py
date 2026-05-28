@@ -222,7 +222,8 @@ def _disagg_spec(
     sla: SLASpec | None = None,
     objective: ReplayObjective = ReplayObjective.THROUGHPUT,
     router_mode: str = "kv_router",
-    overlap_weights: list[float] | None = None,
+    overlap_credits: list[float] | None = None,
+    prefill_load_scales: list[float] | None = None,
     base_router_config: KvRouterConfig | None = None,
     max_parallel_evals: int = 1,
 ) -> ReplayOptimizeSpec:
@@ -238,7 +239,8 @@ def _disagg_spec(
         sla=sla if sla is not None else SLASpec(),
         router=RouterSpec(
             mode=router_mode,
-            overlapWeights=overlap_weights,
+            overlapCredits=overlap_credits,
+            prefillLoadScales=prefill_load_scales,
             baseRouterConfig=base_router_config,
         ),
         objective=objective,
@@ -252,7 +254,8 @@ def _agg_spec(
     total_gpus: int = 4,
     sla: SLASpec | None = None,
     router_mode: str = "kv_router",
-    overlap_weights: list[float] | None = None,
+    overlap_credits: list[float] | None = None,
+    prefill_load_scales: list[float] | None = None,
     base_router_config: KvRouterConfig | None = None,
     max_parallel_evals: int = 1,
 ) -> ReplayOptimizeSpec:
@@ -267,7 +270,8 @@ def _agg_spec(
         sla=sla if sla is not None else SLASpec(),
         router=RouterSpec(
             mode=router_mode,
-            overlapWeights=overlap_weights,
+            overlapCredits=overlap_credits,
+            prefillLoadScales=prefill_load_scales,
             baseRouterConfig=base_router_config,
         ),
         maxParallelEvals=max_parallel_evals,
@@ -327,7 +331,8 @@ def test_iter_tp_states_with_equal_workers_respects_gpu_budget() -> None:
         prefill_tps=[1, 2, 4, 8],
         decode_tps=[1, 2, 4, 8],
         router_mode="round_robin",
-        overlap_score_weight=1.0,
+        overlap_score_credit=1.0,
+        prefill_load_scale=1.0,
         max_total_gpus=8,
     )
 
@@ -350,7 +355,8 @@ def test_iter_agg_tp_states_with_max_workers_respects_gpu_budget() -> None:
     states = replay_optimize._iter_agg_tp_states_with_max_workers(
         tps=[1, 2, 4, 8],
         router_mode="round_robin",
-        overlap_score_weight=0.0,
+        overlap_score_credit=0.0,
+        prefill_load_scale=1.0,
         max_total_gpus=8,
     )
 
@@ -383,7 +389,8 @@ def test_iter_agg_worker_states_collapses_round_robin_overlap() -> None:
     states = replay_optimize._iter_agg_worker_states(
         tp=2,
         router_mode="round_robin",
-        overlap_score_weight=0.0,
+        overlap_score_credit=0.0,
+        prefill_load_scale=1.0,
         max_total_gpus=8,
     )
 
@@ -394,7 +401,7 @@ def test_iter_agg_worker_states_collapses_round_robin_overlap() -> None:
         (2, 4),
     ]
     assert set(state.router_mode for state in states) == {"round_robin"}
-    assert set(state.overlap_score_weight for state in states) == {0.0}
+    assert set(state.overlap_score_credit for state in states) == {0.0}
 
 
 # ---- public-API tests (reshaped to ReplayOptimizeSpec) ----
@@ -402,7 +409,14 @@ def test_iter_agg_worker_states_collapses_round_robin_overlap() -> None:
 
 def test_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) -> None:
     call_counter: Counter = Counter()
-    target_state = replay_optimize.DenseReplayState(2, 4, 2, 1, 2.0)
+    target_state = replay_optimize.DenseReplayState(
+        2,
+        4,
+        2,
+        1,
+        1.0,
+        prefill_load_scale=2.0,
+    )
 
     def fake_run(**kwargs):
         state = kwargs["state"]
@@ -413,7 +427,8 @@ def test_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) -> Non
             - 100.0 * abs(state.decode_tp - target_state.decode_tp)
             - 50.0 * abs(state.prefill_workers - target_state.prefill_workers)
             - 50.0 * abs(state.decode_workers - target_state.decode_workers)
-            - 10.0 * abs(state.overlap_score_weight - target_state.overlap_score_weight)
+            - 10.0 * abs(state.overlap_score_credit - target_state.overlap_score_credit)
+            - 10.0 * abs(state.prefill_load_scale - target_state.prefill_load_scale)
         )
         return {
             "output_throughput_tok_s": desired_score,
@@ -436,7 +451,8 @@ def test_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) -> Non
         _disagg_spec(
             total_gpus=8,
             sla=_sla(mean_e2e_latency_ms=500.0),
-            overlap_weights=[0.0, 1.0, 2.0],
+            overlap_credits=[0.0, 0.5, 1.0],
+            prefill_load_scales=[0.0, 0.25, 0.5, 1.0, 2.0, 4.0],
         )
     )
 
@@ -445,14 +461,21 @@ def test_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) -> Non
     assert result.best_feasible["decode_tp"] == 4
     assert result.best_feasible["prefill_workers"] == 2
     assert result.best_feasible["decode_workers"] == 1
-    assert result.best_feasible["overlap_score_weight"] == 2.0
+    assert result.best_feasible["overlap_score_credit"] == 1.0
+    assert result.best_feasible["prefill_load_scale"] == 2.0
     assert sum(call_counter.values()) == len(call_counter)
     assert len(call_counter) == len(result.evaluated_df)
 
 
 def test_agg_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) -> None:
     call_counter: Counter = Counter()
-    target_state = DenseAggReplayState(2, 3, "kv_router", 2.0)
+    target_state = DenseAggReplayState(
+        2,
+        3,
+        "kv_router",
+        1.0,
+        prefill_load_scale=2.0,
+    )
 
     def fake_run(**kwargs):
         state = kwargs["state"]
@@ -462,7 +485,8 @@ def test_agg_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) ->
             - 100.0 * abs(state.tp - target_state.tp)
             - 50.0 * abs(state.workers - target_state.workers)
             - 100.0 * (state.router_mode != target_state.router_mode)
-            - 10.0 * abs(state.overlap_score_weight - target_state.overlap_score_weight)
+            - 10.0 * abs(state.overlap_score_credit - target_state.overlap_score_credit)
+            - 10.0 * abs(state.prefill_load_scale - target_state.prefill_load_scale)
         )
         return {
             "output_throughput_tok_s": desired_score,
@@ -486,7 +510,8 @@ def test_agg_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) ->
             total_gpus=8,
             sla=_sla(mean_e2e_latency_ms=500.0),
             router_mode="both",
-            overlap_weights=[0.0, 1.0, 2.0],
+            overlap_credits=[0.0, 0.5, 1.0],
+            prefill_load_scales=[0.0, 0.25, 0.5, 1.0, 2.0, 4.0],
         )
     )
 
@@ -494,7 +519,8 @@ def test_agg_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) ->
     assert result.best_feasible["tp"] == 2
     assert result.best_feasible["workers"] == 3
     assert result.best_feasible["router_mode"] == "kv_router"
-    assert result.best_feasible["overlap_score_weight"] == 2.0
+    assert result.best_feasible["overlap_score_credit"] == 1.0
+    assert result.best_feasible["prefill_load_scale"] == 2.0
     assert sum(call_counter.values()) == len(call_counter)
     assert len(call_counter) == len(result.evaluated_df)
 
@@ -512,7 +538,7 @@ def test_optimizer_uses_violation_penalty_when_no_state_is_feasible(
             + 10.0 * abs(state.decode_tp - target_state.decode_tp)
             + 5.0 * abs(state.prefill_workers - target_state.prefill_workers)
             + 5.0 * abs(state.decode_workers - target_state.decode_workers)
-            + abs(state.overlap_score_weight - target_state.overlap_score_weight)
+            + abs(state.overlap_score_credit - target_state.overlap_score_credit)
         )
         return {
             "output_throughput_tok_s": 1000.0,
@@ -535,7 +561,7 @@ def test_optimizer_uses_violation_penalty_when_no_state_is_feasible(
         _disagg_spec(
             total_gpus=6,
             sla=_sla(mean_e2e_latency_ms=50.0),
-            overlap_weights=[0.0, 1.0],
+            overlap_credits=[0.0, 1.0],
         )
     )
 
@@ -545,7 +571,7 @@ def test_optimizer_uses_violation_penalty_when_no_state_is_feasible(
     assert result.best_infeasible["decode_tp"] == 2
     assert result.best_infeasible["prefill_workers"] == 2
     assert result.best_infeasible["decode_workers"] == 2
-    assert result.best_infeasible["overlap_score_weight"] == 1.0
+    assert result.best_infeasible["overlap_score_credit"] == 1.0
 
 
 def test_agg_optimizer_uses_violation_penalty_when_no_state_is_feasible(
@@ -560,7 +586,7 @@ def test_agg_optimizer_uses_violation_penalty_when_no_state_is_feasible(
             + 10.0 * abs(state.tp - target_state.tp)
             + 5.0 * abs(state.workers - target_state.workers)
             + 3.0 * (state.router_mode != target_state.router_mode)
-            + abs(state.overlap_score_weight - target_state.overlap_score_weight)
+            + abs(state.overlap_score_credit - target_state.overlap_score_credit)
         )
         return {
             "output_throughput_tok_s": 1000.0,
@@ -584,7 +610,7 @@ def test_agg_optimizer_uses_violation_penalty_when_no_state_is_feasible(
             total_gpus=8,
             sla=_sla(mean_e2e_latency_ms=50.0),
             router_mode="both",
-            overlap_weights=[0.0, 1.0],
+            overlap_credits=[0.0, 1.0],
         )
     )
 
@@ -593,16 +619,19 @@ def test_agg_optimizer_uses_violation_penalty_when_no_state_is_feasible(
     assert result.best_infeasible["tp"] == 2
     assert result.best_infeasible["workers"] == 3
     assert result.best_infeasible["router_mode"] == "kv_router"
-    assert result.best_infeasible["overlap_score_weight"] == 1.0
+    assert result.best_infeasible["overlap_score_credit"] == 1.0
 
 
 def test_optimizer_supports_round_robin_router_mode(monkeypatch) -> None:
     seen_router_modes: list[str] = []
-    seen_weights: list[float] = []
+    seen_credits: list[float] = []
+    seen_prefill_scales: list[float] = []
 
     def fake_run(**kwargs):
-        seen_router_modes.append(kwargs["state"].router_mode)
-        seen_weights.append(kwargs["state"].overlap_score_weight)
+        state = kwargs["state"]
+        seen_router_modes.append(state.router_mode)
+        seen_credits.append(state.overlap_score_credit)
+        seen_prefill_scales.append(state.prefill_load_scale)
         return {
             "output_throughput_tok_s": 1000.0,
             "mean_ttft_ms": 100.0,
@@ -625,14 +654,16 @@ def test_optimizer_supports_round_robin_router_mode(monkeypatch) -> None:
             total_gpus=4,
             sla=_sla(mean_e2e_latency_ms=500.0),
             router_mode="round_robin",
-            overlap_weights=[0.0, 1.0, 2.0],
+            overlap_credits=[0.0, 0.5, 1.0],
+            prefill_load_scales=[1.0, 2.0, 4.0],
         )
     )
 
     assert result.best_feasible is not None
     assert set(seen_router_modes) == {"round_robin"}
-    # Guardrail #5: round_robin auto-collapses overlap weights to (0.0,)
-    assert set(seen_weights) == {0.0}
+    # Guardrail #5: round_robin auto-collapses router tuning to a single no-op state.
+    assert set(seen_credits) == {0.0}
+    assert set(seen_prefill_scales) == {1.0}
 
 
 def test_disagg_optimizer_supports_latency_objective(monkeypatch) -> None:
@@ -670,7 +701,7 @@ def test_disagg_optimizer_supports_latency_objective(monkeypatch) -> None:
             total_gpus=4,
             sla=_sla(mean_e2e_latency_ms=500.0),
             objective=ReplayObjective.MEAN_E2E_LATENCY,
-            overlap_weights=[0.0],
+            overlap_credits=[0.0],
         )
     )
 
@@ -702,14 +733,32 @@ def test_disagg_optimizer_rejects_invalid_objective() -> None:
         )
 
 
+def test_router_spec_rejects_out_of_range_overlap_credits() -> None:
+    with pytest.raises(ValueError, match="prefill_load_scale"):
+        _agg_spec(overlap_credits=[0.0, 1.1])
+
+    with pytest.raises(ValueError, match="overlapCredits must be between 0.0 and 1.0"):
+        _disagg_spec(overlap_credits=[-0.1, 1.0])
+
+
+def test_router_spec_rejects_invalid_prefill_load_scales() -> None:
+    with pytest.raises(ValueError, match="prefillLoadScales must not be empty"):
+        _agg_spec(prefill_load_scales=[])
+
+    with pytest.raises(ValueError, match="prefillLoadScales must be non-negative"):
+        _disagg_spec(prefill_load_scales=[-0.1, 1.0])
+
+
 def test_disagg_optimizer_supports_router_mode_search(monkeypatch) -> None:
     seen_router_modes: list[str] = []
-    seen_weights: list[float] = []
+    seen_credits: list[float] = []
+    seen_prefill_scales: list[float] = []
 
     def fake_run(**kwargs):
         state = kwargs["state"]
         seen_router_modes.append(state.router_mode)
-        seen_weights.append(state.overlap_score_weight)
+        seen_credits.append(state.overlap_score_credit)
+        seen_prefill_scales.append(state.prefill_load_scale)
         return {
             "output_throughput_tok_s": 1000.0 * state.total_gpus_used,
             "mean_ttft_ms": 100.0,
@@ -732,26 +781,32 @@ def test_disagg_optimizer_supports_router_mode_search(monkeypatch) -> None:
             total_gpus=4,
             sla=_sla(mean_e2e_latency_ms=500.0),
             router_mode="both",
-            overlap_weights=[0.0, 1.0, 2.0],
+            overlap_credits=[0.0, 0.5, 1.0],
+            prefill_load_scales=[1.0, 2.0, 4.0],
         )
     )
 
     assert result.best_feasible is not None
     assert "round_robin" in seen_router_modes
     assert "kv_router" in seen_router_modes
-    assert 0.0 in seen_weights
-    assert 1.0 in seen_weights
-    assert 2.0 in seen_weights
+    assert 0.0 in seen_credits
+    assert 0.5 in seen_credits
+    assert 1.0 in seen_credits
+    assert 1.0 in seen_prefill_scales
+    assert 2.0 in seen_prefill_scales
+    assert 4.0 in seen_prefill_scales
 
 
 def test_agg_optimizer_supports_router_mode_search(monkeypatch) -> None:
     seen_router_modes: list[str] = []
-    seen_weights: list[float] = []
+    seen_credits: list[float] = []
+    seen_prefill_scales: list[float] = []
 
     def fake_run(**kwargs):
         state = kwargs["state"]
         seen_router_modes.append(state.router_mode)
-        seen_weights.append(state.overlap_score_weight)
+        seen_credits.append(state.overlap_score_credit)
+        seen_prefill_scales.append(state.prefill_load_scale)
         return {
             "output_throughput_tok_s": 1000.0 * state.workers,
             "mean_ttft_ms": 100.0,
@@ -774,16 +829,20 @@ def test_agg_optimizer_supports_router_mode_search(monkeypatch) -> None:
             total_gpus=4,
             sla=_sla(mean_e2e_latency_ms=500.0),
             router_mode="both",
-            overlap_weights=[0.0, 1.0, 2.0],
+            overlap_credits=[0.0, 0.5, 1.0],
+            prefill_load_scales=[1.0, 2.0, 4.0],
         )
     )
 
     assert result.best_feasible is not None
     assert "round_robin" in seen_router_modes
     assert "kv_router" in seen_router_modes
-    assert 0.0 in seen_weights
-    assert 1.0 in seen_weights
-    assert 2.0 in seen_weights
+    assert 0.0 in seen_credits
+    assert 0.5 in seen_credits
+    assert 1.0 in seen_credits
+    assert 1.0 in seen_prefill_scales
+    assert 2.0 in seen_prefill_scales
+    assert 4.0 in seen_prefill_scales
 
 
 def test_compare_agg_and_disagg_with_replay_picks_expected_mode(monkeypatch) -> None:
@@ -792,7 +851,7 @@ def test_compare_agg_and_disagg_with_replay_picks_expected_mode(monkeypatch) -> 
             "tp": 2,
             "workers": 3,
             "router_mode": "kv_router",
-            "overlap_score_weight": 1.0,
+            "overlap_score_credit": 1.0,
             "total_gpus_used": 6,
             "output_throughput_tok_s": 3000.0,
             "score": 500.0,
@@ -810,7 +869,7 @@ def test_compare_agg_and_disagg_with_replay_picks_expected_mode(monkeypatch) -> 
             "decode_tp": 1,
             "prefill_workers": 2,
             "decode_workers": 2,
-            "overlap_score_weight": 0.0,
+            "overlap_score_credit": 0.0,
             "total_gpus_used": 4,
             "output_throughput_tok_s": 1200.0,
             "score": 300.0,
@@ -862,7 +921,7 @@ def test_evaluate_state_prefers_normalized_metrics_over_report_payload() -> None
         decode_tp=1,
         prefill_workers=1,
         decode_workers=1,
-        overlap_score_weight=0.0,
+        overlap_score_credit=0.0,
         router_mode="round_robin",
     )
     cache: dict[replay_optimize.DenseReplayState, dict[str, Any]] = {}
@@ -906,7 +965,7 @@ def test_evaluate_agg_state_prefers_normalized_metrics_over_report_payload() -> 
         tp=2,
         workers=2,
         router_mode="round_robin",
-        overlap_score_weight=0.0,
+        overlap_score_credit=0.0,
     )
     cache: dict[DenseAggReplayState, dict[str, Any]] = {}
 
@@ -943,14 +1002,119 @@ def test_evaluate_agg_state_prefers_normalized_metrics_over_report_payload() -> 
     assert record["violation_penalty"] == 0.0
 
 
-def test_kv_router_config_rejects_negative_overlap_weight() -> None:
-    config = KvRouterConfig(overlap_score_weight=1.0)
+def test_kv_router_config_rejects_out_of_range_overlap_credit() -> None:
+    config = KvRouterConfig(overlap_score_credit=1.0)
 
-    with pytest.raises(ValueError, match="overlap_score_weight must be non-negative"):
-        config.overlap_score_weight = -1.0
+    with pytest.raises(ValueError, match="prefill_load_scale"):
+        KvRouterConfig(overlap_score_credit=1.1)
 
-    with pytest.raises(ValueError, match="overlap_score_weight must be non-negative"):
-        config.with_overrides(overlap_score_weight=-1.0)
+    with pytest.raises(
+        ValueError, match="overlap_score_credit must be between 0.0 and 1.0"
+    ):
+        config.overlap_score_credit = -1.0
+
+    with pytest.raises(ValueError, match="prefill_load_scale"):
+        config.overlap_score_credit = 1.1
+
+    with pytest.raises(
+        ValueError, match="overlap_score_credit must be between 0.0 and 1.0"
+    ):
+        config.with_overrides(overlap_score_credit=-1.0)
+
+    with pytest.raises(ValueError, match="prefill_load_scale"):
+        config.with_overrides(overlap_score_credit=1.1)
+
+
+def test_kv_router_config_preserves_positional_overlap_weight_alias() -> None:
+    config = KvRouterConfig(2.0)
+
+    assert config.overlap_score_credit == 1.0
+    assert config.prefill_load_scale == 2.0
+    assert config.overlap_score_weight == 2.0
+
+
+def test_kv_router_config_positional_zero_preserves_no_overlap_behavior() -> None:
+    config = KvRouterConfig(0.0)
+
+    assert config.overlap_score_credit == 0.0
+    assert config.prefill_load_scale == 0.0
+    assert config.overlap_score_weight == 0.0
+
+
+def test_kv_router_config_deprecated_weight_overrides_canonical_constructor_args() -> (
+    None
+):
+    config = KvRouterConfig(
+        2.0,
+        overlap_score_credit=0.5,
+        prefill_load_scale=3.0,
+    )
+
+    assert config.overlap_score_credit == 0.5
+    assert config.prefill_load_scale == 2.0
+    assert config.overlap_score_weight == 2.0
+
+
+def test_kv_router_config_deprecated_zero_overrides_canonical_constructor_args() -> (
+    None
+):
+    config = KvRouterConfig(
+        0.0,
+        overlap_score_credit=0.5,
+        prefill_load_scale=3.0,
+    )
+
+    assert config.overlap_score_credit == 0.0
+    assert config.prefill_load_scale == 0.0
+    assert config.overlap_score_weight == 0.0
+
+
+def test_kv_router_config_with_overrides_preserves_positional_weight_alias() -> None:
+    config = KvRouterConfig(overlap_score_credit=0.5, prefill_load_scale=1.0)
+
+    updated = config.with_overrides(2.0)
+
+    assert updated.overlap_score_credit == 0.5
+    assert updated.prefill_load_scale == 2.0
+    assert updated.overlap_score_weight == 2.0
+
+
+def test_kv_router_config_with_overrides_deprecated_weight_wins() -> None:
+    config = KvRouterConfig(overlap_score_credit=1.0, prefill_load_scale=1.0)
+
+    updated = config.with_overrides(
+        2.0,
+        overlap_score_credit=0.5,
+        prefill_load_scale=3.0,
+    )
+
+    assert updated.overlap_score_credit == 0.5
+    assert updated.prefill_load_scale == 2.0
+    assert updated.overlap_score_weight == 2.0
+
+
+def test_kv_router_config_with_overrides_zero_preserves_no_overlap_behavior() -> None:
+    config = KvRouterConfig(overlap_score_credit=1.0, prefill_load_scale=1.0)
+
+    updated = config.with_overrides(0.0)
+
+    assert updated.overlap_score_credit == 0.0
+    assert updated.prefill_load_scale == 0.0
+    assert updated.overlap_score_weight == 0.0
+
+
+def test_kv_router_config_with_overrides_deprecated_zero_wins() -> None:
+    config = KvRouterConfig(overlap_score_credit=1.0, prefill_load_scale=1.0)
+
+    updated = config.with_overrides(
+        0.0,
+        overlap_score_credit=0.5,
+        prefill_load_scale=3.0,
+    )
+
+    assert updated.overlap_score_credit == 0.0
+    assert updated.prefill_load_scale == 0.0
+    assert updated.overlap_score_weight == 0.0
 
 
 @pytest.mark.timeout(30)
@@ -972,7 +1136,7 @@ def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
                 mean_e2e_latency_ms=100000.0,
             ),
             router_mode="both",
-            overlap_weights=[0.0, 1.0],
+            overlap_credits=[0.0, 1.0],
         )
     )
 
@@ -999,7 +1163,7 @@ def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
                 mean_e2e_latency_ms=100000.0,
             ),
             router_mode="both",
-            overlap_weights=[0.0, 1.0],
+            overlap_credits=[0.0, 1.0],
         )
     )
 
@@ -1025,7 +1189,7 @@ def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
                 mean_tpot_ms=100000.0,
                 mean_e2e_latency_ms=100000.0,
             ),
-            overlap_weights=[0.0, 1.0],
+            overlap_credits=[0.0, 1.0],
         )
     )
 
@@ -1051,7 +1215,7 @@ def test_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
                 mean_tpot_ms=100000.0,
                 mean_e2e_latency_ms=100000.0,
             ),
-            overlap_weights=[0.0, 1.0],
+            overlap_credits=[0.0, 1.0],
         )
     )
 

@@ -170,7 +170,8 @@ async def worker(runtime: DistributedRuntime):
     logger.info("Starting Standalone Router Service")
     logger.debug(
         f"Configuration: endpoint={config.endpoint}, router_block_size={config.router_block_size}, "
-        f"overlap_score_weight={config.overlap_score_weight}, "
+        f"overlap_score_credit={config.overlap_score_credit}, "
+        f"prefill_load_scale={config.prefill_load_scale}, "
         f"router_temperature={config.router_temperature}, "
         f"use_kv_events={config.use_kv_events}, "
         f"durable_kv_events={config.durable_kv_events}, "
@@ -180,9 +181,7 @@ async def worker(runtime: DistributedRuntime):
         f"router_track_output_blocks={config.router_track_output_blocks}, "
         f"router_assume_kv_reuse={config.router_assume_kv_reuse}, "
         f"router_track_prefill_tokens={config.router_track_prefill_tokens}, "
-        f"router_ttl_secs={config.router_ttl_secs}, "
-        f"router_max_tree_size={config.router_max_tree_size}, "
-        f"router_prune_target_ratio={config.router_prune_target_ratio}"
+        f"router_ttl_secs={config.router_ttl_secs}"
     )
 
     kv_router_config = build_kv_router_config(config)

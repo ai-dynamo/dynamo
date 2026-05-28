@@ -113,7 +113,7 @@ def _extract_tool_calls(results):
 # ---------------------------------------------------------------------------
 
 
-class TestSingleToolCall:
+class TestSingleToolCall:  # FRONTEND.4 — single tool-call output assembly
     """Single tool call with reasoning, various batch sizes."""
 
     TEXT = (
@@ -154,7 +154,7 @@ class TestSingleToolCall:
         assert tc[0]["index"] == 0
 
 
-class TestKimiToolCallIds:
+class TestKimiToolCallIds:  # FRONTEND.4 — Kimi-specific tool-call ID format on output
     def test_kimi_uses_history_adjusted_ids(self):
         class DummyTokenizer:
             def decode(self, token_ids, skip_special_tokens=True):
@@ -267,7 +267,7 @@ class TestKimiToolCallIds:
 # ---------------------------------------------------------------------------
 
 
-class TestNoReasoningParser:
+class TestNoReasoningParser:  # FRONTEND.2 — graceful behavior when no reasoning parser configured
     """Tool calls without reasoning parser active."""
 
     TEXT = (
@@ -299,7 +299,7 @@ class TestNoReasoningParser:
 # ---------------------------------------------------------------------------
 
 
-class TestMultipleToolCalls:
+class TestMultipleToolCalls:  # FRONTEND.4 — parallel/multiple tool-call assembly
     """Two tool calls in a single response."""
 
     TEXT = (
@@ -337,7 +337,7 @@ class TestMultipleToolCalls:
 # ---------------------------------------------------------------------------
 
 
-class TestContentWithToolCalls:
+class TestContentWithToolCalls:  # FRONTEND.4 — text content interleaved with tool calls
     """Reasoning content and regular content are preserved alongside tool calls."""
 
     TEXT = (
@@ -369,7 +369,7 @@ class TestContentWithToolCalls:
 # ---------------------------------------------------------------------------
 
 
-class TestNoToolCalls:
+class TestNoToolCalls:  # FRONTEND.4 — text-only response (no tool calls)
     """When no tool call markup is present, no tool_calls should appear."""
 
     TEXT = "<think>\nJust thinking.\n</think>\n\nHello, world!"
@@ -392,7 +392,7 @@ class TestNoToolCalls:
 # ---------------------------------------------------------------------------
 
 
-class TestSingleChunkFallback:
+class TestSingleChunkFallback:  # FRONTEND.4 — non-streaming fallback assembly
     """When all tool call tokens + finish arrive in one batch, the streaming
     parser only processes one event.  The finish-time re-parse must recover
     arguments and any additional tool calls."""
@@ -467,7 +467,7 @@ class TestSingleChunkFallback:
         assert choice["finish_reason"] == "tool_calls"
 
 
-class TestMalformedToolCalls:
+class TestMalformedToolCalls:  # FRONTEND.4 — malformed model output → graceful degradation
     def test_incomplete_arguments_are_not_emitted(self):
         class DummyTokenizer:
             def decode(self, token_ids, skip_special_tokens=True):
@@ -516,7 +516,7 @@ class TestMalformedToolCalls:
 # ---------------------------------------------------------------------------
 
 
-class TestJsonArrayParserReparse:
+class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse path
     """Exercise the JsonArrayParser branch of the finish-time re-parse.
 
     Under ``tool_choice="required"`` or a named function, guided decoding

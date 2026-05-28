@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gc
 import logging
 from typing import Callable, Coroutine
 
@@ -9,7 +10,7 @@ import uvloop
 
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.runtime.logging import configure_dynamo_logging, get_bool_env_var
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.workers import init_worker
@@ -80,6 +81,14 @@ def _make_drain_callback(
 
 async def worker():
     config = parse_args()
+
+    if get_bool_env_var("DYN_TRTLLM_SERVER_DISABLE_GC") or get_bool_env_var(
+        "TRTLLM_SERVER_DISABLE_GC"
+    ):
+        gc.disable()
+        logging.info(
+            "Python cyclic GC disabled (DYN_TRTLLM_SERVER_DISABLE_GC or TRTLLM_SERVER_DISABLE_GC is set)"
+        )
 
     shutdown_event = asyncio.Event()
     runtime, loop = create_runtime(

@@ -10,14 +10,15 @@
 
 pub mod config;
 
-#[allow(dead_code)]
+// when testing is enabled with out
 mod blocks;
 mod managers;
-#[allow(dead_code)]
+mod metered_tracker;
 mod pools;
-#[allow(dead_code)]
 mod sequences;
 mod token_blocks;
+
+pub use metered_tracker::MeteredFrequencyTracker;
 
 // ============================================================================
 // Canonical test metadata types
@@ -55,17 +56,16 @@ pub const TEST_SALT: u64 = 42;
 // ============================================================================
 
 // pub items — usable by downstream crates via the testing feature
-pub use managers::{create_test_manager, create_test_manager_with_block_size};
+pub use managers::{
+    create_test_manager, create_test_manager_metered, create_test_manager_with_block_size,
+};
 pub use sequences::BlockSequenceBuilder;
 pub use token_blocks::{
     create_iota_token_block, create_test_token_block, sequential_tokens, tokens_for_id,
 };
 
-// pub(crate) items — internal helpers using internal types
+// pub(crate) items — internal helpers
 #[cfg(test)]
-pub(crate) use blocks::{
-    TestBlockBuilder, create_registered_block, create_reset_block, create_reset_blocks,
-    create_staged_block,
-};
+pub(crate) use blocks::{block_id_and_hash, hash_for_tokens};
 #[cfg(test)]
 pub(crate) use pools::TestPoolSetupBuilder;

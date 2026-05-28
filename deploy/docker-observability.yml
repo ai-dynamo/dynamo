@@ -87,6 +87,31 @@ services:
     depends_on:
       - nats-prometheus-exporter
 
+  # Dedicated Prometheus instance for high-frequency resource monitoring (200ms scrape, 15m retention).
+  # See dynamo_local_resource_monitor.yml for rationale.
+  # Opt-in via the `resource-monitor` compose profile — does NOT start unless invoked with
+  #   docker compose --profile resource-monitor -f deploy/docker-observability.yml up -d
+  # Requires dynamo_local_resource_monitor.py running on the host.
+  dynamo-resource-monitor:
+    image: prom/prometheus:v3.4.1
+    container_name: dynamo-resource-monitor
+    profiles:
+      - resource-monitor
+    volumes:
+      - ./observability/dynamo_local_resource_monitor.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15m'
+      - '--web.listen-address=:9091'
+    restart: unless-stopped
+    ports:
+      - "9091:9091"
+    networks:
+      - server
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   # Loki - Log aggregation backend
   loki:
     image: grafana/loki:3.5.0
@@ -143,6 +168,7 @@ services:
       - grafana-data:/var/lib/grafana
       - ./observability/grafana_dashboards:/etc/grafana/provisioning/dashboards
       - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yml
+      - ./observability/grafana-datasource-local-resource-monitor.yml:/etc/grafana/provisioning/datasources/dynamo-resource-monitor.yml
       - ./observability/tempo-datasource.yml:/etc/grafana/provisioning/datasources/tempo.yml
       - ./observability/loki-datasource.yml:/etc/grafana/provisioning/datasources/loki.yml
     environment:
@@ -154,7 +180,7 @@ services:
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
       - GF_INSTALL_PLUGINS=grafana-piechart-panel
       # Default min interval is 5s, but can be configured lower
-      - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
+      - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=500ms
       # Disable password change requirement
       - GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION=false
       - GF_SECURITY_ADMIN_PASSWORD_POLICY=false

@@ -60,18 +60,43 @@ def image_server(httpserver: HTTPServer):
         - /llm-graphic.png - LLM diagram image for multimodal tests
           (or a minimal PNG if the file is a Git LFS pointer / not pulled)
 
+    The handler honors `Range: bytes=A-B` and returns 206 Partial Content.
+    The MM-routing dim-fetch path (`fetch_image_dims_uncached`) strictly
+    requires 206 on Range probes so it never accidentally downloads a
+    full image into memory; a bare `respond_with_data` would return 200
+    and silently disable MM routing in the test.
+
     Usage:
         def test_multimodal(image_server):
             # Use MULTIMODAL_IMG_URL from this module
             # ... use url in your test payload
     """
+    from werkzeug.wrappers import Request, Response
+
     image_data = get_multimodal_test_image_bytes()
 
-    # Configure server endpoint
-    httpserver.expect_request("/llm-graphic.png").respond_with_data(
-        image_data,
-        content_type="image/png",
-    )
+    def _handler(request: Request) -> Response:
+        range_hdr = request.headers.get("Range", "")
+        if range_hdr.startswith("bytes="):
+            spec = range_hdr[len("bytes=") :]
+            lo_s, _, hi_s = spec.partition("-")
+            try:
+                lo = int(lo_s) if lo_s else 0
+                hi = int(hi_s) if hi_s else len(image_data) - 1
+            except ValueError:
+                return Response(status=416)
+            hi = min(hi, len(image_data) - 1)
+            lo = max(lo, 0)
+            if lo > hi:
+                return Response(status=416)
+            chunk = image_data[lo : hi + 1]
+            resp = Response(chunk, status=206, content_type="image/png")
+            resp.headers["Content-Range"] = f"bytes {lo}-{hi}/{len(image_data)}"
+            resp.headers["Accept-Ranges"] = "bytes"
+            return resp
+        return Response(image_data, status=200, content_type="image/png")
+
+    httpserver.expect_request("/llm-graphic.png").respond_with_handler(_handler)
 
     return httpserver
 

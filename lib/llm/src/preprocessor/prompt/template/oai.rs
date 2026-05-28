@@ -101,9 +101,18 @@ fn convert_media_url_to_placeholder(
         .collect()
 }
 
-fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) -> Value {
+fn may_be_fix_msg_content(
+    messages: serde_json::Value,
+    preserve_arrays: bool,
+    image_placeholder_template: Option<&str>,
+) -> Value {
     // preserve_arrays=true: strings → arrays (multimodal)
     // preserve_arrays=false: text-only arrays → strings (standard)
+    // image_placeholder_template: when `preserve_arrays=false` and the array
+    // mixes text + image parts, this template (e.g. `<|image_{n}|>`) lets us
+    // flatten by substituting image parts with model-family placeholders
+    // instead of leaving the raw array for the template, which would crash
+    // string-content templates like Phi-3-vision's `'+' message.content`.
 
     let Some(arr) = messages.as_array() else {
         return Value::from_serialize(&messages);
@@ -155,6 +164,22 @@ fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) ->
                                 "content".to_string(),
                                 serde_json::Value::String(concatenated_text),
                             );
+                        } else if !preserve_arrays
+                            && !content_array.is_empty()
+                            && let Some(placeholder_tpl) = image_placeholder_template
+                        {
+                            // Mixed text+image array for a string-content
+                            // template — flatten with model-family image
+                            // placeholders inlined where the image parts were.
+                            // The `is_empty` guard preserves a literal `[]`
+                            // content (matches pre-PR behavior); flattening
+                            // an empty array to `""` would silently change
+                            // what the template renders.
+                            let flattened = flatten_mixed_content(&content_array, placeholder_tpl);
+                            msg_object.insert(
+                                "content".to_string(),
+                                serde_json::Value::String(flattened),
+                            );
                         } else {
                             // Keep as array (with media_url → media placeholder conversion applied)
                             msg_object.insert(
@@ -171,6 +196,43 @@ fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) ->
         .collect();
 
     Value::from_serialize(&updated_messages)
+}
+
+/// Concatenate a mixed-content array (text parts + image placeholders) into a
+/// single string. Text parts contribute their `text` field as-is; non-text
+/// parts (image, video, audio after the URL→placeholder conversion in
+/// `convert_media_url_to_placeholder`) emit the per-family placeholder with
+/// `{n}` substituted by the 1-based index of the image in the message.
+///
+/// Used in `may_be_fix_msg_content` when `preserve_arrays=false` and the
+/// template knows a placeholder convention — currently Phi-3-vision
+/// (`<|image_{n}|>`) and LLaVA-1.5 (`<image>`).
+///
+/// **Caveat — non-text index slot:** `img_idx` increments for every non-text
+/// part, not just images. The current supported families (Phi-3, LLaVA-1.5)
+/// are image-only so there's no collision today, but a future image+video
+/// family would silently consume an image-index slot for each video/audio
+/// part and emit the image placeholder there. When adding a family that
+/// mixes modalities in one message, either:
+///   1. expand this function with per-modality placeholder strings, or
+///   2. assert in `convert_media_url_to_placeholder` that only "image"
+///      placeholders reach this path.
+fn flatten_mixed_content(parts: &[serde_json::Value], placeholder_tpl: &str) -> String {
+    let mut out = String::new();
+    let mut img_idx: u32 = 1;
+    for part in parts {
+        let type_str = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if type_str == "text" {
+            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                out.push_str(text);
+            }
+        } else if !type_str.is_empty() {
+            let placeholder = placeholder_tpl.replace("{n}", &img_idx.to_string());
+            out.push_str(&placeholder);
+            img_idx += 1;
+        }
+    }
+    out
 }
 
 fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
@@ -420,6 +482,10 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         self.supports_add_generation_prompt
     }
 
+    fn image_placeholder_template(&self) -> Option<&'static str> {
+        self.image_placeholder_template
+    }
+
     fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String> {
         let mixins = Value::from_dyn_object(self.mixins.clone());
 
@@ -451,6 +517,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         messages_for_template = serde_json::to_value(may_be_fix_msg_content(
             messages_for_template,
             self.requires_content_arrays,
+            self.image_placeholder_template,
         ))
         .unwrap();
 
@@ -769,7 +836,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test array → string normalization (preserve_arrays=false for standard templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: text-only array is concatenated into a single string
         assert_eq!(
@@ -815,7 +883,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test array → string normalization (preserve_arrays=false for standard templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: System message with string content remains unchanged
         assert_eq!(
@@ -859,10 +928,48 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Empty arrays should be preserved regardless of preserve_arrays setting
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: Empty arrays are preserved as-is
         assert!(messages[0]["content"].is_array());
+        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 0);
+    }
+
+    /// Empty arrays must stay as `[]` even when a flatten-time placeholder
+    /// template is provided (Phi-3 / LLaVA-1.5 path). Without the
+    /// `!content_array.is_empty()` guard in `may_be_fix_msg_content`,
+    /// an empty content array would silently flatten to `""` and the
+    /// chat template would render an entirely empty message instead of
+    /// failing or being preserved.
+    #[test]
+    fn test_may_be_fix_msg_content_empty_array_with_placeholder_template() {
+        let json_str = r#"{
+            "model": "phi-3-vision",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": []
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages_raw = serde_json::to_value(request.messages()).unwrap();
+
+        // preserve_arrays=false + image_placeholder_template=Some(...) is
+        // the combination that previously flattened `[]` to `""`.
+        let messages = serde_json::to_value(may_be_fix_msg_content(
+            messages_raw,
+            false,
+            Some("<|image_{n}|>"),
+        ))
+        .unwrap();
+
+        assert!(
+            messages[0]["content"].is_array(),
+            "empty array should be preserved as `[]`, not flattened to `\"\"`"
+        );
         assert_eq!(messages[0]["content"].as_array().unwrap().len(), 0);
     }
 
@@ -883,7 +990,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test with preserve_arrays=false (standard templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: String content is not modified
         assert_eq!(
@@ -914,7 +1022,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Mixed content should be preserved regardless of preserve_arrays setting
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: Mixed content types are preserved as array for template handling
         // image_url should be converted to image placeholder
@@ -925,6 +1034,68 @@ mod tests {
         assert_eq!(content_array[1]["type"], "image");
         assert!(content_array[1].get("image_url").is_none());
         assert_eq!(content_array[2]["type"], "text");
+    }
+
+    /// Mixed text+image array with a string-content template and an
+    /// `<|image_{n}|>`-style placeholder (Phi-3-vision) — content must be
+    /// flattened to a single string with numbered image markers in place of
+    /// the image parts. The previous default (leave as array) would crash
+    /// the Phi-3 template's `'+' message.content` concatenation.
+    #[test]
+    fn test_may_be_fix_msg_content_flattens_phi3_style() {
+        let json_str = r#"{
+            "model": "phi-3-vision",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "First "},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/a.jpg"}},
+                        {"type": "text", "text": " then "},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/b.jpg"}},
+                        {"type": "text", "text": "?"}
+                    ]
+                }
+            ]
+        }"#;
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages_raw = serde_json::to_value(request.messages()).unwrap();
+
+        let messages = serde_json::to_value(may_be_fix_msg_content(
+            messages_raw,
+            false,
+            Some("<|image_{n}|>"),
+        ))
+        .unwrap();
+
+        let content = messages[0]["content"].as_str().expect("content flattened");
+        assert_eq!(content, "First <|image_1|> then <|image_2|>?");
+    }
+
+    /// Same flattening with a static placeholder (LLaVA-1.5 `<image>`).
+    #[test]
+    fn test_may_be_fix_msg_content_flattens_llava_style() {
+        let json_str = r#"{
+            "model": "llava-1.5-7b-hf",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe: "},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/x.jpg"}}
+                    ]
+                }
+            ]
+        }"#;
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages_raw = serde_json::to_value(request.messages()).unwrap();
+
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, Some("<image>")))
+                .unwrap();
+
+        let content = messages[0]["content"].as_str().expect("content flattened");
+        assert_eq!(content, "Describe: <image>");
     }
 
     /// Tests that content arrays containing only non-text types remain as arrays,
@@ -948,7 +1119,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Non-text arrays should be preserved regardless of preserve_arrays setting
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: Non-text content arrays are preserved, with image_url converted to image
         assert!(messages[0]["content"].is_array());
@@ -1045,7 +1217,8 @@ NORMAL MODE
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Mixed types should preserve array structure, with image_url converted to image
         assert!(messages[0]["content"].is_array());
@@ -1074,7 +1247,8 @@ NORMAL MODE
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Unknown types mixed with text should preserve array
         assert!(messages[0]["content"].is_array());
@@ -1216,7 +1390,7 @@ NORMAL MODE
 
         // Apply content normalization with preserve_arrays=false (standard templates)
         let mut messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         normalize_tool_arguments_in_messages(&mut messages);
 
@@ -1249,7 +1423,8 @@ NORMAL MODE
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test with preserve_arrays=true (multimodal templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, true)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
 
         // Verify: String is converted to array format
         assert!(messages[0]["content"].is_array());
@@ -1279,7 +1454,8 @@ NORMAL MODE
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test with preserve_arrays=true (multimodal templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, true)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
 
         // Verify: Array is preserved as-is
         assert!(messages[0]["content"].is_array());

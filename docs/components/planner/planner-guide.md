@@ -51,9 +51,9 @@ features:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `sla`: regression-based scaling with ttft/itl targets. |
+| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `sla`: regression-based scaling with ttft_ms/itl_ms targets. |
 
-When `optimization_target` is `throughput` or `latency`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft`/`itl` fields are ignored.
+When `optimization_target` is `throughput` or `latency`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft_ms`/`itl_ms` fields are ignored.
 
 ### Scaling Mode Fields (SLA mode)
 
@@ -76,17 +76,17 @@ When throughput-based scaling is enabled, the planner needs engine performance d
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `throughput_adjustment_interval` | int | `180` | Seconds between throughput-based scaling decisions. |
+| `throughput_adjustment_interval_seconds` | int | `180` | Seconds between throughput-based scaling decisions. |
 | `min_endpoint` | int | `1` | Minimum number of engine endpoints to maintain. |
 | `max_gpu_budget` | int | `8` | Maximum total GPUs the planner may allocate. |
-| `ttft` | float | `500.0` | TTFT SLA target (ms) for scaling decisions. |
-| `itl` | float | `50.0` | ITL SLA target (ms) for scaling decisions. |
+| `ttft_ms` | float | `500.0` | TTFT SLA target (ms) for scaling decisions. |
+| `itl_ms` | float | `50.0` | ITL SLA target (ms) for scaling decisions. |
 
 ### Load-Based Scaling Settings
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `load_adjustment_interval` | int | `5` | Seconds between FPM regression updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations are fed into the regression at this interval. Must be shorter than `throughput_adjustment_interval`. |
+| `load_adjustment_interval_seconds` | int | `5` | Seconds between FPM regression updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations are fed into the regression at this interval. Must be shorter than `throughput_adjustment_interval_seconds`. |
 | `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for regression. |
 | `fpm_sample_bucket_size` | int | `16` | Number of buckets for observation retirement (must be a perfect square). |
 | `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |

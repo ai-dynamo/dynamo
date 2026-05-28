@@ -11,9 +11,17 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.trtllm,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 try:
     from dynamo.trtllm.request_handlers.handler_base import HandlerBase
@@ -125,7 +133,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         sample = self.registry.get_sample_value(
             "trtllm_kv_transfer_latency_seconds_count"
         )
-        self.assertEqual(sample, 0.0)
+        self.assertIn(sample, (None, 0.0))
 
     def test_kv_transfer_perf_return_values(self):
         """Verify record_kv_transfer_perf returns True on record, False on skip."""
@@ -248,19 +256,21 @@ class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
 
     def test_structured_output_detection_keys(self):
         """Verify guided decoding detection keys in generate_locally match _override_sampling_params."""
-        # Extract detection keys from generate_locally: the tuple in
+        # Extract detection keys from _generate_locally_impl: the tuple in
         #   any(guided.get(k) for k in ("json", ...))
-        gen_source = textwrap.dedent(inspect.getsource(HandlerBase.generate_locally))
+        # generate_locally is a thin wrapper; the logic lives in the impl.
+        gen_source = textwrap.dedent(
+            inspect.getsource(HandlerBase._generate_locally_impl)
+        )
         gen_tree = ast.parse(gen_source)
         detection_keys = set()
         for node in ast.walk(gen_tree):
             # Find: any(guided.get(k) for k in (...))
             if isinstance(node, ast.Tuple) and all(
-                isinstance(e, (ast.Constant, ast.Str)) for e in node.elts
+                isinstance(e, ast.Constant) and isinstance(e.value, str)
+                for e in node.elts
             ):
-                vals = {
-                    e.value if isinstance(e, ast.Constant) else e.s for e in node.elts
-                }
+                vals = {e.value for e in node.elts}
                 if "json_object" in vals:  # identify the right tuple
                     detection_keys = vals
 

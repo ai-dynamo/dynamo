@@ -11,6 +11,8 @@ pub mod cache;
 pub mod common;
 pub mod engine;
 pub mod kv_manager;
+#[cfg(feature = "kvbm-offload")]
+pub mod kvbm_offload;
 pub mod loadgen;
 pub mod replay;
 pub mod scheduler;

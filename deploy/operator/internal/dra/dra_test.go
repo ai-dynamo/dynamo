@@ -7,10 +7,9 @@ package dra
 
 import (
 	"context"
-	"strconv"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,6 +80,26 @@ func TestApplyClaim_ReplacesGPUWithDRAClaim(t *testing.T) {
 	assert.Empty(t, ps.InitContainers)
 }
 
+func TestApplyClaim_ReplacesMIGResourceWithDRAClaim(t *testing.T) {
+	migResource := corev1.ResourceName("nvidia.com/mig-3g.20gb")
+	ps := basePodSpec()
+	ps.Containers[0].Resources.Limits = corev1.ResourceList{
+		migResource: resource.MustParse("1"),
+	}
+	ps.Containers[0].Resources.Requests = corev1.ResourceList{
+		migResource: resource.MustParse("1"),
+	}
+
+	err := ApplyClaim(&ps, "myapp-worker-gpu")
+	require.NoError(t, err)
+
+	main := ps.Containers[0]
+	assert.NotContains(t, main.Resources.Limits, migResource)
+	assert.NotContains(t, main.Resources.Requests, migResource)
+	require.Len(t, main.Resources.Claims, 1)
+	assert.Equal(t, ClaimName, main.Resources.Claims[0].Name)
+}
+
 func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
 	ps := basePodSpec()
 	ps.Containers = append(ps.Containers, corev1.Container{Name: "sidecar", Image: "sidecar:latest"})
@@ -91,6 +110,47 @@ func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
 	require.Len(t, ps.Containers[0].Resources.Claims, 1)
 	assert.Equal(t, ClaimName, ps.Containers[0].Resources.Claims[0].Name)
 	assert.Empty(t, ps.Containers[1].Resources.Claims)
+}
+
+func TestExtractGPUParamsFromResourceRequirements_MIGResource(t *testing.T) {
+	gpuCount, deviceClassName, err := ExtractGPUParamsFromResourceRequirements(
+		&v1beta1.GPUMemoryServiceSpec{DeviceClassName: "gpu.nvidia.com"},
+		corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceName("nvidia.com/mig-3g.20gb"): resource.MustParse("1"),
+			},
+		},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, gpuCount)
+	assert.Equal(t, "gpu.nvidia.com", deviceClassName)
+}
+
+func TestExtractGPUCountFromResourceRequirements_DeterministicResourceSelection(t *testing.T) {
+	resources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceName("nvidia.com/mig-3g.20gb"):           resource.MustParse("1"),
+			corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("4"),
+		},
+	}
+
+	gpuCount, err := ExtractGPUCountFromResourceRequirements(resources)
+	require.NoError(t, err)
+	assert.Equal(t, 4, gpuCount)
+}
+
+func TestExtractGPUCountFromResourceRequirements_RejectsFractionalGPU(t *testing.T) {
+	resources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("500m"),
+		},
+	}
+
+	_, err := ExtractGPUCountFromResourceRequirements(resources)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a whole number")
+	assert.Contains(t, err.Error(), "500m")
 }
 
 func TestGenerateResourceClaimTemplate_Enabled(t *testing.T) {
@@ -120,24 +180,4 @@ func TestGenerateResourceClaimTemplate_DisabledReturnsDelete(t *testing.T) {
 func TestResourceClaimTemplateName(t *testing.T) {
 	assert.Equal(t, "myapp-worker-gpu", ResourceClaimTemplateName("myapp", "Worker"))
 	assert.Equal(t, "app-vllmdecodeworker-gpu", ResourceClaimTemplateName("app", "VllmDecodeWorker"))
-}
-
-func TestExtractGPUParams(t *testing.T) {
-	count, dc := ExtractGPUParams(nil, nil)
-	assert.Equal(t, 0, count)
-	assert.Equal(t, "", dc)
-
-	count, dc = ExtractGPUParams(
-		&v1alpha1.GPUMemoryServiceSpec{Enabled: true},
-		&v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: strconv.Itoa(4)}},
-	)
-	assert.Equal(t, 4, count)
-	assert.Equal(t, "", dc)
-
-	count, dc = ExtractGPUParams(
-		&v1alpha1.GPUMemoryServiceSpec{Enabled: true, DeviceClassName: "gpu.intel.com/xe"},
-		&v1alpha1.Resources{Requests: &v1alpha1.ResourceItem{GPU: "2"}},
-	)
-	assert.Equal(t, 2, count)
-	assert.Equal(t, "gpu.intel.com/xe", dc)
 }

@@ -30,6 +30,8 @@ docs:
   - 'LICENSE'
   - 'CODEOWNERS'
   - '.coveragerc'
+  - '.claude/**'
+  - '.agents/**'
 
 examples:
   - 'recipes/**'
@@ -90,6 +92,9 @@ core:
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
+  # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
+  # TokenSpeed Docker images and backend-specific build/test jobs.
+  - 'components/src/dynamo/tokenspeed/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
@@ -148,6 +153,16 @@ trtllm:
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
   - 'container/templates/trtllm_*'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+# sample -> sample-unified-test (framework-agnostic CPU-only backend
+# reference implementation). Piggybacks on the vllm image, so a sample-only
+# change triggers vllm-build + sample-unified-test. The common/backend ABC
+# already triggers `core`; this filter is for the launch scripts and tests
+# that are specific to the sample backend.
+sample:
+  - 'examples/backends/sample/**'
   - '!**/*.md'
   - '!**/*.rst'
 

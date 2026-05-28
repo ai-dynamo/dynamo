@@ -71,7 +71,6 @@ python3 -m dynamo.sglang \
   --dyn-tool-call-parser glm47 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --enable-metrics \
-  ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
   "${EXTRA_ARGS[@]}" &
 
 wait_any_exit

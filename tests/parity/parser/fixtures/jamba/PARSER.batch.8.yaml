@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: jamba
+mode: batch
+cases:
+  PARSER.batch.8.a:
+    description: Narration before tool call only
+    ref: dynamo
+    model_text: 'I will check the weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: I will check the weather.
+    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: 'I will check the weather. '
+  PARSER.batch.8.b:
+    description: Narration after tool call only
+    ref: dynamo
+    model_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls> Let me know if you need
+      more.'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+  PARSER.batch.8.c:
+    description: Narration both before and after (sandwich)
+    ref: dynamo
+    model_text: 'I will check the weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>
+      Let me know if you need more.'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: I will check the weather.
+    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: 'I will check the weather. '
+  PARSER.batch.8.d:
+    description: Narration between multiple tool calls
+    ref: dynamo
+    model_text: 'I will check the weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>
+      Then check LA weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "LA"}}]</tool_calls>'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: I will check the weather.
+    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: 'I will check the weather. '

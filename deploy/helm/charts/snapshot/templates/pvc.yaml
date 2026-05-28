@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-{{- if and (eq .Values.storage.type "pvc") .Values.storage.pvc.create }}
+{{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") .Values.storage.pvc.create }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -21,4 +21,3 @@ spec:
   storageClassName: {{ .Values.storage.pvc.storageClass }}
   {{- end }}
 {{- end }}
-

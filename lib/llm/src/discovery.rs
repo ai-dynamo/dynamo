@@ -13,6 +13,9 @@ pub use worker_set::WorkerSet;
 pub(crate) mod runtime_configs;
 pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};
 
+mod endpoint_card;
+pub use endpoint_card::wait_for_endpoint_model_card;
+
 mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 

@@ -15,6 +15,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
@@ -25,6 +26,13 @@ export MODALITY=${MODALITY:-"multimodal"}
 export MODEL_TYPE=${MODEL_TYPE:-"qwen3_vl"}
 export BLOCK_SIZE=${BLOCK_SIZE:-32}
 
+# Profiler/test-harness override: KvCacheConfig JSON when env var is set, empty otherwise.
+TRTLLM_OVERRIDE_ARGS=()
+OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
+if [[ -n "$OVERRIDE_JSON" ]]; then
+    TRTLLM_OVERRIDE_ARGS=(--override-engine-args "$OVERRIDE_JSON")
+fi
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --multimodal "Launching Aggregated Multimodal + MM Router" "$MODEL_PATH" "$HTTP_PORT"
 
@@ -34,6 +42,7 @@ python3 -m dynamo.trtllm \
   --served-model-name "${SERVED_MODEL_NAME}__internal" \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
   --modality "$MODALITY" \
+  "${TRTLLM_OVERRIDE_ARGS[@]}" \
   --publish-events-and-metrics \
   --kv-block-size "$BLOCK_SIZE" &
 

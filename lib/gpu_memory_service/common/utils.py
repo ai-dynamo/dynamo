@@ -11,6 +11,26 @@ from typing import NoReturn
 logger = logging.getLogger(__name__)
 
 
+# Canonical names for GMS-related environment variables. Defined here so
+# operator code, launcher code, and engine integration code all reference
+# one source of truth — keeping these in lockstep with the Go-side
+# constants in deploy/operator/internal/gms/gms.go.
+ENV_SCRATCH_KV_ENABLED = "DYN_GMS_SCRATCH_KV_ENABLED"
+ENV_VMM_GRANULARITY = "DYN_GMS_VMM_GRANULARITY"
+
+_TRUTHY = ("true", "1", "yes")
+
+
+def is_truthy_env(name: str) -> bool:
+    """True when the named env var is set to a recognized truthy string."""
+    return os.environ.get(name, "").lower() in _TRUTHY
+
+
+def is_scratch_kv_enabled() -> bool:
+    """True when this engine should use two-phase (scratch → real) KV allocation."""
+    return is_truthy_env(ENV_SCRATCH_KV_ENABLED)
+
+
 def fail(message: str, *args, exc_info=None) -> NoReturn:
     logger.critical(message, *args, exc_info=exc_info)
     logging.shutdown()

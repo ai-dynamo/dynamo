@@ -119,6 +119,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
 | vLLM KV cache bytes     | requested_vllm_kv_cache_bytes(N)                                             | (vLLM only) Exact KV cache bytes. Sets `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` → `--kv-cache-memory-bytes`. Deterministic, parallel-safe. |
 | SGLang KV tokens        | requested_sglang_kv_tokens(N)                                                          | (SGLang only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. Deterministic, parallel-safe. |
+| SGLang VRAM GiB         | requested_sglang_vram_gib(N)                                                           | (SGLang only) Max VRAM in GiB. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
 | TRT-LLM KV tokens      | requested_trtllm_kv_tokens(N)                                                          | (TRT-LLM only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args`. Deterministic, parallel-safe. |
 | TRT-LLM VRAM GiB       | requested_trtllm_vram_gib(N)                                                           | (TRT-LLM only) Max VRAM in GiB. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args`. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
 | Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
@@ -188,7 +189,8 @@ Markers differ by engine:
 
 **SGLang** uses token-based control:
 - **`profiled_vram_gib(N)`** — actual peak from nvidia-smi at the recommended token count. Used for `--max-vram-gib` filtering and scheduler budget.
-- **`requested_sglang_kv_tokens(N)`** — max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. SGLang's default `--mem-fraction-static` is never overridden; the token cap is the sole allocation control. Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
+- **`requested_sglang_kv_tokens(N)`** — max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens N --mem-fraction-static 0.9`. The token cap controls actual KV allocation; `--mem-fraction-static 0.9` is also emitted to keep SGLang's pool-creation gate open on small GPUs (see PR #9238). Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
+- **`requested_sglang_vram_gib(N)`** — max VRAM in GiB for non-text workloads (video/image diffusion), where token-based control doesn't apply. Used for scheduler admission and display only.
 
 **TRT-LLM** uses token-based control (text models) or byte-based control (diffusion models):
 - **`profiled_vram_gib(N)`** — actual peak from nvidia-smi. Used for `--max-vram-gib` filtering and scheduler budget.
@@ -206,7 +208,7 @@ GPU tests run concurrently via a custom VRAM-aware scheduler (`tests/utils/pytes
 2. **Profiling race**: engines snapshot free memory during init; concurrent startups corrupt each other. The scheduler staggers launches (VRAM stability check) and retries transient failures.
 3. **Engine-specific allocation**: each test gets a constrained allocation so it uses only its budgeted share. xdist has no mechanism for this.
    - **vLLM**: `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES = N` → `--kv-cache-memory-bytes` (from `requested_vllm_kv_cache_bytes` marker). Byte-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_vllm_gpu_mem_args` in `gpu_utils.sh`.
-   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_sglang_gpu_mem_args` in `gpu_utils.sh`.
+   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens N --mem-fraction-static 0.9` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe; `--mem-fraction-static 0.9` is also emitted to keep SGLang's pool-creation gate open on small GPUs (see PR #9238). Non-text workloads may use `requested_sglang_vram_gib` for scheduler admission only.
    - **TRT-LLM**: `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS = N` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON (from `requested_trtllm_kv_tokens` marker). Token-based cap is deterministic and parallel-safe. Uses `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate function because TRT-LLM requires JSON merging).
 
 ```bash
@@ -488,12 +490,57 @@ All commands shown in the "Local equivalent" columns above are also documented i
 Tests must be deterministic. A flaky test -- one that sometimes passes and sometimes fails without code changes -- wastes CI time and erodes developer trust in the test suite. If you encounter or introduce a flaky test:
 
 1. **Fix it first.** Remove sources of non-determinism: set a fixed random seed, eliminate race conditions, mock network calls, avoid relying on execution order.
-2. **If a fix is not immediately possible**, quarantine the test to prevent it from blocking other developers:
+
+   **Special case — LLM-output assertions.** Pass `temperature=0` and `seed=0` so sampling picks the same logits, but treat that as **necessary, not sufficient**: GPU-served LLM inference remains non-deterministic in practice from FP non-associativity in tensor-parallel reductions, batch-size-dependent kernel selection (cuBLAS / flash-attn), prefix-cache state across calls, and non-deterministic attention kernels. For any test asserting on served-model response content, configure retry (step 2b below) — treat it as required, not a fallback.
+2. **If determinism truly isn't reachable** (LLM-output content as above, model genuinely non-deterministic, an upstream library has races we don't own, etc.), retry. There are two mechanisms; pick based on what the test does.
+
+   **2a. Whole-test retry — `@pytest.mark.flaky`** (use for unit tests, parser tests, tool-calling tests, anything that doesn't launch a server)
+
+   The plugin (`pytest-rerunfailures`) is pinned in `container/deps/requirements.test.txt` and the `flaky` marker is registered in `pyproject.toml`. Apply it as narrowly as you can:
+   ```python
+   @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
+   def test_named_tool_choice_forces_specific_function(...):
+       ...
+   ```
+   - `reruns=2` means up to 2 retries (3 attempts total). Pick the smallest number that gets you green; don't paper over a real bug.
+   - `only_rerun=[...]` restricts retries to **content / validation failures**. Use the bare exception class name. Common values:
+     - `"AssertionError"` -- direct pytest asserts (most tool-calling and parser tests).
+     - `"EngineResponseError"` -- `tests/utils/engine_process.py` wraps the validator's `AssertionError` here.
+   - **Never** match infra exceptions (`TimeoutError`, `ConnectionError`, `RuntimeError`) -- those signal a real problem, and retrying hides it.
+   - For tests parametrized via dataclasses, add the marker to the per-parametrization `marks=[...]` list so it only applies to the offending case.
+   - Cost: `@pytest.mark.flaky` reruns the *whole* test. For e2e tests where startup costs 60-90s, three attempts can spend 5+ minutes before failing. Use 2b instead.
+
+   **2b. In-process query retry — `payload.max_attempts`** (use for tests going through `run_serve_deployment` — e2e serving, multimodal smoke checks)
+
+   The server is launched once and stays up across attempts; only the request/response is re-issued. Set `max_attempts` on the payload:
+   ```python
+   # tests/serve/multimodal_profiles/vllm.py
+   tests=[
+       MmCase(
+           payload=make_image_payload(
+               ["green", "white", "black", "purple", "red", ...],
+               max_attempts=3,  # known-flaky model output; see comment above
+           )
+       )
+   ],
+   ```
+   For background on the `MultimodalModelProfile → TopologyConfig → MmCase` shape, see [`tests/serve/multimodal_profiles/README.md`](serve/multimodal_profiles/README.md).
+   - The factory functions (`make_image_payload`, `make_video_payload`, `chat_payload`, ...) accept a `max_attempts: int` kwarg that lands on `BasePayload.max_attempts`.
+   - `tests/serve/common.py:run_serve_deployment` wraps the `send_request` + `check_response` pair in a small inline retry loop, catching `ResponseValidationError` with exponential backoff (1.0 → 1.5 → 2.25 → ... seconds, factor 1.5).
+   - Cost: each attempt is ~one inference call (a few seconds), not a server restart. The 60-90s server startup is amortized across all attempts.
+   - Trade-off: only re-issues the same request -- if the flake is in startup or model loading, this won't help; use 2a for those cases.
+
+   **Other in-repo retry sites** (in case you need to roll your own for a different layer):
+   - `tests/frontend/test_frontend_api_surface_compliance.py:_retry_network_op` -- sync, network-only exception list.
+   - `tests/router/helper.py:send_request_with_retry` -- async, status-code-driven (aiohttp).
+   - `tests/utils/managed_deployment.py` -- sync connect retry with 1.5x backoff.
+   - `components/src/dynamo/planner/connectors/remote_client.py` -- sync exponential backoff (`2**attempt`).
+3. **If retry is not enough either**, quarantine the test to prevent it from blocking other developers:
    - `@pytest.mark.skip(reason="Flaky: <ticket link>")` -- disables the test entirely. Use when the test provides no signal in its current state.
    - `@pytest.mark.xfail(reason="Flaky: <ticket link>", strict=False)` -- runs the test but does not fail the suite. Use when you still want visibility into pass/fail rates while you investigate.
    - In Rust, use `#[ignore]` with a comment explaining why.
-3. **File a ticket** for every quarantined test. Flaky tests without an owner drift indefinitely.
-4. **Do not leave tests quarantined for more than one sprint.** If the root cause is elusive, delete the test and rewrite it.
+4. **File a ticket** for every retried or quarantined test. Even tests using `@pytest.mark.flaky` need an owner -- retry hides the symptom; the underlying non-determinism still exists.
+5. **Do not leave tests quarantined for more than one sprint.** If the root cause is elusive, delete the test and rewrite it. A test marked `flaky` should aim to drop the marker once the upstream determinism issue is fixed.
 
 ### Timeouts
 
@@ -508,6 +555,29 @@ Long-running tests **must** have an explicit timeout. A test that hangs (e.g., w
 - Set the timeout to **2x-3x the observed average runtime**. This gives enough headroom for legitimate variance (model loading jitter, CPU contention) while still catching genuine hangs. For example, if a test normally completes in 90 seconds, set `@pytest.mark.timeout(240)`.
 - For Rust, use `#[timeout(Duration::from_secs(300))]` or set a default timeout in `Cargo.toml`.
 - In CI, the workflow also enforces a global job timeout (see workflow YAML files). Per-test timeouts catch problems earlier and with a clearer error message than a blanket job cancellation.
+
+### When NOT to bump pytest timeouts (CI runner-poisoning)
+
+A test failing with `pytest-timeout` or `URL check failed after Ns` is **not always** a "wait longer" problem. On L4 CI runners we've observed a cascade where the *symptom* looks like a timeout but the *cause* is runner-environment exhaustion:
+
+1. Runner runs out of memory (or fills its disk during a heavy test).
+2. The OOM killer (or disk-pressure death) takes out the per-test ephemeral **etcd** instance (dynamic ports like `127.0.0.1:2387`, not the default `2379`).
+3. The Dynamo worker process tries to register endpoints / publish metrics / get a lease and fails repeatedly with:
+   ```
+   dynamo_runtime::transports::etcd::lease: Failed to establish keep-alive stream
+   error=grpc request error: code: 'The service is currently unavailable',
+   message: "tcp connect error",
+   ConnectError("tcp connect error", 127.0.0.1:2387,
+                Os { code: 111, kind: ConnectionRefused, message: "Connection refused" })
+   ```
+4. The worker never finishes startup; the test's URL health check eventually times out (often after 600s), and **every subsequent test on the same runner inherits the poisoned state** and fails in cascading ways.
+
+How to recognize the cascade vs a genuine slow cold-load:
+
+- **Cascade signal:** Multiple unrelated tests in the same job fail (e.g. `disaggregated`, `multi_node_tp_headless`, `lora_aggregated_router` all timing out at exactly 601.7s on the URL check). The CI dashboard auto-categorizes the job with `oom`, `disk-space-error`, and `etcd-error` tags simultaneously.
+- **Genuine cold-load signal:** A single specific test fails deterministically near a clean budget boundary (e.g. exactly 146.79s for a 147s budget) across many runs. Bumping that one test's timeout helps.
+
+If you see the cascade signal, **do not** bump pytest timeouts. The fix lives in CI infra (bigger runners, disk cleanup between tests, per-test runner reset) — not in the test code.
 
 ### Time Budgets
 
@@ -566,7 +636,7 @@ The profiler automatically detects the engine type and uses the appropriate bina
 
 **Requirement (vLLM):** The launch script must honor `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`. This is handled by `build_vllm_gpu_mem_args` in `gpu_utils.sh` (returns `--kv-cache-memory-bytes N`).
 
-**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
+**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N --mem-fraction-static 0.9`).
 
 **Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args` because TRT-LLM requires JSON merging.
 
@@ -606,9 +676,9 @@ Env vars control engine allocation during profiling and parallel test execution:
 
 **`_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`** (integer) — SGLang only:
 
-| Engine  | Returned CLI flag                | Notes |
-|---------|----------------------------------|-------|
-| SGLang  | `--max-total-tokens N`           | Token-based KV cache cap |
+| Engine  | Returned CLI flag                                  | Notes |
+|---------|----------------------------------------------------|-------|
+| SGLang  | `--max-total-tokens N --mem-fraction-static 0.9`   | Token-based KV cache cap; `--mem-fraction-static 0.9` keeps the pool-creation gate open on small GPUs (see PR #9238) |
 
 **`_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS`** (integer) — TRT-LLM text models:
 

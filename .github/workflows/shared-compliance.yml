@@ -26,6 +26,11 @@ on:
         description: 'Target platforms to test as a JSON array'
         required: true
         type: string
+      compliance_timeout_minutes:
+        description: 'Timeout in minutes for the compliance scan job'
+        required: false
+        type: number
+        default: 15
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -49,6 +54,7 @@ jobs:
     # cuda_version not empty -- name: cuda12, linux/amd64
     # cuda_version empty -- name: cpu, linux/amd64
     name: Compliance ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
+    timeout-minutes: ${{ inputs.compliance_timeout_minutes }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

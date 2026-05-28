@@ -122,7 +122,6 @@ Here's a template structure based on the examples:
 
 ```yaml
     YourWorker:
-      dynamoNamespace: your-namespace
       componentType: worker
       replicas: N
       envFromSecret: your-secrets  # e.g., hf-token-secret
@@ -216,7 +215,6 @@ To disable this behavior for a component and manually control image pull secrets
 
 ```yaml
     YourWorker:
-      dynamoNamespace: your-namespace
       componentType: worker
       annotations:
         nvidia.com/disable-image-pull-secret-discovery: "true"
@@ -225,7 +223,6 @@ To disable this behavior for a component and manually control image pull secrets
 When disabled, you can manually specify secrets as you would for a normal pod spec via:
 ```yaml
     YourWorker:
-      dynamoNamespace: your-namespace
       componentType: worker
       annotations:
         nvidia.com/disable-image-pull-secret-discovery: "true"

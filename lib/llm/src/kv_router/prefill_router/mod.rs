@@ -236,7 +236,7 @@ impl
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
 
                 // Set router_config_override for decode:
-                // - overlap_score_weight = 0 (no KV cache overlap scoring for decode)
+                // - overlap_score_credit = 0 (no KV cache overlap scoring for decode)
                 // - assume_kv_reuse = false (generate random hashes since decode workers
                 //   may already have blocks cached from prefill transfer)
                 // - track_prefill_tokens = false (decode router should ignore prompt-side load)
@@ -272,7 +272,7 @@ mod tests {
             ..Default::default()
         }));
 
-        assert_eq!(override_config.overlap_score_weight, Some(0.0));
+        assert_eq!(override_config.overlap_score_credit, Some(0.0));
         assert_eq!(override_config.assume_kv_reuse, Some(false));
         assert_eq!(override_config.track_prefill_tokens, Some(false));
         assert_eq!(override_config.router_temperature, Some(0.7));

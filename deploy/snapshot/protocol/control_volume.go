@@ -12,6 +12,11 @@ const (
 	// checkpoint/restore lifecycle sentinels written by the snapshot agent
 	// and observed by the workload. It replaces the SIGUSR1/SIGCONT signals
 	// that previously required the workload to run as PID 1.
+	//
+	// When a pod targets multiple containers (e.g. failover engine-0 +
+	// engine-1), each container mounts the emptyDir with
+	// subPath=<containerName>, so sentinels are isolated per-container on
+	// disk while each container still sees them at SnapshotControlMountPath.
 	SnapshotControlVolumeName = "snapshot-control"
 
 	// SnapshotControlMountPath is where the control volume is mounted inside
@@ -39,9 +44,14 @@ const (
 )
 
 // EnsureControlVolume adds the snapshot-control emptyDir to the pod spec,
-// mounts it on the given container at SnapshotControlMountPath, and sets
-// DYN_SNAPSHOT_CONTROL_DIR on the container's env. Idempotent — safe to call
-// from multiple code paths (operator checkpoint job, restore pod shaping, etc.).
+// mounts it on the given container at SnapshotControlMountPath (using
+// subPath=<containerName> so concurrent target containers in a failover pod
+// each see an isolated view), and sets DYN_SNAPSHOT_CONTROL_DIR on the
+// container's env. Idempotent — safe to call from multiple code paths
+// (operator checkpoint job, restore pod shaping, etc.).
+//
+// Callers must pass the container's own name; the subPath makes the mount
+// container-scoped on disk even though the in-container path is the same.
 func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 	if podSpec == nil || container == nil {
 		return
@@ -61,6 +71,12 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 		})
 	}
 
+	// Per-container subPath so each target container has its own sentinel
+	// directory on the emptyDir's backing disk. An empty container name
+	// degrades to the volume root, which is the correct (and only safe)
+	// behavior for single-container pods.
+	subPath := container.Name
+
 	hasMount := false
 	for _, m := range container.VolumeMounts {
 		if m.Name == SnapshotControlVolumeName {
@@ -72,6 +88,7 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 			Name:      SnapshotControlVolumeName,
 			MountPath: SnapshotControlMountPath,
+			SubPath:   subPath,
 		})
 	}
 

@@ -29,7 +29,7 @@ spec:
         # The handler's graceful degradation feature makes this possible:
         # - With no "prefill" profile defined, it runs only the "decode" profile.
         # - The decode scorer receives isDisaggregated=false, so the Dynamo KV router
-        #   uses full overlap scoring (overlap_score_weight=1.0) for aggregated mode.
+        #   uses full overlap scoring (overlap_score_credit=1.0) for aggregated mode.
         # - If prefill workers were added later (and a prefill profile configured),
         #   the same handler would automatically switch to disaggregated routing.
         config:

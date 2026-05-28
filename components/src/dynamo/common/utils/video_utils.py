@@ -175,19 +175,21 @@ def encode_to_mp4(
         raise RuntimeError(f"Video encoding failed: {e}") from e
 
 
-def encode_to_mp4_bytes(
+def encode_to_video_bytes(
     frames: np.ndarray,
     fps: int = 16,
+    output_format: str = "mp4",
 ) -> bytes:
-    """Encode numpy frames to MP4 bytes (in-memory).
+    """Encode numpy frames to video bytes (in-memory).
 
     Args:
         frames: Video frames as numpy array of shape (num_frames, height, width, 3)
             with uint8 values 0-255.
         fps: Frames per second for the output video.
+        output_format: Container format — "mp4", "webm".
 
     Returns:
-        MP4 video as bytes.
+        Encoded video as bytes.
 
     Raises:
         ImportError: If imageio is not available.
@@ -204,20 +206,26 @@ def encode_to_mp4_bytes(
                 "Install with: pip install imageio[ffmpeg]"
             )
 
-    logger.info(f"Encoding {len(frames)} frames to bytes at {fps} fps")
+    logger.info(f"Encoding {len(frames)} frames to {output_format} bytes at {fps} fps")
 
     try:
-        # Use in-memory buffer
         buffer = io.BytesIO()
 
-        # imageio can write to BytesIO with format hint
+        kwargs: dict = {"fps": fps}
+        if output_format == "webm":
+            kwargs["codec"] = "libvpx-vp9"
+        elif output_format == "mp4":
+            kwargs["codec"] = "libx264"
+        else:
+            raise ValueError(f"No codec specified for response format: {output_format}")
+
         if hasattr(iio, "imwrite"):
-            # v3 API - write to buffer
-            iio.imwrite(buffer, frames, extension=".mp4", fps=fps, codec="libx264")
+            # v3 API
+            iio.imwrite(buffer, frames, extension=f".{output_format}", **kwargs)
         else:
             # v2 API
             writer = iio.get_writer(  # type: ignore[attr-defined]
-                buffer, format="FFMPEG", mode="I", fps=fps, codec="libx264"
+                buffer, format="FFMPEG", mode="I", **kwargs
             )
             try:
                 for frame in frames:

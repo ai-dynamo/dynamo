@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 # TODO: make this using cli flag
 _DEFAULT_GRACE_PERIOD_SECS = 5.0
 _DEFAULT_DRAIN_TIMEOUT_SECS = 30.0
+_DEFAULT_CLEANUP_TIMEOUT_SECS = 30.0
 _GRACE_PERIOD_ENV = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"
 _shutdown_started = asyncio.Event()
 
@@ -70,6 +71,7 @@ async def graceful_shutdown_with_discovery(
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
     drain_callback: Optional[Callable[[], Coroutine]] = None,
+    cleanup_callback: Optional[Callable[[], Coroutine]] = None,
 ) -> None:
     """Perform graceful shutdown with endpoint unregistration and optional drain.
 
@@ -85,6 +87,14 @@ async def graceful_shutdown_with_discovery(
             from segfaulting due to use-after-free on freed GPU memory (#7319).
             Any exception raised by drain_callback is logged and swallowed so that
             shutdown still proceeds even if draining times out or fails.
+        cleanup_callback: Optional async callable awaited after drain_callback
+            but *before* runtime.shutdown(). Used by unified backends to release
+            engine resources (GPU memory, PyTorch process groups) before the Rust
+            runtime tears down — the Python ``Worker.run()`` ``finally`` block
+            cannot be relied on for this because ``runtime.shutdown()`` collapses
+            the event loop's native runtime before the cleanup coroutine can
+            complete. Any exception raised by cleanup_callback is logged and
+            swallowed so that shutdown still proceeds.
     """
     if _shutdown_started.is_set():
         return
@@ -122,6 +132,22 @@ async def graceful_shutdown_with_discovery(
     if shutdown_event is not None:
         shutdown_event.set()
 
+    if cleanup_callback is not None:
+        logger.info("Running engine cleanup before runtime shutdown")
+        try:
+            await asyncio.wait_for(
+                cleanup_callback(), timeout=_DEFAULT_CLEANUP_TIMEOUT_SECS
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Engine cleanup timed out after %.0fs, proceeding with shutdown",
+                _DEFAULT_CLEANUP_TIMEOUT_SECS,
+            )
+        except Exception:
+            logger.exception(
+                "Engine cleanup raised an exception; proceeding with shutdown"
+            )
+
     logger.info("Initiating runtime shutdown")
     runtime.shutdown()
 
@@ -133,6 +159,7 @@ def install_signal_handlers(
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
     drain_callback: Optional[Callable[[], Coroutine]] = None,
+    cleanup_callback: Optional[Callable[[], Coroutine]] = None,
 ) -> None:
     shutdown_task: Optional[asyncio.Task[None]] = None
 
@@ -161,6 +188,7 @@ def install_signal_handlers(
                 shutdown_event=shutdown_event,
                 grace_period_s=grace_period_s,
                 drain_callback=drain_callback,
+                cleanup_callback=cleanup_callback,
             )
         )
         shutdown_task.add_done_callback(_on_shutdown_done)

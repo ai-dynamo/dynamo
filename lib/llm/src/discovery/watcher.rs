@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -88,6 +89,10 @@ pub struct ModelWatcher {
     /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
     /// can await a racing put before proceeding with cleanup.
     pending_puts: DashMap<String, JoinHandle<()>>,
+    /// Frontend's `--model-path`. Threaded into `download_config` so
+    /// `file://` slots can fall back here when the worker's path is
+    /// unreachable on this host.
+    local_model_path: Option<PathBuf>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -167,11 +172,16 @@ impl ModelWatcher {
             registering_worker_sets: DashSet::new(),
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
+            local_model_path: None,
         }
     }
 
     pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
         self.model_update_tx = Some(tx);
+    }
+
+    pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
+        self.local_model_path = path;
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -410,10 +420,8 @@ impl ModelWatcher {
 
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
-            if let Some(_removed_ws) = self.manager.remove_worker_set(&model_name, &ws_key) {
-                // remove_prefill_activator uses deployment namespace (not ws_key)
-                self.manager
-                    .remove_prefill_activator(&model_name, worker_namespace);
+            let removed = self.manager.remove_worker_set(&model_name, &ws_key);
+            if removed.is_some() {
                 tracing::info!(
                     model_name,
                     namespace = %worker_namespace,
@@ -421,13 +429,40 @@ impl ModelWatcher {
                 );
             }
 
-            // If the removed component was a prefill worker, deactivate the decode-side
-            // prefill router so requests fall back to aggregated mode (or fail cleanly
-            // with enforce_disagg). The decode WorkerSet's namespace matches the
-            // deployment namespace, not the ws_key.
+            // Activator-state cleanup depends on which component just went away.
+            //
+            // PREFILL teardown (cached endpoint is stale): drop everything for
+            // this key and deactivate the decode-side router so requests fall
+            // back to aggregated mode (or fail cleanly with `enforce_disagg`).
+            //
+            // DECODE teardown: keep `PrefillReady` (the cached endpoint is still
+            // valid for future decode rebuilds — that's PR 8965's primary
+            // contribution) but DO drop any stale `DecodeWaiting(sender)`. The
+            // sender pointed at a `oneshot::Receiver` held by the now-dropped
+            // PrefillRouter; leaving it in the map causes the next decode
+            // rebuild's `register_prefill_router` to find a stale `DecodeWaiting`,
+            // return `None`, and produce a WorkerSet with no PrefillRouter at
+            // all. The stale-DecodeWaiting cleanup tests cover this rebuild
+            // path.
             if card.model_type.supports_prefill() {
+                if removed.is_some() {
+                    self.manager
+                        .remove_prefill_activator(&model_name, worker_namespace);
+                }
                 self.manager
                     .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
+            } else {
+                // Decode-component teardown: always run the waiter cleanup,
+                // regardless of whether `remove_worker_set` found an entry. If
+                // a decode worker registered (creating a `DecodeWaiting`
+                // activator entry) but `handle_add_helper` later failed before
+                // `add_worker_set`, the WorkerSet is absent here yet the stale
+                // `DecodeWaiting` still needs to be cleared. The helper is
+                // state-safe (`remove_if(|_, v| matches!(v, DecodeWaiting(_)))`)
+                // so calling it on a key that's vacant or holds `PrefillReady`
+                // is a no-op.
+                self.manager
+                    .remove_decode_prefill_waiter(&model_name, worker_namespace);
             }
         }
 
@@ -648,7 +683,8 @@ impl ModelWatcher {
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
-        card.download_config().await?;
+        card.download_config(self.local_model_path.as_deref())
+            .await?;
 
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config.

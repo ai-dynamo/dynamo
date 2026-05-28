@@ -17,11 +17,13 @@ use url::Url;
 
 #[derive(Clone, Debug)]
 pub struct CheckedFile {
-    /// Either a path on local disk or a remote URL (usually nats object store)
     path: Either<PathBuf, Url>,
 
     /// Checksum of the contents of path
     checksum: Checksum,
+
+    /// Size of the file in bytes. `None` for legacy (pre-size) wire format.
+    size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -48,11 +50,13 @@ impl CheckedFile {
         if !path.is_file() {
             anyhow::bail!("Not a file: {}", path.display());
         }
+        let size = std::fs::metadata(&path)?.len();
         let hash = b3sum(&path)?;
 
         Ok(CheckedFile {
             path: Either::Left(path),
             checksum: Checksum::blake3(hash),
+            size: Some(size),
         })
     }
 
@@ -84,6 +88,10 @@ impl CheckedFile {
 
     pub fn checksum(&self) -> &Checksum {
         &self.checksum
+    }
+
+    pub fn size(&self) -> Option<u64> {
+        self.size
     }
 
     /// Does the given file checksum to the same value as this CheckedFile?
@@ -144,12 +152,16 @@ impl Serialize for CheckedFile {
     where
         S: Serializer,
     {
-        let mut cf = serializer.serialize_struct("CheckedFile", 2)?;
+        let n = if self.size.is_some() { 3 } else { 2 };
+        let mut cf = serializer.serialize_struct("CheckedFile", n)?;
         match &self.path {
             Either::Left(path) => cf.serialize_field("path", &path)?,
             Either::Right(url) => cf.serialize_field("path", &url)?,
         };
         cf.serialize_field("checksum", &self.checksum)?;
+        if let Some(size) = self.size {
+            cf.serialize_field("size", &size)?;
+        }
         cf.end()
     }
 }
@@ -159,6 +171,8 @@ impl Serialize for CheckedFile {
 struct WireCheckedFile {
     path: String,
     checksum: Checksum,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 // Convert from the temporary struct to CheckedFile with path type logic.
@@ -169,10 +183,12 @@ impl From<WireCheckedFile> for CheckedFile {
             Ok(url) => CheckedFile {
                 path: Either::Right(url),
                 checksum: temp.checksum,
+                size: temp.size,
             },
             Err(_) => CheckedFile {
                 path: Either::Left(PathBuf::from(temp.path)),
                 checksum: temp.checksum,
+                size: temp.size,
             },
         }
     }
@@ -219,6 +235,27 @@ impl Checksum {
             algorithm,
         }
     }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+}
+
+/// Worker-controlled wire field used as a path component downstream;
+/// reject anything that doesn't look like the algorithm's canonical
+/// digest. Called from both `Deserialize` and `TryFrom<&str>` so both
+/// wire entry points stay in lockstep.
+fn validate_checksum_hash(algorithm: CryptographicHashMethods, hash: &str) -> Result<(), String> {
+    match algorithm {
+        CryptographicHashMethods::BLAKE3 => {
+            if hash.len() != 64 || !hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                return Err(format!(
+                    "expected 64-char lowercase hex blake3 digest, got {hash:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Serialize for Checksum {
@@ -257,6 +294,9 @@ impl<'de> Deserialize<'de> for Checksum {
                 let algorithm = parts[0].parse().map_err(|_| {
                     de::Error::invalid_value(de::Unexpected::Str(parts[0]), &"invalid algorithm")
                 })?;
+                validate_checksum_hash(algorithm, parts[1]).map_err(|msg| {
+                    de::Error::invalid_value(de::Unexpected::Str(parts[1]), &msg.as_str())
+                })?;
 
                 Ok(Checksum::new(parts[1], algorithm))
             }
@@ -281,6 +321,7 @@ impl TryFrom<&str> for Checksum {
                 anyhow::bail!("Unsupported cryptographic hash method: {}", parts[0]);
             }
         };
+        validate_checksum_hash(algo, parts[1]).map_err(|msg| anyhow::anyhow!("{msg}"))?;
 
         Ok(Checksum::new(parts[1], algo))
     }
@@ -332,26 +373,32 @@ mod tests {
         assert_eq!(serialized.trim(), "\"blake3:a12c3d4\"");
     }
 
+    const HEX64: &str = "62bc124be974d3a25db05bedc99422660c26715e5bbda0b37d14bd84a0c65ab2";
+
     #[test]
     fn test_deserialization_blake3() {
-        let s = "\"blake3:abcd1234\"";
-        let deserialized: Checksum = serde_json::from_str(s).unwrap();
-
+        let s = format!("\"blake3:{HEX64}\"");
+        let deserialized: Checksum = serde_json::from_str(&s).unwrap();
         assert_eq!(deserialized.algorithm, CryptographicHashMethods::BLAKE3);
-        assert_eq!(deserialized.hash, "abcd1234");
+        assert_eq!(deserialized.hash, HEX64);
     }
 
     #[test]
     fn test_deserialization_invalid_format() {
-        let s = "\"invalidformat\"";
-        let result: Result<Checksum, _> = serde_json::from_str(s);
-
-        assert!(result.is_err());
-
-        let s = "\"blake3:invalid:format\"";
-        let result: Result<Checksum, _> = serde_json::from_str(s);
-
-        assert!(result.is_err());
+        for bad in [
+            "\"invalidformat\"",
+            "\"blake3:invalid:format\"",
+            // Worker-controlled wire field shouldn't survive as a path
+            // component; reject anything that's not a 64-char lowercase
+            // hex blake3 digest.
+            "\"blake3:abcd1234\"",         // too short
+            "\"blake3:../../etc/passwd\"", // path traversal
+            "\"blake3:62BC124BE974D3A25DB05BEDC99422660C26715E5BBDA0B37D14BD84A0C65AB2\"", // uppercase
+            &format!("\"blake3:{HEX64}x\""), // 65 chars
+        ] {
+            let result: Result<Checksum, _> = serde_json::from_str(bad);
+            assert!(result.is_err(), "expected reject: {bad}");
+        }
     }
 
     #[test]
@@ -362,5 +409,38 @@ mod tests {
         let expected =
             Checksum::blake3("62bc124be974d3a25db05bedc99422660c26715e5bbda0b37d14bd84a0c65ab2");
         assert_eq!(expected, *cf.checksum());
+        assert_eq!(Some(560), cf.size(), "TinyLlama config.json is 560 bytes");
+        assert_eq!(
+            "62bc124be974d3a25db05bedc99422660c26715e5bbda0b37d14bd84a0c65ab2",
+            cf.checksum().hash()
+        );
+    }
+
+    /// Old MDC bytes (no `size` field) deserialize cleanly with
+    /// `size = None`, preserving cross-version compat between a
+    /// pre-size worker and a post-size frontend.
+    #[test]
+    fn test_legacy_wire_format_omits_size() {
+        let legacy = format!(r#"{{"path":"/x/config.json","checksum":"blake3:{HEX64}"}}"#);
+        let cf: CheckedFile = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(None, cf.size());
+        assert_eq!("/x/config.json", cf.path().unwrap().to_str().unwrap());
+    }
+
+    /// New-format CheckedFiles round-trip with the size field.
+    #[test]
+    fn test_new_wire_format_carries_size() {
+        let cf = CheckedFile {
+            path: Either::Left(PathBuf::from("/x/tokenizer.json")),
+            checksum: Checksum::blake3(HEX64),
+            size: Some(12345),
+        };
+        let json = serde_json::to_string(&cf).unwrap();
+        assert!(
+            json.contains("\"size\":12345"),
+            "expected size field in serialization, got: {json}"
+        );
+        let back: CheckedFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(Some(12345), back.size());
     }
 }

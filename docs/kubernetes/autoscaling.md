@@ -20,12 +20,10 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: sglang-agg
       componentType: frontend
       replicas: 1
 
     decode:
-      dynamoNamespace: sglang-agg
       componentType: worker
       replicas: 1
       resources:
@@ -244,7 +242,7 @@ Dynamo metrics include these labels for filtering:
 
 | Label | Description | Example |
 |-------|-------------|---------|
-| `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dynamoNamespace}`) | `default-sglang-agg` |
+| `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dgd-name}`) | `default-sglang-agg` |
 | `model` | Model being served | `Qwen/Qwen3-0.6B` |
 
 <Note>
@@ -319,7 +317,7 @@ spec:
         name: dynamo_ttft_p95_seconds
         selector:
           matchLabels:
-            dynamo_namespace: "default-sglang-agg"  # ← {namespace}-{dynamoNamespace}
+            dynamo_namespace: "default-sglang-agg"  # ← {namespace}-{dgd-name}
       target:
         type: Value
         value: "500m"  # Scale up when TTFT p95 > 500ms
@@ -750,4 +748,3 @@ If you see unstable scaling:
 - [Planner Documentation](../components/planner/planner-guide.md)
 - [Dynamo Metrics Reference](../observability/metrics.md)
 - [Prometheus and Grafana Setup](../observability/prometheus-grafana.md)
-

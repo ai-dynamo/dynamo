@@ -194,6 +194,13 @@ struct HfTokenizerConfigJsonFormatter {
     /// True if the chat template natively references `reasoning_content`.
     /// When true, skip injection — the template handles it.
     template_handles_reasoning: bool,
+    /// Per-family placeholder template for image content parts when flattening
+    /// mixed text+image content arrays into a single string (`preserve_arrays`
+    /// = false path). `{n}` in the template is substituted with the 1-based
+    /// image index. `None` when the model's chat template handles content
+    /// arrays natively (Qwen-VL family) or when we have no flatten strategy
+    /// for it (no MM-aware routing benefit either way).
+    image_placeholder_template: Option<&'static str>,
 }
 
 // /// OpenAI Standard Prompt Formatter

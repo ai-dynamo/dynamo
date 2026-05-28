@@ -18,8 +18,18 @@ static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::
     OnceLock::new();
 
 fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
-    GLOBAL_HARMONY_GPTOSS_ENCODING
-        .get_or_init(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
+    GLOBAL_HARMONY_GPTOSS_ENCODING.get_or_init(|| {
+        // load_harmony_encoding internally constructs a reqwest::blocking::Client,
+        // which builds and drops a Tokio Runtime. Dropping a Runtime from inside
+        // an async context (e.g. when this is called for the first time during
+        // an HTTP request handler) panics with "Cannot drop a runtime in a
+        // context where blocking is not allowed". Run the load on a fresh OS
+        // thread so the inner Runtime is dropped outside any async context.
+        // The init runs at most once per process via OnceLock.
+        std::thread::spawn(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
+            .join()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("harmony encoding loader thread panicked")))
+    })
 }
 
 pub struct GptOssReasoningParser {
@@ -295,7 +305,7 @@ impl ReasoningParser for GptOssReasoningParser {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test] // REASONING.batch.1, PARSER.harmony.1
     fn test_gpt_oss_reasoning_parser() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
@@ -307,7 +317,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.1, PARSER.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let chunks = vec![
@@ -331,7 +341,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.1, PARSER.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming_chunked() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let enc = get_harmony_encoding()
@@ -360,7 +370,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.1, PARSER.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming_variable_length_chunks() {
         let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
         let enc = get_harmony_encoding()

@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{/*
+  Validate that removed/renamed values are not present in the user's values.yaml.
+  Each check detects an old value path and fails with a migration message.
+*/}}
+
+{{/* ---- Subchart toggle migrations (moved to global.*) ---- */}}
+
+{{- if and (hasKey .Values "nats") (hasKey .Values.nats "enabled") }}
+  {{- fail `
+BREAKING CHANGE: 'nats.enabled' has been removed.
+Use 'global.nats.install' instead to control NATS subchart installation.
+
+Before:
+  nats:
+    enabled: false
+
+After:
+  global:
+    nats:
+      install: false
+` }}
+{{- end }}
+
+{{- if and (hasKey .Values "etcd") (hasKey .Values.etcd "enabled") }}
+  {{- fail `
+BREAKING CHANGE: 'etcd.enabled' has been removed.
+Use 'global.etcd.install' instead to control etcd subchart installation.
+
+Before:
+  etcd:
+    enabled: false
+
+After:
+  global:
+    etcd:
+      install: false
+` }}
+{{- end }}
+
+{{- if and (hasKey .Values "grove") (hasKey .Values.grove "enabled") }}
+  {{- fail `
+BREAKING CHANGE: 'grove.enabled' has been removed.
+Use 'global.grove.install' to control Grove subchart installation
+and 'global.grove.enabled' to enable Grove integration.
+
+Before:
+  grove:
+    enabled: true
+
+After:
+  global:
+    grove:
+      install: true   # deploys the Grove operator
+      enabled: true   # enables integration (auto-set when install=true)
+` }}
+{{- end }}
+
+{{- if and (hasKey .Values "kai-scheduler") (hasKey (index .Values "kai-scheduler") "enabled") }}
+  {{- fail `
+BREAKING CHANGE: 'kai-scheduler.enabled' has been removed.
+Use 'global.kai-scheduler.install' to control kai-scheduler subchart installation
+and 'global.kai-scheduler.enabled' to enable kai-scheduler integration.
+
+Before:
+  kai-scheduler:
+    enabled: true
+
+After:
+  global:
+    kai-scheduler:
+      install: true   # deploys kai-scheduler
+      enabled: true   # enables integration (auto-set when install=true)
+` }}
+{{- end }}
+
+{{/*
+  NOTE: dynamo-operator subchart values (e.g. dynamo-operator.nats.enabled,
+  dynamo-operator.webhook.enabled) are validated in the operator subchart's
+  own validate-values.yaml. They cannot be reliably checked here because
+  the parent chart sees merged values (subchart defaults + user overrides),
+  making it impossible to distinguish user-set values from subchart defaults.
+*/}}

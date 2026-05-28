@@ -99,7 +99,14 @@ class VllmWorkerProcess(ManagedProcess):
             "32768",
         ]
 
+        # In serial runs the parallel-GPU scheduler isn't injecting this env;
+        # fall back to the test's @requested_vllm_kv_cache_bytes marker so the
+        # advertised profiled_vram_gib matches what the worker actually allocates.
         kv_bytes = os.environ.get("_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES")
+        if not kv_bytes:
+            kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+            if kv_mark:
+                kv_bytes = str(int(kv_mark.args[0]))
         if kv_bytes:
             command.extend(
                 [
@@ -236,9 +243,11 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
 
 
 # Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning_effort
-@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
-# TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
-@pytest.mark.timeout(300)  # 3x observed ~70s wall time, rounded up
+@pytest.mark.profiled_vram_gib(18.7)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_912_759_000
+)  # KV cache cap (2x safety over min=956_379_136)
+@pytest.mark.timeout(378)  # 6x observed 62.8s avg wall time
 @pytest.mark.post_merge
 def test_reasoning_effort(
     request, start_services: ServicePorts, predownload_models
@@ -305,9 +314,11 @@ def test_reasoning_effort(
 
 
 # Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling
-@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
-# TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
-@pytest.mark.timeout(113)  # 3x observed 37.4s wall time
+@pytest.mark.profiled_vram_gib(18.7)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_912_759_000
+)  # KV cache cap (2x safety over min=956_379_136)
+@pytest.mark.timeout(271)  # 6x observed 45.1s avg wall time (9 runs)
 @pytest.mark.post_merge
 def test_tool_calling(
     request, start_services: ServicePorts, predownload_models
@@ -350,9 +361,11 @@ def test_tool_calling(
 
 
 # Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling_second_round
-@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
-# TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
-@pytest.mark.timeout(115)  # 3x observed 38.1s wall time
+@pytest.mark.profiled_vram_gib(18.7)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_912_759_000
+)  # KV cache cap (2x safety over min=956_379_136)
+@pytest.mark.timeout(265)  # 6x observed 44.1s avg wall time (9 runs)
 @pytest.mark.nightly
 def test_tool_calling_second_round(
     request, start_services: ServicePorts, predownload_models
@@ -417,9 +430,11 @@ def test_tool_calling_second_round(
 
 
 # Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning
-@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
-# TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
-@pytest.mark.timeout(131)  # 3x observed 43.4s wall time
+@pytest.mark.profiled_vram_gib(18.7)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_912_759_000
+)  # KV cache cap (2x safety over min=956_379_136)
+@pytest.mark.timeout(281)  # 6x observed 46.7s avg wall time (9 runs)
 @pytest.mark.nightly
 def test_reasoning(request, start_services: ServicePorts, predownload_models) -> None:
     """Test reasoning functionality with a mathematical problem."""

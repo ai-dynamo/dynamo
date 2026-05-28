@@ -87,7 +87,7 @@ ENV HOME=/home/dynamo
 # Use login shell to pick up umask 002 from /etc/profile.d/00-umask.sh for group-writable files
 SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 # Cache uv downloads; uv handles its own locking for the cache.
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv venv /opt/dynamo/venv --python ${PYTHON_VERSION}
 
@@ -98,7 +98,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Install dynamo wheels (runtime packages only, no test dependencies)
 # uv handles its own locking for the cache, no need to add sharing=locked
 ARG ENABLE_KVBM
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -115,14 +115,14 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
 
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
@@ -139,7 +139,7 @@ RUN git lfs install
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --index-strategy unsafe-best-match \

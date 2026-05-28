@@ -404,10 +404,19 @@ impl OpenAIStopConditionsProvider for UnifiedRequest {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.inner.stop.as_ref().map(|stop| match stop {
-            dynamo_protocols::types::Stop::String(s) => vec![s.clone()],
-            dynamo_protocols::types::Stop::StringArray(arr) => arr.clone(),
-        })
+        self.inner
+            .inner
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.strings())
+    }
+
+    fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
+        self.inner
+            .inner
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.token_ids())
     }
 
     fn nvext(&self) -> Option<&NvExt> {
@@ -534,6 +543,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
