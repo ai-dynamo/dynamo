@@ -1749,7 +1749,7 @@ def _parser_cell_html(
         [
             "",
             "Mode:",
-            f"- {html_lib.escape(f'{mode_meta['label']} / {mode_meta['control']}')}",
+            "- " + html_lib.escape(f"{mode_meta['label']} / {mode_meta['control']}"),
         ]
     )
     static_config = mode_meta.get("static", [])
