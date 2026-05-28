@@ -96,6 +96,9 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_attention_dp_size=aic_attention_dp_size,
         enable_local_indexer=not getattr(args, "durable_kv_events", False),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
+        kv_transfer_abort_timeout_ms=getattr(
+            args, "kv_transfer_abort_timeout_ms", None
+        ),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
         sglang=_build_sglang_args(args),
         preemption_mode=getattr(args, "preemption_mode", "lifo"),
