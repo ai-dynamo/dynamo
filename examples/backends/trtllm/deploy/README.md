@@ -271,7 +271,5 @@ Common issues and solutions:
 3. **Health check failures**: Review model loading logs and increase `initialDelaySeconds`
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
-6. **Git LFS issues**: Ensure git-lfs is installed before building containers
-7. **ARM deployment**: Use `--platform linux/arm64` when building on ARM machines
 
 For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).
