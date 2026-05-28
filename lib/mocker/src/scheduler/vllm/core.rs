@@ -270,7 +270,7 @@ impl VllmCore {
         let (buffer, sink) = capture_router_event_sink(worker_id);
         Self::new_internal(
             args,
-            worker_id as u32,
+            0,
             Some(buffer),
             KvEventPublishers::new(Some(sink), None),
         )
