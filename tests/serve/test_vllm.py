@@ -363,7 +363,10 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(7.3),
             pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
-            pytest.mark.timeout(300),
+            # DYN_CHAT_PROCESSOR=vllm adds startup overhead on the vLLM
+            # chat-processor path; 300s could trip the pytest marker before
+            # the engine-readiness budget (default 600s) completed on slower CI.
+            pytest.mark.timeout(420),
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
