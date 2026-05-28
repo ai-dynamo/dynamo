@@ -83,7 +83,7 @@ spec:
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
-          # Work around the GB200 TRT-LLM/DeepEP warmup failure tracked by DYN-2761.
+          # Work around the GB200 TRT-LLM/DeepEP warmup failure
           - name: TRTLLM_FORCE_COMM_METHOD
             value: NVLINK_TWO_SIDED
           - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
