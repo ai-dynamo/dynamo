@@ -21,7 +21,10 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use half::{f16, bf16};
-use kvbm_kernels::{BlockLayout, sycl_block_from_universal, sycl_universal_from_block, sycl_vectorized_copy};
+use kvbm_kernels::{
+    BlockLayout, sycl_block_from_universal, sycl_nhd_hnd_transpose, sycl_universal_from_block,
+    sycl_vectorized_copy,
+};
 use oneapi_rs::sycl::SyclQueue;
 
 // ---------------------------------------------------------------------------
@@ -309,6 +312,176 @@ sycl_block_universal_test!(sycl_roundtrip_nhd_f16, f16, BlockLayout::NHD);
 sycl_block_universal_test!(sycl_roundtrip_nhd_bf16, bf16, BlockLayout::NHD);
 sycl_block_universal_test!(sycl_roundtrip_hnd_f16, f16, BlockLayout::HND);
 sycl_block_universal_test!(sycl_roundtrip_hnd_bf16, bf16, BlockLayout::HND);
+
+// ---------------------------------------------------------------------------
+// NHD ↔ HND transpose (SYCL path — mirrors CUDA kernel_roundtrip.rs)
+// ---------------------------------------------------------------------------
+//
+// Each test starts from independent ground truth (a deterministic universal
+// tensor projected into the src layout) and verifies the kernel output against
+// the *opposite* layout's ground truth — not against the kernel's own inverse
+// pass. A pure round-trip would silently pass a symmetric bug shared by both
+// directions, since the kernel is a single FFI symbol with a runtime layout
+// switch.
+
+/// Project a `[nh, nl, no, nt, hd]` universal tensor into `nl * no` flat block
+/// chunks, each laid out per `layout` (NHD = `[nt, nh, hd]`, HND = `[nh, nt, hd]`).
+fn project_blocks<T: TestDtype>(
+    universal: &[T], layout: BlockLayout,
+    nh: usize, nl: usize, no: usize, nt: usize, hd: usize,
+) -> Vec<Vec<T>> {
+    let mut blocks = Vec::with_capacity(nl * no);
+    for nl_idx in 0..nl {
+        for no_idx in 0..no {
+            let mut chunk = vec![T::from_f64(0.0); nt * nh * hd];
+            for nt_idx in 0..nt {
+                for nh_idx in 0..nh {
+                    for hd_idx in 0..hd {
+                        let uni_idx = ((((nh_idx * nl + nl_idx) * no + no_idx) * nt + nt_idx) * hd) + hd_idx;
+                        let off = inner_offset(layout, nt_idx, nh_idx, hd_idx, nt, nh, hd);
+                        chunk[off] = universal[uni_idx].clone();
+                    }
+                }
+            }
+            blocks.push(chunk);
+        }
+    }
+    blocks
+}
+
+fn nhd_hnd_transpose_inner<T: TestDtype>(src_layout: BlockLayout) {
+    let queue = match sycl_setup() {
+        Some(q) => q,
+        None => {
+            eprintln!("No XPU/SYCL device found, skipping test");
+            return;
+        }
+    };
+
+    let nh = 3usize;
+    let nl = 2usize;
+    let no = 2usize;
+    let nt = 4usize;
+    let hd = 5usize;
+    let nb = 3usize;
+    let chunk_volume = nh * nt * hd;
+    let universal_volume = nh * nl * no * nt * hd;
+    let chunk_count = nl * no;
+    let elem_size = T::ELEM_SIZE;
+
+    let dst_layout = match src_layout {
+        BlockLayout::NHD => BlockLayout::HND,
+        BlockLayout::HND => BlockLayout::NHD,
+    };
+
+    // Generate deterministic universal tensors and project into both layouts.
+    let universals: Vec<Vec<T>> = (0..nb)
+        .map(|block_idx| {
+            (0..universal_volume)
+                .map(|i| T::from_f64((block_idx * universal_volume + i) as f64 * 0.5 - 1.0))
+                .collect()
+        })
+        .collect();
+
+    let src_blocks: Vec<Vec<Vec<T>>> = universals
+        .iter()
+        .map(|u| project_blocks::<T>(u, src_layout, nh, nl, no, nt, hd))
+        .collect();
+    let dst_blocks_expected: Vec<Vec<Vec<T>>> = universals
+        .iter()
+        .map(|u| project_blocks::<T>(u, dst_layout, nh, nl, no, nt, hd))
+        .collect();
+
+    use oneapi_rs::sycl::SyclSlice;
+
+    // Upload src chunks to device.
+    let mut src_device_bufs: Vec<SyclSlice<T>> = Vec::with_capacity(nb * chunk_count);
+    for block in &src_blocks {
+        for chunk in block {
+            let mut buf = queue.context().alloc_device::<T>(queue.device(), chunk_volume)
+                .expect("device alloc failed");
+            queue.memcpy_sync(chunk.as_slice(), &mut buf).expect("H2D src chunk");
+            src_device_bufs.push(buf);
+        }
+    }
+
+    // Allocate dst chunks on device, zero-filled so a misbehaving kernel that
+    // touches only some elements is detected by assert_close on the rest.
+    let mut dst_device_bufs: Vec<SyclSlice<T>> = Vec::with_capacity(nb * chunk_count);
+    let zeros = vec![T::from_f64(0.0); chunk_volume];
+    for _ in 0..(nb * chunk_count) {
+        let mut buf = queue.context().alloc_device::<T>(queue.device(), chunk_volume)
+            .expect("device alloc failed");
+        queue.memcpy_sync(zeros.as_slice(), &mut buf).expect("dst zero-fill");
+        dst_device_bufs.push(buf);
+    }
+
+    let src_ptr_values: Vec<u64> = src_device_bufs.iter().map(|b| b.as_mut_ptr() as u64).collect();
+    let dst_ptr_values: Vec<u64> = dst_device_bufs.iter().map(|b| b.as_mut_ptr() as u64).collect();
+
+    let mut src_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), src_ptr_values.len())
+        .expect("device alloc failed");
+    queue.memcpy_sync(src_ptr_values.as_slice(), &mut src_ptrs_dev)
+        .expect("src ptrs H2D");
+
+    let mut dst_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), dst_ptr_values.len())
+        .expect("device alloc failed");
+    queue.memcpy_sync(dst_ptr_values.as_slice(), &mut dst_ptrs_dev)
+        .expect("dst ptrs H2D");
+
+    queue.synchronize().expect("sync before kernel");
+
+    let queue_ptr = queue.raw_queue_ptr();
+    let status = unsafe {
+        sycl_nhd_hnd_transpose(
+            src_ptrs_dev.as_mut_ptr() as *const *const c_void,
+            dst_ptrs_dev.as_mut_ptr() as *const *mut c_void,
+            nb, nl, no, nt, nh, hd, elem_size,
+            src_layout,
+            queue_ptr,
+        )
+    };
+    assert_eq!(status, 0, "sycl_nhd_hnd_transpose returned {}", status);
+    queue.synchronize().expect("sync after kernel");
+
+    // Verify each dst chunk matches the opposite-layout ground truth.
+    for block_idx in 0..nb {
+        for chunk_idx in 0..chunk_count {
+            let buf_idx = block_idx * chunk_count + chunk_idx;
+            let readback = queue.clone_dtoh(&dst_device_bufs[buf_idx]).expect("D2H");
+            assert_close(
+                &readback,
+                &dst_blocks_expected[block_idx][chunk_idx],
+                &format!(
+                    "transpose {:?}->{:?} block {} chunk {}",
+                    src_layout, dst_layout, block_idx, chunk_idx
+                ),
+            );
+        }
+    }
+    eprintln!(
+        "SYCL nhd_hnd_transpose verified for {:?} -> {:?}, elem_size={}",
+        src_layout, dst_layout, elem_size,
+    );
+}
+
+macro_rules! sycl_nhd_hnd_test {
+    ($name:ident, $ty:ty, $src_layout:expr) => {
+        #[test]
+        fn $name() {
+            nhd_hnd_transpose_inner::<$ty>($src_layout)
+        }
+    };
+}
+
+sycl_nhd_hnd_test!(sycl_nhd_hnd_transpose_nhd_to_hnd_f16, f16, BlockLayout::NHD);
+sycl_nhd_hnd_test!(sycl_nhd_hnd_transpose_nhd_to_hnd_bf16, bf16, BlockLayout::NHD);
+sycl_nhd_hnd_test!(sycl_nhd_hnd_transpose_nhd_to_hnd_f32, f32, BlockLayout::NHD);
+sycl_nhd_hnd_test!(sycl_nhd_hnd_transpose_nhd_to_hnd_f64, f64, BlockLayout::NHD);
+sycl_nhd_hnd_test!(sycl_nhd_hnd_transpose_hnd_to_nhd_f16, f16, BlockLayout::HND);
+sycl_nhd_hnd_test!(sycl_nhd_hnd_transpose_hnd_to_nhd_bf16, bf16, BlockLayout::HND);
+sycl_nhd_hnd_test!(sycl_nhd_hnd_transpose_hnd_to_nhd_f32, f32, BlockLayout::HND);
+sycl_nhd_hnd_test!(sycl_nhd_hnd_transpose_hnd_to_nhd_f64, f64, BlockLayout::HND);
 
 /// Empty batch should be a noop — the C++ launcher returns 0 for num_blocks==0.
 #[test]

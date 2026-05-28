@@ -7,9 +7,10 @@
 // operations, compiled to a shared library (libkvbm_kernels_sycl.so) and called
 // from Rust via extern "C" FFI — identical to the CUDA path.
 //
-// Two extern "C" launchers:
+// Three extern "C" launchers:
 //   kvbm_kernels_sycl_launch_universal_from_block()
 //   kvbm_kernels_sycl_launch_block_from_universal()
+//   kvbm_kernels_sycl_launch_nhd_hnd_transpose()
 //
 // Build:
 //   icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_sycl.so tensor_permute_kernel.cpp
@@ -209,6 +210,91 @@ int kvbm_kernels_sycl_launch_block_from_universal(
     );
   } catch (const sycl::exception& e) {
     fprintf(stderr, "kvbm_kernels_sycl: block_from_universal failed: %s\n", e.what());
+    return -1;
+  }
+  return 0;
+}
+
+/// NHD - HND transpose. Both sides are operational block stacks shaped as
+/// `[nl, no][nt, nh, hd]` (NHD) or `[nl, no][nh, nt, hd]` (HND); the transform
+/// swaps the inner (nt, nh) order while keeping `hd` contiguous.
+///
+/// Mirrors `kvbm_kernels_launch_nhd_hnd_transpose` in cuda/tensor_kernels.cu.
+/// Each `(block, nl, no, nt, nh, hd)` element is one work-item; `hd` is the
+/// stride-1 axis on both src and dst so adjacent items access adjacent bytes.
+///
+/// Parameters:
+///   src_ptrs       - device-accessible array of num_blocks*nl*no pointers to source chunks
+///   dst_ptrs       - device-accessible array of num_blocks*nl*no pointers to dest chunks
+///   num_blocks     - number of independent blocks
+///   nl             - number of KV-cache layers
+///   no             - number of outer dimensions (typically 2 for K and V)
+///   nt             - page size (tokens per block)
+///   nh             - number of attention heads
+///   hd             - head dimension (elements per head)
+///   elem_size      - bytes per element (2=f16/bf16, 4=f32, 8=f64)
+///   src_layout_value - 0=NHD (src is NHD, dst is HND), 1=HND (src is HND, dst is NHD)
+///   queue_ptr      - opaque sycl::queue* (passed from Rust as *mut c_void)
+///
+/// Returns 0 on success, non-zero on error.
+int kvbm_kernels_sycl_launch_nhd_hnd_transpose(
+    const void* const* src_ptrs,
+    void* const* dst_ptrs,
+    size_t num_blocks,
+    size_t nl, size_t no, size_t nt, size_t nh, size_t hd,
+    size_t elem_size,
+    int src_layout_value,
+    void* queue_ptr)
+{
+  if (num_blocks == 0) return 0;
+  if (!src_ptrs || !dst_ptrs || !queue_ptr) return -1;
+
+  auto& q = *static_cast<sycl::queue*>(queue_ptr);
+  auto src_layout = static_cast<BlockLayout>(src_layout_value);
+  auto dst_layout = (src_layout == BlockLayout::NHD) ? BlockLayout::HND : BlockLayout::NHD;
+
+  size_t block_stride = nl * no;
+  size_t total_per_block = nl * no * nt * nh * hd;
+  size_t total = total_per_block * num_blocks;
+
+  size_t groups = compute_grid_size(total, kBlockDim);
+  if (groups == 0) return 0;
+
+  size_t global_size = groups * kBlockDim;
+
+  try {
+    q.parallel_for(
+      sycl::nd_range<1>(sycl::range<1>(global_size), sycl::range<1>(kBlockDim)),
+      [=](sycl::nd_item<1> item) {
+        size_t thread_id = item.get_global_id(0);
+        size_t stride = item.get_global_range(0);
+
+        for (; thread_id < total; thread_id += stride) {
+          size_t block_idx = thread_id / total_per_block;
+          size_t residual  = thread_id % total_per_block;
+
+          size_t tmp = residual;
+          size_t hd_idx = tmp % hd;  tmp /= hd;
+          size_t nt_idx = tmp % nt;  tmp /= nt;
+          size_t nh_idx = tmp % nh;  tmp /= nh;
+          size_t no_idx = tmp % no;  tmp /= no;
+          size_t nl_idx = tmp;
+
+          size_t chunk_ptr_idx = block_idx * block_stride + nl_idx * no + no_idx;
+          auto* src_chunk = static_cast<const uint8_t*>(src_ptrs[chunk_ptr_idx]);
+          auto* dst_chunk = static_cast<uint8_t*>(dst_ptrs[chunk_ptr_idx]);
+
+          size_t src_off = block_inner_offset(src_layout, nt_idx, nh_idx, hd_idx, nt, nh, hd);
+          size_t dst_off = block_inner_offset(dst_layout, nt_idx, nh_idx, hd_idx, nt, nh, hd);
+
+          copy_element(src_chunk + src_off * elem_size,
+                       dst_chunk + dst_off * elem_size,
+                       elem_size);
+        }
+      }
+    );
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "kvbm_kernels_sycl: nhd_hnd_transpose failed: %s\n", e.what());
     return -1;
   }
   return 0;

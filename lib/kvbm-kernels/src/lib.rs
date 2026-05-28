@@ -17,4 +17,6 @@ pub use tensor_kernels_sycl::sycl_vectorized_copy;
 
 // SYCL permute kernels - queue-based layout transforms (requires xpu-sycl-permute feature)
 #[cfg(feature = "xpu-sycl-permute")]
-pub use tensor_kernels_sycl::{sycl_block_from_universal, sycl_universal_from_block};
+pub use tensor_kernels_sycl::{
+    sycl_block_from_universal, sycl_nhd_hnd_transpose, sycl_universal_from_block,
+};

@@ -1619,10 +1619,6 @@ fn dispatch_transform_kernel_cuda_ffi(
 /// SYCL FFI launch path. The SYCL kernels take `elem_size` (bytes per
 /// element) instead of a dtype enum and operate on a raw `sycl::queue*`
 /// recovered from the stream's underlying `SyclDeviceStream`.
-///
-/// `NhdHndTranspose` is currently unsupported on SYCL — the SYCL kernel
-/// crate does not expose `sycl_nhd_hnd_transpose` yet — and bails with
-/// a precise message.
 #[cfg(feature = "xpu-sycl")]
 #[allow(clippy::too_many_arguments)]
 fn dispatch_transform_kernel_sycl_ffi(
@@ -1683,12 +1679,20 @@ fn dispatch_transform_kernel_sycl_ffi(
             }
         }
         KernelKind::NhdHndTranspose => {
-            let _ = (num_blocks, nh, nl, no, nt, hd, a_ptr, b_ptr, queue_raw, elem_size);
-            bail!(
-                "dispatch_transform_kernel_sycl_ffi: NhdHndTranspose is not yet \
-                 supported on SYCL — kvbm-kernels does not expose \
-                 sycl_nhd_hnd_transpose"
-            );
+            // a = src op, b = dst op. Both sides are operational so the chunk-
+            // pointer table already encodes the layer slice; `nl` here is the
+            // slice length. Mirrors the CUDA arm above.
+            unsafe {
+                kvbm_kernels::sycl_nhd_hnd_transpose(
+                    a_ptr as usize as *const *const c_void,
+                    b_ptr as usize as *const *mut c_void,
+                    num_blocks,
+                    nl, no, nt, nh, hd,
+                    elem_size,
+                    invocation.block_layout,
+                    queue_raw,
+                )
+            }
         }
     };
     if status != 0 {
