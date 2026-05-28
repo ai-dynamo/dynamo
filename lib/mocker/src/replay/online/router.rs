@@ -159,6 +159,7 @@ impl KvReplayRouter {
             slots,
             worker_config_rx,
             config.router_queue_threshold,
+            config.router_queue_by_incoming_missing_isl.clone(),
             args.block_size as u32,
             selector,
             policy,

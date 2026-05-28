@@ -26,23 +26,12 @@ from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
+from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
 
 
 def get_local_dp_rank_range(server_args) -> range:
     """Return the global DP ranks hosted by this local worker."""
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
-    nnodes = getattr(server_args, "nnodes", 1) or 1
-    node_rank = getattr(server_args, "node_rank", 0) or 0
-
-    if enable_dp_attention and dp_size > 1:
-        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-        start_dp_rank = node_rank * local_dp_size
-        end_dp_rank = start_dp_rank + local_dp_size
-    else:
-        start_dp_rank = 0
-        end_dp_rank = 1
-
+    start_dp_rank, end_dp_rank = local_dp_rank_bounds(server_args)
     return range(start_dp_rank, end_dp_rank)
 
 
@@ -228,15 +217,15 @@ class DynamoSglangPublisher:
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
-                active_decode_blocks = kv_metrics.kv_active_blocks
+                active_decode_blocks, total_blocks = kv_metrics_block_values(
+                    kv_metrics, self.server_args.page_size
+                )
                 self.metrics_publisher.publish(
                     dp_rank, kv_used_blocks=active_decode_blocks
                 )
                 dp_rank_str = str(dp_rank)
                 # Publish total blocks (always available in KvMetrics)
-                self.component_gauges.set_total_blocks(
-                    dp_rank_str, kv_metrics.kv_total_blocks
-                )
+                self.component_gauges.set_total_blocks(dp_rank_str, total_blocks)
                 # Publish GPU cache usage percentage (always available in KvMetrics)
                 self.component_gauges.set_gpu_cache_usage(
                     dp_rank_str, kv_metrics.gpu_cache_usage_perc

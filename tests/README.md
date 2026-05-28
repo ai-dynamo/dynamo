@@ -112,7 +112,10 @@ Markers are required for all tests. They are used for test selection in CI and l
 
 ### Marker Requirements
 - Every test must have at least one **Lifecycle** marker, and **Test Type** and **Hardware** markers.
-- **Component/Framework** markers are required as applicable.
+- **Framework** and **Component** markers are required as applicable. When a test
+  has a framework marker (`vllm`/`trtllm`/`sglang`), it must also pick **exactly
+  one** component marker so tests are grouped consistently by feature area and
+  remain selectable via expressions like `pytest -m "vllm and multimodal"`.
 
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
@@ -126,9 +129,12 @@ Markers are required for all tests. They are used for test selection in CI and l
 | SGLang VRAM GiB         | requested_sglang_vram_gib(N)                                                           | (SGLang only) Max VRAM in GiB. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
 | TRT-LLM KV tokens      | requested_trtllm_kv_tokens(N)                                                          | (TRT-LLM only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args`. Deterministic, parallel-safe. |
 | TRT-LLM VRAM GiB       | requested_trtllm_vram_gib(N)                                                           | (TRT-LLM only) Max VRAM in GiB. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args`. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
-| Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router, multimodal, core | Backend or component specificity. |
-| Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
+| Framework               | vllm, trtllm, sglang                                             | Which backend the test runs against. Pair with a component marker. |
+| Component               | core, multimodal, router, kvbm, kvbm_concurrency, fault_tolerance, planner | Which part of the backend the test exercises. Pick exactly one of {core, multimodal, router, kvbm, fault_tolerance} per framework-tagged test (disjoint); use `kvbm_concurrency` additionally for KVBM stress tests. `planner` is its own component used by the planner test suite. |
+| Infrastructure          | k8s, deploy                                                      | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
+| Dependency add-ons      | lmcache                                                          | Optional dependency required by the test (paired with a framework marker, e.g. `vllm + lmcache`). |
+| Selector-only           | none                                                             | Defined in `pyproject.toml` for CI selector expressions (e.g. `pre_merge and none and gpu_1` to target tests with no framework marker). Not applied to individual tests. |
 | Other                   | slow, skip, xfail, custom_build, model, aiconfigurator           | Special handling                   |
 
 ### Example (vLLM)
@@ -139,7 +145,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 @pytest.mark.profiled_vram_gib(20.5)  # actual nvidia-smi peak
 @pytest.mark.requested_vllm_kv_cache_bytes(942_054_000)  # KV cache cap (2x safety over min=471_027_000)
 @pytest.mark.vllm
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_kv_cache_behavior():
     ...
 ```
@@ -153,6 +159,7 @@ def test_kv_cache_behavior():
 @pytest.mark.requested_sglang_kv_tokens(96)     # KV cache cap (2x safety over min=48)
 @pytest.mark.timeout(265)
 @pytest.mark.sglang
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_sglang_aggregated():
     ...
 ```
@@ -166,6 +173,7 @@ def test_sglang_aggregated():
 @pytest.mark.requested_trtllm_kv_tokens(2592)   # KV cache cap (2x safety over min=1296)
 @pytest.mark.timeout(300)
 @pytest.mark.trtllm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_trtllm_aggregated():
     ...
 ```
@@ -175,6 +183,7 @@ def test_trtllm_aggregated():
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.multimodal  # video output → multimodal component
 # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens doesn't apply
 # and requested_trtllm_vram_gib (KvCacheConfig.max_gpu_total_bytes) has no effect —
 # the VRAM is model weights + activations. Only profiled_vram_gib is meaningful.

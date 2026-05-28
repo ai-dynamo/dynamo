@@ -148,6 +148,9 @@ You also need:
 
 ## Setup
 
+> [!WARNING]
+> **Known limitation in 1.2.0.** With both `--enable-metrics` and `--disable-piecewise-cuda-graph` set on the SGLang worker, the process can crash on the first KV-cache write due to a race in the upstream `mooncake-transfer-engine` thread pool. The recipe below omits these flags; per-process metrics scraping via the `dynamo.frontend` is unaffected. The mooncake-side fix is being tracked upstream.
+
 **SGLang worker** — HiCache with Mooncake storage:
 
 ```bash
@@ -179,7 +182,7 @@ python -m dynamo.frontend \
 | Flag                        | Env var                       | Default | Description                                                                                                                                                        |
 | --------------------------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--shared-cache-type`       | `DYN_SHARED_CACHE_TYPE`       | `none`  | `none` disables shared-pool lookups; `hicache` enables Mooncake queries.                                                                                           |
-| `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `0.0`   | Discount factor for shared-pool hits. `0.0` queries but ignores them; `0.5` treats a shared hit as half a device hit; `1.0` treats shared and device hits equally. |
+| `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `0.5`   | Discount factor for shared-pool hits. `0.0` queries but ignores them; `0.5` treats a shared hit as half a device hit; `1.0` treats shared and device hits equally. |
 
 Per-request overrides are available via `RouterConfigOverride.shared_cache_multiplier` for A/B experimentation without restarting the router.
 

@@ -19,19 +19,47 @@ ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
+ARG NIXL_REF
+{% if device == "cuda" %}
+ARG CUDA_MAJOR
+{% endif %}
 
 WORKDIR /workspace
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
+{% if device != "cuda" %}
+ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
+{% else %}
 ENV PATH=/usr/local/bin/etcd:${PATH}
+{% endif %}
 
+{% if device != "cuda" %}
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 {% if device == "xpu" %}
+ENV NIXL_PREFIX=/opt/intel/intel_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+{% elif device == "cpu" %}
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+{% endif %}
+ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-{% elif device == "cpu" %}
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+{% else %}
+# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel on
+# LD_LIBRARY_PATH so dlopen() can find it from processes that don't import
+# the `nixl` Python package — chiefly `dynamo.frontend`, which is pure-Rust
+# from a process perspective. Without this, Rust nixl-sys's stub-mode runtime
+# loader returns is_stub()=true and the frontend rejects any model card
+# carrying a `media_decoder` (i.e. workers launched with --frontend-decoding)
+# with "OpenAIPreprocessor.new_with_parts: NIXL is not supported in stub mode".
+# The wheel installs libnixl.so under a hidden ".libs/" sibling that only the
+# wheel's own RPATH knows about; standard LD search can't find it without help.
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ENV LD_LIBRARY_PATH=${SITE_PACKAGES}/.nixl_cu${CUDA_MAJOR}.mesonpy.libs:${LD_LIBRARY_PATH:-}
 {% endif %}
 
 # Install NATS and ETCD
@@ -49,15 +77,74 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
+{% if device != "cuda" %}
+# Copy UCX and NIXL from wheel_builder for CPU/XPU devices
+# (CUDA devices use NIXL from upstream vLLM wheels)
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
+{% if device == "xpu" %}
+# XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
+COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+{% endif %}
+# Copy NIXL Python wheels
+COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+
+# Install RDMA libraries required for UCX to find RDMA devices
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libibverbs1 \
+        rdma-core \
+        ibverbs-utils \
+        libibumad3 \
+        libnuma1 \
+        librdmacm1 \
+        ibverbs-providers && \
+    rm -rf /var/lib/apt/lists/*
+{% endif %}
+
 # Copy attribution files and wheels
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+
+{% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
+{% if device != "cuda" %}
+# NIXL meta package always tries to find a cuda-backend
+# https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
+#
+# We therefore install nixl-cu* packages, and use LD_LIBRARY_PATH settings to point to our installation of nixl
+# v1.1.0 nixl-cu13 has in-built RPATH point to conflicting built-in libs with symbols unsupported in non-cuda builds.
+# we therefore avoid installing nixl-cu13
+
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eu; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    NIXL_VERSION="${NIXL_REF#v}"; \
+    uv pip install \
+        {{ pip_target }} --force-reinstall --no-deps \
+        "nixl==${NIXL_VERSION}" \
+        "nixl-cu12==${NIXL_VERSION}"
+{% endif %}
+
+# Copy attribution files and wheels
+COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+
+# Install device-specific NIXL wheels for non-CUDA devices.
+# These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
+{% if device != "cuda" %}
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
-{% set pip_target = "--python /opt/venv/bin/python" if device == "xpu" else "--system" %}
+
+# Install Dynamo runtime wheels and optional KVBM/GMS wheels.
+# Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
@@ -71,7 +158,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
-{% if device == "cuda" %}
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
 # jq for readable curl output just like the upstream omni image does.
 RUN set -eux; \
@@ -89,8 +175,15 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
+    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
+{% if device == "xpu" %}
+# Remove conflicting standard triton package for XPU and reinstall triton-xpu
+# This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
+# Reinstalling triton-xpu ensures the triton namespace is properly configured
+RUN uv pip uninstall triton && \
+    uv pip install --force-reinstall --no-deps triton-xpu
 {% endif %}
 {% endif %}
 

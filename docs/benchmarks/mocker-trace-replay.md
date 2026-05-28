@@ -151,6 +151,54 @@ Example:
 The second `session-a` row waits for the first turn to complete plus 50 ms. The second `session-b`
 row also waits for the first turn to complete plus the inferred 50 ms timestamp delta.
 
+### Agentic Mooncake
+
+`--trace-format agentic_mooncake` replays request-level workflow dependencies in addition to the
+Mooncake request fields. Each row should contain the normal Mooncake fields plus a stable
+`request_id`. Dependency fields are optional.
+
+```json
+{
+  "request_id": "root-2",
+  "session_id": "run-42:root",
+  "timestamp": 1000.0,
+  "input_length": 4096,
+  "output_length": 256,
+  "hash_ids": [0, 1, 2, 3],
+  "wait_for": ["child-1"],
+  "branches": ["child-1"],
+  "prefix_reset": false,
+  "delay": 10.0,
+  "tool_wait_ms": 2500.0
+}
+```
+
+Rows with no `wait_for` use `timestamp` as their start time. Rows with dependencies wait for every
+listed request to complete, then wait `delay + tool_wait_ms` before dispatch. `branches` records
+child requests spawned by this row, and `prefix_reset` marks the first row in a trajectory.
+
+Use `agent_trace_to_mooncake --agentic` to create this format from Dynamo agent traces:
+
+```bash
+cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
+  --agentic \
+  --input-path /tmp/dynamo-agent-trace.jsonl \
+  --output-file /tmp/dynamo-agent-trace.agentic-mooncake.jsonl
+```
+
+Replay it with:
+
+```bash
+python -m dynamo.replay /tmp/dynamo-agent-trace.agentic-mooncake.jsonl \
+    --trace-format agentic_mooncake \
+    --trace-block-size 128 \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --num-workers 4 \
+    --extra-engine-args '{"block_size":128}' \
+    --report-json /tmp/agentic-replay-report.json
+```
+
 Replay uses two different block-size concepts for trace files:
 
 - `--trace-block-size`: how many tokens each `hash_id` in the dataset represents
@@ -178,6 +226,7 @@ The dedicated replay CLI exposes:
 - `--replay-concurrency`
 - `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
+- `--trace-format mooncake|mooncake-delta|agentic_mooncake|applied_compute_agentic`
 - `--trace-block-size`
 - `--turns-per-session`
 - `--shared-prefix-ratio`

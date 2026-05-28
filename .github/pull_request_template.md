@@ -12,4 +12,4 @@
 
 #### Related Issues: (use one of the action keywords Closes / Fixes / Resolves / Relates to)
 
-- closes GitHub issue: #xxx
+- closes #xxx

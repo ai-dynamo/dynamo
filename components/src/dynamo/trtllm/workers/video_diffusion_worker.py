@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
 
@@ -96,13 +96,17 @@ async def init_video_diffusion_worker(
 
     logging.info(f"Registering model '{model_name}' with ModelType={model_type}")
 
-    # register_model is Dynamo's generic model registration function
+    # Diffusion has no prefill/decode split: a single worker owns the
+    # whole pipeline, so it advertises as Aggregated with no peer
+    # dependencies.
     await register_model(
         ModelInput.Text,
         model_type,
         endpoint,
         config.model,
         model_name,
+        worker_type=WorkerType.Aggregated,
+        needs=[],
     )
 
     logging.info(f"Model registered, serving endpoint: {config.endpoint}")
