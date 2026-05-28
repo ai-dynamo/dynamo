@@ -15,7 +15,6 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
@@ -33,6 +32,7 @@ from vllm.sampling_params import (
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
+from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -265,14 +265,6 @@ class VllmEngineQuiesceController:
         self._is_quiesced = False
 
 
-@dataclass(frozen=True)
-class LoRAInfo:
-    """Metadata for a loaded LoRA adapter."""
-
-    id: int
-    path: str
-
-
 def _compute_mm_uuids(
     multi_modal_data: Dict[str, Any] | None,
 ) -> Dict[str, list[str]] | None:
@@ -298,33 +290,6 @@ def _compute_mm_uuids(
         return None
     uuids = compute_mm_uuids_from_images(images)
     return {"image": uuids}
-
-
-# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
-# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
-_lora_manager = None
-
-
-def get_lora_manager():
-    """Get the LoRAManager singleton, initializing it on first call if enabled."""
-    global _lora_manager
-
-    if _lora_manager is not None:
-        return _lora_manager
-
-    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
-        try:
-            from dynamo.common.lora import LoRAManager
-
-            _lora_manager = LoRAManager()
-            logger.info("LoRAManager initialized successfully")
-            return _lora_manager
-        except Exception as e:
-            logger.warning(
-                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
-            )
-
-    return None
 
 
 def build_sampling_params(

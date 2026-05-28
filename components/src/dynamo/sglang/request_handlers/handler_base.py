@@ -7,7 +7,6 @@ import importlib
 import inspect
 import json
 import logging
-import os
 import random
 import threading
 from abc import ABC, abstractmethod
@@ -28,6 +27,7 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
@@ -46,32 +46,6 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
 logger = logging.getLogger(__name__)
-
-# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
-# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
-_lora_manager = None
-
-
-def get_lora_manager():
-    """Get the LoRAManager singleton, initializing it on first call if enabled."""
-    global _lora_manager
-
-    if _lora_manager is not None:
-        return _lora_manager
-
-    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
-        try:
-            from dynamo.common.lora import LoRAManager
-
-            _lora_manager = LoRAManager()
-            logger.info("LoRAManager initialized successfully")
-            return _lora_manager
-        except Exception as e:
-            logger.warning(
-                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
-            )
-
-    return None
 
 
 class SGLangEngineQuiesceController:

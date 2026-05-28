@@ -6,10 +6,17 @@ Minimal Python wrapper around Rust LoRA core with extension points for custom so
 """
 
 import asyncio
+import logging
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Protocol
 
 from dynamo.llm import LoRADownloader
+
+from .once import OnceLock
+
+logger = logging.getLogger(__name__)
 
 
 class LoRASourceProtocol(Protocol):
@@ -112,3 +119,38 @@ class LoRAManager:
     def _uri_to_cache_key(self, uri: str) -> str:
         """Convert URI to cache key. Delegates to Rust for consistency."""
         return LoRADownloader.uri_to_cache_key(uri)
+
+
+@dataclass(frozen=True)
+class LoRAInfo:
+    """Metadata for a loaded LoRA adapter."""
+
+    id: int
+    path: str
+
+
+_lora_manager: OnceLock[LoRAManager] = OnceLock()
+
+
+def _init_lora_manager() -> LoRAManager:
+    manager = LoRAManager()
+    logger.info("LoRAManager initialized successfully")
+    return manager
+
+
+def get_lora_manager() -> Optional[LoRAManager]:
+    """Get the LoRAManager singleton, initializing it on first call if enabled."""
+    existing = _lora_manager.get()
+    if existing is not None:
+        return existing
+
+    if os.environ.get("DYN_LORA_ENABLED", "").lower() not in ("true", "1", "yes"):
+        return None
+
+    try:
+        return _lora_manager.get_or_init(_init_lora_manager)
+    except Exception as e:
+        logger.warning(
+            f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
+        )
+        return None
