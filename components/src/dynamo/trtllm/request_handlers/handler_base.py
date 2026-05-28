@@ -224,7 +224,6 @@ def extract_logprobs(
             selected.append(float(token_logprobs))
             top_per_position.append([])
             continue
-        any_top_k = True
         actual_token_id = (
             new_token_ids[token_idx] if token_idx < len(new_token_ids) else None
         )
@@ -236,6 +235,8 @@ def extract_logprobs(
             # speculative-decoding rejection). Skip the position entirely
             # rather than mis-correlate selected with an arbitrary entry.
             continue
+        # We're committed to emitting a real top-k list for this position.
+        any_top_k = True
         selected.append(float(info.logprob))
         entries: list[TopLogprob] = []
         for rank_idx, (tok_id, entry) in enumerate(token_logprobs.items()):

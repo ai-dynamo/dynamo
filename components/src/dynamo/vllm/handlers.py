@@ -616,7 +616,7 @@ def extract_logprobs(
         selected.append(float(info.logprob))
 
         entries: list[TopLogprob] = []
-        for tok_id, entry_info in token_logprobs_dict.items():
+        for rank_idx, (tok_id, entry_info) in enumerate(token_logprobs_dict.items()):
             token_str = getattr(entry_info, "decoded_token", None)
             # `is None` rather than falsy: an empty-string decoded token
             # (BOS/EOS, byte-pair fragments) is a real value and should
@@ -627,12 +627,16 @@ def extract_logprobs(
                     token_str = tokenizer.decode([tok_id])
                 except Exception:
                     token_str = None
-            rank = getattr(entry_info, "rank", None)
-            if rank is None:
-                rank = 0
+            # Fall back to positional `rank_idx+1` when the engine doesn't
+            # populate `.rank`, matching the SGLang/TRT-LLM extractors.
+            # The dict is already in rank order (vLLM's logprob outputs
+            # iterate rank-sorted entries).
+            entry_rank = getattr(entry_info, "rank", None)
+            if entry_rank is None:
+                entry_rank = rank_idx + 1
             entries.append(
                 TopLogprob(
-                    rank=rank,
+                    rank=entry_rank,
                     token_id=tok_id,
                     token=token_str,
                     logprob=float(entry_info.logprob),

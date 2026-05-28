@@ -3,9 +3,12 @@
 
 """Conformance check: bare EngineConfig declares no capabilities.
 
-The registry-to-enum lock-step is enforced Rust-side via the
-[`every_forwarded_field_has_capability`] schema test; this file
-only covers the Python boundary.
+The registry-to-enum lock-step is enforced Rust-side via
+``registry_capability_names_match_field_names``
+(`lib/backend-common/src/schema.rs`) and the full-coverage check in
+``every_serializable_request_field_is_classified``
+(`lib/backend-common/tests/schema_coverage.rs`); this file only
+covers the Python boundary.
 """
 
 from __future__ import annotations
