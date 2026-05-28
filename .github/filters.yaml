@@ -34,8 +34,8 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
-  # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
-  - 'skills/**'
+  # Root-level compatibility symlink -> .agents/skills (skills live there).
+  - 'skills'
 
 examples:
   - 'recipes/**'
@@ -73,7 +73,6 @@ ignore:
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
-  - 'scripts/dco_check.py'
 
 ci: &ci
   - '.github/workflows/**'
@@ -98,9 +97,7 @@ core:
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
-  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
-  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
@@ -161,11 +158,9 @@ vllm:
   - '!**/*.rst'
 
 sglang:
-  - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/templates/sglang_*'
-  - 'container/deps/sglang/**'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -196,9 +191,7 @@ frontend:
   - 'container/deps/*'
   - 'container/compliance/**'
   - 'components/src/dynamo/router/**'
-  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
-  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
