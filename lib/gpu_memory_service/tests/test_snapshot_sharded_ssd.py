@@ -36,34 +36,6 @@ def _source(path: str, byte_count: int) -> FileTransferSource:
     )
 
 
-def test_group_sources_by_root_uses_two_queues_per_root_by_default():
-    sources = [
-        _source("/mnt/nvme0/gms/shard_0000.bin", 1),
-        _source("/mnt/nvme0/gms/shard_0001.bin", 1),
-        _source("/mnt/nvme1/gms/shard_0002.bin", 1),
-    ]
-
-    groups = _group_sources_by_root(
-        sources,
-        ["/mnt/nvme0/gms", "/mnt/nvme1/gms"],
-    )
-
-    assert set(groups) == {
-        "/mnt/nvme0/gms#q0",
-        "/mnt/nvme0/gms#q1",
-        "/mnt/nvme1/gms",
-    }
-    assert sorted(
-        file_path
-        for file_groups in groups.values()
-        for file_path, _sources in file_groups
-    ) == [
-        "/mnt/nvme0/gms/shard_0000.bin",
-        "/mnt/nvme0/gms/shard_0001.bin",
-        "/mnt/nvme1/gms/shard_0002.bin",
-    ]
-
-
 def test_group_sources_by_root_preserves_single_queue_when_requested():
     sources = [
         _source("/mnt/nvme0/gms/shard_0000.bin", 1),
@@ -84,7 +56,7 @@ def test_group_sources_by_root_preserves_single_queue_when_requested():
     ]
 
 
-def test_group_sources_by_root_splits_each_root_into_balanced_queues():
+def test_group_sources_by_root_splits_roots_into_balanced_default_queues():
     sources = [
         _source("/mnt/nvme0/gms/shard_0000.bin", 10),
         _source("/mnt/nvme0/gms/shard_0001.bin", 6),
@@ -97,7 +69,6 @@ def test_group_sources_by_root_splits_each_root_into_balanced_queues():
     groups = _group_sources_by_root(
         sources,
         ["/mnt/nvme0/gms", "/mnt/nvme1/gms"],
-        queues_per_root=2,
     )
 
     assert set(groups) == {
