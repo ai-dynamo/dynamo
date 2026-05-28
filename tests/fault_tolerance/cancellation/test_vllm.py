@@ -398,7 +398,7 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.timeout(150)  # 3x average
+@pytest.mark.timeout(660)  # 3x average (~219s)
 @pytest.mark.nightly
 @pytest.mark.gpu_2
 def test_request_cancellation_vllm_prefill_cancel(
