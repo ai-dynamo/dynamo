@@ -59,8 +59,8 @@ pub struct IndexerPeerSnapshot {
 impl IndexerPeerSnapshot {
     fn from_messenger(messenger: &Messenger) -> Result<Self> {
         let peer_info = messenger.peer_info();
-        let peer_info_bytes = rmp_serde::to_vec(&peer_info)
-            .context("failed to serialise PeerInfo to MessagePack")?;
+        let peer_info_bytes =
+            rmp_serde::to_vec(&peer_info).context("failed to serialise PeerInfo to MessagePack")?;
         Ok(Self {
             worker_id: messenger.instance_id().worker_id().as_u64(),
             peer_info_bytes,
@@ -125,7 +125,7 @@ impl IndexerDiscovery {
         })?;
 
         tracing::info!(
-            path      = %peer_file.display(),
+            path = %peer_file.display(),
             worker_id = snapshot.worker_id,
             "Published indexer PeerInfo to filesystem discovery"
         );
@@ -192,7 +192,7 @@ pub fn read_peer_snapshot(discovery_dir: &Path) -> Result<Option<IndexerPeerSnap
             return Err(anyhow::Error::new(e).context(format!(
                 "failed to read peer snapshot from `{}`",
                 path.display()
-            )))
+            )));
         }
     };
     let snapshot: IndexerPeerSnapshot =

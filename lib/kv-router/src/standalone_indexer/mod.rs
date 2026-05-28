@@ -286,6 +286,7 @@ async fn run_common(
 #[cfg(feature = "velo-runtime")]
 pub struct VeloIndexerConfig {
     /// Number of indexer threads per shard.  0 = single-threaded.
+    /// Reserved for a follow-up MR (RuntimeRegistry); unused in this PR.
     pub threads: usize,
     /// TCP port to bind.  0 = OS-assigned.
     pub tcp_port: u16,
@@ -304,10 +305,12 @@ pub struct VeloIndexerConfig {
 
 /// Run the standalone KV cache indexer using velo as the transport layer.
 ///
-/// Workers push KV events via velo active messaging (fire-and-forget);
-/// gateways query via velo unary RPC.  Shards are created lazily on the
-/// first event batch for each `(model_name, tenant_id)` pair.
+/// Binds TCP (and optionally UDS) transports, registers no-op placeholder
+/// handlers for event ingest and prefix-match queries, then publishes the
+/// indexer's peer info for workers and routers to discover via
+/// [`runtime::discovery::connect_to_indexer`].
 ///
+/// Full query and ingest handlers land in follow-up MRs.
 /// Gracefully shuts down on `Ctrl-C`.
 #[cfg(feature = "velo-runtime")]
 pub async fn run_server_velo(config: VeloIndexerConfig) -> anyhow::Result<()> {
@@ -317,11 +320,14 @@ pub async fn run_server_velo(config: VeloIndexerConfig) -> anyhow::Result<()> {
     use velo::Messenger;
     use velo::backend::tcp::TcpTransportBuilder;
 
-    use runtime::{RuntimeRegistry, discovery::IndexerDiscovery, query_engine, subscriber};
+    use runtime::{discovery::IndexerDiscovery, query_engine, subscriber};
 
     // ── Build TCP transport ──────────────────────────────────────────────
     let listener = StdTcpListener::bind(("0.0.0.0", config.tcp_port)).map_err(|e| {
-        anyhow::anyhow!("failed to bind TCP listener on port {}: {e}", config.tcp_port)
+        anyhow::anyhow!(
+            "failed to bind TCP listener on port {}: {e}",
+            config.tcp_port
+        )
     })?;
     let actual_addr = listener.local_addr()?;
 
@@ -346,7 +352,10 @@ pub async fn run_server_velo(config: VeloIndexerConfig) -> anyhow::Result<()> {
             .socket_path(uds_path)
             .build()
             .map_err(|e| {
-                anyhow::anyhow!("failed to build UDS transport at {}: {e}", uds_path.display())
+                anyhow::anyhow!(
+                    "failed to build UDS transport at {}: {e}",
+                    uds_path.display()
+                )
             })?;
 
         builder = builder.add_transport(StdArc::new(uds_transport));
@@ -364,9 +373,9 @@ pub async fn run_server_velo(config: VeloIndexerConfig) -> anyhow::Result<()> {
     // Handlers must be registered before the peer info is published.  A worker
     // that discovers the indexer immediately can send an AM event while Velo
     // still has no registered handler for that endpoint, causing a silent drop.
-    let registry = StdArc::new(RuntimeRegistry::new(config.threads));
-    subscriber::register(&messenger, registry.clone())?;
-    query_engine::register(&messenger, registry.clone())?;
+    // These are no-op stubs; full implementations land in follow-up MRs.
+    subscriber::register(&messenger)?;
+    query_engine::register(&messenger)?;
 
     // ── Publish peer info for workers/routers to discover ────────────────
     let _discovery_handle = if let Some(ref discovery_dir) = config.discovery_dir {
