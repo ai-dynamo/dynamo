@@ -59,7 +59,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip install --break-system-packages --no-deps "accelerate==1.13.0"
 
 # Install distro: openai>=1.x's _base_client imports it unconditionally, and
-# sglang 0.5.11's server_args eagerly imports sglang.srt.entrypoints.openai.protocol
+# sglang 0.5.12's server_args eagerly imports sglang.srt.entrypoints.openai.protocol
 # which pulls in openai.types.responses → triggers openai pkg init → import distro.
 # The upstream lmsysorg/sglang runtime installs openai with --no-deps so distro is
 # missing; without this any dynamo.sglang worker fails to import at startup.

@@ -26,6 +26,7 @@ spec:
               value: deepseek-ai/DeepSeek-V4-Pro
             - name: HF_HOME
               value: /model-store
+            # Uses up to 64 GB RAM for XET buffers; set "0" on low-memory nodes (8 GB cap): https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
           args:
@@ -33,6 +34,13 @@ spec:
               set -eux
               pip install --no-cache-dir huggingface_hub==1.11.0
               hf download $MODEL_NAME
+          resources:
+            requests:
+              cpu: "2"
+              memory: "64Gi"
+            limits:
+              cpu: "8"
+              memory: "64Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /model-store
