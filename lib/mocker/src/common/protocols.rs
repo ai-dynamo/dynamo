@@ -518,6 +518,7 @@ struct MockEngineArgsSerde {
     bootstrap_port: OptionalConfigValue<u16>,
     kv_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
+    kv_transfer_abort_timeout_ms: OptionalConfigValue<u64>,
     num_g2_blocks: OptionalConfigValue<usize>,
     num_g3_blocks: OptionalConfigValue<usize>,
     enable_g4_storage: OptionalConfigValue<bool>,
@@ -728,6 +729,17 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
+
+    /// Timeout (milliseconds) for the prefill→decode NIXL handshake. Mirrors the
+    /// production `VLLM_NIXL_ABORT_REQUEST_TIMEOUT` env var. When a disagg prefill
+    /// completes compute but no decode arrives within this window, the prefill aborts
+    /// the request (KV released, abort error surfaced to the client); late-arriving
+    /// decodes for the same room receive a clean ABORT response. (DIS-2147)
+    ///
+    /// `None` (default) disables the prefill-side wait — preserves pre-DIS-2147
+    /// behavior where prefill ACKs immediately and never holds KV waiting for decode.
+    #[builder(default = "None")]
+    pub kv_transfer_abort_timeout_ms: Option<u64>,
 
     /// KVBM G2 (host DRAM) block capacity. When the `kvbm-offload`
     /// feature is enabled, setting this explicitly opts the mocker into
@@ -1061,6 +1073,11 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
             builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);
         }
+        if let Some(kv_transfer_abort_timeout_ms) =
+            compat.kv_transfer_abort_timeout_ms.into_nullable()
+        {
+            builder = builder.kv_transfer_abort_timeout_ms(kv_transfer_abort_timeout_ms);
+        }
         if let Some(num_g2_blocks) = compat.num_g2_blocks.into_nullable() {
             builder = builder.num_g2_blocks(num_g2_blocks);
         }
@@ -1341,6 +1358,7 @@ mod tests {
             "bandwidth_g3_to_g2_gbps": args.bandwidth_g3_to_g2_gbps,
             "bandwidth_g2_to_g4_gbps": args.bandwidth_g2_to_g4_gbps,
             "bandwidth_g4_to_g2_gbps": args.bandwidth_g4_to_g2_gbps,
+            "kv_transfer_abort_timeout_ms": args.kv_transfer_abort_timeout_ms,
             "reasoning": args.reasoning,
             "zmq_kv_events_port": args.zmq_kv_events_port,
             "zmq_replay_port": args.zmq_replay_port,

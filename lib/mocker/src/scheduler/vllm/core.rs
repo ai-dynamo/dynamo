@@ -513,7 +513,7 @@ impl VllmCore {
     }
 
     pub(super) fn mocker_metrics(&self) -> MockerMetrics {
-        MockerMetrics::from_parts(
+        let mut metrics = MockerMetrics::from_parts(
             self.dp_rank,
             self.kv_manager.num_active_blocks() as u64,
             self.args.num_gpu_blocks as u64,
@@ -522,7 +522,11 @@ impl VllmCore {
             self.state.preemptions_total,
             0,
             0,
-        )
+        );
+        // DIS-2147: expose the seq-slot cap so the decode-side admission wait can gate
+        // on a free sequence slot in addition to block capacity. 0 == "unlimited".
+        metrics.max_num_seqs = self.args.max_num_seqs.map(|v| v as u64).unwrap_or(0);
+        metrics
     }
 
     pub(crate) fn execute_pass(

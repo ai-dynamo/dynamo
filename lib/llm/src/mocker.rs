@@ -258,6 +258,69 @@ impl MockEngine {
         });
     }
 
+    /// Wait until the scheduler at `dp_rank` reports both **block** and **sequence**
+    /// headroom for admitting a new request, up to `timeout`. Used by the decode side
+    /// of disagg before connecting to a prefill bootstrap server (DIS-2147).
+    ///
+    /// Models real NIXL admission behavior in vLLM v1 and sglang — both engines gate
+    /// the disaggregated KV recv on **two independent budgets**: a block/token budget
+    /// (enough KV-cache blocks to absorb the projected sequence) and a sequence-slot
+    /// budget (a free slot in the per-request scheduling state — vLLM `max_num_seqs` /
+    /// `len(self.running)`; sglang's `DecodeReqToTokenPool`). Both must have headroom;
+    /// either alone blocks the NIXL recv from being armed. Without the seq-slot check
+    /// the DIS-2147 abort path is unreachable from realistic seq-bound load shapes.
+    ///
+    /// Returns Ok(()) immediately if schedulers haven't reported metrics yet
+    /// (total_blocks == 0) so warmup is graceful. Also treats `max_num_seqs == 0`
+    /// as "no seq cap configured" (mirrors `MockEngineArgs.max_num_seqs == None`).
+    pub async fn wait_for_decode_kv_capacity(&self, dp_rank: u32, timeout: Duration) -> Result<()> {
+        let schedulers = self
+            ._schedulers
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("schedulers not initialized"))?;
+        let scheduler_idx = dp_rank as usize;
+        if scheduler_idx >= schedulers.len() {
+            return Err(anyhow::anyhow!(
+                "dp_rank {dp_rank} out of bounds (have {} schedulers)",
+                schedulers.len()
+            ));
+        }
+        let mut rx = schedulers[scheduler_idx].metrics_receiver();
+
+        let start = std::time::Instant::now();
+        loop {
+            let metrics = rx.borrow().clone();
+            // total_blocks == 0 means the scheduler hasn't published yet (still warming up).
+            // Don't block on warmup — the scheduler's own queue will handle admission
+            // once metrics start flowing.
+            let has_block_capacity =
+                metrics.total_blocks == 0 || metrics.active_decode_blocks < metrics.total_blocks;
+            // max_num_seqs == 0 means "no seq cap configured" — mirror vLLM/sglang's
+            // treatment of unset max_running_requests as effectively unbounded.
+            // running_requests is the live sequence count (vLLM len(self.running) /
+            // sglang req_to_token_pool occupancy).
+            let has_seq_capacity =
+                metrics.max_num_seqs == 0 || metrics.running_requests < metrics.max_num_seqs;
+            if has_block_capacity && has_seq_capacity {
+                return Ok(());
+            }
+            let remaining = timeout
+                .checked_sub(start.elapsed())
+                .ok_or_else(|| anyhow::anyhow!("decode KV wait timed out after {timeout:?}"))?;
+            match tokio::time::timeout(remaining, rx.changed()).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => {
+                    return Err(anyhow::anyhow!("scheduler metrics channel closed"));
+                }
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "decode KV wait timed out after {timeout:?}"
+                    ));
+                }
+            }
+        }
+    }
+
     /// Send a request to the appropriate scheduler, waiting for initialization if needed.
     pub async fn direct(&self, request: DirectRequest, dp_rank: usize) {
         let sender = self.request_sender(dp_rank).await;
@@ -523,12 +586,38 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             .await;
 
         // Bootstrap rendezvous for disaggregated serving
-        // - Decode: send receiver metadata to prefill, then wait for prefill completion
-        // - Prefill: wait for decode metadata before emitting output, then complete_room()
+        // - Decode: (DIS-2147) wait for own KV capacity, then send receiver metadata to prefill
+        //   and wait for prefill completion or abort
+        // - Prefill: wait for decode metadata (bounded by abort_timeout when set) before emitting
+        //   output, then complete_room(); on abort-timeout abort_room()
         let bootstrap_room = request.bootstrap_info.as_ref().map(|b| b.bootstrap_room);
+        let abort_timeout = self
+            .engine_args
+            .kv_transfer_abort_timeout_ms
+            .map(Duration::from_millis);
+
         if let Some(bootstrap_info) = &request.bootstrap_info
             && self.engine_args.is_decode()
         {
+            // DIS-2147: when abort_timeout is configured, the decode worker must wait for
+            // its own KV cache to have capacity before connecting to the prefill bootstrap
+            // server. The act of connecting is decode's signal that it is ready to receive.
+            // Backward-compatible: with abort_timeout=None we skip the wait (pre-DIS-2147).
+            if let Some(timeout) = abort_timeout {
+                self.wait_for_decode_kv_capacity(dp_rank, timeout)
+                    .await
+                    .map_err(|e| Error::msg(format!("Decode KV wait failed: {e}")))?;
+            }
+            // DIS-2147 forensic logging: emit decode-side wait-start event so post-hoc
+            // analysis can reconstruct (decode_worker, target_prefill, room) stranding graphs.
+            tracing::info!(
+                target: "mocker::dis2147",
+                decode_dp_rank = dp_rank,
+                room_id = bootstrap_info.bootstrap_room,
+                target_host = %bootstrap_info.bootstrap_host,
+                target_port = bootstrap_info.bootstrap_port,
+                "decode_kv_wait_start"
+            );
             connect_to_prefill(
                 &bootstrap_info.bootstrap_host,
                 bootstrap_info.bootstrap_port,
@@ -579,15 +668,49 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
             if let Some((server, room_id, sender, direct_request)) = delayed_prefill_submission {
+                // DIS-2147 forensic logging: pin-start event with room_id + prefill dp_rank.
+                // Lets post-hoc analysis join with decode logs on room_id to build the
+                // (prefill -> decode) stranding graph. While this prefill waits for decode to
+                // arrive, its scheduler request stays active so KV stays pinned.
+                let pin_start = std::time::Instant::now();
+                tracing::info!(
+                    target: "mocker::dis2147",
+                    prefill_dp_rank = dp_rank,
+                    room_id,
+                    "prefill_kv_pin_start"
+                );
                 tokio::select! {
-                    result = server.wait_for_decode_ready(room_id) => {
+                    // DIS-2147: bound the decode-arrival wait by abort_timeout (when set). On
+                    // timeout, abort the room so waiting/late decodes get a clean ABORT instead
+                    // of hanging, surface the abort to the client, and end the stream.
+                    result = server.wait_for_decode_ready(room_id, abort_timeout) => {
                         if let Err(e) = result {
+                            tracing::warn!(
+                                "Prefill aborting transfer for room {room_id}: {e}"
+                            );
+                            server.abort_room(room_id);
+                            tracing::info!(
+                                target: "mocker::dis2147",
+                                prefill_dp_rank = dp_rank,
+                                room_id,
+                                outcome = "aborted",
+                                duration_ms = pin_start.elapsed().as_millis() as u64,
+                                "prefill_kv_pin_end"
+                            );
                             let _ = stream_tx.send(LLMEngineOutput::error(format!(
-                                "Bootstrap wait for decode metadata failed: {e}"
+                                "NIXL transfer aborted: {e}"
                             )));
                             active_requests.remove(&request_uuid);
                             return;
                         }
+                        tracing::info!(
+                            target: "mocker::dis2147",
+                            prefill_dp_rank = dp_rank,
+                            room_id,
+                            outcome = "completed",
+                            duration_ms = pin_start.elapsed().as_millis() as u64,
+                            "prefill_kv_pin_end"
+                        );
                     }
                     _ = async_context.stopped() => {
                         let _ = stream_tx.send(LLMEngineOutput::cancelled());
@@ -653,6 +776,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                         }
 
                         if signal.completed {
+                            // DIS-2147: by this point a disagg prefill has already waited for
+                            // decode to arrive (or aborted) in wait_for_decode_ready below, so
+                            // KV stayed pinned during the wait — modeling real NIXL behavior.
                             if stream_tx.send(output).is_err() {
                                 tracing::error!("Output stream receiver closed.");
                                 break;

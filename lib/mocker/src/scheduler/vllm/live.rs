@@ -29,6 +29,10 @@ pub struct MockerMetrics {
     pub vllm_preemptions_total: u64,
     pub sglang_cache_hit_tokens: u64,
     pub sglang_cache_total_tokens: u64,
+    /// Sequence-slot cap from `MockEngineArgs.max_num_seqs`. 0 means "unlimited"
+    /// (no seq gate — mirrors warmup semantics on `total_blocks`). Used by the
+    /// DIS-2147 decode-side admission wait to model vLLM/sglang seq-slot budgets.
+    pub max_num_seqs: u64,
 }
 
 impl MockerMetrics {
@@ -66,6 +70,7 @@ impl MockerMetrics {
             vllm_preemptions_total,
             sglang_cache_hit_tokens,
             sglang_cache_total_tokens,
+            max_num_seqs: 0,
         }
     }
 }

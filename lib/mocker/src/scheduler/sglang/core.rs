@@ -249,16 +249,21 @@ impl SglangCore {
                 .count(),
             output_signals: decode.output_signals,
             admissions: admit.admissions,
-            mocker_metrics: MockerMetrics::from_parts(
-                self.dp_rank,
-                active_decode_blocks,
-                self.config.total_kv_tokens.div_ceil(self.config.block_size) as u64,
-                self.running.len() as u64,
-                self.waiting.len() as u64,
-                0,
-                sglang_cache_hit_tokens,
-                sglang_cache_total_tokens,
-            ),
+            mocker_metrics: {
+                let mut metrics = MockerMetrics::from_parts(
+                    self.dp_rank,
+                    active_decode_blocks,
+                    self.config.total_kv_tokens.div_ceil(self.config.block_size) as u64,
+                    self.running.len() as u64,
+                    self.waiting.len() as u64,
+                    0,
+                    sglang_cache_hit_tokens,
+                    sglang_cache_total_tokens,
+                );
+                // DIS-2147: expose the seq-slot cap for the decode-side admission wait.
+                metrics.max_num_seqs = self.config.max_num_seqs;
+                metrics
+            },
             router_event_visibility: RouterEventVisibility::PassEnd,
             kv_events: self
                 .kv_event_buffer

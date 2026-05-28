@@ -306,6 +306,9 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         bandwidth_g3_to_g2_gbps=getattr(args, "bandwidth_g3_to_g2_gbps", None),
         bandwidth_g2_to_g4_gbps=getattr(args, "bandwidth_g2_to_g4_gbps", None),
         bandwidth_g4_to_g2_gbps=getattr(args, "bandwidth_g4_to_g2_gbps", None),
+        kv_transfer_abort_timeout_ms=getattr(
+            args, "kv_transfer_abort_timeout_ms", None
+        ),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
         sglang=_build_sglang_args(args),
         trtllm=_build_trtllm_args(args),
