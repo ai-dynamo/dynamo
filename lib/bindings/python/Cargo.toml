@@ -38,6 +38,8 @@ nvtx = ["dynamo-runtime/nvtx"]
 # recipes pass this flag explicitly; the dev container's
 # `.devcontainer/post-create.sh` also enables it for local workflows.
 mm-routing = ["dynamo-llm/mm-routing"]
+stateful-responses-redb = ["dynamo-llm/stateful-responses-redb"]
+stateful-responses-tikv = ["dynamo-llm/stateful-responses-tikv"]
 
 [dependencies]
 # AIC perf model: pure-Rust hot-path latency engine. Pinned to aiconfigurator
