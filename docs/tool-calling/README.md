@@ -5,6 +5,10 @@ title: Tool Calling
 subtitle: Parse tool calls from model output and surface them as OpenAI-compatible tool_calls
 ---
 
+<p align="left">
+  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 Dynamo can connect models to external tools and services by parsing tool-call
 syntax out of raw model output and surfacing it as OpenAI-compatible
 `tool_calls` on the response. Tool calling is controlled by the `tool_choice`
