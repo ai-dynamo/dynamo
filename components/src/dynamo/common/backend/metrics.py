@@ -47,9 +47,18 @@ def ensure_prometheus_multiproc_dir(
     touch."""
     existing = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
     if existing:
-        if not os.path.isdir(existing):
+        if os.path.exists(existing) and not os.path.isdir(existing):
+            logger.error(
+                "PROMETHEUS_MULTIPROC_DIR=%s exists but is not a directory; "
+                "refusing to overwrite. Fix the operator-set value and restart.",
+                existing,
+            )
+            raise ValueError(
+                f"PROMETHEUS_MULTIPROC_DIR={existing!r} exists and is not a directory"
+            )
+        if not os.path.exists(existing):
             logger.warning(
-                "PROMETHEUS_MULTIPROC_DIR=%s does not exist, recreating", existing
+                "PROMETHEUS_MULTIPROC_DIR=%s does not exist, creating", existing
             )
             os.makedirs(existing, exist_ok=True)
         return None

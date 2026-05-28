@@ -871,9 +871,8 @@ class TrtllmLLMEngine(LLMEngine):
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")
 
-    @staticmethod
     def _override_sampling_params(
-        sampling_params: SamplingParams, request: GenerateRequest
+        self, sampling_params: SamplingParams, request: GenerateRequest
     ) -> SamplingParams:
         overrides = {
             key: value
