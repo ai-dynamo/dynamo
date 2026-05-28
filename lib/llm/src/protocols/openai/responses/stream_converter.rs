@@ -14,25 +14,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionToolCall, InputTokenDetails, Instructions, OutputContent, OutputItem,
-    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
-    Response, ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
-    ResponseCreatedEvent, ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTier, Status,
-    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    AssistantRole, ErrorObject, FunctionToolCall, InputTokenDetails, Instructions, OutputContent,
+    OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
+    OutputTokenDetails, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
+    ResponseInProgressEvent, ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent,
+    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
+    ResponseUsage, ServiceTier, Status, TextResponseFormatConfiguration, ToolChoiceOptions,
+    ToolChoiceParam, Truncation,
 };
 use serde::{
     Serialize,
     ser::{SerializeMap, Serializer},
 };
+use serde_json::Value;
 use uuid::Uuid;
 
 use dynamo_protocols::types::ChatCompletionMessageContent;
 
 use super::ResponseParams;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use crate::protocols::openai::nvext::merge_response_nvext;
 use crate::protocols::unified::ResponsesContext;
 
 /// State machine that converts a chat completion stream into Responses API events.
@@ -55,6 +58,7 @@ pub struct ResponseStreamConverter {
     next_output_index: u32,
     // Usage stats from the backend's final chunk
     usage: Option<ResponseUsage>,
+    nvext: Option<Value>,
 }
 
 struct FunctionCallState {
@@ -90,6 +94,7 @@ impl ResponseStreamConverter {
             function_call_items: Vec::new(),
             next_output_index: 0,
             usage: None,
+            nvext: None,
         }
     }
 
@@ -207,6 +212,8 @@ impl ResponseStreamConverter {
         chunk: &NvCreateChatCompletionStreamResponse,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
+        merge_response_nvext(&mut self.nvext, chunk.nvext.clone());
+
         // Capture usage stats from the final chunk (sent when stream_options.include_usage=true)
         if let Some(ref u) = chunk.inner.usage {
             self.usage = Some(ResponseUsage {
@@ -423,8 +430,7 @@ impl ResponseStreamConverter {
         }
     }
 
-    /// Emit the final events when the stream ends: done events + completed.
-    pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_output_done_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
         self.append_end_events(&mut events);
         events
@@ -520,7 +526,32 @@ impl ResponseStreamConverter {
             events.push(self.make_sse_event(&item_done));
         }
 
-        // Build the final output vector from accumulated state
+        events
+    }
+
+    pub fn emit_completed_event(
+        &mut self,
+        response: Response,
+    ) -> Vec<Result<Event, anyhow::Error>> {
+        let completed = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
+            sequence_number: self.next_seq(),
+            response,
+        });
+        vec![self.make_sse_event(&completed)]
+    }
+
+    pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+        let mut events = self.emit_output_done_events();
+        let response = self.completed_response();
+        events.extend(self.emit_completed_event(response));
+        events
+    }
+
+    pub fn completed_response(&self) -> Response {
+        self.make_response(Status::Completed, self.completed_output())
+    }
+
+    fn completed_output(&self) -> Vec<OutputItem> {
         let mut output = Vec::new();
         if self.message_started {
             output.push(OutputItem::Message(OutputMessage {
@@ -547,29 +578,40 @@ impl ResponseStreamConverter {
                 }));
             }
         }
-
-        // Emit response.completed
-        let completed = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
-            sequence_number: self.next_seq(),
-            response: self.make_response(Status::Completed, output),
-        });
-        events.push(self.make_sse_event(&completed));
+        output
     }
 
-    /// Emit error events when the stream ends due to a backend error.
+    fn make_failed_response(&self, code: &str, message: &str) -> Response {
+        let mut response = self.make_response(Status::Failed, vec![]);
+        response.error = Some(ErrorObject {
+            code: code.to_string(),
+            message: message.to_string(),
+        });
+        response.usage = None;
+        response
+    }
+
+    pub fn emit_failed_event(
+        &mut self,
+        code: &str,
+        message: &str,
+    ) -> Vec<Result<Event, anyhow::Error>> {
+        let sequence_number = self.next_seq();
+        vec![
+            self.make_sse_event(&ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
+                sequence_number,
+                response: self.make_failed_response(code, message),
+            })),
+        ]
+    }
+
     pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
-        let mut events = Vec::new();
-        self.append_error_events(&mut events);
-        events
+        self.emit_failed_event("server_error", "The response stream failed.")
     }
 
     /// Append error events when the stream ends due to a backend error.
     pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
-        let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
-            sequence_number: self.next_seq(),
-            response: self.make_response(Status::Failed, vec![]),
-        });
-        events.push(self.make_sse_event(&failed));
+        events.extend(self.emit_error_events());
     }
 }
 
@@ -580,7 +622,16 @@ impl ResponseStreamConverter {
     /// `self.params` rather than hardcoded at each emit site.
     fn make_sse_event(&self, event: &ResponseStreamEvent) -> Result<Event, anyhow::Error> {
         let event_type = get_event_type(event);
-        let data = self.serialize_event_data(event)?;
+        let mut data = self.serialize_event_data(event)?;
+        if let Some(nvext) = &self.nvext {
+            let mut value: Value = serde_json::from_str(&data)?;
+            if let Value::Object(ref mut obj) = value
+                && let Some(Value::Object(inner)) = obj.get_mut("response")
+            {
+                inner.insert("nvext".to_string(), nvext.clone());
+            }
+            data = serde_json::to_string(&value)?;
+        }
         Ok(Event::default().event(event_type).data(data))
     }
 
@@ -1092,16 +1143,21 @@ mod tests {
 
     /// Text-only response: no tool-related events at all.
     #[test]
-    fn test_text_only_response_no_tool_events() {
+    fn test_text_response_nvext_and_failed_event() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
         let _ = conv.emit_start_events();
 
-        let events = conv.process_chunk(&text_chunk("Hello world"));
+        let mut chunk = text_chunk("Hello world");
+        chunk.nvext = Some(serde_json::json!({ "completion_token_ids": [11, 22] }));
+        let events = conv.process_chunk(&chunk);
         let types = event_types(&events);
         assert!(
             !types.contains(&"response.function_call_arguments.done".to_string()),
             "no tool events in text-only: {types:?}"
         );
+        let mut chunk = text_chunk("!");
+        chunk.nvext = Some(serde_json::json!({ "completion_token_ids": [33] }));
+        let _ = conv.process_chunk(&chunk);
 
         let end_events = conv.emit_end_events();
         let end_types = event_types(&end_events);
@@ -1113,6 +1169,20 @@ mod tests {
             end_types.contains(&"response.completed".to_string()),
             "completed in end events: {end_types:?}"
         );
+        assert_eq!(
+            conv.nvext,
+            Some(serde_json::json!({ "completion_token_ids": [11, 22, 33] }))
+        );
+
+        let events = conv.emit_failed_event("server_error", "store failed");
+        let response = conv.make_failed_response("server_error", "store failed");
+
+        assert_eq!(event_types(&events), vec!["response.failed"]);
+        assert_eq!(response.status, Status::Failed);
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "server_error");
+        assert_eq!(error.message, "store failed");
+        assert!(response.usage.is_none());
     }
 
     /// Text followed by tool call: both handled correctly.
