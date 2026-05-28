@@ -41,6 +41,7 @@ from .utils import (
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
+    nvext_extra_field_requested,
     random_uuid,
 )
 
@@ -454,6 +455,15 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        # Backend preproc carries nvext passthrough in extra_args, matching Rust.
+        nvext = request.get("nvext") or {}
+        nvext_passthrough = {
+            key: nvext[key]
+            for key in ("metadata_upload", "extra_fields")
+            if key in nvext
+        }
+        if nvext_passthrough:
+            dynamo_preproc["extra_args"] = {"nvext": nvext_passthrough}
         if reasoning_ended is not None:
             dynamo_preproc["reasoning_ended"] = reasoning_ended
         if reasoning_parser_kwargs is not None:
@@ -688,6 +698,11 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = usage
+                    engine_data = engine_response.get("engine_data")
+                    if engine_data is not None and (
+                        nvext_extra_field_requested(request, "engine_data")
+                    ):
+                        dynamo_out["nvext"] = {"engine_data": engine_data}
 
                     yield dynamo_out
             _nvtx.end_range(rng_stream)

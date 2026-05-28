@@ -267,7 +267,9 @@ def _base_preproc():
     }
 
 
-async def _run_generate(processor, preproc, *, mm_routing_info=None, context=None):
+async def _run_generate(
+    processor, preproc, *, request=None, mm_routing_info=None, context=None
+):
     vllm_preproc = SimpleNamespace(
         sampling_params=SimpleNamespace(n=1),
         request_id="vllm-request",
@@ -279,7 +281,7 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
         item
         async for item in processor._generate_and_stream(
             "request-id",
-            {"model": MODEL},
+            request or {"model": MODEL},
             preproc,
             preproc["token_ids"],
             vllm_preproc,
@@ -338,6 +340,33 @@ class TestRoutedEnginePath:
                 "object": "chat.completion.chunk",
             }
         ]
+
+    @pytest.mark.asyncio
+    async def test_routed_stream_metadata_upload_does_not_emit_engine_data(
+        self, vllm_processor_module
+    ):
+        routed_engine = _FakeRoutedEngine(
+            [
+                {
+                    "token_ids": [101],
+                    "index": 0,
+                    "finish_reason": "length",
+                    "engine_data": {"some_backend_payload": True},
+                }
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        chunks = await _run_generate(
+            processor,
+            _base_preproc(),
+            request={
+                "model": MODEL,
+                "nvext": {"metadata_upload": {"url": "file:///tmp/rollout"}},
+            },
+        )
+
+        assert "nvext" not in chunks[0]
 
 
 OBJECT_TYPED_TOOL_REQUEST = {
