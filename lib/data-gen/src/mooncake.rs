@@ -16,8 +16,7 @@
 //! deserialization. Dynamo-produced traces always emit the canonical names.
 
 use anyhow::{Context, Result, bail};
-use bytemuck::cast_slice;
-use dynamo_tokens::compute_hash_v2;
+use dynamo_kv_hashing::Request;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -152,12 +151,17 @@ impl RollingHashIdMapper {
 
     /// Hash a sequence of tokens into Mooncake `hash_ids`.
     ///
-    /// Tokens are chunked by `block_size`; each block contributes one id. The
-    /// chained hash mixes the prior block's combined hash, so identical
+    /// Tokens are chunked by `block_size`; each complete block contributes one
+    /// compact id derived from Dynamo's shared KV-hashing contract. Identical
     /// prefixes across requests resolve to identical leading `hash_ids` once
     /// the mapper has seen them.
     pub fn hash_token_blocks(&mut self, tokens: &[u32]) -> Vec<u64> {
         hash_token_blocks(self, tokens)
+    }
+
+    /// Fallible variant of [`Self::hash_token_blocks`].
+    pub fn try_hash_token_blocks(&mut self, tokens: &[u32]) -> Result<Vec<u64>> {
+        try_hash_token_blocks(self, tokens)
     }
 
     /// Map precomputed sequence-aware block hashes into compact Mooncake IDs.
@@ -171,27 +175,30 @@ impl RollingHashIdMapper {
 
 /// Token-block hashing helper for the Mooncake replay schema.
 ///
-/// Splits `tokens` into chunks of `mapper.block_size()`, computes a chained
-/// hash per block, and returns the compact ids assigned by `mapper`. Mirrors
+/// Splits `tokens` into complete chunks of `mapper.block_size()`, derives
+/// sequence-aware hashes through `dynamo-kv-hashing`, and returns the compact
+/// ids assigned by `mapper`. Mirrors
 /// [`RollingHashIdMapper::hash_token_blocks`] as a free function so callers
 /// that already hold a mutable mapper reference can invoke it without
 /// re-borrowing.
 pub fn hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Vec<u64> {
-    let block_size = mapper.block_size;
-    let mut hash_ids = Vec::with_capacity(tokens.len().div_ceil(block_size));
-    let mut parent_hash = 0_u64;
-    for block in tokens.chunks(block_size) {
-        let block_hash = compute_hash_v2(cast_slice(block), 0);
-        let combined_hash = compute_hash_v2(&block_hash.to_be_bytes(), parent_hash);
-        let id = *mapper.hash_to_id.entry(combined_hash).or_insert_with(|| {
-            let next_id = mapper.next_id;
-            mapper.next_id += 1;
-            next_id
-        });
-        hash_ids.push(id);
-        parent_hash = combined_hash;
-    }
-    hash_ids
+    try_hash_token_blocks(mapper, tokens).expect("Mooncake token-block hashing failed")
+}
+
+/// Fallible token-block hashing helper for callers that want to surface
+/// invalid block-size or request-shape errors.
+pub fn try_hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Result<Vec<u64>> {
+    require_positive("block size", mapper.block_size)?;
+    let sequence_hashes = Request::builder()
+        .tokens(tokens.to_vec())
+        .build()?
+        .sequence_hashes(
+            mapper
+                .block_size
+                .try_into()
+                .context("block_size does not fit u32")?,
+        )?;
+    Ok(ids_for_sequence_hashes(mapper, &sequence_hashes))
 }
 
 /// Map stable sequence hashes to compact Mooncake IDs with a shared mapper.
@@ -388,9 +395,40 @@ mod tests {
     }
 
     #[test]
+    fn token_blocks_derive_ids_from_shared_kv_hashing_contract() {
+        let tokens = vec![7u32, 8, 9, 10, 11, 12, 13, 14];
+        let request = Request::builder().tokens(tokens.clone()).build().unwrap();
+        let sequence_hashes = request.sequence_hashes(4).unwrap();
+
+        let mut token_mapper = RollingHashIdMapper::new(4);
+        let mut sequence_mapper = RollingHashIdMapper::new(4);
+
+        let token_ids = token_mapper.hash_token_blocks(&tokens);
+        let sequence_ids = sequence_mapper.ids_for_sequence_hashes(&sequence_hashes);
+
+        assert_eq!(token_ids, sequence_ids);
+    }
+
+    #[test]
     fn empty_token_input_yields_empty_hash_ids() {
         let mut mapper = RollingHashIdMapper::new(4);
         assert!(mapper.hash_token_blocks(&[]).is_empty());
+    }
+
+    #[test]
+    fn trailing_partial_block_is_not_mapped() {
+        let mut mapper = RollingHashIdMapper::new(4);
+
+        assert_eq!(mapper.hash_token_blocks(&[1, 2, 3]), Vec::<u64>::new());
+        assert_eq!(mapper.hash_token_blocks(&[1, 2, 3, 4, 5, 6]), vec![0]);
+    }
+
+    #[test]
+    fn try_hash_token_blocks_rejects_zero_block_size() {
+        let mut mapper = RollingHashIdMapper::new(0);
+        let err = mapper.try_hash_token_blocks(&[1, 2, 3]).unwrap_err();
+
+        assert!(err.to_string().contains("block size"));
     }
 
     #[test]
