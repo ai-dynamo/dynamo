@@ -100,6 +100,9 @@ python -m dynamo.mocker \
 | `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
 | `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
 | `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
+| `--aic-moe-tp-size` | None | MoE tensor parallel size for AIC latency prediction. Required by some MoE models |
+| `--aic-moe-ep-size` | None | MoE expert parallel size for AIC latency prediction. Required by some MoE models |
+| `--aic-attention-dp-size` | None | Attention data parallel size for AIC latency prediction. Required by some MoE models |
 | `--extra-engine-args` | None | Path to a JSON file with mocker configuration; overrides individual CLI arguments |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
@@ -111,7 +114,7 @@ python -m dynamo.mocker \
 | `--kv-cache-dtype` | auto | KV cache dtype for bytes-per-token computation |
 | `--kv-bytes-per-token` | Auto-computed | KV cache bytes per token (override auto-computation) |
 | `--discovery-backend` | Env-driven (`etcd`) | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` |
-| `--request-plane` | Env-driven (`tcp`) | Request transport: `nats`, `http`, or `tcp` |
+| `--request-plane` | Env-driven (`tcp`) | Request transport: `nats`, `tcp` |
 | `--event-plane` | Env-driven (`nats`) | Event transport: `nats` or `zmq` |
 
 ## Environment Variables
@@ -319,6 +322,10 @@ python -m dynamo.replay /path/to/trace.jsonl \
     --aic-tp-size 1
 ```
 
+For MoE models that require AIC MoE parallelism, pass the same fields on the router-side AIC surface.
+For Kimi-style TP-only MoE replay, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
+`--aic-moe-ep-size 1`, and `--aic-attention-dp-size 1`.
+
 For offline disagg replay, the same top-level `--aic-*` flags drive the prefill-stage router only;
 the decode-stage router keeps prompt tracking disabled.
 
@@ -388,7 +395,7 @@ When resources become constrained, the mocker simulates the engine's real recove
 
 ### KV Block Manager
 
-The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](../../lib/kvbm-logical/), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](../../lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
+The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-logical), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
 
 Blocks still conceptually live in one of two pools:
 

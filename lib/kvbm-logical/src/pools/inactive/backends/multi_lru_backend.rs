@@ -13,11 +13,13 @@ use anyhow::{Result, bail};
 
 use crate::BlockId;
 use crate::blocks::SequenceHash;
+use crate::pools::IdBuildHasher;
 use crate::pools::store::InactiveIndex;
 use crate::tinylfu::FrequencyTracker;
 
 pub(crate) struct MultiLruBackend {
-    priority_pools: [LruCache<SequenceHash, BlockId>; 4],
+    /// Identity-hashed: `SequenceHash` is already a content hash.
+    priority_pools: [LruCache<SequenceHash, BlockId, IdBuildHasher>; 4],
     frequency_tracker: Arc<dyn FrequencyTracker<u128>>,
     frequency_thresholds: [u8; 3],
 }
@@ -47,10 +49,10 @@ impl MultiLruBackend {
         }
         Ok(Self {
             priority_pools: [
-                LruCache::new(block_count),
-                LruCache::new(block_count),
-                LruCache::new(block_count),
-                LruCache::new(block_count),
+                LruCache::with_hasher(block_count, IdBuildHasher),
+                LruCache::with_hasher(block_count, IdBuildHasher),
+                LruCache::with_hasher(block_count, IdBuildHasher),
+                LruCache::with_hasher(block_count, IdBuildHasher),
             ],
             frequency_tracker,
             frequency_thresholds: *thresholds,

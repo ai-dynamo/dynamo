@@ -8,7 +8,7 @@ title: Writing a Rust Unified Backend
 
 > **New — Dynamo's unified backend.** This guide covers the new
 > **unified backend** infrastructure in
-> [`dynamo-backend-common`](../../lib/backend-common/): a shared
+> [`dynamo-backend-common`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common): a shared
 > `LLMEngine` contract that vLLM, SGLang, TRT-LLM, and the mocker
 > already implement, and that any custom engine can plug into the
 > same way.
@@ -23,8 +23,8 @@ This guide walks through building a Rust unified backend for an
 inference engine that plugs into Dynamo's distributed runtime. A
 unified backend is a standalone Rust binary that owns its engine and
 serves requests via the shared
-[`LLMEngine`](../../lib/backend-common/src/engine.rs) contract in
-[`dynamo-backend-common`](../../lib/backend-common/) — no Python
+[`LLMEngine`](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/engine.rs) contract in
+[`dynamo-backend-common`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common) — no Python
 worker runtime required. For the Python version of the same contract
 see [Writing a Python Unified Backend](python-backend-guide.md).
 
@@ -42,7 +42,7 @@ contract, lighter setup. The non-unified fallback for feature gaps
 today.
 
 The reference example is the **mocker backend** at
-[`lib/backend-common/examples/mocker`](../../lib/backend-common/examples/mocker/)
+[`lib/backend-common/examples/mocker`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/examples/mocker)
 — a small, complete, pure-Rust implementation. Read it alongside this
 guide.
 
@@ -50,12 +50,12 @@ guide.
 
 - This guide — step-by-step walkthrough for someone starting a new
   backend from scratch.
-- [`LLMEngine` trait doc comments](../../lib/backend-common/src/engine.rs)
+- [`LLMEngine` trait doc comments](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/engine.rs)
   — authoritative method-by-method contract.
-- [Crate README](../../lib/backend-common/README.md) — in-tree
+- [Crate README](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/README.md) — in-tree
   reference: architecture, file index, disaggregation contract,
   error taxonomy, conformance kit.
-- [`backend-common` design notes](../../lib/backend-common/CLAUDE.md)
+- [`backend-common` design notes](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/CLAUDE.md)
   — rationale and invariants.
 
 ## Feature gaps
@@ -73,7 +73,7 @@ specifics like LoRA, diffusion, attention DP scheduling) live in the
 - Aggregated token-in-token-out inference
 - Disaggregated serving (`Aggregated` / `Prefill` / `Decode`) with
   bootstrap (SGLang) or internal KV transport (vLLM, TRT-LLM); the
-  Rust [mocker example](../../lib/backend-common/examples/mocker/)
+  Rust [mocker example](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/examples/mocker)
   exercises the same wire format CPU-only
 - Model registration with discovery and endpoint types
 - Request cancellation via in-stream `ctx.is_stopped()` polling plus
@@ -755,7 +755,7 @@ is not honored — `DYN_LOG` replaces it.
 
 ## Reference: the mocker backend
 
-[`lib/backend-common/examples/mocker`](../../lib/backend-common/examples/mocker/)
+[`lib/backend-common/examples/mocker`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/examples/mocker)
 is the canonical small-but-complete reference. Lift these patterns:
 
 - Single shared scheduler driving many concurrent streams via a

@@ -42,7 +42,15 @@ print_launch_banner "Launching Disaggregated (same GPU)" "$MODEL" "$HTTP_PORT" \
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python3 -m dynamo.frontend &
+# Set DYN_CHAT_PROCESSOR=sglang to exercise the Python pre/post processor instead of Rust.
+FRONTEND_ARGS=()
+if [[ -n "${DYN_CHAT_PROCESSOR:-}" ]]; then
+    FRONTEND_ARGS+=(--dyn-chat-processor "$DYN_CHAT_PROCESSOR")
+fi
+if [[ -n "${DYN_ROUTER_MODE:-}" ]]; then
+    FRONTEND_ARGS+=(--router-mode "$DYN_ROUTER_MODE")
+fi
+python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 
 # NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
 # This has a TOCTOU race — the port can be grabbed before init_process_group binds it,

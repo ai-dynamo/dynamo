@@ -21,7 +21,7 @@ title: FlexKV
 1. **Dynamo installed** with vLLM support
 2. **Infrastructure services running**:
    ```bash
-   docker compose -f deploy/docker-compose.yml up -d
+   docker compose -f dev/docker-compose.yml up -d
    ```
 3. **FlexKV installed**:
    ```bash

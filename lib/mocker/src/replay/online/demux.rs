@@ -28,7 +28,7 @@ async fn process_output_signal(
     };
 
     if state.mark_first_token_once() {
-        tracing::info!(uuid = %output.uuid, "replay_diag: demux on_first_token start");
+        tracing::debug!(uuid = %output.uuid, "replay_diag: demux on_first_token start");
         match router.on_first_token(output.uuid).await {
             Ok(true) => stats.record_prefill_marked(),
             Ok(false) => {}
@@ -38,14 +38,13 @@ async fn process_output_signal(
                 "online replay failed to mark prefill completed"
             ),
         }
-        tracing::info!(uuid = %output.uuid, "replay_diag: demux on_first_token done");
     }
 
     if !output.completed || !state.mark_completed_once() {
         return;
     }
 
-    tracing::info!(uuid = %output.uuid, "replay_diag: demux on_complete start");
+    tracing::debug!(uuid = %output.uuid, "replay_diag: demux on_complete start");
     match router.on_complete(output.uuid).await {
         Ok(true) => stats.record_freed(),
         Ok(false) => {}
@@ -55,7 +54,6 @@ async fn process_output_signal(
             "online replay failed to free completed request"
         ),
     }
-    tracing::info!(uuid = %output.uuid, "replay_diag: demux on_complete done, notifying");
     state.notify_completion();
 }
 

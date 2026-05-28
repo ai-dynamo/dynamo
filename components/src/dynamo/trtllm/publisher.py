@@ -31,7 +31,7 @@ from contextlib import asynccontextmanager
 from queue import Queue
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
-import msgpack
+import msgspec
 import zmq
 from prometheus_client import CollectorRegistry
 
@@ -223,8 +223,10 @@ class ZmqKvEventPublisher:
                 f"TensorRT-LLM: ZMQ publisher sending {event_type} event (dp_rank={attention_dp_rank}) to {self.zmq_endpoint}"
             )
 
-            # Serialize with msgpack (vLLM uses msgpack/rmp_serde compatible format)
-            payload = msgpack.packb(batch, use_bin_type=True)
+            # Serialize with msgspec's msgpack implementation to match the
+            # vLLM wire format without depending on the separate msgpack
+            # package.
+            payload = msgspec.msgpack.encode(batch)
 
             # Create multipart message: [topic, sequence, payload]
             # Format matches what consolidator expects: 3 frames [topic, sequence, payload]
@@ -533,11 +535,12 @@ class Publisher:
             logging.error("KV metrics publisher not initialized!")
             return
 
-        # Publish initial metrics with 0 active blocks
-        # TRT-LLM doesn't use data parallelism currently (dp_rank="0")
-        self.metrics_publisher.publish(None, kv_used_blocks=0)
-        self.component_gauges.set_total_blocks("0", 0)
-        self.component_gauges.set_gpu_cache_usage("0", 0.0)
+        # Publish initial metrics with 0 active blocks for each attention-DP rank.
+        for rank in range(self.attention_dp_size):
+            self.metrics_publisher.publish(rank, kv_used_blocks=0)
+            rank_label = str(rank)
+            self.component_gauges.set_total_blocks(rank_label, 0)
+            self.component_gauges.set_gpu_cache_usage(rank_label, 0.0)
 
         # Prepare threads for publishing stats but don't start them yet.
         # TRTLLM needs to start generating tokens first before stats
@@ -650,19 +653,20 @@ class Publisher:
         def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
+            dp_rank = int(stat.get("attentionDpRank", 0))
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
-            # TRT-LLM doesn't use data parallelism currently (dp_rank=None for NATS, "0" for Prometheus)
             assert self.metrics_publisher is not None
-            self.metrics_publisher.publish(None, kv_used_blocks=kv_active_blocks)
+            self.metrics_publisher.publish(dp_rank, kv_used_blocks=kv_active_blocks)
 
             # Publish Prometheus metrics
-            self.component_gauges.set_total_blocks("0", kv_total_blocks)
+            dp_rank_label = str(dp_rank)
+            self.component_gauges.set_total_blocks(dp_rank_label, kv_total_blocks)
 
             # Calculate and publish GPU cache usage percentage
             gpu_cache_usage = (
                 kv_active_blocks / kv_total_blocks if kv_total_blocks > 0 else 0.0
             )
-            self.component_gauges.set_gpu_cache_usage("0", gpu_cache_usage)
+            self.component_gauges.set_gpu_cache_usage(dp_rank_label, gpu_cache_usage)
 
             # Log iteration stats to TRT-LLM MetricsCollector (PR #11243)
             # This populates trtllm_kv_cache_hit_rate and trtllm_kv_cache_utilization gauges

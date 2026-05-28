@@ -1208,6 +1208,175 @@ mod matching_tests {
 }
 
 // ============================================================================
+// SINGLE-LOCK match_blocks REWRITE TESTS
+// ============================================================================
+
+/// Coverage for the single-lock `match_prefix_locked_batch` rewrite of
+/// `match_blocks`. The pre-rewrite code already resolved each hash as
+/// active-or-inactive (via `find_active_match` → `acquire_for_hash`), so
+/// these are regression guards: they must pass identically on the old and
+/// new code, locking in that collapsing N store-lock cycles into one did
+/// not change the prefix the walk returns.
+mod single_lock_match_tests {
+    use super::*;
+
+    /// Allocate, complete, and register one independent block. Returns its
+    /// `SequenceHash` and the strong `ImmutableBlock` handle (hold it to
+    /// keep the block `Primary`/active; drop it to push it to `Inactive`).
+    fn register_one(
+        manager: &BlockManager<TestBlockData>,
+        base: u32,
+    ) -> (SequenceHash, ImmutableBlock<TestBlockData>) {
+        let token_block = create_token_block(&[base, base + 1, base + 2, base + 3]);
+        let seq_hash = token_block.kvbm_sequence_hash();
+        let mutable = manager
+            .allocate_blocks(1)
+            .expect("allocate")
+            .into_iter()
+            .next()
+            .unwrap();
+        let complete = mutable.complete(&token_block).expect("complete");
+        let immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        (seq_hash, immutable)
+    }
+
+    /// `[A, A, I, I, A, A]` — a prefix mixing active and inactive blocks
+    /// must return all 6. Each hash is resolved active-or-inactive under
+    /// the single batched store-lock; an inactive hash in the middle does
+    /// NOT truncate the prefix.
+    #[test]
+    fn match_mixed_active_inactive_prefix_returns_full_length() {
+        let manager = create_test_manager(6);
+
+        let mut hashes = Vec::new();
+        let mut held = Vec::new();
+        for i in 0..6u32 {
+            let (h, imm) = register_one(&manager, 1_000 + i * 10);
+            hashes.push(h);
+            held.push(Some(imm));
+        }
+        // Drop the immutables for positions 2 and 3 → those fall to Inactive.
+        held[2] = None;
+        held[3] = None;
+
+        let matched = manager.match_blocks(&hashes);
+        assert_eq!(
+            matched.len(),
+            6,
+            "mixed active/inactive prefix must not truncate"
+        );
+        for (i, block) in matched.iter().enumerate() {
+            assert_eq!(block.sequence_hash(), hashes[i], "order preserved at {i}");
+        }
+    }
+
+    /// `[I, A]` — leading inactive hash, trailing active. Returns 2.
+    #[test]
+    fn match_inactive_then_active() {
+        let manager = create_test_manager(2);
+        let (h0, imm0) = register_one(&manager, 2_000);
+        let (h1, _imm1) = register_one(&manager, 2_010);
+        drop(imm0); // h0 → Inactive; h1 stays active.
+
+        let matched = manager.match_blocks(&[h0, h1]);
+        assert_eq!(matched.len(), 2);
+        assert_eq!(matched[0].sequence_hash(), h0);
+        assert_eq!(matched[1].sequence_hash(), h1);
+    }
+
+    /// `[A, I, A]` — inactive hash sandwiched between active ones. Returns 3.
+    #[test]
+    fn match_active_inactive_active() {
+        let manager = create_test_manager(3);
+        let (h0, _imm0) = register_one(&manager, 3_000);
+        let (h1, imm1) = register_one(&manager, 3_010);
+        let (h2, _imm2) = register_one(&manager, 3_020);
+        drop(imm1); // h1 → Inactive.
+
+        let matched = manager.match_blocks(&[h0, h1, h2]);
+        assert_eq!(matched.len(), 3);
+        assert_eq!(matched[1].sequence_hash(), h1);
+    }
+
+    /// `[A, A, miss, A]` — an unregistered hash terminates the prefix even
+    /// though a registered hash follows it. Returns 2.
+    #[test]
+    fn match_stops_at_first_total_miss() {
+        let manager = create_test_manager(4);
+        let (h0, _imm0) = register_one(&manager, 4_000);
+        let (h1, _imm1) = register_one(&manager, 4_010);
+        let (h3, _imm3) = register_one(&manager, 4_030);
+        // `miss` is a hash for a block that was never registered.
+        let miss = create_token_block(&[4_020, 4_021, 4_022, 4_023]).kvbm_sequence_hash();
+
+        let matched = manager.match_blocks(&[h0, h1, miss, h3]);
+        assert_eq!(
+            matched.len(),
+            2,
+            "prefix terminates at the first total miss"
+        );
+        assert_eq!(matched[0].sequence_hash(), h0);
+        assert_eq!(matched[1].sequence_hash(), h1);
+    }
+
+    /// Empty input is an allocation-free early return.
+    #[test]
+    fn match_empty_input_returns_empty() {
+        let manager = create_test_manager(4);
+        let _held = register_one(&manager, 5_000);
+        assert!(manager.match_blocks(&[]).is_empty());
+        assert_eq!(manager.metrics().snapshot().match_blocks_returned, 0);
+    }
+
+    /// The batched frequency-tracker touch fires exactly once per returned
+    /// block across a mixed active/inactive prefix — N hits → N touches,
+    /// no double-count, no miss.
+    #[test]
+    fn match_mixed_prefix_touches_once_per_returned_block() {
+        let (manager, metered) = crate::testing::create_test_manager_metered::<TestBlockData>(5);
+
+        let mut hashes = Vec::new();
+        let mut held = Vec::new();
+        for i in 0..5u32 {
+            let (h, imm) = register_one(&manager, 6_000 + i * 10);
+            hashes.push(h);
+            held.push(Some(imm));
+        }
+        // Positions 1 and 3 → Inactive; 0, 2, 4 stay active.
+        held[1] = None;
+        held[3] = None;
+
+        metered.reset();
+        let matched = manager.match_blocks(&hashes);
+        assert_eq!(matched.len(), 5);
+        assert_eq!(
+            metered.touches(),
+            5,
+            "match_blocks must touch the frequency tracker exactly once per \
+             returned block (mix of active hits and inactive resurrections); \
+             got {}",
+            metered.touches()
+        );
+    }
+
+    /// A whole-prefix total miss touches nothing and returns empty.
+    #[test]
+    fn match_total_miss_touches_nothing() {
+        let (manager, metered) = crate::testing::create_test_manager_metered::<TestBlockData>(4);
+        let _held = register_one(&manager, 7_000);
+        let miss = create_token_block(&[9_000, 9_001, 9_002, 9_003]).kvbm_sequence_hash();
+
+        metered.reset();
+        assert!(manager.match_blocks(&[miss]).is_empty());
+        assert_eq!(metered.touches(), 0, "a total miss must not touch");
+    }
+}
+
+// ============================================================================
 // IMMUTABLE BLOCK AND WEAK BLOCK TESTS
 // ============================================================================
 

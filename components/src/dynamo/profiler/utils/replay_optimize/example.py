@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.profiler.utils.replay_optimize import (
     EngineSpec,
     HardwareSpec,
@@ -68,13 +67,12 @@ def _build_workload(
     )
 
 
-def _engine_args(worker_type: str) -> MockEngineArgs:
-    return MockEngineArgs(
-        block_size=512,
-        num_gpu_blocks=20000,
-        enable_prefix_caching=True,
-        worker_type=worker_type,
-    )
+def _engine_args(worker_type: str) -> dict[str, object]:
+    return {
+        "block_size": 512,
+        "enable_prefix_caching": True,
+        "worker_type": worker_type,
+    }
 
 
 def run_example(
@@ -105,7 +103,6 @@ def run_example(
         ),
         sla=SLASpec(ttft=50000.0, itl=100.0, e2eLatency=60000.0),
         router=RouterSpec(
-            baseRouterConfig=KvRouterConfig(),
             overlapCredits=OVERLAP_CREDITS,
             prefillLoadScales=PREFILL_LOAD_SCALES,
         ),

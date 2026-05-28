@@ -41,7 +41,7 @@ To build KVBM from source, see the detailed instructions in the [KVBM bindings R
 
 ```bash
 # Start up etcd for KVBM leader/worker registration and discovery
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 Pick one of the following to get a Dynamo vLLM container with KVBM built in. The subsequent serving commands are the same either way.
@@ -110,7 +110,7 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 
 ```bash
 # Start up etcd for KVBM leader/worker registration and discovery
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built in. The subsequent serving commands are the same either way.
@@ -128,10 +128,10 @@ See the [Local Installation Guide](../../getting-started/local-installation.md) 
 ```bash
 # Build a dynamo TRTLLM container (KVBM is built in by default)
 # x86_64
-python container/render.py --framework trtllm --target runtime --output-short-filename --platform linux/amd64
+python container/render.py --framework trtllm --target runtime --output-short-filename --cuda-version=13.1 --platform linux/amd64
 docker buildx build --platform linux/amd64 -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
-# arm64 (Grace, Jetson, arm64 EC2)
-python container/render.py --framework trtllm --target runtime --output-short-filename --platform linux/arm64
+# arm64 with NVIDIA GPUs (GH200, GB200, P6e-GB200 UltraServer — *not* generic Graviton instances, which have no GPU)
+python container/render.py --framework trtllm --target runtime --output-short-filename --cuda-version=13.1 --platform linux/arm64
 docker buildx build --platform linux/arm64 -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
@@ -213,7 +213,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-> **Learn more:** See the [SGLang HiCache Integration Guide](../../integrations/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
+> **Learn more:** See the [SGLang HiCache Integration Guide](../../backends/sglang/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
 
 ## Disaggregated Serving with KVBM
 
@@ -304,7 +304,7 @@ When disabled (default), each GPU loads KV blocks independently. Set `DYN_KVBM_N
 
 ```bash
 # Start basic services (etcd & natsd), along with Prometheus and Grafana
-docker compose -f deploy/docker-observability.yml up -d
+docker compose -f dev/docker-observability.yml up -d
 ```
 
 ### Enable Metrics for vLLM
@@ -494,4 +494,4 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connect
 - [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache-integration.md)
 - [FlexKV Integration](../../integrations/flexkv-integration.md)
-- [SGLang HiCache](../../integrations/sglang-hicache.md)
+- [SGLang HiCache](../../backends/sglang/sglang-hicache.md)

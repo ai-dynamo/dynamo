@@ -19,15 +19,24 @@ import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
+from urllib.parse import parse_qsl
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 
 logger = logging.getLogger(__name__)
+
+
+def _prometheus_ssl_verify_default() -> bool:
+    return os.environ.get("PROMETHEUS_SSL_VERIFY", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 class PlannerPreDeploymentSweepMode(str, Enum):
@@ -57,12 +66,14 @@ class PlannerConfig(BaseModel):
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
-    optimization_target: Literal["throughput", "latency", "sla"] = Field(
+    optimization_target: Literal["throughput", "latency", "load", "sla"] = Field(
         default="throughput",
         description=(
             "Scaling optimization target. "
             "'throughput' (default) and 'latency' use static thresholds on queue "
             "depth and KV cache utilization — no SLA targets or profiling needed. "
+            "'load' uses user-defined prefill queue token and decode KV "
+            "utilization thresholds. "
             "'sla' uses regression-based scaling that targets specific ttft_ms/itl_ms values."
         ),
     )
@@ -138,6 +149,73 @@ class PlannerConfig(BaseModel):
         ),
         exclude=True,
     )
+    metric_pulling_prometheus_token: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN"),
+        exclude=True,
+        description=(
+            "Optional bearer token sent as `Authorization: Bearer <token>` on "
+            "every PromQL request. Useful for hardened monitoring stacks "
+            "(OpenShift thanos-querier, OAuth-proxied Prometheus). Token is "
+            "read once at startup."
+        ),
+    )
+    metric_pulling_prometheus_token_file: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN_FILE"),
+        exclude=True,
+        description=(
+            "Optional path to a file containing a bearer token. When set, "
+            "the token is re-read before every PromQL request so rotated "
+            "tokens (Kubernetes projected ServiceAccount tokens, OpenShift "
+            "OAuth SA tokens) are picked up without restarting the planner."
+        ),
+    )
+    metric_pulling_prometheus_ssl_verify: bool = Field(
+        default_factory=_prometheus_ssl_verify_default,
+        exclude=True,
+        description=(
+            "Verify the upstream Prometheus TLS certificate. Default False "
+            "preserves the previous PrometheusConnect(disable_ssl=True) "
+            "behavior. Set True for hardened monitoring stacks; pair with "
+            "an injected CA bundle if the upstream uses a private CA."
+        ),
+    )
+    metric_pulling_prometheus_extra_query_params: Optional[Dict[str, str]] = Field(
+        default_factory=lambda: (
+            dict(
+                parse_qsl(
+                    os.environ.get("PROMETHEUS_EXTRA_QUERY_PARAMS", ""),
+                    strict_parsing=True,
+                )
+            )
+            or None
+        ),
+        exclude=True,
+        description=(
+            "Fixed key/value pairs appended as URL query parameters on every PromQL "
+            "request. Set via PROMETHEUS_EXTRA_QUERY_PARAMS as a URL query string, "
+            "e.g. `namespace=my-ns&tenant=foo`."
+        ),
+    )
+    metric_pulling_prometheus_ca_bundle: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_CA_BUNDLE"),
+        exclude=True,
+        validate_default=True,
+        description=(
+            "Path to a CA bundle for verifying the upstream Prometheus TLS certificate. "
+            "No-op unless ssl_verify is enabled."
+        ),
+    )
+
+    @field_validator("metric_pulling_prometheus_ca_bundle", mode="after")
+    @classmethod
+    def _validate_ca_bundle_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not Path(v).is_file():
+            raise ValueError(
+                f"metric_pulling_prometheus_ca_bundle path does not exist or is not a file: {v!r}. "
+                "Check that PROMETHEUS_CA_BUNDLE points to a valid CA bundle file."
+            )
+        return v
+
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
@@ -173,6 +251,43 @@ class PlannerConfig(BaseModel):
     load_scaling_down_sensitivity: int = (
         SLAPlannerDefaults.load_scaling_down_sensitivity
     )
+    prefill_scale_up_queue_tokens: Optional[int] = Field(
+        default=SLAPlannerDefaults.prefill_scale_up_queue_tokens,
+        ge=0,
+        description=(
+            "Prefill queue token count that triggers scale-up when "
+            "optimization_target='load'."
+        ),
+    )
+    prefill_scale_down_queue_tokens: Optional[int] = Field(
+        default=SLAPlannerDefaults.prefill_scale_down_queue_tokens,
+        ge=0,
+        description=(
+            "Prefill queue token count that allows scale-down when "
+            "optimization_target='load'."
+        ),
+    )
+    decode_scale_up_kv_rate: Optional[float] = Field(
+        default=SLAPlannerDefaults.decode_scale_up_kv_rate,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices(
+            "decode_scale_up_kv_rate", "decode_sacle_up_kv_rate"
+        ),
+        description=(
+            "Decode KV utilization percentage that triggers scale-up when "
+            "optimization_target='load'. Accepts 0-100."
+        ),
+    )
+    decode_scale_down_kv_rate: Optional[float] = Field(
+        default=SLAPlannerDefaults.decode_scale_down_kv_rate,
+        ge=0,
+        le=100,
+        description=(
+            "Decode KV utilization percentage that allows scale-down when "
+            "optimization_target='load'. Accepts 0-100."
+        ),
+    )
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
@@ -197,6 +312,13 @@ class PlannerConfig(BaseModel):
             "Fixed filename for HTML diagnostics reports. "
             "When set, reports are written to report_output_dir/report_filename "
             "instead of the default timestamped name."
+        ),
+    )
+    report_write_gzip_log: bool = Field(
+        default=True,
+        description=(
+            "Write a compressed JSONL diagnostics log next to each HTML report. "
+            "The gzip sidecar uses the same report basename with .log.jsonl.gz."
         ),
     )
     live_dashboard_port: int = Field(
@@ -235,8 +357,48 @@ class PlannerConfig(BaseModel):
                 "Please specify the namespace where GlobalPlanner is running."
             )
 
+        if self.optimization_target == "load":
+            if self.mode in ("disagg", "prefill"):
+                if (
+                    self.prefill_scale_up_queue_tokens is None
+                    or self.prefill_scale_down_queue_tokens is None
+                ):
+                    raise ValueError(
+                        "optimization_target='load' requires "
+                        "prefill_scale_up_queue_tokens and "
+                        "prefill_scale_down_queue_tokens for prefill scaling"
+                    )
+                if (
+                    self.prefill_scale_up_queue_tokens
+                    <= self.prefill_scale_down_queue_tokens
+                ):
+                    raise ValueError(
+                        "prefill_scale_up_queue_tokens must be greater than "
+                        "prefill_scale_down_queue_tokens"
+                    )
+            if self.mode in ("disagg", "decode", "agg"):
+                if (
+                    self.decode_scale_up_kv_rate is None
+                    or self.decode_scale_down_kv_rate is None
+                ):
+                    raise ValueError(
+                        "optimization_target='load' requires "
+                        "decode_scale_up_kv_rate and decode_scale_down_kv_rate "
+                        "for decode scaling"
+                    )
+                if self.decode_scale_up_kv_rate <= self.decode_scale_down_kv_rate:
+                    raise ValueError(
+                        "decode_scale_up_kv_rate must be greater than "
+                        "decode_scale_down_kv_rate"
+                    )
+
         # Easy mode: force load scaling on, throughput scaling off
         if self.optimization_target != "sla":
+            if self.optimization_target == "load" and self.enable_throughput_scaling:
+                logger.warning(
+                    "optimization_target='load' disables throughput-based scaling; "
+                    "using reactive load-based scaling only"
+                )
             self.enable_load_scaling = True
             self.enable_throughput_scaling = False
             if (

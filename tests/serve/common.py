@@ -204,12 +204,18 @@ def run_serve_deployment(
                     suffix = k.removeprefix("DYN_SYSTEM_PORT")
                     if suffix.isdigit():
                         merged_env.pop(k, None)
+                        continue
+                if k.startswith("DYN_SYSTEM_PORT_WORKER"):
+                    suffix = k.removeprefix("DYN_SYSTEM_PORT_WORKER")
+                    if suffix.isdigit():
+                        merged_env.pop(k, None)
         else:
             # Alias for PORT1 (many scripts only read this).
             merged_env["DYN_SYSTEM_PORT"] = str(dynamic_system_ports[0])
             merged_env["DYN_SYSTEM_PORT1"] = str(dynamic_system_ports[0])
             for idx, port in enumerate(dynamic_system_ports, start=1):
                 merged_env[f"DYN_SYSTEM_PORT{idx}"] = str(port)
+                merged_env[f"DYN_SYSTEM_PORT_WORKER{idx}"] = str(port)
 
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:

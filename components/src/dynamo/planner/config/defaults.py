@@ -47,6 +47,15 @@ class SLAPlannerDefaults(BasePlannerDefaults):
         "PROMETHEUS_ENDPOINT",
         "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
     )
+    metric_pulling_prometheus_token = os.environ.get("PROMETHEUS_TOKEN")
+    metric_pulling_prometheus_token_file = os.environ.get("PROMETHEUS_TOKEN_FILE")
+    metric_pulling_prometheus_ssl_verify = os.environ.get(
+        "PROMETHEUS_SSL_VERIFY", "false"
+    ).lower() in ("1", "true", "yes")
+    metric_pulling_prometheus_extra_query_params = os.environ.get(
+        "PROMETHEUS_EXTRA_QUERY_PARAMS"
+    )
+    metric_pulling_prometheus_ca_bundle = os.environ.get("PROMETHEUS_CA_BUNDLE")
     profile_results_dir = "profiling_results"
 
     isl = 3000  # in number of tokens
@@ -82,6 +91,10 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     load_scaling_down_sensitivity = 80  # 0-100
     load_metric_samples = 10  # number of samples per interval
     load_min_observations = 5  # cold start threshold
+    prefill_scale_up_queue_tokens = None
+    prefill_scale_down_queue_tokens = None
+    decode_scale_up_kv_rate = None
+    decode_scale_down_kv_rate = None
 
     # Advisory mode: compute and log decisions without executing scaling
     advisory = False

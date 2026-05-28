@@ -5,9 +5,9 @@
 members = [
     "lib/llm",
     "lib/runtime",
-    "lib/config",
     "lib/tokenizers",
     "lib/tokens",
+    "lib/data-gen",
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
@@ -43,9 +43,9 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.2.0" }
 dynamo-llm = { path = "lib/llm", version = "1.2.0" }
-dynamo-config = { path = "lib/config", version = "1.2.0" }
 dynamo-tokenizers = { path = "lib/tokenizers", version = "1.2.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.2.0" }
+dynamo-data-gen = { path = "lib/data-gen", version = "1.2.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.2.0" }
 dynamo-memory = { path = "lib/memory", version = "1.2.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.2.0" }
@@ -53,7 +53,7 @@ dynamo-kv-router = { path = "lib/kv-router", version = "1.2.0", features = ["met
 dynamo-protocols = { path = "lib/protocols", version = "1.2.0" }
 dynamo-parsers = { path = "lib/parsers", version = "1.2.0" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.2.0" }
-fastokens = { version = "0.1.0" }
+fastokens = { version = "0.2.0" }
 
 
 # kvbm
@@ -122,6 +122,7 @@ serde_bytes = { version = "0.11" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }
+serde_path_to_error = "0.1"
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }

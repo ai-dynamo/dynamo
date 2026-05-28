@@ -279,4 +279,32 @@ mod tests {
         let result = remove_known_non_jinja2_tags(template);
         assert_eq!(result, "Start Part 1 middle Part 2");
     }
+
+    #[test]
+    fn test_minijinja_parses_midchain_dotted_integer_lookup() {
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": r#"{{ m.content.0.type }} {{ "1.5.10" }}"#,
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        let result = formatter
+            .env
+            .get_template("default")
+            .unwrap()
+            .render(context! {
+                m => json!({
+                    "content": [
+                        {
+                            "type": "tool_reference"
+                        }
+                    ]
+                })
+            })
+            .unwrap();
+
+        assert_eq!(result, "tool_reference 1.5.10");
+    }
 }

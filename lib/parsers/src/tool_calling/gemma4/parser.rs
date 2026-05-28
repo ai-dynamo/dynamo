@@ -70,34 +70,30 @@ pub fn find_tool_call_end_position_gemma4(chunk: &str) -> Option<usize> {
 
 /// Parse a Gemma 4 model response into structured tool calls + leftover text.
 ///
-/// Returns `(parsed_tool_calls, normal_text_content)`. Text outside any
-/// `<|tool_call>call:NAME{...}<tool_call|>` match is returned as `normal_text`.
-/// When a tool call is truncated (start marker present but no `}<tool_call|>`
-/// terminator — typically because the model hit `max_tokens` mid-call), the
-/// regex finds no match and the raw bytes after the start marker are echoed
-/// back as `normal_text` so the caller can detect the truncation and surface
-/// it to the user.
+/// Returns `(parsed_tool_calls, normal_text_content)`. `normal_text` is the
+/// text BEFORE the first `<|tool_call>` start marker, trimmed of whitespace.
+/// Text between calls, after the last call, and truncated-incomplete-call
+/// tails are all dropped — matching upstream vLLM
+/// (`vllm/tool_parsers/gemma4_tool_parser.py::extract_tool_calls`) which
+/// computes `content = model_output[:content_end].strip()` where
+/// `content_end = model_output.find(self.tool_call_start_token)`.
 ///
-/// Mirrors upstream's `extract_tool_calls` in `vllm/tool_parsers/
-/// gemma4_tool_parser.py`, which uses `tool_call_regex.findall(model_output)`
-/// directly. The `}<tool_call|>` adjacency requirement in the regex means
-/// embedded `<tool_call|>` literals inside string-typed args (e.g. a
-/// `description` field documenting the tool-call format) don't truncate the
-/// match prematurely.
+/// Per `tests/parity/README.md`: vLLM and SGLang both drop trailing text
+/// after the wrapper across XML-style families; this aligns Dynamo to that
+/// behavior. Cases: TOOLCALLING.batch.{2.c, 8.b, 8.c, 8.d}.
+///
+/// The `}<tool_call|>` adjacency requirement in the regex means embedded
+/// `<tool_call|>` literals inside string-typed args (e.g. a `description`
+/// field documenting the tool-call format) don't truncate the match
+/// prematurely.
 pub fn try_tool_call_parse_gemma4(
     message: &str,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let regex = tool_call_regex();
     let mut calls = Vec::new();
-    let mut normal_parts = Vec::new();
-    let mut cursor = 0;
 
     for caps in regex.captures_iter(message) {
-        let whole = caps.get(0).expect("capture 0 always present");
-        normal_parts.push(&message[cursor..whole.start()]);
-        cursor = whole.end();
-
         let name = caps
             .name("name")
             .map(|m| m.as_str().to_string())
@@ -136,20 +132,66 @@ pub fn try_tool_call_parse_gemma4(
         });
     }
 
-    // Anything after the last complete match — including a truncated
-    // `<|tool_call>call:...` with no closing `}<tool_call|>` — is returned to
-    // the caller as `normal_text` so model truncation is visible rather than
-    // silently swallowed.
-    normal_parts.push(&message[cursor..]);
-
-    let normal_text = normal_parts.join("").trim().to_string();
-    let normal_content = if normal_text.is_empty() {
-        Some(String::new())
+    // No-leak contract for `normal_text`:
+    //   - Success path (≥1 call extracted): prefix BEFORE the first
+    //     `<|tool_call>` start marker — mirrors vLLM's
+    //     `content = model_output[:content_end].strip()`. Inter-call,
+    //     trailing, and truncation tails after a successful call are dropped.
+    //   - Recovery path (zero calls extracted): if the message contains ANY
+    //     gemma4 markup token (`<|tool_call>`, `<tool_call|>`, `<|"|>`),
+    //     return empty — Dynamo intentionally diverges from vLLM's
+    //     exception-fallback (which echoes raw bytes) so tool-call markup
+    //     never leaks into normal_text on malformed / truncated / orphan-
+    //     close / no-body inputs. Cases flagged by the parity table's `↯`:
+    //     TOOLCALLING.batch.{4.a, 4.b, 4.c, 4.d, 5.a, 5.b, 5.c, 6.c}.
+    //   - Plain-text path (zero calls AND no markup): return the message
+    //     as-is.
+    let has_markup = message.contains(TOOL_CALL_START)
+        || message.contains(TOOL_CALL_END)
+        || message.contains(STRING_DELIM);
+    let normal_text = if calls.is_empty() {
+        if has_markup {
+            // Recovery: malformed/truncated/orphan-close/no-body shapes.
+            // Suppress the whole message so tool-call markup doesn't leak.
+            let preview: String = message.chars().take(120).collect();
+            tracing::warn!(
+                why = "no_calls_with_markup",
+                stripped_bytes = message.len(),
+                has_start = message.contains(TOOL_CALL_START),
+                has_end = message.contains(TOOL_CALL_END),
+                has_string_delim = message.contains(STRING_DELIM),
+                "gemma4 strip (recovery): zero calls extracted but gemma4 markup present (<|tool_call>, <tool_call|>, <|\"|>); suppressing entire message to prevent leak into normal_text. preview={:?}",
+                preview
+            );
+            String::new()
+        } else {
+            // No markup at all → plain text passes through unchanged. No strip.
+            message.trim().to_string()
+        }
     } else {
-        Some(normal_text)
+        // Success: prefix-only contract — drop everything from the first
+        // `<|tool_call>` onward (inter-call text, trailing narration,
+        // truncation tails). Mirrors vLLM's
+        // `content = model_output[:content_end].strip()`.
+        match message.find(TOOL_CALL_START) {
+            Some(idx) => {
+                let stripped = &message[idx..];
+                let preview: String = stripped.chars().take(120).collect();
+                tracing::debug!(
+                    why = "prefix_only_contract",
+                    n_calls = calls.len(),
+                    kept_prefix_bytes = idx,
+                    stripped_bytes = stripped.len(),
+                    "gemma4 strip (success): kept prefix before first <|tool_call>; dropped parsed-call(s) + any inter-call / trailing narration. preview={:?}",
+                    preview
+                );
+                message[..idx].trim().to_string()
+            }
+            None => String::new(),
+        }
     };
 
-    Ok((calls, normal_content))
+    Ok((calls, Some(normal_text)))
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +476,8 @@ mod tests {
         );
     }
 
-    #[test] // PARSER.batch.1 — single string argument
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1 in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1 — single string argument
     fn parse_single_string_argument() {
         let input = r#"<|tool_call>call:get_weather{location:<|"|>Tokyo<|"|>}<tool_call|>"#;
         let (name, args) = extract_first(input);
@@ -442,7 +485,8 @@ mod tests {
         assert_eq!(args["location"], "Tokyo");
     }
 
-    #[test] // PARSER.batch.1, PARSER.batch.7 — multiple typed arguments
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1, TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.7.yaml, tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1, TOOLCALLING.batch.7 — multiple typed arguments
     fn parse_multiple_typed_arguments() {
         let input = r#"<|tool_call>call:f{loc:<|"|>San Francisco, CA<|"|>,unit:<|"|>celsius<|"|>,count:42,flag:true,nope:null}<tool_call|>"#;
         let (name, args) = extract_first(input);
@@ -454,7 +498,8 @@ mod tests {
         assert_eq!(args["nope"], Value::Null);
     }
 
-    #[test] // PARSER.batch.6 — empty argument object
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.6.yaml.
+    #[test] // TOOLCALLING.batch.6 — empty argument object
     fn parse_no_arg_call() {
         let input = "<|tool_call>call:get_time{}<tool_call|>";
         let (name, args) = extract_first(input);
@@ -462,7 +507,8 @@ mod tests {
         assert!(args.as_object().unwrap().is_empty());
     }
 
-    #[test] // PARSER.batch.7 — nested object value
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7 — nested object value
     fn parse_nested_object_value() {
         let input = r#"<|tool_call>call:f{cfg:{ssl:true,pool:{min:5,max:20}}}<tool_call|>"#;
         let (_name, args) = extract_first(input);
@@ -471,14 +517,16 @@ mod tests {
         assert_eq!(args["cfg"]["pool"]["max"], 20);
     }
 
-    #[test] // PARSER.batch.7 — array of strings
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7 — array of strings
     fn parse_array_of_strings() {
         let input = r#"<|tool_call>call:f{tags:[<|"|>a<|"|>,<|"|>b<|"|>,<|"|>c<|"|>]}<tool_call|>"#;
         let (_name, args) = extract_first(input);
         assert_eq!(args["tags"], serde_json::json!(["a", "b", "c"]));
     }
 
-    #[test] // PARSER.batch.7 — array of mixed primitives
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7 — array of mixed primitives
     fn parse_array_of_mixed_primitives() {
         let input = "<|tool_call>call:f{xs:[1,2,3.5,true,false,null]}<tool_call|>";
         let (_name, args) = extract_first(input);
@@ -490,7 +538,8 @@ mod tests {
         assert_eq!(args["xs"][5], Value::Null);
     }
 
-    #[test] // PARSER.batch.2 — multiple parallel calls, zero spacing
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2 — multiple parallel calls, zero spacing
     fn parse_multiple_parallel_calls() {
         let input = concat!(
             "<|tool_call>call:a{x:1}<tool_call|>",
@@ -505,23 +554,24 @@ mod tests {
         assert_eq!(normal, Some(String::new()));
     }
 
-    #[test] // PARSER.batch.8 — surrounding normal text preserved
+    #[test] // TOOLCALLING.batch.8.c — prefix narration preserved, trailing dropped (matches vLLM)
     fn parse_with_surrounding_text() {
         let input = r#"Sure thing. <|tool_call>call:f{x:1}<tool_call|> All set."#;
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(normal, Some("Sure thing.  All set.".to_string()));
+        assert_eq!(normal, Some("Sure thing.".to_string()));
     }
 
-    #[test] // PARSER.batch.3 — no tool calls at all
+    #[test] // TOOLCALLING.batch.3 — no tool calls at all
     fn parse_no_tool_calls() {
         let (calls, normal) = try_tool_call_parse_gemma4("just plain prose here", None).unwrap();
         assert_eq!(calls.len(), 0);
         assert_eq!(normal, Some("just plain prose here".to_string()));
     }
 
-    #[test] // PARSER.batch.5 — complete prior calls survive; truncated tail is echoed
-    fn truncated_tail_echoed_complete_prior_survives() {
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.c in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5 — complete prior call survives; truncated tail dropped (matches vLLM)
+    fn truncated_tail_dropped_complete_prior_survives() {
         let input = concat!(
             "<|tool_call>call:complete{x:1}<tool_call|>",
             "<|tool_call>call:partial{y:<|\"|>incomp", // no end marker
@@ -529,17 +579,14 @@ mod tests {
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "complete");
-        // Truncated bytes are surfaced rather than silently dropped — matches
-        // upstream `vllm.tool_parsers.gemma4_tool_parser.extract_tool_calls`
-        // when no complete tool call could be parsed past the start marker.
-        let normal = normal.unwrap();
-        assert!(
-            normal.contains("<|tool_call>call:partial"),
-            "expected truncated bytes echoed in normal_text, got: {normal:?}"
-        );
+        // vLLM computes content as text BEFORE the first start marker; here that
+        // is empty (message starts with `<|tool_call>`), so normal_text is "".
+        // The truncated tail bytes are dropped, not echoed.
+        assert_eq!(normal, Some(String::new()));
     }
 
-    #[test] // PARSER.batch.4 — malformed args body falls back to empty object, call still emitted
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.a in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4 — malformed args body falls back to empty object, call still emitted
     fn malformed_args_falls_back_to_empty_object() {
         let input = "<|tool_call>call:f{garbage no colons here}<tool_call|>";
         let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
@@ -549,7 +596,7 @@ mod tests {
         assert!(args.as_object().unwrap().is_empty());
     }
 
-    #[test] // PARSER.fmt.1 — function names with hyphens, dots, underscores
+    #[test] // TOOLCALLING.fmt.1 — function names with hyphens, dots, underscores
     fn parse_function_names_with_special_chars() {
         for (input, expected_name) in [
             (
@@ -571,21 +618,23 @@ mod tests {
         }
     }
 
-    #[test] // PARSER.batch.7 — angle brackets / HTML inside string values
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.b in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7 — angle brackets / HTML inside string values
     fn parse_html_in_string_value() {
         let input = r#"<|tool_call>call:render{html:<|"|><div class="x"><h1>Hi</h1></div><|"|>}<tool_call|>"#;
         let (_name, args) = extract_first(input);
         assert_eq!(args["html"], "<div class=\"x\"><h1>Hi</h1></div>");
     }
 
-    #[test] // PARSER.batch.7 — newlines inside string values
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.b in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7 — newlines inside string values
     fn parse_newlines_in_string_value() {
         let input = "<|tool_call>call:f{body:<|\"|>line1\nline2\nline3<|\"|>}<tool_call|>";
         let (_name, args) = extract_first(input);
         assert_eq!(args["body"], "line1\nline2\nline3");
     }
 
-    #[test] // PARSER.fmt.2 — whitespace tolerance inside args
+    #[test] // TOOLCALLING.fmt.2 — whitespace tolerance inside args
     fn parse_with_internal_whitespace() {
         let input = r#"<|tool_call>call:f{ x : 1 , y : <|"|>z<|"|> }<tool_call|>"#;
         let (_name, args) = extract_first(input);
@@ -593,7 +642,8 @@ mod tests {
         assert_eq!(args["y"], "z");
     }
 
-    #[test] // PARSER.batch.7 — negative numbers and floats
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7 — negative numbers and floats
     fn parse_signed_numbers_and_floats() {
         let input = "<|tool_call>call:f{a:-1,b:-2.5,c:0,d:0.0}<tool_call|>";
         let (_name, args) = extract_first(input);
@@ -603,19 +653,20 @@ mod tests {
         assert!((args["d"].as_f64().unwrap()).abs() < 1e-9);
     }
 
-    #[test] // PARSER.fmt.1 — tool validation warns but doesn't drop
+    #[test] // TOOLCALLING.fmt.1 — tool validation warns but doesn't drop
     fn parse_with_tool_validation() {
         let input = r#"<|tool_call>call:get_weather{x:1}<tool_call|>"#;
         let tools = vec![ToolDefinition {
             name: "get_weather".to_string(),
             parameters: None,
+            strict: None,
         }];
         let (calls, _) = try_tool_call_parse_gemma4(input, Some(&tools)).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test] // PARSER.fmt.4 — empty wrapper between calls
+    #[test] // TOOLCALLING.fmt.4 — empty wrapper between calls
     fn parse_empty_text_between_calls() {
         let input = concat!(
             "<|tool_call>call:a{}<tool_call|>",
@@ -628,32 +679,32 @@ mod tests {
 
     // Argument-grammar unit tests (parse_args_object directly)
 
-    #[test] // PARSER.batch.6 — empty args at the grammar entry point
+    #[test] // TOOLCALLING.batch.6 — empty args at the grammar entry point
     fn args_grammar_empty() {
         let v = parse_args_object("").unwrap();
         assert_eq!(v, serde_json::json!({}));
     }
 
-    #[test] // PARSER.batch.7 — string with comma/colon/brace literals
+    #[test] // TOOLCALLING.batch.7 — string with comma/colon/brace literals
     fn args_grammar_string_with_special_chars() {
         let v = parse_args_object(r#"x:<|"|>has,comma:and{brace}<|"|>"#).unwrap();
         assert_eq!(v["x"], "has,comma:and{brace}");
     }
 
-    #[test] // PARSER.batch.7 — deeply nested object value
+    #[test] // TOOLCALLING.batch.7 — deeply nested object value
     fn args_grammar_deeply_nested() {
         let v = parse_args_object("a:{b:{c:{d:{e:1}}}}").unwrap();
         assert_eq!(v["a"]["b"]["c"]["d"]["e"], 1);
     }
 
-    #[test] // PARSER.batch.7 — array of objects
+    #[test] // TOOLCALLING.batch.7 — array of objects
     fn args_grammar_array_of_objects() {
         let v = parse_args_object(r#"items:[{n:<|"|>x<|"|>},{n:<|"|>y<|"|>}]"#).unwrap();
         assert_eq!(v["items"][0]["n"], "x");
         assert_eq!(v["items"][1]["n"], "y");
     }
 
-    #[test] // PARSER.batch.4, PARSER.batch.5 — truncated string-arg recovery (mirrors upstream)
+    #[test] // TOOLCALLING.batch.4, TOOLCALLING.batch.5 — truncated string-arg recovery (mirrors upstream)
     fn args_grammar_unterminated_string_takes_remainder() {
         // Upstream Gemma 4 parser: when the closing <|"|> is missing,
         // everything after the opening delimiter becomes the value. We mirror
@@ -663,21 +714,21 @@ mod tests {
         assert_eq!(v["x"], "oops");
     }
 
-    #[test] // PARSER.batch.4 — empty value mid-args (upstream test_empty_value)
+    #[test] // TOOLCALLING.batch.4 — empty value mid-args (upstream test_empty_value)
     fn args_grammar_empty_value_yields_empty_string() {
         let v = parse_args_object("x:,y:1").unwrap();
         assert_eq!(v["x"], "");
         assert_eq!(v["y"], 1);
     }
 
-    #[test] // PARSER.batch.4 — empty value at end-of-args (upstream test_empty_value)
+    #[test] // TOOLCALLING.batch.4 — empty value at end-of-args (upstream test_empty_value)
     fn args_grammar_trailing_empty_value() {
         let v = parse_args_object("x:1,y:").unwrap();
         assert_eq!(v["x"], 1);
         assert_eq!(v["y"], "");
     }
 
-    #[test] // PARSER.batch.7 — typed-value null variants, case-insensitive (upstream `value_str.lower() in (...)`)
+    #[test] // TOOLCALLING.batch.7 — typed-value null variants, case-insensitive (upstream `value_str.lower() in (...)`)
     fn args_grammar_null_aliases_case_insensitive() {
         for variant in [
             "null", "NULL", "Null", "none", "NONE", "None", "nil", "NIL", "Nil",
@@ -688,27 +739,29 @@ mod tests {
         }
     }
 
-    #[test] // PARSER.batch.4 — keyword-prefix must not partial-match (`nullable` vs `null`)
+    #[test] // TOOLCALLING.batch.4 — keyword-prefix must not partial-match (`nullable` vs `null`)
     fn args_grammar_keyword_prefix_not_consumed() {
         // `nullable` must not be parsed as `null` + leftover `able`.
         let _ = parse_args_object("x:nullable").unwrap_err();
     }
 
-    #[test] // PARSER.batch.5 — missing end-marker, raw bytes echoed (upstream test_incomplete_tool_call)
-    fn incomplete_tool_call_echoes_raw_bytes() {
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.c in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5 — missing end-marker, markup suppressed (no-leak contract)
+    fn incomplete_tool_call_suppresses_markup() {
         let input = "<|tool_call>call:foo{x:1";
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
         assert_eq!(calls.len(), 0);
-        let normal = normal.unwrap();
-        assert!(
-            normal.contains("<|tool_call>call:foo"),
-            "expected raw bytes echoed; got: {normal:?}"
-        );
+        // No calls extracted → return the prefix BEFORE the first `<|tool_call>`
+        // start marker (here: empty). Dynamo intentionally diverges from vLLM's
+        // exception fallback (which echoes the raw bytes) so tool-call markup
+        // never leaks into normal_text on the recovery path.
+        assert_eq!(normal, Some(String::new()));
     }
 
-    #[test] // PARSER.batch.7 — `<tool_call|>` literal inside a string-typed argument
+    #[test] // TOOLCALLING.batch.7 — `<tool_call|>` literal inside a string-typed argument
     // must not truncate the call. The extraction regex requires
     // `}<tool_call|>` adjacency, so a bare embedded marker is safe.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.b in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.7.yaml.
     fn embedded_tool_call_marker_in_string_value() {
         let input = r#"<|tool_call>call:render{html:<|"|><tool_call|> example<|"|>}<tool_call|>"#;
         let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
@@ -726,10 +779,11 @@ mod tests {
         assert_eq!(&input[pos..], " trailing");
     }
 
-    #[test] // PARSER.batch.8 — paired reasoning span + tool call in the same emission
+    #[test] // TOOLCALLING.batch.8 — paired reasoning span + tool call in the same emission
     // (in production the reasoning parser runs first and strips `<|channel>`,
     // but the tool-call parser must remain correct if it sees the full
     // emission, e.g. when reasoning parsing is disabled).
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.8.yaml.
     fn paired_reasoning_and_tool_call_in_same_emission() {
         let input = concat!(
             "<|channel>thought\nthinking about the request<channel|>",
@@ -745,14 +799,16 @@ mod tests {
         assert!(normal.unwrap().contains("<|channel>thought"));
     }
 
-    #[test] // PARSER.batch.9 — empty input, no tool calls
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.9 — empty input, no tool calls
     fn empty_input_yields_zero_calls_empty_content() {
         let (calls, normal) = try_tool_call_parse_gemma4("", None).unwrap();
         assert_eq!(calls.len(), 0);
         assert_eq!(normal, Some(String::new()));
     }
 
-    #[test] // PARSER.batch.9 — `null` argument values round-trip as JSON null
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.9 — `null` argument values round-trip as JSON null
     fn null_argument_values_preserved() {
         let input = "<|tool_call>call:f{x:null,y:none,z:nil}<tool_call|>";
         let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
@@ -763,9 +819,10 @@ mod tests {
         assert_eq!(args["z"], Value::Null);
     }
 
-    #[test] // PARSER.batch.10 — duplicate calls to the same function name. Both must
+    #[test] // TOOLCALLING.batch.10 — duplicate calls to the same function name. Both must
     // appear with distinct IDs; client decides whether duplicate invocation
     // is intended.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.10 in tests/parity/toolcalling/fixtures/gemma4/TOOLCALLING.batch.yaml.
     fn duplicate_tool_call_same_name() {
         let input = concat!(
             "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>",
@@ -785,9 +842,9 @@ mod tests {
         assert_eq!(args1["location"], "NYC");
     }
 
-    // ----- Explicit N/A coverage notes (per lib/parsers/PARSER_CASES.md) -----
+    // ----- Explicit N/A coverage notes (per lib/parsers/TOOLCALLING_CASES.md) -----
     //
-    // PARSER.stream.3  — Streaming token-by-token assembly: indirect. The Gemma 4
+    // TOOLCALLING.stream.3  — Streaming token-by-token assembly: indirect. The Gemma 4
     //           parser exposes only the synchronous extraction path; the
     //           streaming jail (`tools.rs::try_tool_call_parse_stream`) drives
     //           it via `detect_tool_call_start_gemma4` and
@@ -801,7 +858,7 @@ mod tests {
     // PIPELINE.finish_reason — `finish_reason` semantics: same universal gap; lives in
     //           `lib/llm/tests/tool_choice_finish_reasons.rs`, hermes-only
     //           today.
-    // PARSER.xml.1 / PARSER.xml.2 — XML-family only. N/A — Gemma 4 uses a custom
+    // TOOLCALLING.xml.1 / TOOLCALLING.xml.2 — XML-family only. N/A — Gemma 4 uses a custom
     //           non-JSON, non-XML grammar.
-    // PARSER.harmony.1 / PARSER.harmony.2 — Harmony only. N/A.
+    // TOOLCALLING.harmony.1 / TOOLCALLING.harmony.2 — Harmony only. N/A.
 }

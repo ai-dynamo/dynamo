@@ -43,6 +43,7 @@ TEST_MODEL = "Qwen/Qwen3-0.6B"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.nightly,
     pytest.mark.gpu_1,
     pytest.mark.model(TEST_MODEL),

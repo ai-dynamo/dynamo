@@ -564,6 +564,9 @@ def preprocess_chat_request(
         if chat_template_kwargs:
             template_kwargs.update(chat_template_kwargs)
 
+        if (reasoning_effort := request.get("reasoning_effort")) is not None:
+            template_kwargs["reasoning_effort"] = reasoning_effort
+
         prompt_token_ids = _normalize_prompt_token_ids(
             tokenizer.apply_chat_template(messages, **template_kwargs)
         )
