@@ -10,11 +10,6 @@
 # in-tree LGPL ffmpeg CLI via IMAGEIO_FFMPEG_EXE instead.
 --no-binary imageio-ffmpeg
 
-# Lock huggingface-hub to upstream transformers's <1.0 constraint. Without
-# this pin, Dockerfile.test's `uv pip install --requirement requirements.test.txt`
-# later upgrades the venv copy to 1.x (datasets allows it) and breaks
-# `import transformers` against upstream's compiled stack.
-huggingface-hub<1.0,>=0.34.0
 # Used by the trtllm video_diffusion handler to encode generated frames to MP4.
 # Upstream tensorrt-llm/release does not ship them.
 imageio>=2.37.0
