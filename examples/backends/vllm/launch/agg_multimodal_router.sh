@@ -132,6 +132,8 @@ COMMON_ENV=(
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 # Phase 1: launch all workers in parallel.
+# Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
+# requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
