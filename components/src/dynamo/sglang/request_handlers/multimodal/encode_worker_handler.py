@@ -65,6 +65,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
     and forwards to the PD worker.
     """
 
+    _missing_video_cache_key_config_warned = False
+
     def __init__(
         self,
         config: Config,
@@ -160,13 +162,26 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             return cls._url_hash(url)
 
         video_config = {}
+        missing_config_fields: list[str] = []
         vision_config = getattr(encoder, "vision_config", None)
         if isinstance(vision_config, dict):
             video_config = cls._normalize_cache_key_value(
                 vision_config.get("video", {})
             )
+        else:
+            missing_config_fields.append("vision_config")
 
         video_processor = getattr(encoder, "video_processor", None)
+        if video_processor is None:
+            missing_config_fields.append("video_processor")
+        if missing_config_fields and not cls._missing_video_cache_key_config_warned:
+            logger.warning(
+                "Video embedding cache key could not include encoder %s; "
+                "cache reuse may not reflect all video processor settings.",
+                ", ".join(missing_config_fields),
+            )
+            cls._missing_video_cache_key_config_warned = True
+
         cache_key_payload = {
             "modality": getattr(modality, "name", str(modality)),
             "url": url,
@@ -209,6 +224,20 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 return candidate_id
 
         return None
+
+    @staticmethod
+    def _ensure_batched_grid(grid_dim: Any, item_count: int) -> list:
+        grid_list = (
+            grid_dim.tolist() if isinstance(grid_dim, torch.Tensor) else grid_dim
+        )
+        if (
+            item_count == 1
+            and isinstance(grid_list, list)
+            and len(grid_list) == 3
+            and not isinstance(grid_list[0], list)
+        ):
+            return [grid_list]
+        return grid_list
 
     @staticmethod
     def _grid_units(grid_item: Any, modality: str) -> int:
@@ -269,8 +298,15 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             if value.ndim == 0:
                 return value.item()
             value = value.tolist()
-        if isinstance(value, (list, tuple)) and len(value) == item_count:
-            return cls._jsonable_media_value(value[index])
+        if isinstance(value, (list, tuple)):
+            if len(value) == item_count:
+                return cls._jsonable_media_value(value[index])
+            if item_count == 1:
+                return cls._jsonable_media_value(value)
+            raise ValueError(
+                "Auxiliary media metadata length mismatch: "
+                f"expected {item_count} items, got {len(value)}"
+            )
         return cls._jsonable_media_value(value)
 
     async def _encode_with_cache(
@@ -284,6 +320,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         """
         assert self._embedding_cache is not None
 
+        modality_name = getattr(modality, "name", str(modality))
         cached: dict[int, CachedEmbedding] = {}
         uncached_indices: list[int] = []
         uncached_urls: list[str] = []
@@ -315,23 +352,13 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     f"expected CPU. Moving to CPU."
                 )
                 new_embeddings = new_embeddings.to(target_device)
-            grid_list: list = (
-                grid_dim.tolist() if isinstance(grid_dim, torch.Tensor) else grid_dim
-            )
-            if (
-                len(uncached_urls) == 1
-                and isinstance(grid_list, list)
-                and len(grid_list) == 3
-                and not isinstance(grid_list[0], list)
-            ):
-                grid_list = [grid_list]
+            grid_list = self._ensure_batched_grid(grid_dim, len(uncached_urls))
             if not (
                 isinstance(new_embeddings, torch.Tensor) and new_embeddings.ndim == 2
             ):
                 raise ValueError(
                     f"Unsupported embeddings type from encoder: {type(new_embeddings)}"
                 )
-            modality_name = getattr(modality, "name", str(modality))
             token_counts = self._split_token_counts(
                 grid_list, new_embeddings.shape[0], modality_name
             )
@@ -363,7 +390,6 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 new_entries[orig_idx] = entry
 
         # Reassemble results in original URL order
-        modality_name = getattr(modality, "name", str(modality))
         all_grid_thw: list = []
         all_entries: list[CachedEmbedding] = []
         embedding_parts: list[torch.Tensor] = []
@@ -543,19 +569,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                             urls, modality_enum
                         )
 
-                grid_list = (
-                    grid_dim.tolist()
-                    if isinstance(grid_dim, torch.Tensor)
-                    else grid_dim
-                )
-                if len(urls) == 1:
-                    if modality_name in ("IMAGE", "VIDEO"):
-                        if (
-                            isinstance(grid_list, list)
-                            and len(grid_list) == 3
-                            and not isinstance(grid_list[0], list)
-                        ):
-                            grid_list = [grid_list]
+                grid_list = self._ensure_batched_grid(grid_dim, len(urls))
 
                 if not isinstance(grid_list, list) or len(grid_list) != len(urls):
                     raise ValueError(

@@ -104,13 +104,6 @@ async def test_encode_with_cache_partial_hit_and_reuse(
     assert new_cached_entry.image_grid_thw == [1, 2, 4]
     assert new_cached_entry.video_grid_thw is None
 
-    new_cached_entry = cache_handler._embedding_cache.get(
-        cache_handler._url_hash(urls[0])
-    )
-    assert new_cached_entry is not None
-    assert new_cached_entry.image_grid_thw == [1, 2, 4]
-    assert new_cached_entry.video_grid_thw is None
-
     grid2, full_embeddings2, entries2 = await cache_handler._encode_with_cache(
         urls, Modality.IMAGE
     )
@@ -243,6 +236,21 @@ async def test_video_requests_reuse_cached_embeddings(
         assert group["second_per_grid_ts"] == 0.5
         assert group["video_timestamps"] == [0.25, 0.75]
         assert group["num_mm_tokens"] == 6
+
+
+def test_aux_value_for_item_rejects_mismatched_batched_lists() -> None:
+    with pytest.raises(ValueError, match="Auxiliary media metadata length mismatch"):
+        MultimodalEncodeWorkerHandler._aux_value_for_item([0.5], 0, 2)
+
+    assert MultimodalEncodeWorkerHandler._aux_value_for_item(0.5, 1, 2) == 0.5
+    assert (
+        MultimodalEncodeWorkerHandler._aux_value_for_item(torch.tensor([0.5]), 0, 1)
+        == 0.5
+    )
+    assert MultimodalEncodeWorkerHandler._aux_value_for_item([0.25, 0.75], 0, 1) == [
+        0.25,
+        0.75,
+    ]
 
 
 @pytest.mark.asyncio

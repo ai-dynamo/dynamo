@@ -122,8 +122,8 @@ class MultiModalGroup(BaseModel):
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     video_grid_thw: Optional[List[Any]] = None
-    second_per_grid_ts: Optional[Any] = None
-    video_timestamps: Optional[Any] = None
+    second_per_grid_ts: Optional[float] = None
+    video_timestamps: Optional[List[float]] = None
     num_mm_tokens: Optional[int] = None
 
 
