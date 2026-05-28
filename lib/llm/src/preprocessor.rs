@@ -859,27 +859,41 @@ impl OpenAIPreprocessor {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
             }
 
-            // Forward routing-side mm_hashes as `multi_modal_uuids` so vLLM
-            // publishes KV events with the same key the router computes.
-            // The kv-router parses events via parse_mm_hash_from_extra_key
-            // (kv-router/src/zmq_wire/extra_keys.rs), which requires exactly
-            // 64 hex chars and reads u64 from the first 16. We pad u64 ->
-            // 16 hex chars + 48 zeros so the byte representation matches
-            // end-to-end without forcing frontend image decoding.
+            // Forward routing-side mm_hashes as `multi_modal_uuids` (vLLM)
+            // or `mm_hashes` (sglang) so the backend publishes KV events
+            // with the same key the router computes.
+            //
+            // Format depends on the backend:
+            // - vLLM: 64-char hex (16 hex of the u64 + 48 trailing zeros).
+            //   Required by parse_mm_hash_from_extra_key
+            //   (kv-router/src/zmq_wire/extra_keys.rs) which filters MM
+            //   identifiers from other extra_keys (LoRA salts, cache
+            //   salts, prompt-embed metadata) via the 64-char length.
+            // - sglang: 16-char hex of the u64. Sglang derives its
+            //   per-block pad_value from int(hex, 16); the 48-zero
+            //   padding would push the bottom 30 bits to zero and
+            //   collapse pad_value to MM_PAD_SHIFT_VALUE for every image.
             //
             // Skip forwarding entirely if any image failed dim resolution —
             // a shorter `mm_hashes` list would misalign with the image
-            // positions vLLM derives from `multi_modal_data`, and the
-            // backend would inject the wrong UUIDs onto the wrong images.
+            // positions the backend derives from `multi_modal_data`, and
+            // the wrong UUIDs would get injected onto the wrong images.
             #[cfg(feature = "lightseek-mm")]
             if !mm_image_entries.is_empty() && mm_image_entries.len() == total_image_count {
-                // 48 trailing zeros — paired with the {:016x} prefix this gives
-                // the 64-char hex string the kv-router's parse_mm_hash_from_extra_key
-                // expects (reads u64 from the first 16 chars).
+                let sglang_mode = std::env::var("DYN_MM_ROUTING_BACKEND")
+                    .map(|v| v.eq_ignore_ascii_case("sglang"))
+                    .unwrap_or(false);
                 const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
-                    .map(|e| serde_json::Value::String(format!("{:016x}{}", e.mm_hash, HEX_PAD)))
+                    .map(|e| {
+                        let s = if sglang_mode {
+                            format!("{:016x}", e.mm_hash)
+                        } else {
+                            format!("{:016x}{}", e.mm_hash, HEX_PAD)
+                        };
+                        serde_json::Value::String(s)
+                    })
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
             } else if !mm_image_entries.is_empty() {
