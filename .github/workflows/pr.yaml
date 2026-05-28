@@ -283,7 +283,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 120
+      build_timeout_minutes: 60
     secrets: inherit
 
   sglang-efa-build:
@@ -298,7 +298,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 120
+      build_timeout_minutes: 60
     secrets: inherit
 
   trtllm-efa-build:
@@ -313,7 +313,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 120
+      build_timeout_minutes: 60
     secrets: inherit
 
   planner-build:
