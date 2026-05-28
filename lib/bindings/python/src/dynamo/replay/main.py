@@ -124,9 +124,12 @@ def _resolve_kv_bytes_per_token(raw: dict) -> None:
     if raw.get("kv_bytes_per_token") is not None:
         return
 
-    offload_requested = any(
-        isinstance(raw.get(name), int) and raw[name] > 0
-        for name in ("num_g2_blocks", "num_g3_blocks")
+    offload_requested = (
+        any(
+            isinstance(raw.get(name), int) and raw[name] > 0
+            for name in ("num_g2_blocks", "num_g3_blocks")
+        )
+        or raw.get("enable_g4_storage") is True
     )
     if not offload_requested:
         return

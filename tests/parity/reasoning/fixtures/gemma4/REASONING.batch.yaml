@@ -56,7 +56,7 @@ cases:
   REASONING.batch.2.d:
     description: Gemma normal text around reasoning
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: |-
       Hello. <|channel>thought
       rumination<channel|> Goodbye.
@@ -95,7 +95,7 @@ cases:
   REASONING.batch.5:
     description: Open thought channel without close treats suffix as reasoning
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: |-
       intro <|channel>thought
       partial
@@ -152,16 +152,20 @@ cases:
       sglang:
         unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
   REASONING.batch.6.a:
-    description: Gemma batch parser stops after the first reasoning channel
+    description: Multiple reasoning spans are concatenated by Dynamo
     ref: *upstream_ref
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: |-
       <|channel>thought
       first<channel|> middle <|channel>thought
       second<channel|> done
     expected:
       dynamo: &d_9
+        reasoning_text: firstsecond
+        normal_text: ' middle  done'
+      vllm:
         reasoning_text: first
         normal_text: " middle <|channel>thought\nsecond<channel|> done"
-      vllm: *d_9
+        reason: Multi-span reasoning is out-of-spec model output; Dynamo preserves all reasoning and non-reasoning text without leaking protocol markers, while vLLM leaves the later complete channel in normal_text.
       sglang:
         unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'

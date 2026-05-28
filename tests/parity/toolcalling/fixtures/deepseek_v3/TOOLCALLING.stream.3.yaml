@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3
+model_label: DeepSeek V3
+mode: stream
+cases:
+  TOOLCALLING.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: <｜
+    - delta_text: too
+    - delta_text: l▁cal
+    - delta_text: ls▁begin｜><
+    - delta_text: ｜tool▁call▁begin｜>f
+    - delta_text: un
+    - delta_text: cti
+    - delta_text: on<｜t
+    - delta_text: ool▁sep｜>ge
+    - delta_text: |-
+        t_weather
+        ```json
+        {
+    - delta_text: '"l'
+    - delta_text: oca
+    - delta_text: tion"
+    - delta_text: |-
+        : "NYC"}
+        ``
+    - delta_text: '`<｜tool▁call▁end｜><'
+    - delta_text: ｜t
+    - delta_text: ool
+    - delta_text: ▁call
+    - delta_text: s▁end｜>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          json
+          {"location": "NYC"}
+          ```<｜tool▁calls▁end｜>
+      vllm:
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"location": "NYC"}
+          ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>

@@ -16,3 +16,4 @@ pub mod kvbm_offload;
 pub mod loadgen;
 pub mod replay;
 pub mod scheduler;
+pub mod services;

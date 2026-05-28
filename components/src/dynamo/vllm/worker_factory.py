@@ -26,6 +26,7 @@ from dynamo.runtime import DistributedRuntime
 
 from .args import Config
 from .cache_info import configure_kv_event_block_size
+from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
@@ -41,7 +42,10 @@ from .publisher import StatLoggerFactory
 logger = logging.getLogger(__name__)
 
 # (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
-EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
+# component_gauges is None on the embedding-worker path: pooling engines
+# have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
+# LLMBackendMetrics registration there.
+EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
@@ -254,7 +258,15 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint]
 
         fpm_worker_id = str(generate_endpoint.connection_id())
-        factory = StatLoggerFactory(endpoint=generate_endpoint)
+        # Embedding workers run on pooling engines: no KV cache, no
+        # scheduler stats, no decode loop. The factory still has to exist
+        # because vLLM unconditionally invokes it during AsyncLLM init,
+        # but it returns a no-op stat logger and setup_vllm_engine() skips
+        # the chat-shaped LLMBackendMetrics registration.
+        factory = StatLoggerFactory(
+            endpoint=generate_endpoint,
+            embedding_worker=True,
+        )
         (
             engine_client,
             vllm_config,
@@ -404,7 +416,12 @@ class WorkerFactory:
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
-        factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
         factory.init_publish()
 
         # Currently routing to worker is still controlled by the worker

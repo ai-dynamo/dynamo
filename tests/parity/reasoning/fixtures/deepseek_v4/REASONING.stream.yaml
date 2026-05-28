@@ -22,7 +22,7 @@ cases:
   REASONING.stream.2.a:
     description: Single reasoning block across chunks
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     chunks:
     - <think>thin
     - king</think>answer
@@ -39,7 +39,7 @@ cases:
   REASONING.stream.2.b:
     description: Multiple reasoning spans across chunks
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     chunks:
     - <think>first</think>
     - ' middle '
@@ -57,7 +57,7 @@ cases:
   REASONING.stream.3.a:
     description: Start marker split across chunks
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     chunks:
     - <th
     - ink>thinking</think>answer
@@ -74,7 +74,7 @@ cases:
   REASONING.stream.3.b:
     description: End marker split across chunks
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     chunks:
     - <think>thinking</th
     - ink>answer
