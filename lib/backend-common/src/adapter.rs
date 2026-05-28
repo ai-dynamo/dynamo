@@ -196,10 +196,13 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
             while let Some(ann) = inner_stream.next().await {
                 // HealthCheckManager only inspects `response.err()`; a chunk with
                 // `FinishReason::Error` would otherwise serialize as healthy data
-                // and mark the endpoint Ready on an engine failure.
+                // and mark the endpoint Ready on an engine failure. An Error
+                // terminal is also end-of-stream, so break rather than continue
+                // — a misbehaving engine yielding after a terminal would
+                // otherwise keep firing errors through the probe.
                 if let Some(err) = ann.data.as_ref().and_then(|chunk| chunk.err()) {
                     yield Annotated::<serde_json::Value>::from_err(err);
-                    continue;
+                    break;
                 }
                 yield ann.map_data(|chunk| serde_json::to_value(&chunk).map_err(|e| e.to_string()));
             }

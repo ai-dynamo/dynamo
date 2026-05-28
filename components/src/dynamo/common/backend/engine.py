@@ -56,10 +56,12 @@ class GenerateChunk(TypedDict, total=False):
     additionally include ``finish_reason`` and ``completion_usage``.
     Prefill terminals carry ``disaggregated_params``.
 
-    Logprob fields are populated when the request set
-    ``output_options.logprobs`` and the engine declared the
-    ``"logprobs"`` capability. ``top_logprobs`` entries follow
-    ``{rank, token_id, token, logprob, bytes}``.
+    ``log_probs`` and ``top_logprobs`` are populated when the request set
+    ``output_options.logprobs`` (or ``prompt_logprobs``) and the engine
+    computed them; each ``top_logprobs`` entry follows
+    ``{rank, token_id, token, logprob, bytes}`` (bytes is optional).
+    ``cum_log_probs`` is a per-completion summary — engines emit it on
+    the terminal chunk only, alongside ``completion_usage``.
     """
 
     token_ids: Required[list[int]]

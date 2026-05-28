@@ -131,9 +131,16 @@ def extract_logprobs(
         if output_top
         else len(output_token_logprobs)
     )
+    # Clamp the offset at the high-water mark: if the cumulative arrays
+    # transiently shrink below the persisted cursor (e.g. a future engine
+    # regression rolls back length), holding the cursor where it was would
+    # leave it permanently stranded; advancing it to safe_len makes the
+    # next tick resume cleanly once cumulative catches back up.
+    if num_output_logprobs_so_far > safe_len:
+        return None, None, safe_len
     new_logprobs = output_token_logprobs[num_output_logprobs_so_far:safe_len]
     if not new_logprobs:
-        return None, None, num_output_logprobs_so_far
+        return None, None, safe_len
 
     selected = [float(entry[0]) for entry in new_logprobs]
 

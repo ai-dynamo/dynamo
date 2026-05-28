@@ -106,9 +106,14 @@ class SampleLLMEngine(LLMEngine):
         args = parser.parse_args(argv)
 
         mode = DisaggregationMode(args.disaggregation_mode)
-        policy = getattr(
-            _backend.UnsupportedFieldPolicy, args.unsupported_field_policy.capitalize()
-        )
+        # Explicit map: fails loud on an unrecognized choice rather than
+        # silently AttributeError'ing on a future multi-word variant.
+        _POLICY_BY_NAME = {
+            "reject": _backend.UnsupportedFieldPolicy.Reject,
+            "warn": _backend.UnsupportedFieldPolicy.Warn,
+            "ignore": _backend.UnsupportedFieldPolicy.Ignore,
+        }
+        policy = _POLICY_BY_NAME[args.unsupported_field_policy]
         engine = cls(
             model_name=args.model_name,
             max_tokens=args.max_tokens,

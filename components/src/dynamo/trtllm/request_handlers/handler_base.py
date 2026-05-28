@@ -206,43 +206,48 @@ def extract_logprobs(
     if not new_logprobs:
         return None, None
 
-    # TRT-LLM may emit `List[float]` (chosen-token-only) or `TokenLogprobs`
-    # (dict[token_id, LogProb]). Cover the simple-float fallback first.
-    if isinstance(new_logprobs[0], float):
-        return [float(lp) for lp in new_logprobs], None
-
+    # TRT-LLM may emit `List[float]` (chosen-token-only) or
+    # `TokenLogprobs` (dict[token_id, LogProb]). Decide per-position
+    # rather than per-stream, so a mixed-shape stream doesn't crash the
+    # all-float comprehension.
     new_token_ids = list(output.token_ids or [])[num_output_tokens_so_far:]
     new_token_ids = new_token_ids[: len(new_logprobs)]
 
     selected: list[float] = []
     top_per_position: list[list[TopLogprob]] = []
-    for token_idx, token_logprobs_dict in enumerate(new_logprobs):
-        if token_logprobs_dict is None:
+    for token_idx, token_logprobs in enumerate(new_logprobs):
+        if token_logprobs is None:
+            continue
+        if isinstance(token_logprobs, float):
+            # Chosen-token-only path: no top-k at this position.
+            selected.append(float(token_logprobs))
+            top_per_position.append([])
             continue
         actual_token_id = (
             new_token_ids[token_idx] if token_idx < len(new_token_ids) else None
         )
         info = (
-            token_logprobs_dict.get(actual_token_id)
-            if actual_token_id is not None
-            else None
+            token_logprobs.get(actual_token_id) if actual_token_id is not None else None
         )
         if info is None:
-            info = next(iter(token_logprobs_dict.values()), None)
-        if info is None:
-            # Position has no logprob entries at all; skip so the
-            # selected/top arrays stay aligned.
+            # The chosen token wasn't in this position's dict (rare —
+            # speculative-decoding rejection). Skip the position entirely
+            # rather than mis-correlate selected with an arbitrary entry.
             continue
         selected.append(float(info.logprob))
         top_per_position.append(
             [
                 TopLogprob(
-                    rank=getattr(entry, "rank", None) or 0,
+                    rank=(
+                        getattr(entry, "rank", None)
+                        if getattr(entry, "rank", None) is not None
+                        else rank_idx + 1
+                    ),
                     token_id=tok_id,
                     token=getattr(entry, "decoded_token", None),
                     logprob=float(entry.logprob),
                 )
-                for tok_id, entry in token_logprobs_dict.items()
+                for rank_idx, (tok_id, entry) in enumerate(token_logprobs.items())
             ]
         )
 

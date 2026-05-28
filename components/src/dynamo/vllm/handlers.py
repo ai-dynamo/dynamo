@@ -632,7 +632,15 @@ def extract_logprobs(
                     token_id=tok_id,
                     token=token_str,
                     logprob=float(entry_info.logprob),
-                    bytes_=list(token_str.encode("utf-8")) if token_str else None,
+                    # `is not None` rather than truthy: a legitimately
+                    # empty decoded string (BOS/EOS, byte-pair fragments)
+                    # should round-trip as the empty byte array `[]`,
+                    # not get dropped to None.
+                    bytes_=(
+                        list(token_str.encode("utf-8"))
+                        if token_str is not None
+                        else None
+                    ),
                 )
             )
         top_per_position.append(entries)

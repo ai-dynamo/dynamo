@@ -87,6 +87,12 @@ _IDLE_SLEEP_S = 0.01
 # publish KV cache events. Without this, `get_kv_cache_events` returns empty.
 _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
+# Latches `_override_sampling_params`'s "TRT-LLM doesn't expose this attr"
+# warning to fire once per attribute per process. Module-level (rather than
+# per-engine-instance) so the method stays a staticmethod for the tests in
+# `test_trtllm_handler_base.py` that exercise it via the class binding.
+_UNSUPPORTED_SAMPLING_ATTRS_LOGGED: set[str] = set()
+
 # Note: `metrics_dict` is set per-instance on `GenerationResult` (only
 # when TRT-LLM's perf-stats collection is enabled and the request
 # finished). Check `hasattr(res, "metrics_dict")` on each instance —
@@ -162,10 +168,6 @@ class TrtllmLLMEngine(LLMEngine):
         self._metrics_thread: Optional[threading.Thread] = None
         self._kv_events_thread: Optional[threading.Thread] = None
         self._attention_dp_size: int = 1
-        # SamplingParams attribute names already logged as unsupported.
-        # Logged at most once per attribute per process so a TRT-LLM build
-        # lacking `logprobs` / `prompt_logprobs` doesn't flood logs.
-        self._unsupported_sampling_attrs_logged: set[str] = set()
         # Worker invokes on_ready callbacks serially during setup (see
         # `setup_kv_publishers` in lib/backend-common/src/publisher.rs); the
         # dict is fully populated before `_kv_events_thread` starts and
@@ -654,9 +656,6 @@ class TrtllmLLMEngine(LLMEngine):
                         out["log_probs"] = log_probs
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
-                    cum_logprob = getattr(output, "cumulative_logprob", None)
-                    if cum_logprob is not None:
-                        out["cum_log_probs"] = float(cum_logprob)
 
                     if output.finish_reason:
                         out["finish_reason"] = str(output.finish_reason)
@@ -664,6 +663,11 @@ class TrtllmLLMEngine(LLMEngine):
                     if out.get("finish_reason") or res.finished:
                         if not out.get("finish_reason"):
                             out["finish_reason"] = "unknown"
+                        # `cumulative_logprob` is a single per-completion summary;
+                        # emit on the terminal chunk only (matches vllm/llm_engine.py).
+                        cum_logprob = getattr(output, "cumulative_logprob", None)
+                        if cum_logprob is not None:
+                            out["cum_log_probs"] = float(cum_logprob)
                         prompt_tokens = len(token_ids)
                         total_completion_tokens = sum(
                             len(o.token_ids) for o in res.outputs
@@ -871,8 +875,9 @@ class TrtllmLLMEngine(LLMEngine):
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")
 
+    @staticmethod
     def _override_sampling_params(
-        self, sampling_params: SamplingParams, request: GenerateRequest
+        sampling_params: SamplingParams, request: GenerateRequest
     ) -> SamplingParams:
         overrides = {
             key: value
@@ -920,10 +925,10 @@ class TrtllmLLMEngine(LLMEngine):
                 continue
             if hasattr(sampling_params, name):
                 overrides[name] = parsed
-            elif name not in self._unsupported_sampling_attrs_logged:
-                # Latch the warning per-attribute per-process; this fires
-                # on every request with that field set otherwise.
-                self._unsupported_sampling_attrs_logged.add(name)
+            elif name not in _UNSUPPORTED_SAMPLING_ATTRS_LOGGED:
+                # Latch per-attribute per-process; this fires on every
+                # request with that field set otherwise.
+                _UNSUPPORTED_SAMPLING_ATTRS_LOGGED.add(name)
                 logger.warning(
                     "TRT-LLM SamplingParams does not expose %s; ignoring request value %r "
                     "(further occurrences of this field will be silently ignored)",

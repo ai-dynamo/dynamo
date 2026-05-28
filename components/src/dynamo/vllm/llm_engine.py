@@ -341,7 +341,12 @@ class VllmLLMEngine(LLMEngine):
                 # vLLM streams in DELTA mode (see build_sampling_params), so
                 # output.logprobs/token_ids carry only the per-chunk delta;
                 # pass offset=0 rather than the running cumulative tally.
-                log_probs, top_logprobs = extract_logprobs(output, 0)
+                # Pass tokenizer through so missing `decoded_token` on
+                # top-k entries (older vLLM builds, custom tokenizers)
+                # can fall back to `tokenizer.decode([tok_id])`.
+                log_probs, top_logprobs = extract_logprobs(
+                    output, 0, tokenizer=getattr(self.engine_client, "tokenizer", None)
+                )
                 # Pre-extract `cumulative_logprob` so the emit-loop below
                 # doesn't reach back into the engine-side type.
                 cum_logprob = getattr(output, "cumulative_logprob", None)
