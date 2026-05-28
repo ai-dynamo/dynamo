@@ -377,10 +377,14 @@ where
             }
         });
 
-        let parsed = self.parse_and_build_request(payload).await?;
+        let ParsedRequest {
+            request,
+            response_connection_info,
+            frontend_send_ts_ns,
+        } = self.parse_and_build_request(payload).await?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
-        if let Some(t1_ns) = parsed.frontend_send_ts_ns {
+        if let Some(t1_ns) = frontend_send_ts_ns {
             let transit_ns = t2_wallclock_ns.saturating_sub(t1_ns);
             WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
         }
@@ -389,8 +393,8 @@ where
         // we only support tcp here, so we can just unwrap the connection info
         tracing::trace!("creating tcp response stream");
         let mut publisher = tcp::client::TcpClient::create_response_stream(
-            parsed.request.context(),
-            parsed.response_connection_info,
+            request.context(),
+            response_connection_info,
             self.metrics().map(|m| m.cancellation_total.clone()),
         )
         .await
@@ -408,7 +412,7 @@ where
             .segment
             .get()
             .expect("segment not set")
-            .generate(parsed.request)
+            .generate(request)
             .await
             .map_err(|e| {
                 if let Some(m) = self.metrics() {
