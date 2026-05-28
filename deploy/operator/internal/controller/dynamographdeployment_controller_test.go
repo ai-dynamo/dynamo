@@ -27,7 +27,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
@@ -656,6 +659,78 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Clea
 	}
 }
 
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_CreatesCheckpointTemplate(t *testing.T) {
+	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
+	ctx := context.Background()
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	require.NoError(t, err)
+
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  commonconsts.MainContainerName,
+								Image: "checkpoint-writer:latest",
+								Resources: corev1.ResourceRequirements{
+									Limits: corev1.ResourceList{
+										corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+									},
+								},
+							}},
+						},
+					},
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
+						Checkpoint: &v1beta1.ComponentCheckpointConfig{
+							Mode: v1beta1.CheckpointModeAuto,
+							Identity: &v1beta1.DynamoCheckpointIdentity{
+								Model:            identity.Model,
+								BackendFramework: identity.BackendFramework,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dgd, deviceClass).
+		Build()
+	r := &DynamoGraphDeploymentReconciler{
+		Client:        cl,
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(100),
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
+	}
+
+	require.NoError(t, r.reconcileGMSResourceClaimTemplates(ctx, dgd))
+
+	template := &resourcev1.ResourceClaimTemplate{}
+	require.NoError(t, cl.Get(ctx, client.ObjectKey{
+		Name:      checkpointGMSResourceClaimTemplateName(hash),
+		Namespace: "default",
+	}, template))
+	require.Len(t, template.Spec.Spec.Devices.Requests, 1)
+	request := template.Spec.Spec.Devices.Requests[0]
+	require.NotNil(t, request.Exactly)
+	assert.Equal(t, int64(1), request.Exactly.Count)
+	assert.Equal(t, dra.DefaultDeviceClassName, request.Exactly.DeviceClassName)
+	assert.True(t, metav1.IsControlledBy(template, dgd))
+}
+
 func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
@@ -830,6 +905,18 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClie
 	if got := saver.Command; len(got) != 1 || got[0] != "/bin/custom-saver" {
 		t.Fatalf("checkpoint saver command = %#v, want [/bin/custom-saver]", got)
 	}
+	main := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName)
+	require.NotNil(t, main)
+	assert.Contains(t, main.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
+	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
+	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName))
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	require.NoError(t, err)
+	claimTemplateName := checkpointGMSResourceClaimTemplateName(hash)
+	assert.Contains(t, ckpt.Spec.Job.PodTemplateSpec.Spec.ResourceClaims, corev1.PodResourceClaim{
+		Name:                      dra.ClaimName,
+		ResourceClaimTemplateName: &claimTemplateName,
+	})
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t *testing.T) {
@@ -842,7 +929,11 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t 
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
-		Config: &configv1alpha1.OperatorConfiguration{},
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{
+				Backend: configv1alpha1.DiscoveryBackendKubernetes,
+			},
+		},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
@@ -885,6 +976,10 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t 
 	require.NotNil(t, main)
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: "HF_HOME", Value: "/models/huggingface"})
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: "OVERRIDE_ME", Value: "component"})
+	assert.Equal(t,
+		discovery.GetK8sDiscoveryServiceAccountName("test-dgd"),
+		ckpt.Spec.Job.PodTemplateSpec.Spec.ServiceAccountName,
+	)
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t *testing.T) {

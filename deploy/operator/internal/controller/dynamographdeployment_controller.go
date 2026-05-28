@@ -366,6 +366,19 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
 	}
 
+	// Reconcile discovery RBAC before checkpoints so auto-created checkpoint
+	// Jobs can reference the DGD discovery service account in their prepared
+	// pod template.
+	err = r.reconcileK8sDiscoveryResources(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile K8s discovery resources")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
+	}
+
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
+		return ReconcileResult{}, err
+	}
+
 	// Reconcile checkpoints for components with checkpointing enabled.
 	checkpointStatuses, checkpointInfos, err := r.reconcileCheckpoints(ctx, dynamoDeployment)
 	if err != nil {
@@ -379,13 +392,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	if err != nil {
 		logger.Error(err, "Failed to reconcile scaling adapters")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
-	}
-
-	// Reconcile the SA, Role and RoleBinding if k8s discovery is enabled
-	err = r.reconcileK8sDiscoveryResources(ctx, dynamoDeployment)
-	if err != nil {
-		logger.Error(err, "Failed to reconcile K8s discovery resources")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
 	}
 
 	// Reconcile EPP resources (ConfigMaps, Services, InferencePools) if EPP service exists
@@ -421,10 +427,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 
 	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
 	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
-
-	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
-		return ReconcileResult{}, err
-	}
 
 	var result ReconcileResult
 	if r.isGrovePathway(dynamoDeployment) {
@@ -956,8 +958,112 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 			logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "component", componentName)
 			return fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", componentName, err)
 		}
+		if err := r.reconcileCheckpointGMSResourceClaimTemplate(ctx, dynamoDeployment, component, gmsSpec); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileCheckpointGMSResourceClaimTemplate(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	gmsSpec *nvidiacomv1beta1.GPUMemoryServiceSpec,
+) error {
+	checkpointConfig := dynamo.GetCheckpoint(component)
+	if checkpointConfig == nil || checkpointConfig.Identity == nil {
+		return nil
+	}
+
+	identity := *dynamo.ToAlphaCheckpointIdentity(checkpointConfig.Identity)
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		return fmt.Errorf("failed to compute checkpoint identity hash for %s: %w", component.ComponentName, err)
+	}
+	claimTemplateName := checkpointGMSResourceClaimTemplateName(hash)
+
+	shouldCreate := gmsSpec != nil &&
+		checkpointConfig.Mode == nvidiacomv1beta1.CheckpointModeAuto &&
+		(checkpointConfig.CheckpointRef == nil || *checkpointConfig.CheckpointRef == "")
+
+	gpuCount := 0
+	deviceClassName := ""
+	if shouldCreate {
+		if gmsSpec.Mode == nvidiacomv1beta1.GMSModeInterPod {
+			return fmt.Errorf("GMS checkpoint jobs for mode %q are not implemented", gmsSpec.Mode)
+		}
+		targetResources, err := r.checkpointTargetContainerResources(ctx, dynamoDeployment, component, identity, hash)
+		if err != nil {
+			return err
+		}
+		gpuCount, err = dra.ExtractGPUCountFromResourceRequirements(targetResources)
+		if err != nil {
+			return fmt.Errorf("invalid GPU resource requirements for GMS checkpoint %s/%s: %w", dynamoDeployment.Name, component.ComponentName, err)
+		}
+		deviceClassName = gmsSpec.DeviceClassName
+		if deviceClassName == "" {
+			deviceClassName = dra.DefaultDeviceClassName
+		}
+	}
+
+	_, _, err = commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+		return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to sync checkpoint GMS ResourceClaimTemplate for %s: %w", component.ComponentName, err)
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) checkpointTargetContainerResources(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	identity nvidiacomv1alpha1.DynamoCheckpointIdentity,
+	hash string,
+) (corev1.ResourceRequirements, error) {
+	if existing, err := checkpoint.FindCheckpointByIdentityHash(ctx, r.Client, dynamoDeployment.Namespace, hash, ""); err != nil {
+		return corev1.ResourceRequirements{}, err
+	} else if existing != nil {
+		targetContainerName := existing.Spec.Job.TargetContainerName
+		if targetContainerName == "" {
+			targetContainerName = consts.MainContainerName
+		}
+		targetContainer, err := findPodTemplateContainer(&existing.Spec.Job.PodTemplateSpec, targetContainerName)
+		if err != nil {
+			return corev1.ResourceRequirements{}, err
+		}
+		return targetContainer.Resources, nil
+	}
+
+	podTemplate, err := r.buildCheckpointJobPodTemplate(
+		dynamoDeployment,
+		component,
+		component.ComponentName,
+		identity.BackendFramework,
+	)
+	if err != nil {
+		return corev1.ResourceRequirements{}, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
+	}
+	targetContainerName := consts.MainContainerName
+	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.TargetContainerName != "" {
+		targetContainerName = checkpointConfig.TargetContainerName
+	}
+	targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
+	if err != nil {
+		return corev1.ResourceRequirements{}, err
+	}
+	return targetContainer.Resources, nil
+}
+
+func findPodTemplateContainer(podTemplate *corev1.PodTemplateSpec, containerName string) (*corev1.Container, error) {
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == containerName {
+			return &podTemplate.Spec.Containers[i], nil
+		}
+	}
+	return nil, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", containerName)
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
@@ -1748,6 +1854,10 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	}
 
 	checkpointIdentity := *dynamo.ToAlphaCheckpointIdentity(checkpointConfig.Identity)
+	hash, err := checkpoint.ComputeIdentityHash(checkpointIdentity)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+	}
 
 	// Capture config is not part of the checkpoint identity. Once a checkpoint object exists for a
 	// hash, later reconcilers must reuse it instead of racing to overwrite the capture pod template.
@@ -1759,6 +1869,10 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
+	}
+	if commoncontroller.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, dynamoDeployment.Annotations) &&
+		podTemplate.Spec.ServiceAccountName == "" {
+		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(dynamoDeployment.Name)
 	}
 
 	targetContainerName := consts.MainContainerName
@@ -1773,6 +1887,11 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 			gmsSpec.ExtraClientContainers = append([]string(nil), checkpointConfig.Job.GMSClientContainers...)
 		}
 	}
+	if gmsSpec != nil && gmsSpec.Enabled {
+		if err := prepareCheckpointGMSPodTemplate(&podTemplate, targetContainerName, hash, gmsSpec); err != nil {
+			return nil, err
+		}
+	}
 	return checkpoint.CreateOrGetAutoCheckpoint(
 		ctx,
 		r.Client,
@@ -1782,6 +1901,67 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		targetContainerName,
 		gmsSpec,
 	)
+}
+
+func checkpointGMSResourceClaimTemplateName(hash string) string {
+	return dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
+}
+
+func prepareCheckpointGMSPodTemplate(
+	podTemplate *corev1.PodTemplateSpec,
+	targetContainerName string,
+	hash string,
+	gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec,
+) error {
+	switch gmsSpec.Mode {
+	case "", nvidiacomv1alpha1.GMSModeIntraPod:
+	case nvidiacomv1alpha1.GMSModeInterPod:
+		return fmt.Errorf("gpuMemoryService checkpoint jobs for mode %q are not implemented", gmsSpec.Mode)
+	default:
+		return fmt.Errorf("gpuMemoryService checkpoint job has unsupported mode %q", gmsSpec.Mode)
+	}
+
+	targetContainer, err := findPodTemplateContainer(podTemplate, targetContainerName)
+	if err != nil {
+		return err
+	}
+	ensureCheckpointGMSPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(hash))
+	checkpoint.EnsureIntraPodGPUMemoryService(
+		&podTemplate.Spec,
+		[]*corev1.Container{targetContainer},
+		gmsSpec.ExtraClientContainers,
+	)
+	return nil
+}
+
+func ensureCheckpointGMSPodClaim(podSpec *corev1.PodSpec, claimTemplateName string) {
+	foundToleration := false
+	for i := range podSpec.Tolerations {
+		toleration := podSpec.Tolerations[i]
+		if toleration.Key == consts.KubeResourceGPUNvidia && toleration.Effect == corev1.TaintEffectNoSchedule {
+			foundToleration = true
+			break
+		}
+	}
+	if !foundToleration {
+		podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
+			Key:      consts.KubeResourceGPUNvidia,
+			Operator: corev1.TolerationOpExists,
+			Effect:   corev1.TaintEffectNoSchedule,
+		})
+	}
+
+	podClaim := corev1.PodResourceClaim{
+		Name:                      dra.ClaimName,
+		ResourceClaimTemplateName: &claimTemplateName,
+	}
+	for i := range podSpec.ResourceClaims {
+		if podSpec.ResourceClaims[i].Name == dra.ClaimName {
+			podSpec.ResourceClaims[i] = podClaim
+			return
+		}
+	}
+	podSpec.ResourceClaims = append(podSpec.ResourceClaims, podClaim)
 }
 
 // buildCheckpointJobPodTemplate builds a checkpoint job template from the same
