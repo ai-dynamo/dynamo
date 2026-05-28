@@ -21,8 +21,9 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, ComponentSnapshot,
     DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
-    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings,
-    MetricsCtx, OnPublisherReady, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
+    EngineRoute as RsEngineRoute, EngineRouteCallback as RsEngineRouteCallback, ErrorType,
+    KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings, MetricsCtx,
+    OnPublisherReady, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::local_model::runtime_config::{
@@ -935,6 +936,29 @@ impl LLMEngine for PyLLMEngine {
             on_publisher_ready: Some(on_publisher_ready),
         })
     }
+
+    async fn engine_routes(&self) -> Result<Vec<RsEngineRoute>, DynamoError> {
+        let py_routes = self
+            .call_method0_async("engine_routes")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        let event_loop = self.event_loop.clone();
+        Python::with_gil(|py| -> PyResult<Vec<RsEngineRoute>> {
+            let bound = py_routes.bind(py);
+            let dict = bound.downcast::<PyDict>()?;
+            let mut routes = Vec::with_capacity(dict.len());
+            for (key, value) in dict.iter() {
+                let route: String = key.extract()?;
+                let callback: PyObject = value.into();
+                routes.push(RsEngineRoute {
+                    route,
+                    callback: python_engine_route_callback(callback, event_loop.clone()),
+                });
+            }
+            Ok(routes)
+        })
+        .map_err(py_err_to_dynamo)
+    }
 }
 
 impl PyLLMEngine {
@@ -1028,6 +1052,43 @@ impl PySnapshotPublisher {
         py.allow_threads(move || inner.publish(dp_rank, snap));
         Ok(())
     }
+}
+
+fn python_engine_route_callback(
+    callback: PyObject,
+    event_loop: Arc<PyObject>,
+) -> RsEngineRouteCallback {
+    let callback = Arc::new(callback);
+    Arc::new(move |body: serde_json::Value| {
+        let callback = callback.clone();
+        let event_loop = event_loop.clone();
+        Box::pin(async move {
+            let py_future = Python::with_gil(|py| {
+                let py_body = pythonize(py, &body).map_err(|e| {
+                    anyhow::anyhow!("Failed to convert route request body to Python: {e}")
+                })?;
+                let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
+                    anyhow::anyhow!("Failed to call Python route callback: {e}")
+                })?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(
+                    &locals,
+                    coroutine.into_bound(py),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to convert route coroutine: {e}"))
+            })?;
+
+            let py_result = py_future
+                .await
+                .map_err(|e| anyhow::anyhow!("Python route callback failed: {e}"))?;
+
+            Python::with_gil(|py| {
+                depythonize::<serde_json::Value>(py_result.bind(py)).map_err(|e| {
+                    anyhow::anyhow!("Failed to serialize route response: {e}")
+                })
+            })
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------

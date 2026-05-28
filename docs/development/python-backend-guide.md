@@ -72,6 +72,7 @@ diffusion, attention DP scheduling) live in the
 - `DynamoException` error chain wrapping
 - Graceful shutdown with signal handling
 - Finish reason normalization (handled by the Rust layer)
+- Engine management route plumbing, with per-backend profiling, quiesce/resume, and supported weight-update callbacks
 
 **Not yet on the unified path**
 
@@ -83,7 +84,6 @@ diffusion, attention DP scheduling) live in the
 | Logprobs | Selected + top-k logprob extraction and streaming |
 | Guided decoding | JSON schema, regex, grammar, choice constraints |
 | OpenTelemetry tracing | Trace headers, request perf metrics, OTEL propagation |
-| Engine routes | Profiling, memory release/resume, weight updates (disk/tensor/distributed/IPC) |
 | Data-parallel routing | DP rank extraction, DP-aware scheduling |
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization |
 | Custom Jinja chat templates | `--custom-jinja-template` for model-specific prompt formatting |

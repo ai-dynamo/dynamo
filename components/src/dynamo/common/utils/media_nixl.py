@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import logging
 import time
 import uuid
-from typing import Any, Dict, Literal, Tuple, overload
+from typing import TYPE_CHECKING, Any, Dict, Literal, Tuple, overload
 
 import numpy as np
 import torch
 
-from dynamo import nixl_connect
-from dynamo.nixl_connect import OperationKind, RdmaMetadata, SerializedDescriptor
+if TYPE_CHECKING:
+    from dynamo import nixl_connect
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +22,7 @@ async def read_decoded_media_via_nixl(
     connector: nixl_connect.Connector,
     decoded_meta: Dict[str, Any],
     return_metadata: Literal[False] = False,
-) -> np.ndarray:
-    ...
+) -> np.ndarray: ...
 
 
 @overload
@@ -29,8 +30,7 @@ async def read_decoded_media_via_nixl(
     connector: nixl_connect.Connector,
     decoded_meta: Dict[str, Any],
     return_metadata: Literal[True],
-) -> Tuple[np.ndarray, Dict[str, Any] | None]:
-    ...
+) -> Tuple[np.ndarray, Dict[str, Any] | None]: ...
 
 
 async def read_decoded_media_via_nixl(
@@ -49,6 +49,9 @@ async def read_decoded_media_via_nixl(
         np.ndarray containing the transferred media data.
         Dict[str, Any] containing the media metadata.
     """
+    from dynamo import nixl_connect
+    from dynamo.nixl_connect import OperationKind, RdmaMetadata, SerializedDescriptor
+
     rdma_metadata = decoded_meta["nixl_metadata"]
     descriptor = decoded_meta["nixl_descriptor"]
     remote_device = (

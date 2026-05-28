@@ -79,3 +79,9 @@ async def test_default_abort_is_noop():
     without raising and without touching the (None) context."""
     engine = _Complete()
     await engine.abort(None)  # type: ignore[arg-type]
+
+
+async def test_default_engine_routes_is_empty():
+    """Engines opt into system-server management routes explicitly."""
+    engine = _Complete()
+    assert await engine.engine_routes() == {}

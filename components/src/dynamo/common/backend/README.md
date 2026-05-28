@@ -433,6 +433,7 @@ that the unified path does not yet support.
 - `DynamoException` error chain wrapping
 - Graceful shutdown with signal handling
 - Finish reason normalization handled by Rust layer
+- Engine management route plumbing, with per-backend profiling, quiesce/resume, and supported weight-update callbacks
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — see
   [Disaggregated Serving](#disaggregated-serving) below
 - **Metrics & Prometheus** — engine-native metrics passthrough
@@ -450,7 +451,6 @@ that the unified path does not yet support.
 | Logprobs | Selected token + top-k log probability extraction and streaming |
 | Guided decoding / structured outputs | JSON schema, regex, grammar, choice constraints |
 | OpenTelemetry tracing | `build_trace_headers()`, request performance metrics, OTEL propagation |
-| Engine routes | Profiling (start/stop), memory release/resume, weight update (disk/tensor/distributed/IPC) |
 | Data-parallel routing | DP rank extraction from routing hints, DP-aware scheduling |
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization |
 | Custom Jinja chat templates | `--custom-jinja-template` for model-specific prompt formatting |
@@ -463,8 +463,6 @@ that the unified path does not yet support.
 | LoRA adapters | Dynamic load/unload/list, ModelDeploymentCard publishing, per-LoRA serialization locks. Also: unified prefill does not currently thread per-request LoRA adapters into the engine call. |
 | Multimodal (images/video) | Image/video loading, embedding caching, NIXL RDMA transfer, Qwen VL mRoPE. Also: unified prefill does not pack `embedding_params` into the response's `disaggregated_params` — disagg multimodal flows still need the legacy path. |
 | Separate encode worker | `EncodeWorkerHandler` for multimodal encode-only disaggregation |
-| Sleep/wake/quiesce | 3-level engine lifecycle control (weights, buffers, everything) |
-| Elastic EP scaling | `scale_elastic_ep` with Ray node management |
 | GMS shadow mode | GPU Memory Service integration with failover lock |
 | ModelExpress P2P | Distributed model loading via P2P |
 | KV block clearing | Prefix cache reset endpoint |

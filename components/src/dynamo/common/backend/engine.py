@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
@@ -262,3 +262,8 @@ class LLMEngine(ABC):
         ``DYN_HEALTH_CHECK_PAYLOAD`` / ``--health-check-payload`` overrides
         on top."""
         return None
+
+    async def engine_routes(self) -> dict[str, Callable[[dict], Awaitable[dict]]]:
+        """Engine-management routes exposed as ``/engine/{route}``. Default
+        opts out. ``Worker`` calls once after :meth:`start`."""
+        return {}
