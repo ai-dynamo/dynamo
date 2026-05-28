@@ -30,7 +30,7 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 | **vLLM** | Rust frontend (default) | ✅ | Uses lightseek `llm-multimodal` for image-token counting + placeholder expansion. Supported models tracked below. |
 | **vLLM** | Python chat-processor (`--dyn-chat-processor vllm --router-mode kv`) | ✅ | Uses vLLM's own multimodal processor — supports any VLM that vLLM supports. |
 | **TRT-LLM** | — | ✅ | Uses dedicated MM Router Worker. Requires `--publish-events-and-metrics` on TRT-LLM workers. |
-| **SGLang** | Rust frontend (`DYN_MM_ROUTING_BACKEND=sglang`) | ✅ | Reuses the lightseek registry for image-token counting; substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix cache key (`MM_PAD_SHIFT_VALUE + mm_hash % 2^30`) matches byte-for-byte. Requires the sglang fork with the `mm_hashes` field on `GenerateReqInput` ([sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)). |
+| **SGLang** | Rust frontend (auto-detected) | ✅ | Reuses the lightseek registry for image-token counting; substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix cache key (`MM_PAD_SHIFT_VALUE + mm_hash % 2^30`) matches byte-for-byte. The frontend selects the SGLang protocol when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"` — no env var needed. Requires the sglang fork with the `mm_hashes` field on `GenerateReqInput` ([sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)). |
 
 ## Supported Model Families (Rust frontend path)
 
@@ -128,7 +128,7 @@ Unlike the vLLM path (which forwards `mm_hashes` as `multi_modal_uuids` for vLLM
 
 Two preconditions for byte-for-byte alignment between routing-side and server-side hashes:
 
-1. **Dynamo Rust frontend** computes `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)` for each image and substitutes that value (× N expansion) in `routing_token_ids`. Enabled via `DYN_MM_ROUTING_BACKEND=sglang` on the frontend.
+1. **Dynamo Rust frontend** computes `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)` for each image and substitutes that value (× N expansion) in `routing_token_ids`. Engaged automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
 2. **SGLang fork** exposes `GenerateReqInput.mm_hashes: Optional[List[str]]`. When set, `set_pad_value()` skips its internal `hash_feature()` recompute and uses the caller's hash directly, so the worker's derived `pad_value` matches the router's substitution. See [upstream PR sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300).
 
 Without both pieces, the routing-side hash and the server-side hash decouple and MM-aware routing silently degrades to text-prefix-only (the request still completes; just no prefix-cache benefit across images).
@@ -212,7 +212,7 @@ cd $DYNAMO_HOME
 bash examples/backends/sglang/launch/agg_multimodal_router.sh
 ```
 
-The launcher sets `DYN_MM_ROUTING_BACKEND=sglang` on the frontend and `--kv-events-config` on each worker, plus the standard `--router-mode kv --kv-cache-block-size 16` on the frontend so the KV router consumes block-level overlap.
+The launcher sets `--kv-events-config` on each worker plus the standard `--router-mode kv --kv-cache-block-size 16` on the frontend so the KV router consumes block-level overlap. The SGLang pad-value protocol is engaged automatically — the worker registers `backend_framework="sglang"` in its `ModelDeploymentCard` and the frontend picks the matching path from there.
 
 Key environment variables:
 

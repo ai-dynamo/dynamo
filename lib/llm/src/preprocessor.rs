@@ -880,7 +880,10 @@ impl OpenAIPreprocessor {
             // the wrong UUIDs would get injected onto the wrong images.
             #[cfg(feature = "lightseek-mm")]
             if !mm_image_entries.is_empty() && mm_image_entries.len() == total_image_count {
-                let sglang_mode = std::env::var("DYN_MM_ROUTING_BACKEND")
+                let sglang_mode = self
+                    .runtime_config
+                    .backend_framework
+                    .as_deref()
                     .map(|v| v.eq_ignore_ascii_case("sglang"))
                     .unwrap_or(false);
                 const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
@@ -1028,10 +1031,13 @@ impl OpenAIPreprocessor {
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
-        // DYN_MM_ROUTING_BACKEND=sglang: substitute per-image pad_value at
-        // image positions and emit no block_mm_infos, matching sglang's
-        // BlockStored event bytes. Default mirrors vLLM's protocol.
-        let sglang_pad_value_mode = std::env::var("DYN_MM_ROUTING_BACKEND")
+        // For sglang-backed models, substitute per-image pad_value at image
+        // positions and emit no block_mm_infos to match sglang's BlockStored
+        // event bytes. Default (vllm or unreported) keeps vLLM's protocol.
+        let sglang_pad_value_mode = self
+            .runtime_config
+            .backend_framework
+            .as_deref()
             .map(|v| v.eq_ignore_ascii_case("sglang"))
             .unwrap_or(false);
         // Mirrors sglang's _compute_pad_value; must follow upstream if either

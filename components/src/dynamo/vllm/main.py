@@ -608,6 +608,7 @@ async def register_vllm_model(
         vllm_config: vLLM configuration
     """
     runtime_config = ModelRuntimeConfig()
+    runtime_config.backend_framework = "vllm"
 
     # Get runtime configuration from vLLM engine
     logging.info(

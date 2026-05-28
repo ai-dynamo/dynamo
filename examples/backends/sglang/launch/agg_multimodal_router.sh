@@ -89,8 +89,6 @@ COMMON_ENV=(
     "NATS_SERVER=${NATS_SERVER}"
     "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
     "DYN_MM_ALLOW_INTERNAL=1"
-    # pad_value substitution so routing-side tokens match sglang's BlockStored bytes.
-    "DYN_MM_ROUTING_BACKEND=sglang"
 )
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
