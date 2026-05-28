@@ -518,10 +518,16 @@ def move_tensor_attrs_out_of_gms(
     model: torch.nn.Module,
     *,
     device_index: int,
-    name_substrings: tuple[str, ...] = ("workspace",),
+    name_substrings: tuple[str, ...] = ("workspace", "_buffer"),
     max_depth: int = 12,
 ) -> list[str]:
-    """Move mutable runtime tensor attrs out of the GMS weight layout."""
+    """Move mutable runtime tensor attrs out of the GMS weight layout.
+
+    Only direct tensor attributes are considered here; registered parameters
+    and buffers stay on the strict weight path. vLLM uses attrs such as
+    ``workspace`` and ``*_buffer`` for scratch state that kernels mutate during
+    profiling/serving and should not be published as read-only weights.
+    """
     moved: list[str] = []
     alias_map: _TensorAliasMap = {}
     target_device = torch.device("cuda", device_index)

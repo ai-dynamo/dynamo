@@ -99,12 +99,20 @@ class _TinyWorkspaceModule(torch.nn.Module):
         self.weight = torch.nn.Parameter(
             torch.zeros(4, 4, device="cuda", dtype=torch.float32)
         )
+        self.register_buffer(
+            "registered_buffer", torch.ones(2, device="cuda", dtype=torch.float32)
+        )
         self.workspace = torch.zeros(8, device="cuda", dtype=torch.int32)
         self.cache = type("_Cache", (), {})()
         self.cache.workspace = self.workspace
         self.helper = type("_Helper", (), {})()
         self.helper.runtime_workspace = torch.arange(
             4, device="cuda", dtype=torch.int32
+        )
+        self.indexer = torch.nn.Module()
+        self.indexer.indexer_op = torch.nn.Module()
+        self.indexer.indexer_op.topk_indices_buffer = torch.empty(
+            16, 4, device="cuda", dtype=torch.int32
         )
 
 
@@ -258,8 +266,13 @@ def test_mutable_workspace_attrs_are_moved_out_of_gms(running_gms):
 
     moved = move_tensor_attrs_out_of_gms(writer, model, device_index=0)
 
-    assert moved == ["workspace", "helper.runtime_workspace"]
+    assert moved == [
+        "workspace",
+        "helper.runtime_workspace",
+        "indexer.indexer_op.topk_indices_buffer",
+    ]
     assert model.cache.workspace is model.workspace
+    assert cast(torch.Tensor, model.registered_buffer).is_cuda
 
     register_module_tensors(writer, model)
     assert writer.commit()
