@@ -506,7 +506,12 @@ def test_request_cancellation_vllm_prefill_cancel(
                     "yielding KV-transfer params."
                 )
 
-                # Verify cancellation metrics
+                # Verify cancellation metrics. The decode-side counter
+                # increments in tcp/client.rs:347 only after the reader loop
+                # exits (which lags the prefill drain by: decode dispatch +
+                # frontend->decode ControlMessage::Kill + Python handler exit +
+                # writer drain). Poll until it matches to avoid scraping before
+                # the async chain finishes on slow runners.
                 verify_frontend_cancellation_metrics(
                     frontend_port=frontend.frontend_port,
                     request_type="completion",
@@ -515,6 +520,7 @@ def test_request_cancellation_vllm_prefill_cancel(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=decode_worker.system_port,
                     expected_count=1,
+                    max_wait_ms=15000,
                 )
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
