@@ -10,6 +10,7 @@ import sglang as sgl
 
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.llm import WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
@@ -102,6 +103,8 @@ async def init_llm_diffusion(
                 dynamo_args,
                 output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
+                worker_type=WorkerType.Aggregated,
+                needs=[],
             ),
         )
     except Exception as e:
