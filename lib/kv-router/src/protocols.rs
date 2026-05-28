@@ -217,6 +217,10 @@ pub enum KvTransferEnforcement {
     Preferred,
 }
 
+/// Request-level taint constraints evaluated against each worker's published taints.
+///
+/// Topology-aware routing uses the same fields with canonical taints such as
+/// `dynamo.topology/zone=us-east-1a`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RoutingConstraints {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
