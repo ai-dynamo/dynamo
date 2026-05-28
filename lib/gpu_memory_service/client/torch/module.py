@@ -666,6 +666,7 @@ def _materialize_runtime_meta_tensor_attrs(
 
     return materialized
 
+
 def _copy_tensor_attrs(src: torch.Tensor, dst: torch.Tensor) -> None:
     attrs = getattr(src, "__dict__", None)
     if attrs:
