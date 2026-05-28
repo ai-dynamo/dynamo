@@ -112,15 +112,6 @@ pub(crate) fn kv_cache_event_type_label(event: &KvCacheEventData) -> &'static st
     }
 }
 
-fn is_kv_publisher_event_type(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        KV_PUBLISHER_EVENT_TYPE_STORED
-            | KV_PUBLISHER_EVENT_TYPE_REMOVED
-            | KV_PUBLISHER_EVENT_TYPE_CLEARED
-    )
-}
-
 impl KvPublisherMetrics {
     #[cfg(test)]
     pub(crate) fn new_unregistered_for_tests() -> Self {
@@ -279,9 +270,6 @@ impl KvPublisherMetrics {
         self.zmq_events_total
             .with_label_values(&[stage, event_type])
             .inc();
-        if is_kv_publisher_event_type(event_type) {
-            self.increment_event(stage, event_type, KV_PUBLISHER_EVENT_SOURCE_ZMQ);
-        }
     }
 
     pub fn increment_zmq_filtered_event(&self, event_type: &'static str, reason: &'static str) {
@@ -344,7 +332,7 @@ mod kv_publisher_metric_tests {
     }
 
     #[test]
-    fn zmq_event_increments_legacy_and_generic_metrics() {
+    fn zmq_event_increments_legacy_metric_only() {
         let metrics = KvPublisherMetrics::new_unregistered_for_tests();
 
         metrics.increment_zmq_event(
@@ -359,6 +347,9 @@ mod kv_publisher_metric_tests {
                 KV_PUBLISHER_EVENT_TYPE_STORED,
             ])
             .get();
+        // The generic counter is owned by the event processor, which records it
+        // uniformly across sources. The ZMQ listener must only touch the legacy
+        // counter, otherwise ZMQ events would be double-counted in events_total.
         let generic = metrics
             .events_total
             .with_label_values(&[
@@ -369,13 +360,11 @@ mod kv_publisher_metric_tests {
             .get();
 
         assert_eq!(legacy, 1);
-        assert_eq!(generic, 1);
+        assert_eq!(generic, 0);
 
         let content = encode_metric_families(&metrics);
         assert!(content.contains("dynamo_component_kv_publisher_zmq_events_total"));
-        assert!(content.contains("dynamo_component_kv_publisher_events_total"));
         assert!(content.contains("event_type=\"stored\""));
-        assert!(content.contains("source=\"zmq\""));
         assert!(content.contains("stage=\"received\""));
     }
 }

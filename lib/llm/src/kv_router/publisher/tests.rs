@@ -526,8 +526,8 @@ mod test_event_processing {
 mod tests_startup_helpers {
     use super::*;
     use crate::kv_router::metrics::{
-        KV_PUBLISHER_EVENT_SOURCE_ZMQ, KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
-        KV_PUBLISHER_EVENT_STAGE_RECEIVED, KV_PUBLISHER_EVENT_TYPE_STORED, KvPublisherMetrics,
+        KV_PUBLISHER_EVENT_STAGE_ACCEPTED, KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+        KV_PUBLISHER_EVENT_TYPE_STORED, KvPublisherMetrics,
     };
     use crate::utils::zmq::{bind_pub_socket, send_multipart};
     use bytes::Bytes;
@@ -576,18 +576,6 @@ mod tests_startup_helpers {
 
     fn local_gpu_event(worker_id: WorkerId, event: KvCacheEvent) -> PlacementEvent {
         PlacementEvent::local_gpu(worker_id, event)
-    }
-
-    fn generic_event_metric_value(
-        metrics: &KvPublisherMetrics,
-        stage: &'static str,
-        event_type: &'static str,
-        source: &'static str,
-    ) -> u64 {
-        metrics
-            .events_total
-            .with_label_values(&[stage, event_type, source])
-            .get()
     }
 
     fn legacy_zmq_event_metric_value(
@@ -975,18 +963,10 @@ mod tests_startup_helpers {
             KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
             KV_PUBLISHER_EVENT_TYPE_STORED,
         );
-        let generic_received_before = generic_event_metric_value(
-            &metrics,
-            KV_PUBLISHER_EVENT_STAGE_RECEIVED,
-            KV_PUBLISHER_EVENT_TYPE_STORED,
-            KV_PUBLISHER_EVENT_SOURCE_ZMQ,
-        );
-        let generic_accepted_before = generic_event_metric_value(
-            &metrics,
-            KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
-            KV_PUBLISHER_EVENT_TYPE_STORED,
-            KV_PUBLISHER_EVENT_SOURCE_ZMQ,
-        );
+        // This test drives the ZMQ listener directly and drains the channel itself,
+        // so no event processor runs here. The generic events_total counter is
+        // recorded by the event processor (see event_processor_tests), not the
+        // listener, so only the legacy zmq_events_total counter is asserted below.
 
         // Prepare channel that listener should fill
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
@@ -1083,30 +1063,14 @@ mod tests_startup_helpers {
                 &metrics,
                 KV_PUBLISHER_EVENT_STAGE_RECEIVED,
                 KV_PUBLISHER_EVENT_TYPE_STORED,
-            ) >= legacy_received_before + 1
+            ) > legacy_received_before
         );
         assert!(
             legacy_zmq_event_metric_value(
                 &metrics,
                 KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
                 KV_PUBLISHER_EVENT_TYPE_STORED,
-            ) >= legacy_accepted_before + 1
-        );
-        assert!(
-            generic_event_metric_value(
-                &metrics,
-                KV_PUBLISHER_EVENT_STAGE_RECEIVED,
-                KV_PUBLISHER_EVENT_TYPE_STORED,
-                KV_PUBLISHER_EVENT_SOURCE_ZMQ,
-            ) >= generic_received_before + 1
-        );
-        assert!(
-            generic_event_metric_value(
-                &metrics,
-                KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
-                KV_PUBLISHER_EVENT_TYPE_STORED,
-                KV_PUBLISHER_EVENT_SOURCE_ZMQ,
-            ) >= generic_accepted_before + 1
+            ) > legacy_accepted_before
         );
 
         // Stop the listener
@@ -1939,7 +1903,7 @@ mod event_processor_tests {
                 KV_PUBLISHER_EVENT_STAGE_RECEIVED,
                 KV_PUBLISHER_EVENT_TYPE_STORED,
                 KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
-            ) >= received_before + 1
+            ) > received_before
         );
         assert!(
             event_metric_value(
@@ -1947,7 +1911,7 @@ mod event_processor_tests {
                 KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
                 KV_PUBLISHER_EVENT_TYPE_STORED,
                 KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
-            ) >= accepted_before + 1
+            ) > accepted_before
         );
     }
 

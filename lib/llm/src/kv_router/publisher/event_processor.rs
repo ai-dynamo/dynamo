@@ -25,17 +25,21 @@ use super::dedup::EventDedupFilter;
 use super::sinks::{JetStreamPublisher, emit};
 
 fn increment_event_metric(
-    metric_source: Option<&'static str>,
+    metric_source: &'static str,
     stage: &'static str,
     event_type: &'static str,
 ) {
-    if let Some(source) = metric_source
-        && let Some(metrics) = kv_publisher_metrics()
-    {
-        metrics.increment_event(stage, event_type, source);
+    if let Some(metrics) = kv_publisher_metrics() {
+        metrics.increment_event(stage, event_type, metric_source);
     }
 }
 
+// Counts the generic events_total metric uniformly for every source (ZMQ and
+// the direct event plane) at the same two points in this loop — `received` when
+// an event is pulled off the channel and `accepted` once it has passed dedup and
+// is committed to the outgoing batch. The ZMQ listener only feeds this loop; it
+// does not record events_total itself, so there is no double counting.
+#[allow(clippy::too_many_arguments)]
 async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
@@ -43,7 +47,7 @@ async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send +
     mut rx: mpsc::UnboundedReceiver<PlacementEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
-    metric_source: Option<&'static str>,
+    metric_source: &'static str,
     max_batch_blocks: usize,
 ) {
     let mut batching_state = BatchingState::new();
@@ -201,7 +205,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
         rx,
         local_indexer,
         timeout_ms,
-        Some(KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE),
+        KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
         max_batch_blocks,
     )
     .await
@@ -223,7 +227,7 @@ pub(super) async fn start_event_processor<P: RouterEventSink + Send + Sync + 'st
         rx,
         local_indexer,
         batching_timeout_ms,
-        Some(KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE),
+        KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
     )
     .await
 }
@@ -237,7 +241,7 @@ pub(super) async fn start_event_processor_with_metric_source<
     rx: mpsc::UnboundedReceiver<PlacementEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
-    metric_source: Option<&'static str>,
+    metric_source: &'static str,
 ) {
     run_event_processor_loop_with_metric_source(
         publisher,
@@ -259,7 +263,7 @@ pub(super) async fn start_event_processor_jetstream_with_metric_source(
     rx: mpsc::UnboundedReceiver<PlacementEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
-    metric_source: Option<&'static str>,
+    metric_source: &'static str,
 ) {
     run_event_processor_loop_with_metric_source(
         JetStreamPublisher(publisher),

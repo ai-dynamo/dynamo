@@ -23,7 +23,9 @@ use dynamo_runtime::{
 use crate::kv_router::{
     KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
     indexer::start_worker_kv_query_endpoint,
-    metrics::{KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE, KvPublisherMetrics},
+    metrics::{
+        KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE, KV_PUBLISHER_EVENT_SOURCE_ZMQ, KvPublisherMetrics,
+    },
 };
 
 mod batching;
@@ -121,6 +123,18 @@ impl KvEventSource {
     }
 }
 
+/// The `source` label applied to the generic `kv_publisher_events_total` metric,
+/// derived from the configured event source. The match is intentionally
+/// exhaustive (no wildcard): adding a new [`KvEventSourceConfig`] variant will
+/// fail to compile until it is given an explicit source label, so a new source
+/// can never silently land without metric attribution.
+fn metric_source_for(source_config: &Option<KvEventSourceConfig>) -> &'static str {
+    match source_config {
+        Some(KvEventSourceConfig::Zmq { .. }) => KV_PUBLISHER_EVENT_SOURCE_ZMQ,
+        None => KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
+    }
+}
+
 /// A publisher of KV events.
 pub struct KvEventPublisher {
     /// The size of the KV block.
@@ -215,7 +229,7 @@ impl KvEventPublisher {
         let next_event_id = Arc::new(AtomicU64::new(0));
 
         let mut source = None;
-        let has_external_source = source_config.is_some();
+        let metric_source = metric_source_for(&source_config);
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
                 component.clone(),
@@ -227,11 +241,6 @@ impl KvEventPublisher {
                 next_event_id.clone(),
             )?);
         }
-        let metric_source = if has_external_source {
-            None
-        } else {
-            Some(KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE)
-        };
 
         let local_indexer = if enable_local_indexer {
             let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
@@ -376,5 +385,25 @@ impl KvEventPublisher {
 impl Drop for KvEventPublisher {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod metric_source_tests {
+    use super::*;
+
+    #[test]
+    fn metric_source_matches_event_source_kind() {
+        assert_eq!(
+            metric_source_for(&Some(KvEventSourceConfig::Zmq {
+                endpoint: "tcp://127.0.0.1:0".to_string(),
+                topic: String::new(),
+            })),
+            KV_PUBLISHER_EVENT_SOURCE_ZMQ
+        );
+        assert_eq!(
+            metric_source_for(&None),
+            KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE
+        );
     }
 }
