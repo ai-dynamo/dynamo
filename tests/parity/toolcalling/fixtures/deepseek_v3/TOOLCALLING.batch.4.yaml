@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3
+mode: batch
+cases:
+  TOOLCALLING.batch.4.a:
+    description: Garbage between calls fences
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L322
+    model_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  TOOLCALLING.batch.4.b:
+    description: Missing close brace inside fenced JSON
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "NYC"
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      dynamo: &id002
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"location": "NYC"
+          ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "NYC"'
+        normal_text: ''
+      sglang: *id002
+  TOOLCALLING.batch.4.c:
+    description: Missing function name token
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>
+          ```json
+          {"location": "NYC"}
+          ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls:
+        - name: ''
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  TOOLCALLING.batch.4.d:
+    description: Missing fenced JSON block (no ```json)
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      {"location": "NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          {"location": "NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+  TOOLCALLING.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      TOOLCALLING.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in TOOLCALLING.batch.4.a through 4.d.
+  TOOLCALLING.batch.4.f:
+    description: Tool-name XML tag case - n/a for this family's syntax
+    reason: |-
+      TOOLCALLING.batch.4.f is specific to Qwen3-Coder XML syntax, where the model may emit a tool-name tag such as <terminal> inside <tool_call> instead of the required <function=Terminal> opener. This family does not use Qwen3-Coder's <function=...> opener.

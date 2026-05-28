@@ -35,6 +35,7 @@ impl PrefillRouter {
     /// Otherwise, query for the best worker (KV mode) or select next worker (non-KV modes).
     pub(super) async fn resolve_prefill_worker(
         &self,
+        context_id: &str,
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
     ) -> PrefillResolveDecision {
@@ -45,8 +46,23 @@ impl PrefillRouter {
             return PrefillResolveDecision::NotActivated;
         }
 
+        // Treat a preselected prefill worker as a caller/external pin. Otherwise,
+        // sticky affinity wins before this router writes generated bootstrap hints.
+        let sticky_worker = if preselected_worker.is_none() {
+            self.resolve_sticky_prefill_worker(context_id, req).await
+        } else {
+            None
+        };
+
         // Worker selection
-        let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
+        let (worker_id, dp_rank) = if let Some(worker) = sticky_worker {
+            tracing::debug!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                "Using sticky prefill worker for bootstrap"
+            );
+            (worker.worker_id, Some(worker.dp_rank))
+        } else if let Some(id) = preselected_worker {
             let dp_rank = req
                 .routing
                 .as_ref()
@@ -142,6 +158,41 @@ impl PrefillRouter {
                 bootstrap_port: port,
                 bootstrap_room,
             },
+        }
+    }
+
+    async fn resolve_sticky_prefill_worker(
+        &self,
+        context_id: &str,
+        req: &PreprocessedRequest,
+    ) -> Option<dynamo_kv_router::protocols::WorkerWithDpRank> {
+        let router = self.prefill_router.get()?;
+        let worker = router.sticky_worker_for_prefill(req)?;
+        if router.unbind_ineligible_sticky_prefill_worker(context_id, req, worker) {
+            return None;
+        }
+
+        match router
+            .validate_sticky_prefill_worker(context_id, req, worker)
+            .await
+        {
+            Ok(worker) => {
+                router.refresh_sticky_prefill_worker(req);
+                Some(worker)
+            }
+            Err(error) => {
+                let unbound =
+                    router.unbind_ineligible_sticky_prefill_worker(context_id, req, worker);
+                tracing::warn!(
+                    request_id = %context_id,
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    error = %error,
+                    unbound_due_to_ineligibility = unbound,
+                    "Sticky prefill worker routing failed; falling back to normal prefill routing"
+                );
+                None
+            }
         }
     }
 
@@ -320,6 +371,7 @@ impl PrefillRouter {
                         block_mm_infos,
                         None,
                         update_states,
+                        false,
                         lora_name,
                         priority_jump,
                         None,

@@ -592,6 +592,36 @@ def test_single_stage_runtime_devices_preserve_visible_subset(monkeypatch):
     assert stage_arg["runtime"]["devices"] == "1"
 
 
+def test_single_stage_runtime_devices_normalized_for_xpu_visibility(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("ZE_AFFINITY_MASK", "2")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "2"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "0"
+
+
+def test_single_stage_runtime_devices_preserve_xpu_visible_subset(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("ZE_AFFINITY_MASK", "0,1")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "1"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "1"
+
+
 def test_fetch_stage_inputs_raises_on_missing_connector():
     worker = _make_worker_at_stage(1, connectors={}, engine_input_source=[0])
     with pytest.raises(RuntimeError, match="no connector for edge"):

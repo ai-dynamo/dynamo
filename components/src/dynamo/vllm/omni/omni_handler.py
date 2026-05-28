@@ -62,7 +62,7 @@ class EngineInputs:
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
-    Handles text-to-text, text-to-image, text-to-video, and text-to-audio generation.
+    Handles text-to-image, text-to-video, image-to-video, and text-to-audio generation.
     Audio/TTS logic is delegated to AudioGenerationHandler via composition.
     """
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
+use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
@@ -241,6 +242,20 @@ fn kv_indexer_to_pyerr(err: anyhow::Error) -> PyErr {
     to_pyerr(err)
 }
 
+fn resolve_event_transport_kind(
+    discovery_backend: &DiscoveryBackend,
+    event_plane: Option<&str>,
+) -> PyResult<EventTransportKind> {
+    match event_plane {
+        Some("nats") => Ok(EventTransportKind::Nats),
+        Some("zmq") => Ok(EventTransportKind::Zmq),
+        Some("") | None => Ok(discovery_backend.resolve_event_transport_kind()),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "Invalid event_plane value '{other}'. Valid values: 'nats', 'zmq'"
+        ))),
+    }
+}
+
 #[pyfunction(name = "run_kv_indexer")]
 #[pyo3(signature = (argv=None))]
 fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
@@ -374,6 +389,10 @@ fn register_model<'p>(
         .clone()
         .or(model_name)
         .or_else(|| Some(source_path.clone()));
+
+    if let Some(cfg) = &runtime_config {
+        cfg.validate_config()?;
+    }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // For TensorBased, Images, and Videos models, skip HuggingFace downloads and register directly
@@ -686,12 +705,13 @@ impl From<llm_rs::worker_type::WorkerType> for WorkerType {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None))]
+    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None, *, event_plane=None))]
     fn new(
         event_loop: PyObject,
         discovery_backend: String,
         request_plane: String,
         enable_nats: Option<bool>,
+        event_plane: Option<String>,
     ) -> PyResult<Self> {
         if enable_nats.is_some() {
             Python::with_gil(|py| {
@@ -715,6 +735,9 @@ impl DistributedRuntime {
             }
         };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
+        let explicit_event_plane = event_plane.as_deref().filter(|value| !value.is_empty());
+        let event_transport_kind =
+            resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
@@ -744,14 +767,13 @@ impl DistributedRuntime {
             });
         }
 
-        let event_transport_kind = discovery_backend_config.resolve_event_transport_kind();
-
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(config::environment_names::nats::NATS_SERVER).is_ok()
             || matches!(
                 event_transport_kind,
                 dynamo_runtime::discovery::EventTransportKind::Nats
-            );
+            )
+            || (explicit_event_plane.is_none()
+                && std::env::var(config::environment_names::nats::NATS_SERVER).is_ok());
 
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,

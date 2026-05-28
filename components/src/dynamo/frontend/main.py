@@ -120,6 +120,21 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
                     "Flag '--chat-processor vllm' requires vllm be installed."
                 )
                 sys.exit(1)
+
+        # On a host with no GPU and a CUDA-built wheel, vllm.platforms
+        # auto-detection picks UnspecifiedPlatform and the
+        # AsyncEngineArgs.add_cli_args call below crashes inside
+        # DeviceConfig.__post_init__. Frontend uses vLLM for parsers
+        # only and never constructs an engine, so coerce CpuPlatform.
+        # Must run before importing vllm.engine.arg_utils, which binds
+        # current_platform at module scope.
+        import vllm.platforms
+
+        if vllm.platforms.current_platform.device_type == "":
+            from vllm.platforms.cpu import CpuPlatform
+
+            vllm.platforms.current_platform = CpuPlatform()
+
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
             from vllm.entrypoints.openai.cli_args import FrontendArgs
