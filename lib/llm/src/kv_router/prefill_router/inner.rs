@@ -62,9 +62,9 @@ impl InnerPrefillRouter {
         request: &PreprocessedRequest,
     ) -> Option<WorkerWithDpRank> {
         match self {
-            InnerPrefillRouter::KvRouter(router) => {
-                router.sticky_worker_for_phase(request, RequestPhase::Prefill)
-            }
+            InnerPrefillRouter::KvRouter(router) => router
+                .sticky
+                .worker_for_phase(request, RequestPhase::Prefill),
             InnerPrefillRouter::SimpleRouter(_) => None,
         }
     }
@@ -108,7 +108,9 @@ impl InnerPrefillRouter {
 
     pub(super) fn refresh_sticky_prefill_worker(&self, request: &PreprocessedRequest) {
         if let InnerPrefillRouter::KvRouter(router) = self {
-            router.refresh_sticky_worker_for_phase(request, RequestPhase::Prefill);
+            router
+                .sticky
+                .refresh_worker_for_phase(request, RequestPhase::Prefill);
         }
     }
 }
