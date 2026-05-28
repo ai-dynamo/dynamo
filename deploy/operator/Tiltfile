@@ -122,7 +122,7 @@ IMG_REF  = IMG + ':' + IMG_TAG
 # Compile the manager binary locally (much faster than building in Docker)
 # ---------------------------------------------------------------------------
 def compile_manager():
-    return 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o tilt_bin/manager ./cmd/main.go'
+    return 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOWORK=off go build -o tilt_bin/manager ./cmd/main.go'
 
 local_resource(
     'manager-build',

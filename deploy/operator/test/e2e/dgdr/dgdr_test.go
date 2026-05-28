@@ -212,18 +212,49 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 	})
 
 	// -----------------------------------------------------------------------
-	// Model-specific DGDR scenarios — exercise real model configs from the
-	// repo's DGDR YAMLs (qwen-235, llama-70b, gpt-oss-120b).
+	// Support matrix — rapid profiling
+	// Models where rapid search can find a viable configuration.
+	// Sorted by ascending GPU count within the section.
 	// -----------------------------------------------------------------------
 
-	Context("Model-specific DGDR scenarios", func() {
+	Context("Model-specific DGDR scenarios — rapid profiling", func() {
 
-		It("should complete full lifecycle with Qwen3-235B disagg on H100", func() {
-			By("Running DGDR lifecycle with Qwen3-235B-A22B-FP8 + trtllm + rapid + disagg planner")
+		It("should complete full lifecycle with Qwen3-VL-30B-FP8 agg on GB200", func() {
+			// Multimodal model; only recipe: vLLM agg 1 GB200
+			By("Running DGDR lifecycle with Qwen3-VL-30B-FP8 + vllm + rapid + agg")
 			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
 				return DGDRLifecycleInput{
-					Name:           uniqueName("qwen235b-disagg"),
-					Model:          "Qwen/Qwen3-235B-A22B-FP8",
+					Name:           uniqueName("qwen3vl30b"),
+					Model:          "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+					Backend:        v1beta1.BackendTypeVllm,
+					SearchStrategy: v1beta1.SearchStrategyRapid,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(500.0),
+						ITL:  ptr.To(30.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(3000)),
+						OSL: ptr.To(int32(300)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:    ptr.To(float64(81920)),
+						TotalGPUs: ptr.To(int32(1)),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+
+		It("should complete full lifecycle with Qwen3-32B-FP8 agg on H100", func() {
+			// Also available: TRT-LLM disagg 8 H100/H200/A100, vLLM disagg 8 A100
+			By("Running DGDR lifecycle with Qwen3-32B-FP8 + trtllm + rapid + agg")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("qwen32bfp8-agg"),
+					Model:          "Qwen/Qwen3-32B-FP8",
 					Backend:        v1beta1.BackendTypeTrtllm,
 					SearchStrategy: v1beta1.SearchStrategyRapid,
 					AutoApply:      ptr.To(true),
@@ -238,32 +269,7 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 					Hardware: &v1beta1.HardwareSpec{
 						GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:    ptr.To(float64(81920)),
-						TotalGPUs: ptr.To(int32(32)),
-					},
-					Features: &v1beta1.FeaturesSpec{
-						Planner: plannerRawExtension(map[string]interface{}{
-							"mode":                     "disagg",
-							"enable_throughput_scaling": true,
-							"enable_load_scaling":       true,
-							"max_gpu_budget":            32,
-						}),
-					},
-					Overrides: &v1beta1.OverridesSpec{
-						DGD: dgdOverrideRawExtension(map[string]interface{}{
-							"apiVersion": "nvidia.com/v1alpha1",
-							"kind":       "DynamoGraphDeployment",
-							"metadata":   map[string]interface{}{"name": "placeholder"},
-							"spec": map[string]interface{}{
-								"services": map[string]interface{}{
-									"prefill": map[string]interface{}{
-										"sharedMemory": map[string]interface{}{"size": "256Gi"},
-									},
-									"decode": map[string]interface{}{
-										"sharedMemory": map[string]interface{}{"size": "256Gi"},
-									},
-								},
-							},
-						}),
+						TotalGPUs: ptr.To(int32(2)),
 					},
 					ExpectDGDReady:  true,
 					VerifyConfigMap: true,
@@ -271,14 +277,106 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 			})
 		})
 
-		It("should complete full lifecycle with Llama-70B on H100", func() {
-			By("Running DGDR lifecycle with Llama-3.3-70B-FP8 + trtllm + thorough")
+		It("should complete full lifecycle with Llama-3.3-70B-FP8 agg on H100", func() {
+			// Also available: vLLM disagg single-node 8 H100/H200,
+			//   vLLM disagg multi-node 16 H100/H200,
+			//   vLLM agg+GAIE 4 H100/H200, vLLM disagg+GAIE 8 H100/H200
+			By("Running DGDR lifecycle with Llama-3.3-70B-FP8 + vllm + rapid + agg")
 			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
 				return DGDRLifecycleInput{
-					Name:           uniqueName("llama70b-disagg"),
+					Name:           uniqueName("llama70b-agg"),
 					Model:          "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
+					Backend:        v1beta1.BackendTypeVllm,
+					SearchStrategy: v1beta1.SearchStrategyRapid,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(500.0),
+						ITL:  ptr.To(30.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(3000)),
+						OSL: ptr.To(int32(300)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:    ptr.To(float64(81920)),
+						TotalGPUs: ptr.To(int32(4)),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+
+		It("should complete full lifecycle with Nemotron-3-Super-120B-FP8 agg on H100", func() {
+			// Also available: SGLang disagg 4 H100/H200,
+			//   TRT-LLM disagg 4 H100/H200, vLLM agg 4 H100/H200
+			By("Running DGDR lifecycle with Nemotron-3-Super-120B-FP8 + sglang + rapid + agg")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("nem120b-agg"),
+					Model:          "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+					Backend:        v1beta1.BackendTypeSglang,
+					SearchStrategy: v1beta1.SearchStrategyRapid,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(500.0),
+						ITL:  ptr.To(30.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(3000)),
+						OSL: ptr.To(int32(300)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:    ptr.To(float64(81920)),
+						TotalGPUs: ptr.To(int32(4)),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+
+		It("should complete full lifecycle with GPT-OSS-120B agg on GB200", func() {
+			// Also available: TRT-LLM disagg 5 GB200/B200
+			By("Running DGDR lifecycle with GPT-OSS-120B + trtllm + rapid + agg")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("gptoss120b-agg"),
+					Model:          "openai/gpt-oss-120b",
 					Backend:        v1beta1.BackendTypeTrtllm,
-					SearchStrategy: v1beta1.SearchStrategyThorough,
+					SearchStrategy: v1beta1.SearchStrategyRapid,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(500.0),
+						ITL:  ptr.To(30.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(3000)),
+						OSL: ptr.To(int32(300)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:    ptr.To(float64(81920)),
+						TotalGPUs: ptr.To(int32(4)),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+
+		It("should complete full lifecycle with Kimi-K2.5-NVFP4 agg on B200", func() {
+			// Also available: TRT-LLM agg+KVBM 8 B200 (deploy-kvbm.yaml),
+			//   TRT-LLM agg+SpecDec 32 B200 (deploy-specdec.yaml)
+			By("Running DGDR lifecycle with Kimi-K2.5-NVFP4 + trtllm + rapid + agg")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("kimik25-agg"),
+					Model:          "nvidia/Kimi-K2.5-NVFP4",
+					Backend:        v1beta1.BackendTypeTrtllm,
+					SearchStrategy: v1beta1.SearchStrategyRapid,
 					AutoApply:      ptr.To(true),
 					SLA: &v1beta1.SLASpec{
 						TTFT: ptr.To(500.0),
@@ -299,12 +397,13 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 			})
 		})
 
-		It("should complete full lifecycle with GPT-OSS-120B on H100", func() {
-			By("Running DGDR lifecycle with gpt-oss-120b + trtllm + rapid")
+		It("should complete full lifecycle with Qwen3-235B-A22B-FP8 disagg on H100", func() {
+			// Also available: TRT-LLM agg 16 H100/H200
+			By("Running DGDR lifecycle with Qwen3-235B-A22B-FP8 + trtllm + rapid + disagg")
 			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
 				return DGDRLifecycleInput{
-					Name:           uniqueName("gptoss120b-disagg"),
-					Model:          "openai/gpt-oss-120b",
+					Name:           uniqueName("qwen235b-disagg"),
+					Model:          "Qwen/Qwen3-235B-A22B-FP8",
 					Backend:        v1beta1.BackendTypeTrtllm,
 					SearchStrategy: v1beta1.SearchStrategyRapid,
 					AutoApply:      ptr.To(true),
@@ -317,9 +416,199 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 						OSL: ptr.To(int32(300)),
 					},
 					Hardware: &v1beta1.HardwareSpec{
-						GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
-						VRAMMB:    ptr.To(float64(81920)),
-						TotalGPUs: ptr.To(int32(32)),
+						GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(float64(81920)),
+						NumGPUsPerNode: ptr.To(int32(8)),
+						TotalGPUs:      ptr.To(int32(16)),
+					},
+					Features: &v1beta1.FeaturesSpec{
+						Planner: plannerRawExtension(map[string]interface{}{
+							"mode":                      "disagg",
+							"enable_throughput_scaling": true,
+							"enable_load_scaling":       true,
+							"max_gpu_budget":            16,
+						}),
+					},
+					Overrides: &v1beta1.OverridesSpec{
+						DGD: dgdOverrideRawExtension(map[string]interface{}{
+							"apiVersion": "nvidia.com/v1alpha1",
+							"kind":       "DynamoGraphDeployment",
+							"metadata":   map[string]interface{}{"name": "q235"},
+							"spec": map[string]interface{}{
+								"services": map[string]interface{}{
+									"prefill": map[string]interface{}{
+										"sharedMemory": map[string]interface{}{"size": "256Gi"},
+									},
+									"decode": map[string]interface{}{
+										"sharedMemory": map[string]interface{}{"size": "256Gi"},
+									},
+								},
+							},
+						}),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+
+		It("should complete full lifecycle with Qwen3-32B agg on H200", func() {
+			// Also available: vLLM disagg-kv-router 16 H200
+			By("Running DGDR lifecycle with Qwen3-32B + vllm + rapid + agg")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("qwen32b-agg"),
+					Model:          "Qwen/Qwen3-32B",
+					Backend:        v1beta1.BackendTypeVllm,
+					SearchStrategy: v1beta1.SearchStrategyRapid,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(500.0),
+						ITL:  ptr.To(30.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(3000)),
+						OSL: ptr.To(int32(300)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(float64(81920)),
+						NumGPUsPerNode: ptr.To(int32(8)),
+						TotalGPUs:      ptr.To(int32(16)),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+	})
+
+	// -----------------------------------------------------------------------
+	// Support matrix — models that don't fit on H100
+	// These large MoE models require non-H100 SKUs (H200/GB200) and are
+	// excluded from the H100 test cluster. Kept here for completeness;
+	// run these on clusters with the appropriate GPU SKU.
+	// -----------------------------------------------------------------------
+
+	Context("Model-specific DGDR scenarios — non-H100 SKUs", func() {
+
+		It("should complete full lifecycle with DeepSeek-R1 disagg on H200", func() {
+			// Also available: SGLang disagg 32 H200,
+			//   TRT-LLM disagg wide-EP 36 GB200, vLLM disagg 32 H200
+			By("Running DGDR lifecycle with DeepSeek-R1 + sglang + thorough + disagg")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("dsr1-disagg"),
+					Model:          "deepseek-ai/DeepSeek-R1",
+					Backend:        v1beta1.BackendTypeSglang,
+					SearchStrategy: v1beta1.SearchStrategyThorough,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(2000.0),
+						ITL:  ptr.To(50.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(4000)),
+						OSL: ptr.To(int32(1000)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:         v1beta1.GPUSKUTypeH200SXM,
+						VRAMMB:         ptr.To(float64(144384)),
+						NumGPUsPerNode: ptr.To(int32(8)),
+						TotalGPUs:      ptr.To(int32(16)),
+					},
+					Features: &v1beta1.FeaturesSpec{
+						Planner: plannerRawExtension(map[string]interface{}{
+							"mode":                      "disagg",
+							"enable_throughput_scaling": true,
+							"enable_load_scaling":       true,
+							"max_gpu_budget":            16,
+						}),
+					},
+					Overrides: &v1beta1.OverridesSpec{
+						DGD: dgdOverrideRawExtension(map[string]interface{}{
+							"apiVersion": "nvidia.com/v1alpha1",
+							"kind":       "DynamoGraphDeployment",
+							"metadata":   map[string]interface{}{"name": "dsr1"},
+							"spec": map[string]interface{}{
+								"services": map[string]interface{}{
+									"prefill": map[string]interface{}{
+										"sharedMemory": map[string]interface{}{"size": "256Gi"},
+									},
+									"decode": map[string]interface{}{
+										"sharedMemory": map[string]interface{}{"size": "256Gi"},
+									},
+								},
+							},
+						}),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+
+		It("should complete full lifecycle with GLM-5-NVFP4 disagg on GB200", func() {
+			// Only recipe: SGLang disagg 20 GB200
+			By("Running DGDR lifecycle with GLM-5-NVFP4 + sglang + thorough + disagg")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("glm5fp4-disagg"),
+					Model:          "nvidia/GLM-5-NVFP4",
+					Backend:        v1beta1.BackendTypeSglang,
+					SearchStrategy: v1beta1.SearchStrategyThorough,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(2000.0),
+						ITL:  ptr.To(50.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(4000)),
+						OSL: ptr.To(int32(1000)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:         v1beta1.GPUSKUTypeGB200SXM,
+						VRAMMB:         ptr.To(float64(196608)),
+						NumGPUsPerNode: ptr.To(int32(8)),
+						TotalGPUs:      ptr.To(int32(20)),
+					},
+					Features: &v1beta1.FeaturesSpec{
+						Planner: plannerRawExtension(map[string]interface{}{
+							"mode":                      "disagg",
+							"enable_throughput_scaling": true,
+							"enable_load_scaling":       true,
+							"max_gpu_budget":            20,
+						}),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+
+		It("should complete full lifecycle with DeepSeek-V3.2-NVFP4 agg on GB200", func() {
+			// Also available: TRT-LLM disagg 32 GB200
+			By("Running DGDR lifecycle with DeepSeek-V3.2-NVFP4 + trtllm + thorough + agg")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("dsv32fp4-agg"),
+					Model:          "nvidia/DeepSeek-V3.2-NVFP4",
+					Backend:        v1beta1.BackendTypeTrtllm,
+					SearchStrategy: v1beta1.SearchStrategyThorough,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(2000.0),
+						ITL:  ptr.To(50.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(4000)),
+						OSL: ptr.To(int32(1000)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:         v1beta1.GPUSKUTypeGB200SXM,
+						VRAMMB:         ptr.To(float64(196608)),
+						NumGPUsPerNode: ptr.To(int32(8)),
+						TotalGPUs:      ptr.To(int32(32)),
 					},
 					ExpectDGDReady:  true,
 					VerifyConfigMap: true,
