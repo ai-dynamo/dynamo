@@ -949,14 +949,14 @@ fn wrap_engine_route_callback(
 
                     match callback(body).await {
                         Ok(response) => {
-                            if route_response_is_error(&response) {
-                                if let Err(e) = endpoint.register_endpoint_instance().await {
-                                    tracing::warn!(
-                                        route = %route_name,
-                                        error = %e,
-                                        "failed to re-register endpoint after route error"
-                                    );
-                                }
+                            if route_response_is_error(&response)
+                                && let Err(e) = endpoint.register_endpoint_instance().await
+                            {
+                                tracing::warn!(
+                                    route = %route_name,
+                                    error = %e,
+                                    "failed to re-register endpoint after route error"
+                                );
                             }
                             Ok(response)
                         }
@@ -974,12 +974,12 @@ fn wrap_engine_route_callback(
                 }
                 EngineRoutePolicy::RegisterAfter => {
                     let response = callback(body).await?;
-                    if !route_response_is_error(&response) {
-                        if let Err(e) = endpoint.register_endpoint_instance().await {
-                            return Ok(route_error_response(format!(
-                                "failed to register endpoint after /engine/{route_name}: {e}"
-                            )));
-                        }
+                    if !route_response_is_error(&response)
+                        && let Err(e) = endpoint.register_endpoint_instance().await
+                    {
+                        return Ok(route_error_response(format!(
+                            "failed to register endpoint after /engine/{route_name}: {e}"
+                        )));
                     }
                     Ok(response)
                 }

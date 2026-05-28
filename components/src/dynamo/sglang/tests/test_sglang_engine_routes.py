@@ -118,9 +118,10 @@ async def test_update_weights_from_disk_forwards_request_body():
         "message": "loaded",
         "num_paused_requests": 3,
     }
-    req, request_context = (
-        engine.engine.tokenizer_manager.update_weights_from_disk.await_args.args
-    )
+    (
+        req,
+        request_context,
+    ) = engine.engine.tokenizer_manager.update_weights_from_disk.await_args.args
     assert req.model_path == "/weights"
     assert request_context is None
 
