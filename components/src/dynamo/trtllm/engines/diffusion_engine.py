@@ -24,7 +24,7 @@ Note on imports:
 
 import logging
 import random
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -207,7 +207,7 @@ class DiffusionEngine:
 
         from tensorrt_llm.visual_gen import VisualGenParams
 
-        params_kwargs = {
+        params_kwargs: dict[str, Any] = {
             "height": height,
             "width": width,
             "num_inference_steps": num_inference_steps,
