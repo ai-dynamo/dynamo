@@ -233,36 +233,128 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         }
     }
 }
+/// The output of [`IngressDispatch::parse_and_build_request`]: the typed
+/// request the engine consumes, plus the bits of the on-wire control
+/// message the shared handler needs after parsing (the response-stream
+/// connection info and the frontend send timestamp).
+struct ParsedRequest<Req> {
+    request: Req,
+    response_connection_info: ConnectionInfo,
+    frontend_send_ts_ns: Option<u64>,
+}
+
+/// Per-shape strategy for turning a raw payload into a typed engine
+/// request. Captures the wire-shape-specific parsing of the request
+/// envelope; everything else — metrics-guard, response stream open,
+/// `segment.generate`, prologue, pump — lives in
+/// [`Ingress::handle_payload_shared`] below.
+///
+/// Currently has a single impl (the unary `HeaderAndData` shape). The
+/// abstraction exists to keep an additional impl for the bidirectional
+/// `HeaderOnly` + dial-in shape addition cheap when that lands.
+#[async_trait]
+trait IngressDispatch: Send + Sync {
+    type Request: PipelineIO;
+
+    async fn parse_and_build_request(
+        &self,
+        payload: Bytes,
+    ) -> Result<ParsedRequest<Self::Request>, PipelineError>;
+}
 
 #[async_trait]
-impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
+impl<T, U> IngressDispatch for Ingress<SingleIn<T>, ManyOut<U>>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + MaybeError + std::fmt::Debug,
 {
-    fn add_metrics(
+    type Request = SingleIn<T>;
+
+    async fn parse_and_build_request(
         &self,
-        endpoint: &crate::component::Endpoint,
-        metrics_labels: Option<&[(&str, &str)]>,
-    ) -> Result<()> {
-        // Call the Ingress-specific add_metrics implementation
-        use crate::pipeline::network::Ingress;
-        Ingress::add_metrics(self, endpoint, metrics_labels)
-    }
+        payload: Bytes,
+    ) -> Result<ParsedRequest<SingleIn<T>>, PipelineError> {
+        // decode the control message and the request
+        let msg = TwoPartCodec::default()
+            .decode_message(payload)?
+            .into_message_type();
 
-    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
-        use crate::pipeline::network::Ingress;
-        self.endpoint_health_check_notifier
-            .set(notifier)
-            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
-        Ok(())
-    }
+        // we must have a header and a body
+        let (control_msg, request_t) = match msg {
+            TwoPartMessageType::HeaderAndData(header, data) => {
+                tracing::trace!(
+                    "received two part message with ctrl: {} bytes, data: {} bytes",
+                    header.len(),
+                    data.len()
+                );
+                let control_msg: RequestControlMessage = match serde_json::from_slice(&header) {
+                    Ok(cm) => cm,
+                    Err(err) => {
+                        let json_str = String::from_utf8_lossy(&header);
+                        if let Some(m) = self.metrics() {
+                            m.error_counter
+                                .with_label_values(&[work_handler::error_types::DESERIALIZATION])
+                                .inc();
+                        }
+                        return Err(PipelineError::DeserializationError(format!(
+                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}, header_len={}",
+                            header.len(),
+                        )));
+                    }
+                };
+                let request_t: T = serde_json::from_slice(&data)?;
+                (control_msg, request_t)
+            }
+            _ => {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                        .inc();
+                }
+                return Err(PipelineError::Generic(String::from(
+                    "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
+                )));
+            }
+        };
 
-    async fn handle_payload(
+        // extend request with context
+        tracing::trace!(
+            request_id = %control_msg.id,
+            metadata_entries = control_msg.metadata.len(),
+            "received control message"
+        );
+        tracing::trace!("received request: {:?}", request_t);
+
+        let request: context::Context<T> =
+            Context::with_id_and_metadata(request_t, control_msg.id, control_msg.metadata);
+
+        Ok(ParsedRequest {
+            request,
+            response_connection_info: control_msg.connection_info,
+            frontend_send_ts_ns: control_msg.frontend_send_ts_ns,
+        })
+    }
+}
+
+impl<Req: PipelineIO + Sync, U> Ingress<Req, ManyOut<U>>
+where
+    U: Data + Serialize + MaybeError + std::fmt::Debug,
+{
+    /// Shared body of `PushWorkHandler::handle_payload` for every
+    /// `Ingress<Req, ManyOut<U>>` shape that has an [`IngressDispatch`]
+    /// impl. Sets up the inflight metrics guard, calls
+    /// `parse_and_build_request` for the wire-shape-specific request
+    /// building, opens the response stream uniformly, dispatches via
+    /// the engine, sends the prologue, and pumps the response through
+    /// [`Self::pump_response_stream`].
+    async fn handle_payload_shared(
         &self,
         payload: Bytes,
         request_id: Option<String>,
-    ) -> Result<(), PipelineError> {
+    ) -> Result<(), PipelineError>
+    where
+        Self: IngressDispatch<Request = Req>,
+    {
         let t2_wallclock_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -285,72 +377,20 @@ where
             }
         });
 
-        // decode the control message and the request
-        let msg = TwoPartCodec::default()
-            .decode_message(payload)?
-            .into_message_type();
-
-        // we must have a header and a body
-        // it will be held by this closure as a Some(permit)
-        let (control_msg, request) = match msg {
-            TwoPartMessageType::HeaderAndData(header, data) => {
-                tracing::trace!(
-                    "received two part message with ctrl: {} bytes, data: {} bytes",
-                    header.len(),
-                    data.len()
-                );
-                let control_msg: RequestControlMessage = match serde_json::from_slice(&header) {
-                    Ok(cm) => cm,
-                    Err(err) => {
-                        let json_str = String::from_utf8_lossy(&header);
-                        if let Some(m) = self.metrics() {
-                            m.error_counter
-                                .with_label_values(&[work_handler::error_types::DESERIALIZATION])
-                                .inc();
-                        }
-                        return Err(PipelineError::DeserializationError(format!(
-                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}, header_len={}",
-                            header.len(),
-                        )));
-                    }
-                };
-                let request: T = serde_json::from_slice(&data)?;
-                (control_msg, request)
-            }
-            _ => {
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
-                        .inc();
-                }
-                return Err(PipelineError::Generic(String::from(
-                    "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
-                )));
-            }
-        };
+        let parsed = self.parse_and_build_request(payload).await?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
-        if let Some(t1_ns) = control_msg.frontend_send_ts_ns {
+        if let Some(t1_ns) = parsed.frontend_send_ts_ns {
             let transit_ns = t2_wallclock_ns.saturating_sub(t1_ns);
             WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
         }
-
-        // extend request with context
-        tracing::trace!(
-            request_id = %control_msg.id,
-            metadata_entries = control_msg.metadata.len(),
-            "received control message"
-        );
-        tracing::trace!("received request: {:?}", request);
-        let request: context::Context<T> =
-            Context::with_id_and_metadata(request, control_msg.id, control_msg.metadata);
 
         // todo - eventually have a handler class which will returned an abstracted object, but for now,
         // we only support tcp here, so we can just unwrap the connection info
         tracing::trace!("creating tcp response stream");
         let mut publisher = tcp::client::TcpClient::create_response_stream(
-            request.context(),
-            control_msg.connection_info,
+            parsed.request.context(),
+            parsed.response_connection_info,
             self.metrics().map(|m| m.cancellation_total.clone()),
         )
         .await
@@ -368,7 +408,7 @@ where
             .segment
             .get()
             .expect("segment not set")
-            .generate(request)
+            .generate(parsed.request)
             .await
             .map_err(|e| {
                 if let Some(m) = self.metrics() {
@@ -416,5 +456,38 @@ where
         drop(_inflight_guard);
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl<T, U> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
+where
+    T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
+    U: Data + Serialize + MaybeError + std::fmt::Debug,
+{
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        // Call the Ingress-specific add_metrics implementation
+        use crate::pipeline::network::Ingress;
+        Ingress::add_metrics(self, endpoint, metrics_labels)
+    }
+
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+        use crate::pipeline::network::Ingress;
+        self.endpoint_health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+        Ok(())
+    }
+
+    async fn handle_payload(
+        &self,
+        payload: Bytes,
+        request_id: Option<String>,
+    ) -> Result<(), PipelineError> {
+        self.handle_payload_shared(payload, request_id).await
     }
 }
