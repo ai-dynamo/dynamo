@@ -2280,7 +2280,10 @@ impl OpenAIPreprocessor {
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
-    /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
+    /// For kimi_k2 / kimi_k25: disabled when chat_template_args contains
+    ///   "thinking": false.
+    /// For qwen3 / glm45 / nemotron_deci / nemotron_3 / interns1:
+    ///   disabled when chat_template_args contains "enable_thinking": false.
     /// For Nemotron force-reasoning aliases: disabled when chat_template_args
     ///   contains "enable_thinking": false or "force_nonempty_content": true.
     /// For deepseek_r1 / deepseek_v4: disabled when chat_template_args contains
@@ -2301,6 +2304,27 @@ impl OpenAIPreprocessor {
                     && let Some(thinking) = args.get("thinking")
                 {
                     return thinking == &serde_json::Value::Bool(false);
+                }
+                false
+            }
+            Some("kimi_k2") => {
+                if let Some(args) = chat_template_args
+                    && let Some(thinking) = args.get("thinking").and_then(|v| v.as_bool())
+                {
+                    return !thinking;
+                }
+                false
+            }
+            Some("qwen3")
+            | Some("glm45")
+            | Some("nemotron_deci")
+            | Some("nemotron_3")
+            | Some("interns1") => {
+                if let Some(args) = chat_template_args
+                    && let Some(enable_thinking) =
+                        args.get("enable_thinking").and_then(|v| v.as_bool())
+                {
+                    return !enable_thinking;
                 }
                 false
             }
@@ -2342,6 +2366,66 @@ impl OpenAIPreprocessor {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// Whether SGLang's guided decoding backend should keep grammar constraints
+    /// gated until the model emits the reasoning end marker.
+    ///
+    /// This is not exactly the same as `!is_reasoning_disabled_by_request`:
+    /// some parsers are safe to run as no-op postprocessors by default, but
+    /// SGLang should only enable its reasoner gate when the request is actually
+    /// in a thinking mode.
+    fn requires_sglang_reasoning_gate(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        match reasoning_parser {
+            None => false,
+            Some("deepseek-v3")
+            | Some("deepseek_v3")
+            | Some("deepseek_v3_1")
+            | Some("deepseek_v3_2") => {
+                if let Some(args) = chat_template_args
+                    && let Some(thinking) = args.get("thinking").and_then(|v| v.as_bool())
+                {
+                    return thinking;
+                }
+                false
+            }
+            Some("gemma4") | Some("gemma-4") => {
+                if let Some(args) = chat_template_args
+                    && let Some(enable_thinking) =
+                        args.get("enable_thinking").and_then(|v| v.as_bool())
+                {
+                    return enable_thinking;
+                }
+                false
+            }
+            Some("kimi_k2") => {
+                if let Some(args) = chat_template_args
+                    && let Some(thinking) = args.get("thinking").and_then(|v| v.as_bool())
+                {
+                    return thinking;
+                }
+                true
+            }
+            Some("qwen3")
+            | Some("glm45")
+            | Some("nemotron_deci")
+            | Some("nemotron_3")
+            | Some("interns1") => {
+                if let Some(args) = chat_template_args
+                    && let Some(enable_thinking) =
+                        args.get("enable_thinking").and_then(|v| v.as_bool())
+                {
+                    return enable_thinking;
+                }
+                true
+            }
+            Some(parser) => {
+                !Self::is_reasoning_disabled_by_request(Some(parser), chat_template_args)
+            }
         }
     }
 
@@ -2622,6 +2706,32 @@ impl
             &mut common_request,
             prompt_injected_reasoning,
         )?;
+
+        let require_reasoning = common_request.sampling_options.guided_decoding.is_some()
+            && Self::requires_sglang_reasoning_gate(
+                self.runtime_config.reasoning_parser.as_deref(),
+                request.chat_template_args.as_ref(),
+            );
+
+        if prompt_injected_reasoning || require_reasoning {
+            let extra_args = common_request
+                .extra_args
+                .get_or_insert_with(|| serde_json::json!({}));
+            if let Some(extra_args) = extra_args.as_object_mut() {
+                if prompt_injected_reasoning {
+                    extra_args.insert(
+                        "prompt_injected_reasoning".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+                if require_reasoning {
+                    extra_args.insert(
+                        "require_reasoning".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+            }
+        }
 
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
@@ -3182,6 +3292,37 @@ mod tests {
                 false,
                 "kimi_k25 + empty args → enabled",
             ),
+            (
+                Some("qwen3"),
+                Some(&enable_thinking_false),
+                true,
+                "qwen3 + enable_thinking=false → disabled",
+            ),
+            (
+                Some("qwen3"),
+                Some(&enable_thinking_true),
+                false,
+                "qwen3 + enable_thinking=true → enabled",
+            ),
+            (Some("qwen3"), None, false, "qwen3 + no args → enabled"),
+            (
+                Some("glm45"),
+                Some(&enable_thinking_false),
+                true,
+                "glm45 + enable_thinking=false → disabled",
+            ),
+            (
+                Some("nemotron_deci"),
+                Some(&enable_thinking_false),
+                true,
+                "nemotron_deci + enable_thinking=false → disabled",
+            ),
+            (
+                Some("nemotron_3"),
+                Some(&enable_thinking_false),
+                true,
+                "nemotron_3 + enable_thinking=false → disabled",
+            ),
             // deepseek_r1 uses "thinking" bool or "thinking_mode" string
             (
                 Some("deepseek_r1"),
@@ -3359,6 +3500,97 @@ mod tests {
         for (parser, args, expected, desc) in cases {
             assert_eq!(
                 OpenAIPreprocessor::is_reasoning_disabled_by_request(parser, args),
+                expected,
+                "FAILED: {desc}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_requires_sglang_reasoning_gate() {
+        let thinking_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("thinking".to_string(), serde_json::Value::Bool(true));
+            m
+        };
+        let thinking_false = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("thinking".to_string(), serde_json::Value::Bool(false));
+            m
+        };
+        let enable_thinking_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+            m
+        };
+        let enable_thinking_false = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            m
+        };
+
+        let cases = [
+            (None, None, false, "no parser -> no gate"),
+            (Some("qwen3"), None, true, "qwen3 defaults to thinking"),
+            (
+                Some("qwen3"),
+                Some(&enable_thinking_false),
+                false,
+                "qwen3 + enable_thinking=false -> no gate",
+            ),
+            (
+                Some("glm45"),
+                Some(&enable_thinking_true),
+                true,
+                "glm45 + enable_thinking=true -> gate",
+            ),
+            (
+                Some("nemotron_deci"),
+                None,
+                true,
+                "nemotron_deci defaults to thinking",
+            ),
+            (
+                Some("nemotron_3"),
+                Some(&enable_thinking_false),
+                false,
+                "nemotron_3 + enable_thinking=false -> no gate",
+            ),
+            (Some("kimi_k2"), None, true, "kimi_k2 defaults to thinking"),
+            (
+                Some("kimi_k2"),
+                Some(&thinking_false),
+                false,
+                "kimi_k2 + thinking=false -> no gate",
+            ),
+            (Some("gemma4"), None, false, "gemma4 is opt-in"),
+            (
+                Some("gemma4"),
+                Some(&enable_thinking_true),
+                true,
+                "gemma4 + enable_thinking=true -> gate",
+            ),
+            (Some("deepseek-v3"), None, false, "deepseek-v3 is opt-in"),
+            (
+                Some("deepseek_v3"),
+                Some(&thinking_true),
+                true,
+                "deepseek_v3 + thinking=true -> gate",
+            ),
+            (
+                Some("basic"),
+                None,
+                true,
+                "unknown/default parser follows parser-disabled gate",
+            ),
+        ];
+
+        for (parser, args, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::requires_sglang_reasoning_gate(parser, args),
                 expected,
                 "FAILED: {desc}",
             );

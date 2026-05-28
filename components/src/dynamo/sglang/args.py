@@ -30,6 +30,24 @@ from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 configure_dynamo_logging()
 
 
+_DYN_TO_SGLANG_REASONING_PARSER = {
+    "deepseek_r1": "deepseek-r1",
+    "deepseek_v3": "deepseek-v3",
+    "deepseek_v3_1": "deepseek-v3",
+    "deepseek_v3_2": "deepseek-v3",
+    "deepseek_v4": "deepseek-v4",
+    "deepseekv4": "deepseek-v4",
+    "gemma-4": "gemma4",
+    "gpt_oss": "gpt-oss",
+    "kimi_k25": "kimi_k2",
+    "minimax_append_think": "minimax-append-think",
+    "nemotron_nano": "nemotron_3",
+    "nemotron3": "nemotron_3",
+    "nemotron_v3": "nemotron_3",
+    "nemotron_deci": "glm45",
+}
+
+
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
     """Combined configuration container for SGLang server and Dynamo args."""
 
@@ -79,10 +97,42 @@ def _preprocess_for_encode_config(
 def _validate_parser_flags(
     sglang_val: Optional[str], dynamo_val: Optional[str], name: str
 ) -> None:
-    """Validate that --{name} (SGLang) and --dyn-{name} (Dynamo) are not both set."""
+    """Validate parser flag combinations."""
+    if name == "reasoning-parser" and sglang_val and dynamo_val:
+        expected_sglang_val = _DYN_TO_SGLANG_REASONING_PARSER.get(
+            dynamo_val, dynamo_val
+        )
+        if sglang_val != expected_sglang_val:
+            logging.error(
+                "Cannot use different --reasoning-parser (%s) and "
+                "--dyn-reasoning-parser (%s) values. Expected SGLang parser "
+                "%s for Dynamo parser %s.",
+                sglang_val,
+                dynamo_val,
+                expected_sglang_val,
+                dynamo_val,
+            )
+            sys.exit(1)
+        return
     if sglang_val and dynamo_val:
         logging.error(f"Cannot use both --{name} and --dyn-{name}.")
         sys.exit(1)
+
+
+def _mirror_dyn_reasoning_parser_to_sglang(
+    parsed_args: argparse.Namespace, dynamo_config: DynamoSGLangConfig
+) -> None:
+    """Use Dynamo's reasoning parser to activate SGLang's reasoner gate."""
+    dyn_parser = dynamo_config.dyn_reasoning_parser
+    if dyn_parser and not getattr(parsed_args, "reasoning_parser", None):
+        sglang_parser = _DYN_TO_SGLANG_REASONING_PARSER.get(dyn_parser, dyn_parser)
+        parsed_args.reasoning_parser = sglang_parser
+        logging.info(
+            "Mirroring --dyn-reasoning-parser=%s to SGLang --reasoning-parser=%s "
+            "so guided decoding is gated until the reasoning end token.",
+            dyn_parser,
+            sglang_parser,
+        )
 
 
 def _has_cli_flag(args: list[str], flag: str) -> bool:
@@ -295,6 +345,7 @@ async def parse_args(args: list[str]) -> Config:
         dynamo_config.dyn_reasoning_parser,
         "reasoning-parser",
     )
+    _mirror_dyn_reasoning_parser_to_sglang(parsed_args, dynamo_config)
 
     if dynamo_config.custom_jinja_template and dynamo_config.use_sglang_tokenizer:
         logging.error(

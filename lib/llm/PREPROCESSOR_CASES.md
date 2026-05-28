@@ -46,7 +46,9 @@ gpt-oss before the harmony/gpt_oss whitelist landed.
 Some parsers should be turned **off** based on `chat_template_args` in
 the request. The exact arg name and value varies per family:
 
-- `kimi_k25` — `thinking: false`
+- `kimi_k2` / `kimi_k25` — `thinking: false`
+- `qwen3` / `glm45` / `nemotron_deci` / `nemotron_3` / `interns1` —
+  `enable_thinking: false`
 - `nemotron_nano` / `nemotron3` / `nemotron_v3` —
   `enable_thinking: false` OR `force_nonempty_content: true`
 - `deepseek_r1` / `deepseek_v4` — `thinking: false` OR

@@ -145,20 +145,21 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {context.id()} will use LoRA adapter: {lora_path}"
             )
 
-        results = await self.engine.async_generate(
-            **input_param,
-            sampling_params=sampling_params,
-            stream=True,
-            bootstrap_host=bootstrap_host,
-            bootstrap_port=bootstrap_port,
-            bootstrap_room=bootstrap_room,
-            external_trace_header=trace_header,
-            rid=trace_id,
-            data_parallel_rank=dp_rank,
-            **self._session_kwargs(inner_request),
-            lora_path=lora_path,
-            **self._priority_kwargs(priority),
-        )
+        with self._require_reasoning_context(inner_request, input_param):
+            results = await self.engine.async_generate(
+                **input_param,
+                sampling_params=sampling_params,
+                stream=True,
+                bootstrap_host=bootstrap_host,
+                bootstrap_port=bootstrap_port,
+                bootstrap_room=bootstrap_room,
+                external_trace_header=trace_header,
+                rid=trace_id,
+                data_parallel_rank=dp_rank,
+                **self._session_kwargs(inner_request),
+                lora_path=lora_path,
+                **self._priority_kwargs(priority),
+            )
 
         if inner_request.get(HEALTH_CHECK_KEY):
             # Canary: stream engine output so the Rust canary sees scheduler output.
