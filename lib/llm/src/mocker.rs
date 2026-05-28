@@ -447,6 +447,51 @@ impl MockEngine {
         Ok(())
     }
 
+    /// Wait until the scheduler at `dp_rank` reports any free KV blocks, up to `timeout`.
+    /// Used by the decode side of disagg before connecting to a prefill bootstrap server
+    /// (DIS-2147): models real NIXL behavior where a decode worker only accepts a transfer
+    /// when it has KV capacity available. Returns Ok(()) immediately if schedulers haven't
+    /// reported metrics yet (total_blocks == 0) so the path is graceful during warmup.
+    pub async fn wait_for_decode_kv_capacity(&self, dp_rank: u32, timeout: Duration) -> Result<()> {
+        let schedulers = self
+            ._schedulers
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("schedulers not initialized"))?;
+        let scheduler_idx = dp_rank as usize;
+        if scheduler_idx >= schedulers.len() {
+            return Err(anyhow::anyhow!(
+                "dp_rank {dp_rank} out of bounds (have {} schedulers)",
+                schedulers.len()
+            ));
+        }
+        let mut rx = schedulers[scheduler_idx].metrics_receiver();
+
+        let start = std::time::Instant::now();
+        loop {
+            let metrics = rx.borrow().clone();
+            // total_blocks == 0 means the scheduler hasn't published yet (still warming up).
+            // Don't block on warmup — let the request through; the scheduler's own queue
+            // will handle admission once metrics start flowing.
+            if metrics.total_blocks == 0 || metrics.active_decode_blocks < metrics.total_blocks {
+                return Ok(());
+            }
+            let remaining = timeout
+                .checked_sub(start.elapsed())
+                .ok_or_else(|| anyhow::anyhow!("decode KV wait timed out after {timeout:?}"))?;
+            match tokio::time::timeout(remaining, rx.changed()).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => {
+                    return Err(anyhow::anyhow!("scheduler metrics channel closed"));
+                }
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "decode KV wait timed out after {timeout:?}"
+                    ));
+                }
+            }
+        }
+    }
+
     /// Send a request to the appropriate scheduler, waiting for initialization if needed.
     pub async fn direct(&self, request: DirectRequest, dp_rank: usize) {
         if let Some(senders) = self.request_senders.get() {
@@ -682,12 +727,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         }
 
         // Bootstrap rendezvous for disaggregated serving
-        // - Decode: connect to prefill's server, block until prefill completes
-        // - Prefill: complete_room() is called after first token (see below)
+        // - Decode: connect to prefill's server, block until prefill completes (or aborts)
+        // - Prefill: complete_room() / abort_room() called after compute (see below)
         let bootstrap_room = request.bootstrap_info.as_ref().map(|b| b.bootstrap_room);
+        let abort_timeout = self
+            .engine_args
+            .kv_transfer_abort_timeout_ms
+            .map(Duration::from_millis);
+
         if let Some(bootstrap_info) = &request.bootstrap_info
             && self.engine_args.is_decode()
         {
+            // DIS-2147: when abort_timeout is configured, the decode worker must wait for
+            // its own KV cache to have capacity before connecting to the prefill bootstrap
+            // server. The act of connecting is decode's signal that it is ready to receive.
+            // Backward-compatible: with abort_timeout=None we skip the wait (pre-DIS-2147).
+            if let Some(timeout) = abort_timeout {
+                self.wait_for_decode_kv_capacity(dp_rank, timeout)
+                    .await
+                    .map_err(|e| Error::msg(format!("Decode KV wait failed: {e}")))?;
+            }
             connect_to_prefill(
                 &bootstrap_info.bootstrap_host,
                 bootstrap_info.bootstrap_port,
@@ -771,6 +830,43 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                         }
 
                         if signal.completed {
+                            // DIS-2147: when this is a prefill in disagg AND abort_timeout is
+                            // configured, wait for decode to be present (i.e. for decode to
+                            // have connected — which it only does once decode KV has room)
+                            // before declaring the transfer complete. While we wait, the
+                            // scheduler's notion of "request active" persists, so prefill KV
+                            // stays pinned — modeling real NIXL behavior. On timeout, abort
+                            // the room so any late decode gets a clean ABORT response.
+                            if is_prefill
+                                && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
+                                && let Some(timeout) = abort_timeout
+                            {
+                                match server.wait_for_decode_arrival(room_id, timeout).await {
+                                    Ok(()) => {
+                                        let _ = stream_tx.send(output);
+                                        if let Some(delay_ms) = signal.handoff_delay_ms {
+                                            sleep_precise(Duration::from_secs_f64(
+                                                delay_ms / 1000.0,
+                                            ))
+                                            .await;
+                                        }
+                                        server.complete_room(room_id);
+                                        let _ = stream_tx.send(LLMEngineOutput::length());
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Prefill aborting transfer for room {room_id}: {e}"
+                                        );
+                                        server.abort_room(room_id);
+                                        let _ = stream_tx.send(LLMEngineOutput::error(format!(
+                                            "NIXL transfer aborted: {e}"
+                                        )));
+                                    }
+                                }
+                                break;
+                            }
+
+                            // Pre-DIS-2147 path (abort_timeout=None or non-prefill).
                             let _ = stream_tx.send(output);
 
                             // Prefill-to-decode handoff delay is emitted by the shared mocker core.

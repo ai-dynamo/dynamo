@@ -471,6 +471,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "For intra-node NVLink, typical value is ~450.",
     )
     parser.add_argument(
+        "--kv-transfer-abort-timeout-ms",
+        type=int,
+        default=None,
+        help="Prefill-to-decode handshake timeout in milliseconds (DIS-2147). When set, "
+        "the prefill worker holds KV cache after compute until decode connects to its "
+        "bootstrap server, up to this timeout. If decode does not arrive in time, the "
+        "prefill aborts the request (KV released, abort error surfaced); late-arriving "
+        "decodes for the same room get a clean ABORT response. Mirrors production "
+        "VLLM_NIXL_ABORT_REQUEST_TIMEOUT. Decode-side: must wait for local KV "
+        "availability before connecting to prefill. Default: None (pre-DIS-2147 behavior, "
+        "prefill ACKs immediately).",
+    )
+    parser.add_argument(
         "--kv-cache-dtype",
         type=str,
         default="auto",
