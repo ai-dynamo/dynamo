@@ -936,7 +936,10 @@ def materialize_module_from_gms(
                         )
                     mod._parameters[attr] = cast(torch.nn.Parameter, existing)
                     continue
-                if param.shape != tensor.shape or param.dtype != tensor.dtype:
+                if (
+                    not param.is_meta
+                    and (param.shape != tensor.shape or param.dtype != tensor.dtype)
+                ):
                     raise RuntimeError(
                         f"Shape/dtype mismatch for {name}: "
                         f"param={tuple(param.shape)}/{param.dtype}, "

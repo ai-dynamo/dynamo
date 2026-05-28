@@ -225,6 +225,76 @@ def test_materialize_module_from_gms_refreshes_deep_quant_aliases(monkeypatch):
     torch.testing.assert_close(materialized, torch.arange(3, dtype=torch.float32))
 
 
+def test_materialize_module_from_gms_uses_gms_layout_for_meta_params(monkeypatch):
+    """Meta params should adopt writer-side post-processed layouts."""
+
+    class _FakeSpec:
+        meta = types.SimpleNamespace(
+            tensor_type="parameter",
+            shape=(6, 3),
+            stride=(3, 1),
+            dtype=torch.int32,
+        )
+        allocation_id = "alloc"
+        offset_bytes = 0
+
+        def materialize(self, _manager, _device_index):
+            return torch.arange(18, dtype=torch.int32).reshape(6, 3)
+
+    monkeypatch.setattr(
+        "gpu_memory_service.client.torch.module.GMSTensorSpec.load_all",
+        lambda _manager: {"scale": _FakeSpec()},
+    )
+
+    module = torch.nn.Module()
+    scale = torch.nn.Parameter(
+        torch.empty((2, 3), device="meta", dtype=torch.float32),
+        requires_grad=False,
+    )
+    scale.weight_loader = object()
+    module.scale = scale
+    module.cached_scale = scale
+
+    materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
+
+    assert tuple(module.scale.shape) == (6, 3)
+    assert module.scale.dtype is torch.int32
+    assert module.scale.weight_loader is scale.weight_loader
+    assert module.cached_scale is module.scale
+    torch.testing.assert_close(
+        module.scale,
+        torch.arange(18, dtype=torch.int32).reshape(6, 3),
+    )
+
+
+def test_materialize_module_from_gms_rejects_non_meta_layout_mismatch(monkeypatch):
+    """Real parameters must still match the writer metadata."""
+
+    class _FakeSpec:
+        meta = types.SimpleNamespace(
+            tensor_type="parameter",
+            shape=(3,),
+            stride=(1,),
+            dtype=torch.float32,
+        )
+        allocation_id = "alloc"
+        offset_bytes = 0
+
+        def materialize(self, _manager, _device_index):
+            return torch.arange(3, dtype=torch.float32)
+
+    monkeypatch.setattr(
+        "gpu_memory_service.client.torch.module.GMSTensorSpec.load_all",
+        lambda _manager: {"scale": _FakeSpec()},
+    )
+
+    module = torch.nn.Module()
+    module.scale = torch.nn.Parameter(torch.empty(2, dtype=torch.float32))
+
+    with pytest.raises(RuntimeError, match="Shape/dtype mismatch for scale"):
+        materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
+
+
 def test_materialize_module_from_gms_preserves_shared_parameter_aliases(monkeypatch):
     """Duplicate metadata paths for the same Parameter should share one object."""
 
