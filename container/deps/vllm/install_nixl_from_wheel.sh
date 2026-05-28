@@ -114,9 +114,10 @@ if [ "${skip_headers}" -eq 0 ]; then
     if [ -n "${headers_src}" ]; then
         [ -d "${headers_src}" ] || die "missing NIXL headers source directory: ${headers_src}"
         [ -f "${headers_src}/nixl.h" ] || die "missing ${headers_src}/nixl.h"
-        if [ ! -f "${wheel_lib_dir}/include/nixl.h" ]; then
-            rm -rf "${wheel_lib_dir}/include"
+        if [ ! -e "${wheel_lib_dir}/include" ]; then
             cp -a "${headers_src}" "${wheel_lib_dir}/include"
+        elif [ ! -f "${wheel_lib_dir}/include/nixl.h" ]; then
+            die "unexpected header layout under ${wheel_lib_dir}/include; upstream NIXL wheel layout changed"
         fi
     fi
     [ -f "${wheel_lib_dir}/include/nixl.h" ] || die "missing ${wheel_lib_dir}/include/nixl.h; pass --headers-src or --skip-headers"
