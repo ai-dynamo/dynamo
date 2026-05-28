@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import logging
+import struct
 from collections.abc import AsyncGenerator
 from typing import Any, Dict, List, Optional
 
@@ -12,7 +14,24 @@ from dynamo._core import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_handlers.embedding.metrics import (
+    observe_embedding_batch_size,
+    observe_embedding_input_tokens,
+)
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+
+def _encode_floats_to_base64(floats: List[float]) -> str:
+    """Encode an embedding vector as a base64 string per the OpenAI
+    ``encoding_format=base64`` spec: raw little-endian ``float32`` bytes
+    are concatenated and base64-encoded with the standard alphabet.
+
+    Mirrors the Rust ``encode_floats_to_base64`` helper in
+    ``lib/llm/src/preprocessor.rs`` so the two backend code paths
+    produce identical bytes for the same input.
+    """
+    packed = struct.pack(f"<{len(floats)}f", *floats)
+    return base64.b64encode(packed).decode("ascii")
 
 
 class EmbeddingWorkerHandler(BaseWorkerHandler):
@@ -64,6 +83,8 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
 
+        encoding_format = embedding_request.encoding_format
+
         trace_header = context.trace_headers() if self.enable_trace else None
         trace_id = context.trace_id
 
@@ -78,6 +99,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             result,
             embedding_request.model,
             dimensions=dimensions,
+            encoding_format=encoding_format,
         )
         yield response
 
@@ -86,20 +108,21 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         ret: Any,
         model_name: str,
         dimensions: Optional[int] = None,
+        encoding_format: str = "float",
     ) -> Dict[str, Any]:
         """Transform SGLang response to OpenAI embedding format.
 
-        Applies the optional ``dimensions`` field for Matryoshka-style
-        truncation (slice leading N).
+        Honors two optional request fields:
 
-        Note: ``encoding_format=base64`` is part of the OpenAI spec but
-        cannot be honored at this layer alone -- the Rust frontend's
-        response aggregator deserializes ``data[].embedding`` as
-        ``Vec<f32>`` (inherited from the upstream ``async_openai``
-        embeddings types), so a base64 string here would be rejected
-        downstream. Supporting it end-to-end requires owning the
-        embedding response type in ``lib/protocols`` and updating the
-        aggregator. Tracked separately.
+        - ``dimensions``: Matryoshka-style truncation; keeps the first N
+          values of each embedding vector.
+        - ``encoding_format``: wire format of ``data[].embedding``.
+          ``"float"`` (default) emits a JSON array of floats;
+          ``"base64"`` emits a base64-encoded little-endian ``float32``
+          byte string per the OpenAI spec.
+
+        When both are set, truncation runs first so the base64 byte
+        count matches the requested dimensionality.
         """
         if not isinstance(ret, list):
             ret = [ret]
@@ -119,14 +142,26 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
                     )
                 embedding = embedding[:dimensions]
 
+            embedding_payload: Any
+            if encoding_format == "base64":
+                embedding_payload = _encode_floats_to_base64(embedding)
+            else:
+                embedding_payload = embedding
+
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": embedding,
+                    "embedding": embedding_payload,
                     "index": idx,
                 }
             )
             prompt_tokens += ret_item.get("meta_info", {}).get("prompt_tokens", 0)
+
+        try:
+            observe_embedding_batch_size(model_name, len(embedding_objects))
+            observe_embedding_input_tokens(model_name, prompt_tokens)
+        except Exception:
+            logging.warning("Failed to record embedding metrics", exc_info=True)
 
         return {
             "object": "list",

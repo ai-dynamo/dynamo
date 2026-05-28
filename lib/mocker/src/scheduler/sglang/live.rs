@@ -134,15 +134,11 @@ impl SglangScheduler {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                     publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 }
-                let active_decode_blocks = pass.active_decode_blocks;
+                let metrics = pass.mocker_metrics.clone();
                 flush_output_signals(&output_tx, pass.output_signals);
                 publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
-                let _ = metrics_tx.send(MockerMetrics::new(
-                    dp_rank,
-                    active_decode_blocks,
-                    total_blocks,
-                ));
+                let _ = metrics_tx.send(metrics);
             }
         });
 

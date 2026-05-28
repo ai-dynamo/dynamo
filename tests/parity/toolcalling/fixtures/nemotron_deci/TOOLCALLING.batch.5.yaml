@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_deci
+mode: batch
+cases:
+  TOOLCALLING.batch.5.a:
+    description: Missing </TOOLCALL> end marker
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  TOOLCALLING.batch.5.b:
+    description: Closing </TOOLCALL> without matching <TOOLCALL> open
+    ref: dynamo
+    model_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        reason: "Dynamo's nemotron_deci parser leaves closing </TOOLCALL> envelope plus the JSON array in normal_text when opening <TOOLCALL> marker is missing (impl-defined recovery)"
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  TOOLCALLING.batch.5.c:
+    description: Truncation mid-arguments JSON
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        reason: "Dynamo's nemotron_deci parser leaves closing </TOOLCALL> envelope plus the JSON array in normal_text when opening <TOOLCALL> marker is missing (impl-defined recovery)"
+        calls: []
+        normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  TOOLCALLING.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<TOOLCALL>[{"name": "get_weather",
+      "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York"}}]'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  TOOLCALLING.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<TOOLCALL>[{"name": "get_weather",
+      "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'

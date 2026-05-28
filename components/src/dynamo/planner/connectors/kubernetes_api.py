@@ -21,10 +21,22 @@ from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
+from dynamo.planner.monitoring.dgd_services import (
+    Service,
+    get_component_type,
+    get_components_by_name,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+NVIDIA_API_GROUP = "nvidia.com"
+DYNAMO_API_VERSION = "v1beta1"
+DYNAMO_WORKER_METADATA_API_VERSION = "v1alpha1"
+DGD_PLURAL = "dynamographdeployments"
+DGDSA_PLURAL = "dynamographdeploymentscalingadapters"
+JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
 
 
 def get_current_k8s_namespace() -> str:
@@ -51,20 +63,20 @@ class KubernetesAPI:
     def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
         """Get the graph deployment from the dynamo graph deployment name"""
         return self.custom_api.get_namespaced_custom_object(
-            group="nvidia.com",
-            version="v1alpha1",
+            group=NVIDIA_API_GROUP,
+            version=DYNAMO_API_VERSION,
             namespace=self.current_namespace,
-            plural="dynamographdeployments",
+            plural=DGD_PLURAL,
             name=graph_deployment_name,
         )
 
     def list_graph_deployments(self) -> list[dict]:
         """List all DynamoGraphDeployments in the current namespace."""
         result = self.custom_api.list_namespaced_custom_object(
-            group="nvidia.com",
-            version="v1alpha1",
+            group=NVIDIA_API_GROUP,
+            version=DYNAMO_API_VERSION,
             namespace=self.current_namespace,
-            plural="dynamographdeployments",
+            plural=DGD_PLURAL,
         )
         return result.get("items", [])
 
@@ -92,12 +104,12 @@ class KubernetesAPI:
         self, graph_deployment_name: str, service_name: str, replicas: int
     ) -> None:
         """
-        Update replicas for a service using Scale subresource when DGDSA exists.
-        Falls back to DGD patch for backward compatibility with older operators.
+        Update replicas for a component using Scale subresource when DGDSA exists.
+        Falls back to a direct DGD patch when the component does not have a DGDSA.
 
         Args:
             graph_deployment_name: Name of the DynamoGraphDeployment
-            service_name: Name of the service in DGD.spec.services
+            service_name: Name of the component in DGD.spec.components
             replicas: Desired number of replicas
         """
         # DGDSA naming convention: <dgd-name>-<lowercase-service-name>
@@ -106,10 +118,10 @@ class KubernetesAPI:
         try:
             # Try to scale via DGDSA Scale subresource
             self.custom_api.patch_namespaced_custom_object_scale(
-                group="nvidia.com",
-                version="v1alpha1",
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
                 namespace=self.current_namespace,
-                plural="dynamographdeploymentscalingadapters",
+                plural=DGDSA_PLURAL,
                 name=adapter_name,
                 body={"spec": {"replicas": replicas}},
             )
@@ -117,7 +129,7 @@ class KubernetesAPI:
 
         except client.ApiException as e:
             if e.status == 404:
-                # DGDSA doesn't exist - fall back to DGD patch (old operator)
+                # DGDSA doesn't exist - fall back to a direct DGD patch.
                 logger.info(
                     f"DGDSA {adapter_name} not found, falling back to DGD update"
                 )
@@ -128,25 +140,101 @@ class KubernetesAPI:
     def _update_dgd_replicas(
         self, graph_deployment_name: str, service_name: str, replicas: int
     ) -> None:
-        """Update replicas directly in DGD (fallback for old operators)"""
-        patch = {"spec": {"services": {service_name: {"replicas": replicas}}}}
-        self.custom_api.patch_namespaced_custom_object(
-            group="nvidia.com",
-            version="v1alpha1",
-            namespace=self.current_namespace,
-            plural="dynamographdeployments",
-            name=graph_deployment_name,
-            body=patch,
+        """Update replicas directly in DGD when no DGDSA is available."""
+        deployment = self.get_graph_deployment(graph_deployment_name)
+        components = self._dgd_components(deployment, graph_deployment_name)
+        self._patch_component_replicas(
+            graph_deployment_name, components, service_name, replicas
         )
         logger.info(
-            f"Updated DGD {graph_deployment_name} service {service_name} to {replicas} replicas"
+            f"Updated DGD {graph_deployment_name} component {service_name} to {replicas} replicas"
+        )
+
+    @staticmethod
+    def _dgd_components(deployment: dict, graph_deployment_name: str) -> list[dict]:
+        components = deployment.get("spec", {}).get("components")
+        if components is None:
+            raise KeyError(
+                f"DGD {graph_deployment_name!r} has no v1beta1 spec.components"
+            )
+        if not isinstance(components, list):
+            raise TypeError(
+                f"DGD {graph_deployment_name!r} spec.components must be a list"
+            )
+        return components
+
+    def _patch_component_replicas(
+        self,
+        graph_deployment_name: str,
+        components: list[dict],
+        component_name: str,
+        replicas: int,
+    ) -> None:
+        index = self._find_component_index(
+            graph_deployment_name, components, component_name
+        )
+        patch = self._component_replicas_json_patch(index, component_name, replicas)
+        self._patch_dgd_with_json_patch(graph_deployment_name, patch)
+
+    @staticmethod
+    def _find_component_index(
+        graph_deployment_name: str, components: list[dict], component_name: str
+    ) -> int:
+        for index, component in enumerate(components):
+            if component.get("name") == component_name:
+                return index
+        raise KeyError(
+            f"component {component_name!r} not found in DGD {graph_deployment_name!r}"
+        )
+
+    @staticmethod
+    def _component_replicas_json_patch(
+        index: int, component_name: str, replicas: int
+    ) -> list[dict]:
+        return [
+            {
+                "op": "test",
+                "path": f"/spec/components/{index}/name",
+                "value": component_name,
+            },
+            {
+                "op": "add",
+                "path": f"/spec/components/{index}/replicas",
+                "value": replicas,
+            },
+        ]
+
+    def _patch_dgd_with_json_patch(
+        self, graph_deployment_name: str, patch: list[dict]
+    ) -> None:
+        """Patch a v1beta1 DGD with RFC 6902 JSON Patch operations."""
+        self.custom_api.api_client.call_api(
+            "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
+            "PATCH",
+            {
+                "group": NVIDIA_API_GROUP,
+                "version": DYNAMO_API_VERSION,
+                "namespace": self.current_namespace,
+                "plural": DGD_PLURAL,
+                "name": graph_deployment_name,
+            },
+            [],
+            {
+                "Accept": "application/json",
+                "Content-Type": JSON_PATCH_CONTENT_TYPE,
+            },
+            body=patch,
+            response_type="object",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
+            collection_formats={},
         )
 
     def update_graph_replicas(
         self, graph_deployment_name: str, component_name: str, replicas: int
     ) -> None:
         """
-        Update replicas for a service. Now uses DGDSA when available.
+        Update replicas for a component. Now uses DGDSA when available.
 
         Deprecated: Use update_service_replicas() instead for clarity.
         This method is kept for backward compatibility.
@@ -167,7 +255,7 @@ class KubernetesAPI:
         self, deployment: dict, service_name: str
     ) -> tuple[int, bool]:
         """
-        Get the actual ready replica count for a service from DGD status.
+        Get the actual ready replica count for a component from DGD status.
 
         Returns:
             tuple[int, bool]: (replica_count, is_stable)
@@ -175,21 +263,20 @@ class KubernetesAPI:
             - is_stable: no rollout is in progress (desired == updated == ready/available)
         """
         # Get desired replicas from spec
-        service_spec = (
-            deployment.get("spec", {}).get("services", {}).get(service_name, {})
-        )
-        desired_replicas = service_spec.get("replicas", 0)
+        service_spec = get_components_by_name(deployment).get(service_name, {})
+        desired_replicas = Service(
+            name=service_name, service=service_spec
+        ).number_replicas()
 
         # Get status fields
-        service_status = (
-            deployment.get("status", {}).get("services", {}).get(service_name, {})
-        )
+        status = deployment.get("status", {})
+        service_status = status.get("components", {}).get(service_name, {})
         available = service_status.get("availableReplicas")
         ready = service_status.get("readyReplicas", 0)
         updated = service_status.get("updatedReplicas", 0)
 
         # availableReplicas takes precedence over readyReplicas for the count
-        # refer to ServiceReplicaStatus type (https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/api/v1alpha1/dynamographdeployment_types.go#L157)
+        # refer to ComponentReplicaStatus in deploy/operator/api/v1beta1/common.go
         if available is not None:
             traffic_serving_replicas = available
         else:
@@ -212,8 +299,8 @@ class KubernetesAPI:
 
         Args:
             graph_deployment_name: Name of the DGD to wait for.
-            include_planner: If False, skip services with componentType "planner"
-                and check per-service readiness instead of the global DGD Ready
+            include_planner: If False, skip components with type "planner"
+                and check per-component readiness instead of the global DGD Ready
                 condition. This avoids a circular wait when the planner itself
                 is one of the services in the DGD.
             max_attempts: Maximum polling iterations.
@@ -238,23 +325,23 @@ class KubernetesAPI:
                     f"message: {ready_condition.get('message') if ready_condition else 'no condition found'})"
                 )
             else:
-                services = graph_deployment.get("spec", {}).get("services", {})
+                components = get_components_by_name(graph_deployment)
                 not_ready: list[str] = []
-                for svc_name, svc_spec in services.items():
-                    if svc_spec.get("componentType", "") == "planner":
+                for component_name, component_spec in components.items():
+                    if get_component_type(component_spec) == "planner":
                         continue
                     _, is_stable = self.get_service_replica_status(
-                        graph_deployment, svc_name
+                        graph_deployment, component_name
                     )
                     if not is_stable:
-                        not_ready.append(svc_name)
+                        not_ready.append(component_name)
 
                 if not not_ready:
                     return
 
                 logger.info(
                     f"[Attempt {attempt + 1}/{max_attempts}] "
-                    f"Waiting for services (excluding planner): "
+                    f"Waiting for components (excluding planner): "
                     f"not ready: {not_ready}"
                 )
 
