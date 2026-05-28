@@ -310,6 +310,25 @@ def _copy_tensor_attrs(src: torch.Tensor, dst: torch.Tensor) -> None:
         dst.__dict__.update(attrs)
 
 
+def _clone_mutable_gms_tensor(
+    tensor: torch.Tensor,
+    *,
+    name: str,
+    tensor_type: str,
+    spec: GMSTensorSpec,
+) -> torch.Tensor:
+    try:
+        return tensor.detach().clone()
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to materialize mutable {tensor_type} {name!r} from GMS: "
+            f"shape={tuple(spec.meta.shape)}, dtype={spec.meta.dtype}, "
+            f"stride={tuple(spec.meta.stride)}, "
+            f"allocation_id={spec.allocation_id!r}, "
+            f"offset_bytes={int(spec.offset_bytes)}"
+        ) from e
+
+
 def _replace_aliases_in_value(
     value: Any,
     alias_map: _TensorAliasMap,
@@ -905,12 +924,16 @@ def materialize_module_from_gms(
                 and attr in mod._buffers
             ):
                 old = mod._buffers[attr]
-                replacement = tensor.detach().clone()
+                replacement = _clone_mutable_gms_tensor(
+                    tensor, name=name, tensor_type=tensor_type, spec=spec
+                )
                 if torch.is_tensor(old):
                     _set_tensor_alias(alias_map, old, replacement)
                 mod._buffers[attr] = replacement
             else:
-                replacement = tensor.detach().clone()
+                replacement = _clone_mutable_gms_tensor(
+                    tensor, name=name, tensor_type=tensor_type, spec=spec
+                )
                 old = getattr(mod, attr, None)
                 if torch.is_tensor(old):
                     _set_tensor_alias(alias_map, old, replacement)

@@ -295,6 +295,51 @@ def test_materialize_module_from_gms_rejects_non_meta_layout_mismatch(monkeypatc
         materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
 
 
+def test_materialize_module_from_gms_reports_mutable_tensor_clone_context(
+    monkeypatch,
+):
+    """Mutable tensor clone failures should name the GMS entry."""
+
+    class _BadTensor:
+        def detach(self):
+            return self
+
+        def clone(self):
+            raise RuntimeError("boom")
+
+    class _FakeSpec:
+        meta = types.SimpleNamespace(
+            tensor_type="tensor_attr",
+            shape=(2, 3),
+            stride=(3, 1),
+            dtype=torch.float16,
+        )
+        allocation_id = "alloc"
+        offset_bytes = 128
+
+        def materialize(self, _manager, _device_index):
+            return _BadTensor()
+
+    monkeypatch.setattr(
+        "gpu_memory_service.client.torch.module.GMSTensorSpec.load_all",
+        lambda _manager: {"layer.scale": _FakeSpec()},
+    )
+
+    module = torch.nn.Module()
+    module.layer = torch.nn.Module()
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Failed to materialize mutable tensor_attr 'layer\.scale'",
+    ) as exc_info:
+        materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
+
+    message = str(exc_info.value)
+    assert "shape=(2, 3)" in message
+    assert "dtype=torch.float16" in message
+    assert "offset_bytes=128" in message
+
+
 def test_materialize_module_from_gms_preserves_shared_parameter_aliases(monkeypatch):
     """Duplicate metadata paths for the same Parameter should share one object."""
 
