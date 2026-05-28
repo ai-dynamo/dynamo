@@ -262,10 +262,7 @@ mod tests {
     /// `get_model_express_cache_dir()` resolves deterministically.
     unsafe fn set_hub_cache_env(path: &Path) {
         unsafe {
-            env::set_var(
-                env_model::huggingface::HF_HUB_CACHE,
-                path.to_str().unwrap(),
-            );
+            env::set_var(env_model::huggingface::HF_HUB_CACHE, path.to_str().unwrap());
             env::remove_var(env_model::huggingface::HF_HOME);
             env::remove_var(env_model::model_express::MODEL_EXPRESS_CACHE_PATH);
             env::remove_var(env_model::huggingface::HF_HUB_OFFLINE);
