@@ -444,6 +444,13 @@ mod router_events {
             pass.router_event_visibility,
             RouterEventVisibility::PassStart
         );
+        assert!(!pass.kv_events.is_empty());
+        assert!(
+            pass.kv_events
+                .iter()
+                .all(|event| event.worker_id == ROUTER_TEST_WORKER_ID)
+        );
+        assert!(pass.kv_events.iter().all(|event| event.event.dp_rank == 0));
     }
 
     #[tokio::test]
