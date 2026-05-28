@@ -118,29 +118,33 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
-    if checkpoint_dir:
-        devices: list[int] = []
-        for child in Path(checkpoint_dir).iterdir():
-            if not child.is_dir() or not child.name.startswith("device-"):
-                continue
-            suffix = child.name.removeprefix("device-")
-            if suffix.isdigit():
-                devices.append(int(suffix))
-        if devices:
-            discovered = sorted(set(devices))
-            logger.info(
-                "Discovered GMS checkpoint devices from %s: %s",
-                checkpoint_dir,
-                ",".join(str(device) for device in discovered),
-            )
-            return discovered
+    if not checkpoint_dir:
+        return cuda_utils.list_devices()
 
+    checkpoint_path = Path(checkpoint_dir)
+    devices: set[int] = set()
+    for child in checkpoint_path.iterdir():
+        if not child.is_dir() or not child.name.startswith("device-"):
+            continue
+
+        suffix = child.name.removeprefix("device-")
+        if suffix.isdigit():
+            devices.add(int(suffix))
+
+    if devices:
+        discovered = sorted(devices)
         logger.info(
-            "No device-* checkpoint directories found under %s; falling back to "
-            "CUDA/NVML device discovery",
-            checkpoint_dir,
+            "Discovered GMS checkpoint devices from %s: %s",
+            checkpoint_path,
+            ",".join(str(device) for device in discovered),
         )
+        return discovered
 
+    logger.info(
+        "No device-* checkpoint directories found under %s; falling back to "
+        "CUDA/NVML device discovery",
+        checkpoint_path,
+    )
     return cuda_utils.list_devices()
 
 

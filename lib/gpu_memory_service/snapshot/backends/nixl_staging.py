@@ -55,14 +55,12 @@ NixlGroupingFn = Callable[
 
 @dataclass
 class _PreparedNixlGroup:
-    worker_index: int
     group_name: str
     file_groups: Sequence[NixlFileGroup]
     agent: object
     agent_name: str
     slots: List[PinnedCopySlot]
     prep_elapsed_s: float
-    prep_started_after_s: float
     closed: bool = False
 
 
@@ -417,14 +415,12 @@ class _NixlPosixStagingTransferSession:
                 prep_started_after_s,
             )
             return _PreparedNixlGroup(
-                worker_index=worker_index,
                 group_name=group_name,
                 file_groups=file_groups,
                 agent=agent,
                 agent_name=agent_name,
                 slots=slots,
                 prep_elapsed_s=prep_elapsed_s,
-                prep_started_after_s=prep_started_after_s,
             )
         except Exception:
             close_pinned_copy_slots(
