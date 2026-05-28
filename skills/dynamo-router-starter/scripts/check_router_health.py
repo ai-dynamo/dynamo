@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -14,9 +15,27 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+# Tunables and contract values (kept here to avoid magic numbers in the body).
+DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_PROMPT = "Say hello from Dynamo in one short sentence."
+DEFAULT_MAX_TOKENS = 32
+DEFAULT_RETRIES = 5
+DEFAULT_RETRY_SLEEP_SEC = 2.0
+DEFAULT_HTTP_TIMEOUT_SEC = 20.0
+HTTP_OK = 200
+
+# Process exit codes used to distinguish smoke-test outcomes.
+EXIT_OK = 0
+EXIT_MODELS_UNAVAILABLE = 2
+EXIT_NO_MODEL_DISCOVERED = 3
+EXIT_CHAT_FAILED = 4
+
 
 def request_json(
-    method: str, url: str, payload: dict[str, Any] | None = None, timeout: float = 20
+    method: str,
+    url: str,
+    payload: dict[str, Any] | None = None,
+    timeout: float = DEFAULT_HTTP_TIMEOUT_SEC,
 ) -> tuple[int, Any]:
     # Only talk to real HTTP(S) endpoints; urlopen otherwise happily opens
     # file:// and other local schemes if a bad --base-url is passed.
@@ -64,15 +83,13 @@ def choose_model(models_body: Any) -> str | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--model")
-    parser.add_argument(
-        "--prompt", default="Say hello from Dynamo in one short sentence."
-    )
-    parser.add_argument("--max-tokens", type=int, default=32)
+    parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--skip-chat", action="store_true")
-    parser.add_argument("--retries", type=int, default=5)
-    parser.add_argument("--retry-sleep", type=float, default=2.0)
+    parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
+    parser.add_argument("--retry-sleep", type=float, default=DEFAULT_RETRY_SLEEP_SEC)
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
@@ -82,7 +99,7 @@ def main() -> int:
     models_body = None
     for attempt in range(1, args.retries + 1):
         models_status, models_body = request_json("GET", f"{base_url}/v1/models")
-        if models_status == 200:
+        if models_status == HTTP_OK:
             break
         time.sleep(args.retry_sleep)
 
@@ -91,21 +108,21 @@ def main() -> int:
         {"name": "models", "status": models_status, "body": models_body, "model": model}
     )
 
-    if models_status != 200:
+    if models_status != HTTP_OK:
         print(json.dumps(result, indent=2))
-        return 2
+        return EXIT_MODELS_UNAVAILABLE
 
     if args.skip_chat:
         result["ok"] = True
         print(json.dumps(result, indent=2))
-        return 0
+        return EXIT_OK
 
     if not model:
         result["checks"].append(
             {"name": "chat", "status": "skipped", "reason": "No model discovered"}
         )
         print(json.dumps(result, indent=2))
-        return 3
+        return EXIT_NO_MODEL_DISCOVERED
 
     payload = {
         "model": model,
@@ -116,9 +133,9 @@ def main() -> int:
         "POST", f"{base_url}/v1/chat/completions", payload
     )
     result["checks"].append({"name": "chat", "status": chat_status, "body": chat_body})
-    result["ok"] = chat_status == 200
+    result["ok"] = chat_status == HTTP_OK
     print(json.dumps(result, indent=2))
-    return 0 if result["ok"] else 4
+    return EXIT_OK if result["ok"] else EXIT_CHAT_FAILED
 
 
 if __name__ == "__main__":

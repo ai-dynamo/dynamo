@@ -56,7 +56,7 @@ cases:
   REASONING.batch.2.d:
     description: Gemma normal text around reasoning
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: |-
       Hello. <|channel>thought
       rumination<channel|> Goodbye.
@@ -95,7 +95,7 @@ cases:
   REASONING.batch.5:
     description: Open thought channel without close treats suffix as reasoning
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: |-
       intro <|channel>thought
       partial
@@ -154,7 +154,7 @@ cases:
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated by Dynamo
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: |-
       <|channel>thought
       first<channel|> middle <|channel>thought
