@@ -178,10 +178,11 @@ async fn handler_anthropic_messages(
         tokio::spawn(anthropic_messages(state, template, request, stream_handle).in_current_span())
             .await
             .map_err(|e| {
+                tracing::error!("Failed to await Anthropic messages task: {e:?}");
                 anthropic_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "api_error",
-                    &format!("Failed to await messages task: {:?}", e),
+                    "Internal server error",
                 )
             })?;
 
@@ -333,17 +334,19 @@ async fn anthropic_messages(
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
             inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+            tracing::debug!("Anthropic request cancelled before response: {e:#}");
             return anthropic_error(
                 StatusCode::from_u16(499).unwrap(),
                 "request_cancelled",
-                &format!("Request cancelled: {}", e),
+                "Request cancelled",
             );
         }
         inflight_guard.mark_error(super::metrics::ErrorType::Internal);
+        tracing::error!("Failed to generate Anthropic completions: {e}");
         anthropic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
-            &format!("Failed to generate completions: {}", e),
+            "Internal server error",
         )
     })?;
 
@@ -472,7 +475,7 @@ async fn anthropic_messages(
                     anthropic_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "api_error",
-                        &format!("Failed to fold messages stream: {}", e),
+                        "Internal server error",
                     )
                 })?;
 

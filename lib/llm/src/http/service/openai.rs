@@ -223,6 +223,28 @@ impl ErrorMessage {
         )
     }
 
+    /// Internal Server Error with sanitized client message.
+    /// Logs `details` server-side and returns only `public_msg` to the client.
+    /// Use this whenever the detail could carry an anyhow chain, JoinError
+    /// debug output, or anything else that may leak file paths, library
+    /// versions, or other internal implementation details.
+    pub fn internal_server_error_with_details(
+        public_msg: &str,
+        details: impl std::fmt::Display,
+    ) -> ErrorResponse {
+        tracing::error!("Internal server error: {public_msg}: {details}");
+        let code = StatusCode::INTERNAL_SERVER_ERROR;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: public_msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
     /// Not Implemented Error
     /// Return this error when the client requests a feature that is not yet implemented.
     /// This should be used for features that are planned but not available.
@@ -260,17 +282,15 @@ impl ErrorMessage {
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
         // Check for ResourceExhausted anywhere in the error chain → HTTP 503
         if super::metrics::request_was_rejected(err.as_ref()) {
-            let message = find_dynamo_error_in_chain(
-                err.as_ref(),
-                dynamo_runtime::error::ErrorType::ResourceExhausted,
-            )
-            .map(|dynamo_err| dynamo_err.message().to_string())
-            .unwrap_or_else(|| err.to_string());
-
+            // Log the full chain server-side; client only sees a sanitized hint
+            // so we don't leak internal paths or implementation details.
+            tracing::warn!("Request rejected by admission control: {err:#}");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorMessage {
-                    message: format!("{}. {}", message, ADMISSION_CONTROL_REJECTION_HINT),
+                    message: format!(
+                        "Service temporarily overloaded. {ADMISSION_CONTROL_REJECTION_HINT}"
+                    ),
                     error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
                     code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 }),
@@ -299,11 +319,14 @@ impl ErrorMessage {
         // Check for Cancelled anywhere in the error chain → HTTP 499 (Client Closed Request)
         if super::metrics::request_was_cancelled(err.as_ref()) {
             let code = StatusCode::from_u16(499).unwrap();
-            tracing::debug!("Request cancelled before response: {err}");
+            // Log the detail server-side; the client gets only a static message so a
+            // 499 surfaced before the connection actually drops can't leak context
+            // IDs or backend cancellation internals.
+            tracing::debug!("Request cancelled before response: {err:#}");
             return (
                 code,
                 Json(ErrorMessage {
-                    message: err.to_string(),
+                    message: "Request cancelled".to_string(),
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                 }),
@@ -313,14 +336,24 @@ impl ErrorMessage {
         // Then check for HttpError
         match err.downcast::<HttpError>() {
             Ok(http_error) => ErrorMessage::from_http_error(http_error),
-            Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err:#}")),
+            // Log the full anyhow chain server-side but only return `alt_msg`
+            // to the client so we don't leak internal paths.
+            Err(err) => {
+                ErrorMessage::internal_server_error_with_details(alt_msg, format!("{err:#}"))
+            }
         }
     }
 
     /// Implementers should only be able to throw 400-499 errors.
     pub fn from_http_error(err: HttpError) -> ErrorResponse {
+        // Backend-supplied messages are only forwarded for the documented 4xx
+        // range; for 5xx or codes outside the HTTP space the message may
+        // contain internal paths/details and is kept server-side only.
         if err.code < 400 || err.code >= 500 {
-            return ErrorMessage::internal_server_error(&err.message);
+            return ErrorMessage::internal_server_error_with_details(
+                "Internal server error",
+                err.message,
+            );
         }
         match StatusCode::from_u16(err.code) {
             Ok(code) => (
@@ -331,7 +364,10 @@ impl ErrorMessage {
                     code: code.as_u16(),
                 }),
             ),
-            Err(_) => ErrorMessage::internal_server_error(&err.message),
+            Err(_) => ErrorMessage::internal_server_error_with_details(
+                "Internal server error",
+                err.message,
+            ),
         }
     }
 }
@@ -515,10 +551,12 @@ async fn handler_completions(
     let response = tokio::spawn(completions(state, request, stream_handle).in_current_span())
         .await
         .map_err(|e| {
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to await chat completions task: {:?}",
-                e,
-            ))
+            // JoinError debug output can include panic messages with stack
+            // info — keep that server-side only.
+            ErrorMessage::internal_server_error_with_details(
+                "Failed to await chat completions task",
+                format!("{e:?}"),
+            )
         })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
@@ -692,8 +730,7 @@ async fn completions_single(
                     e
                 );
                 let err_response = ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold completions stream for {}: {:?}",
-                    request_id, e
+                    "Failed to fold completions stream for {request_id}"
                 ));
                 inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                 err_response
@@ -887,8 +924,7 @@ async fn completions_batch(
                     e
                 );
                 let err_response = ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold completions stream for {}: {:?}",
-                    request_id, e
+                    "Failed to fold completions stream for {request_id}"
                 ));
                 inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                 err_response
@@ -1035,10 +1071,12 @@ async fn handler_chat_completions(
         tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
             .await
             .map_err(|e| {
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to await chat completions task: {:?}",
-                    e,
-                ))
+                // JoinError debug output can include panic messages with stack
+                // info — keep that server-side only.
+                ErrorMessage::internal_server_error_with_details(
+                    "Failed to await chat completions task",
+                    format!("{e:?}"),
+                )
             })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
@@ -1156,13 +1194,24 @@ pub(super) async fn check_for_backend_error(
     if let Some(first_event) = stream.next().await {
         // Check if it's an error event
         if let Some((error_msg, status_code)) = extract_backend_error_if_present(&first_event) {
-            return Err((
-                status_code,
-                Json(ErrorMessage {
-                    message: error_msg,
-                    error_type: map_error_code_to_error_type(status_code),
-                    code: status_code.as_u16(),
-                }),
+            // Mirror from_http_error: only the documented 4xx range is part
+            // of the protocol contract and forwarded unchanged. Anything
+            // else (5xx, or a 1xx/2xx/3xx asserted by the backend payload)
+            // may carry panic text, file paths, or raw internal error JSON
+            // and is kept server-side only.
+            if status_code.is_client_error() {
+                return Err((
+                    status_code,
+                    Json(ErrorMessage {
+                        message: error_msg,
+                        error_type: map_error_code_to_error_type(status_code),
+                        code: status_code.as_u16(),
+                    }),
+                ));
+            }
+            return Err(ErrorMessage::internal_server_error_with_details(
+                "Internal server error",
+                error_msg,
             ));
         }
 
@@ -1550,10 +1599,9 @@ async fn chat_completions(
                         "Failed to parse chat completion response: {:?}",
                         e
                     );
-                    let err_response = ErrorMessage::internal_server_error(&format!(
-                        "Failed to parse chat completion response: {}",
-                        e
-                    ));
+                    let err_response = ErrorMessage::internal_server_error(
+                        "Failed to parse chat completion response",
+                    );
                     inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                     err_response
                 })?;
@@ -1710,10 +1758,12 @@ async fn handler_responses(
         tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
             .await
             .map_err(|e| {
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to await responses task: {:?}",
-                    e,
-                ))
+                // JoinError debug output can include panic messages with stack
+                // info — keep that server-side only.
+                ErrorMessage::internal_server_error_with_details(
+                    "Failed to await responses task",
+                    format!("{e:?}"),
+                )
             })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
@@ -1984,10 +2034,8 @@ async fn responses(
                 .await
                 .map_err(|e| {
                     tracing::error!(request_id, "Failed to fold responses stream: {:?}", e);
-                    let err_response = ErrorMessage::internal_server_error(&format!(
-                        "Failed to fold responses stream: {}",
-                        e
-                    ));
+                    let err_response =
+                        ErrorMessage::internal_server_error("Failed to fold responses stream");
                     inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                     err_response
                 })?;
@@ -2668,7 +2716,10 @@ async fn video_stream(
         .map_err(|e| {
             // inflight is already owned by the monitored_stream which handles
             // mark_ok (stream end) and mark_error (cancellation).
-            ErrorMessage::internal_server_error(&format!("Failed to build MJPEG response: {e}"))
+            ErrorMessage::internal_server_error_with_details(
+                "Failed to build MJPEG response",
+                format!("{e}"),
+            )
         })
 }
 
@@ -2855,34 +2906,32 @@ mod tests {
 
     #[test]
     fn test_error_response_from_anyhow_out_of_range() {
-        let err = http_error_from_engine(399).unwrap_err();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.1.message, "custom error message");
-
-        let err = http_error_from_engine(500).unwrap_err();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.1.message, "custom error message");
-
-        let err = http_error_from_engine(501).unwrap_err();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.1.message, "custom error message");
+        // Backend-supplied messages outside the 4xx range must NOT be
+        // forwarded to the client — they may include internal paths.
+        for code in [399u16, 500, 501] {
+            let err = http_error_from_engine(code).unwrap_err();
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+            assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(response.1.message, "Internal server error");
+            assert!(
+                !response.1.message.contains("custom error message"),
+                "client response must not include the backend-supplied HttpError message"
+            );
+        }
     }
 
     #[test]
     fn test_other_error_response_from_anyhow() {
+        // Non-HttpError anyhow chains must NOT be exposed to the client; only
+        // the static backup message should appear in the response.
         let err = other_error_from_engine().unwrap_err();
+        let leaked_chain = format!("{err:#}");
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            response.1.message,
-            format!(
-                "{}: {}",
-                BACKUP_ERROR_MESSAGE,
-                other_error_from_engine().unwrap_err()
-            )
+        assert_eq!(response.1.message, BACKUP_ERROR_MESSAGE);
+        assert!(
+            !response.1.message.contains(&leaked_chain),
+            "client response must not contain the anyhow error chain"
         );
     }
 
@@ -2904,7 +2953,11 @@ mod tests {
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.1.message,
-            format!("All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}")
+            format!("Service temporarily overloaded. {ADMISSION_CONTROL_REJECTION_HINT}")
+        );
+        assert!(
+            !response.1.message.contains("All workers are busy"),
+            "client response must not include the underlying engine message"
         );
     }
 
@@ -2963,7 +3016,11 @@ mod tests {
         );
         assert_eq!(response.1.code, 499);
         assert_eq!(response.1.error_type, "Client Closed Request");
-        assert!(response.1.message.contains("stopped or killed"));
+        // The client gets a static message; the backend detail (context id,
+        // cancellation internals) must not leak into the 499 body.
+        assert_eq!(response.1.message, "Request cancelled");
+        assert!(!response.1.message.contains("abc-123"));
+        assert!(!response.1.message.contains("stopped or killed"));
     }
 
     #[test]
@@ -3595,7 +3652,14 @@ mod tests {
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(error_response.1.message, "Backend service unavailable");
+            // Backend-supplied 5xx text must not be forwarded to the client.
+            assert_eq!(error_response.1.message, "Internal server error");
+            assert!(
+                !error_response
+                    .1
+                    .message
+                    .contains("Backend service unavailable")
+            );
         }
     }
 
@@ -3622,8 +3686,42 @@ mod tests {
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(error_response.1.message, "prompt > max_seq_len");
+            // 500 backend JSON messages are sanitized to a static client
+            // message; the raw payload is only logged server-side.
+            assert_eq!(error_response.1.message, "Internal server error");
             assert_eq!(error_response.1.code, 500);
+            assert!(!error_response.1.message.contains("prompt > max_seq_len"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_non_client_error_code() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        // A backend asserting a non-4xx code (here 399) must not be able to
+        // smuggle a sensitive message through with a non-error status:
+        // anything outside the 4xx range is sanitized to 500.
+        let error_json =
+            r#"{"message":"panic at /srv/model.py:42","type":"Backend Error","code":399}"#;
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![error_json.to_string()]),
+            error: None,
+        };
+
+        let test_stream = stream::iter(vec![error_event]);
+        let result = check_for_backend_error(test_stream).await;
+
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(error_response.1.code, 500);
+            assert_eq!(error_response.1.message, "Internal server error");
+            assert!(!error_response.1.message.contains("/srv/model.py"));
+            assert!(!error_response.1.message.contains("panic"));
         }
     }
 
@@ -3708,7 +3806,10 @@ mod tests {
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(error_response.1.message, "Connection timeout");
+            // Backend comment text falls under the 5xx default — must be
+            // sanitized so it cannot leak internals to the client.
+            assert_eq!(error_response.1.message, "Internal server error");
+            assert!(!error_response.1.message.contains("Connection timeout"));
         }
     }
 

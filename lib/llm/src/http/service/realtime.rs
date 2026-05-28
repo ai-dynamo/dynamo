@@ -171,12 +171,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
             let event = if let Some(event) = annotated.data {
                 event
             } else if let Some(err) = annotated.error {
+                // Log the engine error server-side; the client only receives a
+                // static message so the realtime stream can't leak internal paths,
+                // panic text, or backend exception details.
+                tracing::error!("/v1/realtime engine error: {err}");
                 RealtimeServerEvent::Error(RealtimeServerEventError {
                     event_id: format!("event_{}", Uuid::new_v4()),
                     error: RealtimeAPIError {
                         r#type: "server_error".to_string(),
                         code: None,
-                        message: err.to_string(),
+                        message: "Internal server error".to_string(),
                         param: None,
                         event_id: None,
                     },
@@ -469,7 +473,7 @@ where
                 send_error_event(
                     ws_tx,
                     "server_error",
-                    &err.to_string(),
+                    "Internal server error",
                     Some("session.model"),
                 )
                 .await;
