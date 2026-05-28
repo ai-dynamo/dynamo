@@ -86,20 +86,21 @@ fn is_no_shared_storage() -> bool {
 /// If ignore_weights is true, model weight files will be skipped
 /// Returns the path to the model files
 ///
-/// If HF_HUB_OFFLINE=1 is set and the model is already cached, returns the cached
-/// path without making any API calls to HuggingFace.
+/// If the model is already cached locally with the required files, returns the cached
+/// path without making any API calls to HuggingFace, regardless of HF_HUB_OFFLINE.
 pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
     let model_name = name.display().to_string();
 
-    // In offline mode, check cache first and return immediately if found
+    // Cache-first in all modes: if the snapshot is already on disk with the files we
+    // need, return it without touching the network. Previously this short-circuit was
+    // gated behind HF_HUB_OFFLINE=1, which forced operators to set the env var to avoid
+    // HF API hangs on nodes whose cache was already populated. See DIS-1803.
+    if let Some(cached_path) = get_cached_model_path(&model_name, ignore_weights) {
+        return Ok(cached_path);
+    }
+
     if is_offline_mode() {
-        if let Some(cached_path) = get_cached_model_path(&model_name, ignore_weights) {
-            tracing::info!(
-                "Offline mode: using cached model '{model_name}' without API validation"
-            );
-            return Ok(cached_path);
-        }
         tracing::warn!(
             "Offline mode enabled but model '{model_name}' not found in cache, attempting download anyway"
         );
@@ -207,6 +208,8 @@ fn get_model_express_cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_from_hf_with_model_express() {
@@ -236,5 +239,113 @@ mod tests {
             // Clean up
             env::remove_var(env_model::huggingface::HF_HOME);
         }
+    }
+
+    /// Build an hf-hub-format cache layout for `model_name` in `cache_root`,
+    /// populated with the given filenames at a fake snapshot revision. Returns
+    /// the snapshot directory path that `Cache::model().get()` should resolve to.
+    fn build_hf_cache(cache_root: &Path, model_name: &str, files: &[&str]) -> PathBuf {
+        let repo_dir = cache_root.join(format!("models--{}", model_name.replace('/', "--")));
+        let snapshot_hash = "0000000000000000000000000000000000000000";
+        let snapshot_dir = repo_dir.join("snapshots").join(snapshot_hash);
+        let refs_dir = repo_dir.join("refs");
+        fs::create_dir_all(&snapshot_dir).unwrap();
+        fs::create_dir_all(&refs_dir).unwrap();
+        fs::write(refs_dir.join("main"), snapshot_hash).unwrap();
+        for f in files {
+            fs::write(snapshot_dir.join(f), "{}").unwrap();
+        }
+        snapshot_dir
+    }
+
+    /// Point HF_HUB_CACHE at `path` and clear the other cache env vars so
+    /// `get_model_express_cache_dir()` resolves deterministically.
+    unsafe fn set_hub_cache_env(path: &Path) {
+        unsafe {
+            env::set_var(
+                env_model::huggingface::HF_HUB_CACHE,
+                path.to_str().unwrap(),
+            );
+            env::remove_var(env_model::huggingface::HF_HOME);
+            env::remove_var(env_model::model_express::MODEL_EXPRESS_CACHE_PATH);
+            env::remove_var(env_model::huggingface::HF_HUB_OFFLINE);
+        }
+    }
+
+    unsafe fn clear_hub_cache_env() {
+        unsafe {
+            env::remove_var(env_model::huggingface::HF_HUB_CACHE);
+            env::remove_var(env_model::huggingface::HF_HUB_OFFLINE);
+        }
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn test_cached_path_metadata_only_satisfies_ignore_weights_true() {
+        // A cache with only metadata files should satisfy ignore_weights=true
+        // but NOT ignore_weights=false (no weight files present).
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/metadata-only";
+        let snapshot = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        unsafe { set_hub_cache_env(temp.path()) };
+        let with_weights = get_cached_model_path(model, false);
+        let no_weights = get_cached_model_path(model, true);
+        unsafe { clear_hub_cache_env() };
+
+        assert!(
+            with_weights.is_none(),
+            "metadata-only cache must NOT satisfy ignore_weights=false"
+        );
+        assert_eq!(
+            no_weights.as_deref(),
+            Some(snapshot.as_path()),
+            "metadata-only cache must satisfy ignore_weights=true"
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn test_cached_path_full_cache_satisfies_both_modes() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/full-cache";
+        let snapshot = build_hf_cache(
+            temp.path(),
+            model,
+            &["config.json", "tokenizer.json", "model.safetensors"],
+        );
+
+        unsafe { set_hub_cache_env(temp.path()) };
+        let with_weights = get_cached_model_path(model, false);
+        let no_weights = get_cached_model_path(model, true);
+        unsafe { clear_hub_cache_env() };
+
+        assert_eq!(with_weights.as_deref(), Some(snapshot.as_path()));
+        assert_eq!(no_weights.as_deref(), Some(snapshot.as_path()));
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn test_from_hf_cache_first_in_online_mode() {
+        // DIS-1803: cache-first short-circuit must fire even when HF_HUB_OFFLINE
+        // is not set. If the short-circuit works, from_hf returns the cached path
+        // without touching MxClient or the HF network.
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/cache-first-online";
+        let snapshot = build_hf_cache(
+            temp.path(),
+            model,
+            &["config.json", "tokenizer.json", "model.safetensors"],
+        );
+
+        unsafe { set_hub_cache_env(temp.path()) };
+        let result = from_hf(PathBuf::from(model), false).await;
+        unsafe { clear_hub_cache_env() };
+
+        assert_eq!(
+            result.ok().as_deref(),
+            Some(snapshot.as_path()),
+            "from_hf must return cached path in online mode without network"
+        );
     }
 }
