@@ -54,7 +54,7 @@ Source of truth: [`docs/reference/support-matrix.md`](../../reference/support-ma
 **Step 1 (host terminal):** Start infrastructure services:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 **Step 2 (host terminal):** Pull and run the prebuilt container:

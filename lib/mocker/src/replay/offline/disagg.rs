@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub(super) use super::components::ReplayMode;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-    ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
+    ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
@@ -211,6 +211,14 @@ impl DisaggRuntime {
         })
     }
 
+    /// Toggle per-request record capture on the underlying collector. When
+    /// `true`, the final `TraceSimulationReport` returned from `run()` will
+    /// have `per_request` populated. Default `false` (cheap).
+    pub(in crate::replay) fn with_per_request_records(mut self, capture: bool) -> Self {
+        self.collector.set_capture_per_request(capture);
+        self
+    }
+
     /// Cap the simulated wall-clock duration. After construction, call this to
     /// have `run()` stop gracefully once the simulated clock would exceed
     /// `ms`. Pass `None` to run to natural completion (the default).
@@ -306,6 +314,7 @@ impl DisaggRuntime {
         let request = self.state(uuid)?.build_prefill_request()?;
         self.prefill_engine.dispatch(worker_idx, request)?;
         self.state_mut(uuid)?.start_prefill(worker_idx);
+        self.collector.on_prefill_assigned(uuid, worker_idx);
         #[cfg(test)]
         {
             self.stats.prefill_assignments.insert(uuid, worker_idx);
@@ -318,6 +327,7 @@ impl DisaggRuntime {
         let request = self.state(uuid)?.original_request()?.clone();
         self.decode_engine.dispatch(worker_idx, request)?;
         self.state_mut(uuid)?.start_decode(worker_idx);
+        self.collector.on_decode_assigned(uuid, worker_idx);
         #[cfg(test)]
         {
             self.stats.decode_assignments.insert(uuid, worker_idx);
@@ -698,7 +708,19 @@ impl DisaggRuntime {
             .admission
             .drain_ready(self.now_ms, self.cluster_in_flight())?
         {
-            self.on_external_arrival(ready.request, ready.arrival_time_ms, ready.replay_hashes)?;
+            let ReadyArrival {
+                request,
+                arrival_time_ms,
+                replay_hashes,
+                session_id,
+                turn_index,
+            } = ready;
+            let session_metadata = session_id.zip(turn_index);
+            let uuid = self.on_external_arrival(request, arrival_time_ms, replay_hashes)?;
+            if let Some((session_id, turn_index)) = session_metadata {
+                self.collector
+                    .on_session_metadata(uuid, session_id, turn_index);
+            }
             released_any = true;
         }
         Ok(released_any)

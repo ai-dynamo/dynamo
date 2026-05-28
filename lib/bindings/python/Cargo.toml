@@ -40,6 +40,7 @@ lightseek-mm = ["dynamo-llm/lightseek-mm"]
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }
+dynamo-protocols = { path = "../../protocols" }
 dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }
@@ -57,6 +58,12 @@ tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { version = "0" }
+# Authoritative pins live in the workspace root Cargo.toml. This crate is
+# excluded from the workspace (pyo3 build constraint) so we duplicate. Keep
+# these two versions in lockstep with the root — drift will show up as
+# tracing-opentelemetry bridge mismatches across the FFI boundary.
+tracing-opentelemetry = { version = "0.32.0" }
+opentelemetry = { version = "0.31.0", features = ["trace"] }
 uuid = { version = "1.18.1" }
 
 # kv-indexer / shared kv-router types

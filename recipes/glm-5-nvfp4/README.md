@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 Serves [nvidia/GLM-5-NVFP4](https://huggingface.co/nvidia/GLM-5-NVFP4) using SGLang with
 disaggregated prefill/decode and EAGLE speculative decoding via Dynamo on GB200 nodes.
 
+For GB200 on AWS, please see the [efa variant](sglang/disagg/efa/README.md).
+
 ## Topology
 
 | Role    | Nodes | GPUs/node | Total GPUs | Parallelism        |

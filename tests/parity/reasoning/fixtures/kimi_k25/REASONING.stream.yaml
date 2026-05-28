@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: kimi_k25
+model_label: Kimi K2.5 / K2.6
+mode: stream
+refs:
+  upstream: &upstream_ref 'inspired by vLLM Kimi K2/K2.5 reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_kimi_k2_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
+cases:
+  REASONING.stream.1.a:
+    description: Empty stream chunk
+    ref: *upstream_ref
+    chunks:
+    - ''
+    expected:
+      dynamo: &d_s0
+        reasoning_text: ''
+        normal_text: ''
+      vllm: *d_s0
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.2.a:
+    description: Force-reasoning stream exits on closing think tag
+    ref: *upstream_ref
+    chunks:
+    - thinking
+    - </think>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: thinking
+        normal_text: answer
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.2.b:
+    description: Multiple reasoning spans across chunks
+    ref: *upstream_ref
+    chunks:
+    - <think>first</think>
+    - ' middle '
+    - <think>second</think> done
+    expected:
+      dynamo:
+        reasoning_text: firstsecond
+        normal_text: ' middle  done'
+      vllm:
+        reasoning_text: <think>first
+        normal_text: ' middle <think>second</think> done'
+        reason: vLLM Kimi K2 streaming parser leaks the first start marker and leaves the later complete span in normal_text.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.3.a:
+    description: Opening think marker split across chunks
+    ref: *upstream_ref
+    chunks:
+    - <thi
+    - nk>thinking</think>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: <think>thinking
+        normal_text: answer
+        reason: Dynamo buffers a split start delimiter and strips it; vLLM Kimi K2 streaming parser leaks the reconstructed delimiter.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.3.b:
+    description: End marker split across chunks
+    ref: *upstream_ref
+    chunks:
+    - <think>thinking</th
+    - ink>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: <think>thinking</think>answer
+        normal_text: ''
+        reason: Dynamo buffers a split end delimiter and resumes normal_text after it; vLLM Kimi K2 streaming parser keeps the delimiter and answer in reasoning_text.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.3.c:
+    description: Partial start-marker prefix later resolves as force-reasoning text
+    ref: *upstream_ref
+    chunks:
+    - plain <th
+    - esis answer
+    expected:
+      dynamo:
+        reasoning_text: plain <thesis answer
+        normal_text: ''
+      vllm:
+        reasoning_text: plain <thesis answer
+        normal_text: ''
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.1.b:
+    description: Plain text stays in force-reasoning mode until an end marker
+    ref: *upstream_ref
+    chunks:
+    - plain
+    - ' answer'
+    expected:
+      dynamo:
+        reasoning_text: plain answer
+        normal_text: ''
+      vllm:
+        reasoning_text: plain answer
+        normal_text: ''
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
