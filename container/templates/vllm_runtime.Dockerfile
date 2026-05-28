@@ -203,8 +203,8 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # IMAGEIO_FFMPEG_EXE is needed; this is purely to clear the GPL binary.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    if uv pip show imageio-ffmpeg >/dev/null 2>&1; then \
-        uv pip install --reinstall-package imageio-ffmpeg --no-deps --no-binary imageio-ffmpeg "imageio-ffmpeg>=0.6.0"; \
+    if uv pip show {{ pip_target }} imageio-ffmpeg >/dev/null 2>&1; then \
+        uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps --no-binary imageio-ffmpeg "imageio-ffmpeg>=0.6.0"; \
     fi
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
