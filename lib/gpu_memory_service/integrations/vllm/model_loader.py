@@ -22,7 +22,6 @@ from gpu_memory_service.client.torch.allocator import (
 )
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
-    move_tensor_attrs_out_of_gms,
 )
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
@@ -32,9 +31,8 @@ from gpu_memory_service.integrations.common.utils import (
     setup_meta_tensor_workaround,
     strip_gms_model_loader_config,
 )
-from gpu_memory_service.integrations.vllm.patches import (
-    fused_moe_cpu_routing_buffers_during_meta_init,
-    meta_safe_module_to_during_meta_init,
+from gpu_memory_service.integrations.vllm.upstream_workarounds import (
+    vllm_meta_init_workarounds,
 )
 
 if os.environ.get("MX_ENABLED", "0") == "1":
@@ -191,6 +189,11 @@ def _load_read_mode(
         logger.info("[GMS] Read mode: materializing tensors")
         materialize_module_from_gms(gms_client, model, device_index=device_index)
 
+        _process_fused_moe_kernels_after_gms_materialization(
+            model,
+            model_config,
+            target_device,
+        )
         _process_mla_weights_after_gms_materialization(
             model,
             model_config,
@@ -223,6 +226,116 @@ def _is_mla_post_load_module(module: torch.nn.Module) -> bool:
         and hasattr(module, "num_heads")
         and callable(getattr(module, "process_weights_after_loading", None))
     )
+
+
+def _make_fused_moe_kernel(module: torch.nn.Module, quant_method) -> bool:
+    experts_cls = getattr(quant_method, "experts_cls", None)
+    if experts_cls is None:
+        return False
+
+    quant_config = quant_method.get_fused_moe_quant_config(module)
+    if quant_config is None:
+        return False
+    quant_method.moe_quant_config = quant_config
+
+    routing_tables = None
+    maybe_routing_tables = getattr(module, "_maybe_init_expert_routing_tables", None)
+    if callable(maybe_routing_tables):
+        routing_tables = maybe_routing_tables()
+    shared_experts = getattr(module, "shared_experts", None)
+
+    if hasattr(quant_method, "fp8_backend"):
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import make_fp8_moe_kernel
+
+        quant_method.moe_kernel = make_fp8_moe_kernel(
+            moe_quant_config=quant_config,
+            moe_config=module.moe_config,
+            fp8_backend=quant_method.fp8_backend,
+            experts_cls=experts_cls,
+            routing_tables=routing_tables,
+            shared_experts=shared_experts,
+        )
+        return True
+
+    if hasattr(quant_method, "mxfp4_backend"):
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+            make_mxfp4_moe_kernel,
+        )
+
+        quant_method.moe_kernel = make_mxfp4_moe_kernel(
+            moe_quant_config=quant_config,
+            moe_config=module.moe_config,
+            mxfp4_backend=quant_method.mxfp4_backend,
+            experts_cls=experts_cls,
+            routing_tables=routing_tables,
+            shared_experts=shared_experts,
+        )
+        return True
+
+    if hasattr(quant_method, "nvfp4_backend"):
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            make_nvfp4_moe_kernel,
+        )
+
+        quant_method.moe_kernel = make_nvfp4_moe_kernel(
+            moe_quant_config=quant_config,
+            moe_config=module.moe_config,
+            experts_cls=experts_cls,
+            routing_tables=routing_tables,
+            shared_experts=shared_experts,
+        )
+        return True
+
+    if hasattr(quant_method, "unquantized_backend"):
+        from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+            make_unquantized_moe_kernel,
+        )
+
+        quant_method.moe_kernel = make_unquantized_moe_kernel(
+            quant_config=quant_config,
+            moe_config=module.moe_config,
+            backend=quant_method.unquantized_backend,
+            experts_cls=experts_cls,
+            routing_tables=routing_tables,
+            shared_experts=shared_experts,
+        )
+        return True
+
+    return False
+
+
+def _process_fused_moe_kernels_after_gms_materialization(
+    model: torch.nn.Module,
+    model_config,
+    target_device: torch.device,
+) -> None:
+    """Rebuild vLLM MoE runtime kernels around imported GMS weights."""
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    rebuilt: list[str] = []
+    with set_default_torch_dtype(model_config.dtype):
+        with target_device:
+            for name, module in model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+                if quant_method is None:
+                    continue
+                if getattr(quant_method, "moe_kernel", None) is not None:
+                    continue
+                if not callable(
+                    getattr(quant_method, "get_fused_moe_quant_config", None)
+                ):
+                    continue
+                if not hasattr(module, "moe_config"):
+                    continue
+                if _make_fused_moe_kernel(module, quant_method):
+                    rebuilt.append(name)
+
+    if rebuilt:
+        logger.info(
+            "[GMS] Read mode: rebuilt %d FusedMoE kernels: %s",
+            len(rebuilt),
+            rebuilt[:8],
+        )
 
 
 def _process_mla_weights_after_gms_materialization(
@@ -292,18 +405,6 @@ def _load_write_mode(
                 default_loader.load_weights(model, model_config)
                 process_weights_after_loading(model, model_config, target_device)
 
-        moved = move_tensor_attrs_out_of_gms(
-            gms_client,
-            model,
-            device_index=target_device.index or 0,
-        )
-        if moved:
-            msg = (
-                f"[GMS] Moved {len(moved)} runtime tensor attrs out of GMS: "
-                f"{moved[:8]}"
-            )
-            logger.info(msg)
-            print(msg, flush=True)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -321,28 +422,22 @@ def _load_write_mode(
 
 def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
     """Create model on meta device for RO mode materialization."""
-    from vllm.model_executor.model_loader.utils import (
-        initialize_model,
-        process_weights_after_loading,
-    )
+    from vllm.model_executor.model_loader.utils import initialize_model
     from vllm.utils.torch_utils import set_default_torch_dtype
 
     setup_meta_tensor_workaround()
     meta_device = torch.device("meta")
 
-    with (
-        fused_moe_cpu_routing_buffers_during_meta_init(),
-        meta_safe_module_to_during_meta_init(),
-    ):
+    with vllm_meta_init_workarounds():
         with set_default_torch_dtype(model_config.dtype):
             with meta_device:
                 model = initialize_model(
                     vllm_config=vllm_config, model_config=model_config
                 )
 
-        try:
-            process_weights_after_loading(model, model_config, meta_device)
-        except Exception as e:
-            logger.debug("[GMS] Post-processing on meta tensors: %s", e)
+        # Do not run vLLM post-load hooks on the RO meta model. Some
+        # quantization/attention hooks still initialize backend CUDA scratch
+        # when tensors are meta. GMS imports the writer's final parameter
+        # metadata below and rebuilds supported MLA derived tensors afterward.
 
     return model

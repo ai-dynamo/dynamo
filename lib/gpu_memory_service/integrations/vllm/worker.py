@@ -44,6 +44,8 @@ from gpu_memory_service.integrations.vllm.model_loader import (
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
+)
+from gpu_memory_service.integrations.vllm.upstream_workarounds import (
     patch_moe_wna16_marlin_gemm_fake_impl,
 )
 
@@ -146,23 +148,11 @@ def _scratch_kv_extra_reserve(requested_memory: int) -> int:
     raw = os.environ.get("DYN_GMS_KV_CACHE_MEMORY_RESERVE_GB")
     if raw is not None and raw != "":
         return _env_memory_gib("DYN_GMS_KV_CACHE_MEMORY_RESERVE_GB")
-    if not _shadow_mode_enabled():
-        return 0
-    return min(4 * _GIB, max(1 * _GIB, int(requested_memory * 0.03)))
-
-
-def _shadow_mode_enabled() -> bool:
-    return os.environ.get("DYN_VLLM_GMS_SHADOW_MODE", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return 0
 
 
 def _cudagraph_peer_count() -> int:
-    default = 1 if _shadow_mode_enabled() else 0
-    return _env_nonnegative_int("DYN_GMS_CUDAGRAPH_PEER_COUNT", default)
+    return _env_nonnegative_int("DYN_GMS_CUDAGRAPH_PEER_COUNT", 0)
 
 
 class GMSWorker(Worker):
@@ -216,33 +206,52 @@ class GMSWorker(Worker):
             print(msg, flush=True)
             return self.available_kv_cache_memory_bytes
 
-        torch.cuda.reset_peak_memory_stats()
-        self.model_runner.profile_run()
-        torch.cuda.synchronize()
-        torch_peak = torch.cuda.max_memory_allocated()
+        import vllm.envs as envs
+        from vllm.platforms import current_platform
+        from vllm.utils.mem_utils import memory_profiling
 
-        cudagraph_memory_estimate = 0
-        if not self.model_config.enforce_eager and hasattr(
-            self.model_runner, "profile_cudagraph_memory"
-        ):
-            from vllm.platforms import current_platform
+        weights_memory = int(getattr(self.model_runner, "model_memory_usage", 0))
+        with memory_profiling(
+            self.init_snapshot,
+            weights_memory=weights_memory,
+        ) as profile_result:
+            self.model_runner.profile_run()
+            if hasattr(torch, "accelerator"):
+                stats = torch.accelerator.memory_stats(self.device)
+            else:
+                stats = torch.cuda.memory_stats(self.device)
+            profile_torch_peak = stats.get("allocated_bytes.all.peak", 0)
 
-            if not current_platform.is_rocm():
+            cudagraph_memory_estimate = 0
+            if (
+                not self.model_config.enforce_eager
+                and not current_platform.is_rocm()
+                and hasattr(self.model_runner, "profile_cudagraph_memory")
+            ):
                 cudagraph_memory_estimate = int(
                     self.model_runner.profile_cudagraph_memory()
                 )
 
-        # GMS weights mapped via cuMemMap are invisible to PyTorch's memory
-        # stats on RO engines. Add them explicitly. On RW engines, torch_peak
-        # already includes weights so skip to avoid double-counting.
-        weights_memory = int(getattr(self.model_runner, "model_memory_usage", 0))
-        if torch_peak < weights_memory:
-            non_kv_cache_memory = torch_peak + weights_memory
-        else:
-            non_kv_cache_memory = torch_peak
+        # Match upstream vLLM: use the pre-cudagraph torch peak so graph
+        # profiling is not counted twice, and apply the graph estimate only
+        # when the upstream opt-in flag is enabled.
+        profile_result.torch_peak_increase = (
+            profile_torch_peak - profile_result.before_profile.torch_peak
+        )
+        profile_result.non_kv_cache_memory = (
+            profile_result.non_torch_increase
+            + profile_result.torch_peak_increase
+            + profile_result.weights_memory
+        )
+        non_kv_cache_memory = int(profile_result.non_kv_cache_memory)
 
+        cudagraph_applied = (
+            cudagraph_memory_estimate
+            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            else 0
+        )
         peer_graphs = _cudagraph_peer_count()
-        cudagraph_reserve = cudagraph_memory_estimate * (1 + peer_graphs)
+        cudagraph_reserve = cudagraph_applied * (1 + peer_graphs)
         extra_reserve = _scratch_kv_extra_reserve(self.requested_memory)
         projected_available = (
             self.requested_memory
@@ -256,26 +265,35 @@ class GMSWorker(Worker):
                 f"{projected_available / _GIB:.2f} GiB. "
                 "Reduce gpu_memory_utilization, reduce "
                 "DYN_GMS_CUDAGRAPH_PEER_COUNT, or lower "
-                "DYN_GMS_KV_CACHE_MEMORY_RESERVE_GB."
+                "DYN_GMS_KV_CACHE_MEMORY_RESERVE_GB. "
+                f"requested={self.requested_memory / _GIB:.2f} GiB, "
+                f"non_kv={non_kv_cache_memory / _GIB:.2f} GiB, "
+                f"weights={weights_memory / _GIB:.2f} GiB, "
+                f"cudagraph_estimate={cudagraph_memory_estimate / _GIB:.2f} GiB, "
+                f"cudagraph_applied={cudagraph_reserve / _GIB:.2f} GiB, "
+                f"extra_reserve={extra_reserve / _GIB:.2f} GiB."
             )
 
-        self.non_torch_memory = 0
-        self.peak_activation_memory = max(non_kv_cache_memory - weights_memory, 0)
+        self.non_torch_memory = profile_result.non_torch_increase
+        self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
         self.available_kv_cache_memory_bytes = int(projected_available)
 
         msg = (
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
-            "torch_peak=%.2f GiB, weights=%.2f GiB, cudagraph=%.2f GiB x%d, "
-            "extra_reserve=%.2f GiB)"
+            "non_torch=%.2f GiB, torch_peak_increase=%.2f GiB, "
+            "weights=%.2f GiB, cudagraph_estimate=%.2f GiB, "
+            "cudagraph_applied=%.2f GiB x%d, extra_reserve=%.2f GiB)"
             % (
                 self.available_kv_cache_memory_bytes / _GIB,
                 self.requested_memory / _GIB,
                 non_kv_cache_memory / _GIB,
-                torch_peak / _GIB,
+                profile_result.non_torch_increase / _GIB,
+                profile_result.torch_peak_increase / _GIB,
                 weights_memory / _GIB,
                 cudagraph_memory_estimate / _GIB,
+                cudagraph_applied / _GIB,
                 1 + peer_graphs,
                 extra_reserve / _GIB,
             )

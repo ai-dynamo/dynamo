@@ -41,8 +41,8 @@ from gpu_memory_service.client.torch.allocator import (
 )
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
-    move_tensor_attrs_out_of_gms,
     register_module_tensors,
+    snapshot_auxiliary_tensors,
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
@@ -222,6 +222,17 @@ def _make_gms_tensor(
     return allocation_id, gms_tensor
 
 
+def _find_gms_mapping_for_test(
+    manager: GMSClientMemoryManager,
+    tensor: torch.Tensor,
+):
+    ptr = int(tensor.data_ptr())
+    for va, mapping in manager.mappings.items():
+        if va <= ptr < va + mapping.aligned_size:
+            return mapping
+    return None
+
+
 def _assert_exact_tensor_equal(expected: torch.Tensor, actual: torch.Tensor) -> None:
     torch.testing.assert_close(expected, actual, rtol=0, atol=0)
 
@@ -266,7 +277,7 @@ def test_gms_tensor_matches_plain_torch_ops(running_gms):
     evict_gms_client_memory_manager(writer)
 
 
-def test_mutable_workspace_attrs_are_moved_out_of_gms(running_gms):
+def test_auxiliary_tensors_are_snapshotted_and_moved_out_of_gms(running_gms):
     socket_path = running_gms
     writer = get_or_create_gms_client_memory_manager(
         socket_path,
@@ -283,34 +294,46 @@ def test_mutable_workspace_attrs_are_moved_out_of_gms(running_gms):
             torch.arange(8, device="cuda", dtype=torch.int32),
         )
 
-    moved = move_tensor_attrs_out_of_gms(writer, model, device_index=0)
+    snapshotted = snapshot_auxiliary_tensors(writer, model, device_index=0)
 
-    assert moved == [
+    assert snapshotted == [
+        "registered_buffer",
         "workspace",
+        "cache.workspace",
         "helper.runtime_workspace",
         "indexer.indexer_op.topk_indices_buffer",
     ]
     assert model.cache.workspace is model.workspace
+    workspace_metadata = writer.metadata_get("workspace")
+    registered_buffer_metadata = writer.metadata_get("registered_buffer")
+    assert workspace_metadata is not None
+    assert registered_buffer_metadata is not None
     assert cast(torch.Tensor, model.registered_buffer).is_cuda
 
     register_module_tensors(writer, model)
+    weight_metadata = writer.metadata_get("weight")
+    assert weight_metadata is not None
+    assert workspace_metadata[2] != weight_metadata[2]
+    assert registered_buffer_metadata[2] != weight_metadata[2]
     assert writer.commit()
     del model
     writer.close()
 
     reader = GMSClientMemoryManager(socket_path, device=0)
     reader.connect(RequestedLockType.RO)
-    materialized = torch.nn.Module()
-    materialized.weight = torch.nn.Parameter(
-        torch.empty(4, 4, device="meta", dtype=torch.float32), requires_grad=False
-    )
+    materialized = _TinyWorkspaceModule()
     materialize_module_from_gms(reader, materialized, device_index=0)
 
     _assert_exact_tensor_equal(
         expected_weight, cast(torch.Tensor, materialized.weight).cpu()
     )
-    assert not hasattr(materialized, "workspace")
-    assert not hasattr(materialized, "helper")
+    _assert_exact_tensor_equal(
+        torch.arange(8, device="cuda", dtype=torch.int32),
+        cast(torch.Tensor, materialized.workspace),
+    )
+    assert materialized.cache.workspace is materialized.workspace
+    assert _find_gms_mapping_for_test(reader, materialized.workspace) is None
+    assert _find_gms_mapping_for_test(reader, materialized.registered_buffer) is None
     reader.close()
     evict_gms_client_memory_manager(writer)
 
@@ -329,7 +352,9 @@ def test_recomputable_non_persistent_buffers_stay_out_of_gms(running_gms):
         expected_weight = torch.arange(16, dtype=torch.float32).reshape(4, 4)
         model.weight.data.copy_(expected_weight.to(device="cuda"))
 
+    snapshot_auxiliary_tensors(writer, model, device_index=0)
     register_module_tensors(writer, model)
+    assert writer.metadata_get("cos_sin_cache") is not None
     assert writer.commit()
     del model
     writer.close()
@@ -507,6 +532,7 @@ def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
     _, gms_extra = _make_gms_tensor(writer, baseline_extra, tag="weights")
     gms_model.extra = gms_extra
 
+    snapshot_auxiliary_tensors(writer, gms_model, device_index=0)
     register_module_tensors(writer, gms_model)
     _assert_exact_tensor_equal(expected, gms_model(inputs))
     assert writer.commit()

@@ -15,9 +15,12 @@ torch = pytest.importorskip("torch", reason="torch is required")
 
 try:
     from gpu_memory_service.integrations.vllm.patches import (
+        patch_kv_cache_allocation_for_scratch,
+    )
+    from gpu_memory_service.integrations.vllm.upstream_workarounds import (
+        deepseek_rope_cpu_cache_during_meta_init,
         fused_moe_cpu_routing_buffers_during_meta_init,
         meta_safe_module_to_during_meta_init,
-        patch_kv_cache_allocation_for_scratch,
         patch_moe_wna16_marlin_gemm_fake_impl,
     )
 except ModuleNotFoundError:
@@ -54,7 +57,12 @@ class _FakeTorch(types.ModuleType):
             _FakeTorch._device_stack.pop()
 
     def full(self, *args, **kwargs):
-        return _FakeTensor(self._device_stack[-1])
+        device = kwargs.get("device")
+        if device is None:
+            device_type = self._device_stack[-1]
+        else:
+            device_type = str(device).split(":", 1)[0]
+        return _FakeTensor(device_type)
 
 
 @pytest.fixture
@@ -94,6 +102,64 @@ def fake_fused_moe_layer(monkeypatch):
     return layer
 
 
+@pytest.fixture
+def fake_deepseek_rope(monkeypatch):
+    """Install minimal fake torch and vLLM DeepSeek RoPE modules."""
+    fake_torch = _FakeTorch("torch")
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    package_names = [
+        "vllm",
+        "vllm.model_executor",
+        "vllm.model_executor.layers",
+        "vllm.model_executor.layers.rotary_embedding",
+    ]
+    packages = {name: types.ModuleType(name) for name in package_names}
+    for package in packages.values():
+        package.__path__ = []
+
+    deepseek_rope = types.ModuleType(
+        "vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope"
+    )
+    deepseek_rope.current_platform = types.SimpleNamespace(device_type="cuda")
+
+    class DeepseekScalingRotaryEmbedding:
+        def _compute_cos_sin_cache(self):
+            import torch
+
+            return torch.full((4,), 1, dtype=torch.int32)
+
+    class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
+        def _compute_cos_sin_cache(self):
+            import torch
+            import vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope as module
+
+            return torch.full(
+                (4,),
+                1,
+                dtype=torch.int32,
+                device=module.current_platform.device_type,
+            )
+
+    deepseek_rope.DeepseekScalingRotaryEmbedding = DeepseekScalingRotaryEmbedding
+    deepseek_rope.DeepseekV4ScalingRotaryEmbedding = DeepseekV4ScalingRotaryEmbedding
+
+    packages["vllm"].model_executor = packages["vllm.model_executor"]
+    packages["vllm.model_executor"].layers = packages["vllm.model_executor.layers"]
+    packages["vllm.model_executor.layers"].rotary_embedding = packages[
+        "vllm.model_executor.layers.rotary_embedding"
+    ]
+    packages["vllm.model_executor.layers.rotary_embedding"].deepseek_scaling_rope = (
+        deepseek_rope
+    )
+
+    for name, module in packages.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setitem(sys.modules, deepseek_rope.__name__, deepseek_rope)
+
+    return deepseek_rope
+
+
 def test_fused_moe_meta_init_patch_forces_expert_map_to_cpu(fake_fused_moe_layer):
     import torch
 
@@ -120,6 +186,51 @@ def test_fused_moe_meta_init_patch_restores_after_error(fake_fused_moe_layer):
             raise RuntimeError("boom")
 
     assert fake_fused_moe_layer.determine_expert_map is original
+
+
+def test_deepseek_rope_meta_init_patch_forces_cache_to_cpu(fake_deepseek_rope):
+    import torch
+
+    base = fake_deepseek_rope.DeepseekScalingRotaryEmbedding()
+    v4 = fake_deepseek_rope.DeepseekV4ScalingRotaryEmbedding()
+
+    with torch.device("meta"):
+        before = base._compute_cos_sin_cache()
+    assert before.device.type == "meta"
+    assert v4._compute_cos_sin_cache().device.type == "cuda"
+
+    with deepseek_rope_cpu_cache_during_meta_init():
+        with torch.device("meta"):
+            base_during = base._compute_cos_sin_cache()
+            v4_during = v4._compute_cos_sin_cache()
+
+    assert base_during.device.type == "cpu"
+    assert v4_during.device.type == "cpu"
+    assert fake_deepseek_rope.current_platform.device_type == "cuda"
+
+    with torch.device("meta"):
+        after = base._compute_cos_sin_cache()
+    assert after.device.type == "meta"
+    assert v4._compute_cos_sin_cache().device.type == "cuda"
+
+
+def test_deepseek_rope_meta_init_patch_restores_after_error(fake_deepseek_rope):
+    original = (
+        fake_deepseek_rope.DeepseekV4ScalingRotaryEmbedding._compute_cos_sin_cache
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with deepseek_rope_cpu_cache_during_meta_init():
+            assert (
+                fake_deepseek_rope.DeepseekV4ScalingRotaryEmbedding._compute_cos_sin_cache
+                is not original
+            )
+            raise RuntimeError("boom")
+
+    assert (
+        fake_deepseek_rope.DeepseekV4ScalingRotaryEmbedding._compute_cos_sin_cache
+        is original
+    )
 
 
 def test_meta_safe_module_to_keeps_meta_tensors_on_meta():

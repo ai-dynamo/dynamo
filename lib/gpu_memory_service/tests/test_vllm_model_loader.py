@@ -38,6 +38,48 @@ class _FakeGMSClient:
         self.close_best_effort = best_effort
 
 
+def test_create_meta_model_skips_vllm_post_load_hooks(monkeypatch):
+    """Meta construction should not run CUDA-capable vLLM post-load hooks."""
+    model = torch.nn.Module()
+    model_config = types.SimpleNamespace(dtype=torch.float32)
+    calls: list[str] = []
+
+    def initialize_model(*, vllm_config, model_config):
+        calls.append("initialize")
+        return model
+
+    def process_weights_after_loading(*_args, **_kwargs):
+        calls.append("post_load")
+        raise AssertionError("post-load hooks must not run on the meta model")
+
+    real_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "vllm.model_executor.model_loader.utils":
+            return types.SimpleNamespace(
+                initialize_model=initialize_model,
+                process_weights_after_loading=process_weights_after_loading,
+            )
+        if name == "vllm.utils.torch_utils":
+            return types.SimpleNamespace(
+                set_default_torch_dtype=lambda _dtype: contextlib.nullcontext()
+            )
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    monkeypatch.setattr(model_loader, "setup_meta_tensor_workaround", lambda: None)
+    monkeypatch.setattr(
+        model_loader,
+        "vllm_meta_init_workarounds",
+        lambda: contextlib.nullcontext(),
+    )
+
+    loaded = model_loader._create_meta_model(object(), model_config)
+
+    assert loaded is model
+    assert calls == ["initialize"]
+
+
 def test_load_read_mode_uses_best_effort_cleanup(monkeypatch):
     """Read-side import errors should not be masked by CUDA cleanup sync."""
     gms_client = _FakeGMSClient()
@@ -84,6 +126,11 @@ def test_load_read_mode_rebuilds_mla_after_materialization(monkeypatch):
     )
     monkeypatch.setattr(
         model_loader,
+        "_process_fused_moe_kernels_after_gms_materialization",
+        lambda *_args, **_kwargs: calls.append("moe"),
+    )
+    monkeypatch.setattr(
+        model_loader,
         "get_mx_load_context",
         lambda *_args, **_kwargs: None,
     )
@@ -112,5 +159,50 @@ def test_load_read_mode_rebuilds_mla_after_materialization(monkeypatch):
     assert calls == [
         "create",
         "materialize",
+        "moe",
         "mla:torch.float32",
     ]
+
+
+def test_load_read_mode_rebuilds_fused_moe_before_mla(monkeypatch):
+    """Read-side imports rebuild MoE runtime kernels before MLA state."""
+    gms_client = _FakeGMSClient()
+    model_config = type("ModelConfig", (), {"dtype": torch.float32})()
+    calls: list[str] = []
+    model = torch.nn.Module()
+
+    monkeypatch.setattr(
+        model_loader,
+        "_create_meta_model",
+        lambda *_args, **_kwargs: calls.append("create") or model,
+    )
+    monkeypatch.setattr(
+        model_loader,
+        "materialize_module_from_gms",
+        lambda *_args, **_kwargs: calls.append("materialize"),
+    )
+    monkeypatch.setattr(
+        model_loader,
+        "_process_fused_moe_kernels_after_gms_materialization",
+        lambda *_args, **_kwargs: calls.append("moe"),
+    )
+    monkeypatch.setattr(
+        model_loader,
+        "_process_mla_weights_after_gms_materialization",
+        lambda *_args, **_kwargs: calls.append("mla"),
+    )
+    monkeypatch.setattr(
+        model_loader,
+        "get_mx_load_context",
+        lambda *_args, **_kwargs: None,
+    )
+
+    loaded = model_loader._load_read_mode(
+        gms_client,
+        object(),
+        model_config,
+        device_index=0,
+    )
+
+    assert loaded is model
+    assert calls == ["create", "materialize", "moe", "mla"]

@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING
 
 import torch
 from gpu_memory_service.client.torch.allocator import prune_allocations
-from gpu_memory_service.client.torch.module import register_module_tensors
+from gpu_memory_service.client.torch.module import (
+    register_module_tensors,
+    snapshot_auxiliary_tensors,
+)
 from gpu_memory_service.common.locks import RequestedLockType
 
 if TYPE_CHECKING:
@@ -90,7 +93,25 @@ def finalize_gms_write(
     Returns:
         Committed/pruned byte stats.
     """
+    aux_tensors = snapshot_auxiliary_tensors(
+        allocator,
+        model,
+        device_index=allocator.device,
+    )
+    if aux_tensors:
+        logger.info(
+            "[GMS] Snapshotted %d auxiliary runtime tensors: %s",
+            len(aux_tensors),
+            aux_tensors[:10],
+        )
+
     referenced_allocation_ids = register_module_tensors(allocator, model)
+    for key in allocator.metadata_list():
+        got = allocator.metadata_get(key)
+        if got is not None:
+            allocation_id, _, _ = got
+            referenced_allocation_ids.add(str(allocation_id))
+
     before_prune_bytes = allocator.total_bytes
     before_prune_count = len(allocator.mappings)
 
