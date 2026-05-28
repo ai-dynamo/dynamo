@@ -387,3 +387,34 @@ def test_materialize_module_from_gms_preserves_shared_parameter_aliases(monkeypa
     assert module.experts.runner.gate.e_score_correction_bias is materialized
     assert spec.materialize_calls == 1
     torch.testing.assert_close(materialized, torch.arange(3, dtype=torch.float32))
+
+
+def test_materialize_module_from_gms_recreates_runtime_meta_buffer_attrs(monkeypatch):
+    """Runtime scratch attrs skipped from metadata should not stay meta."""
+    original_empty_strided = torch.empty_strided
+
+    def fake_empty_strided(shape, stride, *, dtype, device):
+        return original_empty_strided(shape, stride, dtype=dtype, device="cpu")
+
+    monkeypatch.setattr(torch, "empty_strided", fake_empty_strided)
+
+    module = torch.nn.Module()
+    module.indexer = torch.nn.Module()
+    module.indexer.indexer_op = torch.nn.Module()
+    topk = torch.empty((4, 8), device="meta", dtype=torch.int32)
+    module.indexer.topk_indices_buffer = topk
+    module.indexer.indexer_op.topk_indices_buffer = topk
+    module.helper = types.SimpleNamespace(runtime_workspace=topk)
+    module.real_weight = torch.nn.Parameter(torch.empty((2, 2), device="meta"))
+
+    materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
+
+    materialized = module.indexer.topk_indices_buffer
+    assert not materialized.is_meta
+    assert materialized.device.type == "cpu"
+    assert tuple(materialized.shape) == (4, 8)
+    assert materialized.dtype is torch.int32
+    assert module.indexer.indexer_op.topk_indices_buffer is materialized
+    assert module.helper.runtime_workspace is materialized
+    # Non-runtime non-zero meta parameters are still not silently materialized.
+    assert module.real_weight.is_meta

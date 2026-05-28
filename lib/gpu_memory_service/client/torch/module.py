@@ -304,6 +304,213 @@ def _materialize_zero_size_meta_tensors(
     return materialized
 
 
+
+def _materialize_runtime_meta_tensor_attrs(
+    module: torch.nn.Module,
+    *,
+    device_index: int,
+    alias_map: _TensorAliasMap,
+    name_substrings: tuple[str, ...] = ("workspace", "_buffer"),
+    max_depth: int = 12,
+    prefix: str = "",
+) -> list[str]:
+    """Create CUDA scratch tensors for runtime attrs skipped from GMS.
+
+    This intentionally applies only to non-registered tensor attributes whose
+    names indicate mutable runtime state. Parameters and registered buffers stay
+    strict: non-zero model state must come from GMS metadata.
+    """
+    materialized: list[str] = []
+    target_device = torch.device("cuda", device_index)
+
+    def should_materialize(path: str) -> bool:
+        lowered = path.lower()
+        return any(substring in lowered for substring in name_substrings)
+
+    def make_replacement(tensor: torch.Tensor) -> torch.Tensor:
+        replacement = torch.empty_strided(
+            tuple(tensor.shape),
+            tuple(int(s) for s in tensor.stride()),
+            dtype=tensor.dtype,
+            device=target_device,
+        )
+        _copy_tensor_attrs(tensor, replacement)
+        _set_tensor_alias(alias_map, tensor, replacement)
+        return replacement
+
+    def set_value(owner: Any, key: str | int, value: Any) -> None:
+        if isinstance(owner, list):
+            owner[int(key)] = value
+        elif isinstance(owner, MutableMapping):
+            owner[key] = value
+        elif isinstance(owner, torch.nn.Module):
+            owner.__dict__[str(key)] = value
+        else:
+            setattr(owner, str(key), value)
+
+    def visit_value(
+        owner: Any,
+        key: str | int,
+        value: Any,
+        *,
+        path: str,
+        visited: set[int],
+        depth: int,
+    ) -> None:
+        if torch.is_tensor(value):
+            if value.is_meta and should_materialize(path):
+                replacement = _get_tensor_alias(alias_map, value)
+                if replacement is None:
+                    replacement = make_replacement(value)
+                    materialized.append(path)
+                set_value(owner, key, replacement)
+            return
+
+        if depth <= 0 or value is None:
+            return
+
+        if isinstance(
+            value,
+            (
+                str,
+                bytes,
+                int,
+                float,
+                bool,
+                torch.dtype,
+                torch.device,
+                FunctionType,
+                MethodType,
+                ModuleType,
+            ),
+        ) or isinstance(value, type):
+            return
+
+        value_id = id(value)
+        if value_id in visited:
+            return
+        visited.add(value_id)
+
+        if isinstance(value, list):
+            for idx, item in enumerate(value):
+                visit_value(
+                    value,
+                    idx,
+                    item,
+                    path=f"{path}.{idx}",
+                    visited=visited,
+                    depth=depth - 1,
+                )
+            return
+
+        if isinstance(value, tuple):
+            updated = list(value)
+            changed = False
+            for idx, item in enumerate(value):
+                before = updated[idx]
+                visit_value(
+                    updated,
+                    idx,
+                    item,
+                    path=f"{path}.{idx}",
+                    visited=visited,
+                    depth=depth - 1,
+                )
+                changed = changed or updated[idx] is not before
+            if changed:
+                try:
+                    replacement_tuple = type(value)(*updated)
+                except TypeError:
+                    replacement_tuple = tuple(updated)
+                set_value(owner, key, replacement_tuple)
+            return
+
+        if isinstance(value, MutableMapping):
+            for item_key, item in list(value.items()):
+                visit_value(
+                    value,
+                    item_key,
+                    item,
+                    path=f"{path}.{item_key}",
+                    visited=visited,
+                    depth=depth - 1,
+                )
+            return
+
+        if isinstance(value, (Mapping, Sequence, torch.nn.Module, ModuleType)):
+            return
+
+        try:
+            attrs = vars(value)
+        except TypeError:
+            attrs = {}
+
+        for attr_name, attr_val in list(attrs.items()):
+            if attr_name.startswith("__"):
+                continue
+            visit_value(
+                value,
+                attr_name,
+                attr_val,
+                path=f"{path}.{attr_name}",
+                visited=visited,
+                depth=depth - 1,
+            )
+
+        slots = getattr(type(value), "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        for slot_name in slots:
+            if slot_name in ("__dict__", "__weakref__") or slot_name.startswith("__"):
+                continue
+            try:
+                slot_val = getattr(value, slot_name)
+            except AttributeError:
+                continue
+            visit_value(
+                value,
+                slot_name,
+                slot_val,
+                path=f"{path}.{slot_name}",
+                visited=visited,
+                depth=depth - 1,
+            )
+
+    skip = (
+        set(module._parameters.keys())
+        | set(module._buffers.keys())
+        | set(module._modules.keys())
+        | {"_parameters", "_buffers", "_modules"}
+    )
+    for attr_name, attr_val in list(module.__dict__.items()):
+        if attr_name in skip or attr_name.startswith("__"):
+            continue
+        qualified = f"{prefix}{attr_name}" if prefix else attr_name
+        visit_value(
+            module,
+            attr_name,
+            attr_val,
+            path=qualified,
+            visited=set(),
+            depth=max_depth,
+        )
+
+    for name, submodule in module._modules.items():
+        if submodule is not None:
+            subprefix = f"{prefix}{name}." if prefix else f"{name}."
+            materialized.extend(
+                _materialize_runtime_meta_tensor_attrs(
+                    submodule,
+                    device_index=device_index,
+                    alias_map=alias_map,
+                    name_substrings=name_substrings,
+                    max_depth=max_depth,
+                    prefix=subprefix,
+                )
+            )
+
+    return materialized
+
 def _copy_tensor_attrs(src: torch.Tensor, dst: torch.Tensor) -> None:
     attrs = getattr(src, "__dict__", None)
     if attrs:
@@ -1005,6 +1212,16 @@ def materialize_module_from_gms(
             "[GMS] Materialized %d zero-size meta tensors not in metadata: %s",
             len(zero_size_meta_tensors),
             zero_size_meta_tensors[:10],
+        )
+
+    runtime_meta_attrs = _materialize_runtime_meta_tensor_attrs(
+        model, device_index=device_index, alias_map=alias_map
+    )
+    if runtime_meta_attrs:
+        logger.info(
+            "[GMS] Materialized %d runtime meta tensor attrs: %s",
+            len(runtime_meta_attrs),
+            runtime_meta_attrs[:10],
         )
 
     refreshed = _refresh_tensor_aliases(model, alias_map)
