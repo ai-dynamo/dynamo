@@ -140,6 +140,31 @@ def test_g3_args_allow_kv_bytes_per_token_worker_override():
     assert worker_args.num_g3_blocks == 16384
 
 
+def test_g4_args_allow_kv_bytes_per_token_worker_override():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            model_path="/models/mock",
+            kv_bytes_per_token=None,
+            num_g2_blocks=8192,
+            enable_g4_storage=True,
+            bandwidth_g2_to_g4_gbps=4.0,
+            bandwidth_g4_to_g2_gbps=4.0,
+        )
+    )
+    assert engine_args.kv_bytes_per_token is None
+    assert engine_args.num_g2_blocks == 8192
+    assert engine_args.enable_g4_storage is True
+    assert engine_args.bandwidth_g2_to_g4_gbps == 4.0
+    assert engine_args.bandwidth_g4_to_g2_gbps == 4.0
+
+    worker_args = CONFIG.apply_worker_engine_args_overrides(
+        engine_args,
+        kv_bytes_per_token=131072,
+    )
+    assert worker_args.kv_bytes_per_token == 131072
+    assert worker_args.enable_g4_storage is True
+
+
 def test_runtime_config_disables_local_indexer_for_decode_worker():
     engine_args = CONFIG.build_mocker_engine_args(
         make_args(is_decode_worker=True, durable_kv_events=False)
@@ -292,6 +317,35 @@ def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatc
 
     assert engine_args.num_g2_blocks == 8192
     assert engine_args.num_g3_blocks == 16384
+    assert calls == [("/models/mock", "auto")]
+
+
+def test_replay_engine_args_compute_kv_bytes_for_g4_before_validation(monkeypatch):
+    import dynamo.replay.main as replay_main
+
+    calls = []
+
+    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
+        calls.append((model_path, kv_cache_dtype))
+        return 131072
+
+    monkeypatch.setattr(
+        replay_main, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
+    )
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "num_g2_blocks": 8192,
+                "enable_g4_storage": True,
+                "aic_model_path": "/models/mock",
+            }
+        )
+    )
+
+    assert engine_args.num_g2_blocks == 8192
+    assert engine_args.enable_g4_storage is True
     assert calls == [("/models/mock", "auto")]
 
 

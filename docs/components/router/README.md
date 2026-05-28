@@ -4,6 +4,10 @@
 title: Router
 ---
 
+<p align="left">
+  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 
 ## Quick Start
@@ -38,14 +42,14 @@ For deployment modes and quick start steps, see the [Router Guide](router-guide.
 **Requirements:**
 - **Dynamic endpoints only**: KV router requires `register_model()` with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
 - Backend workers must call `register_model()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../../development/backend-guide.md))
-- You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
+- Use dynamic discovery with KV routing so the router can track worker instances and KV cache state
 
 **Multimodal Support:**
 - **Image routing via multimodal hashes**: Supported in the documented TRT-LLM and vLLM router paths.
 - **Other backend or modality combinations**: Check the backend-specific multimodal docs before relying on multimodal hash routing.
 
 **Limitations:**
-- Static endpoints not supported—KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states
+- Static endpoints are not supported with KV routing; use dynamic discovery so the router can track worker instances and KV cache state
 
 For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, `--router-mode least-loaded`, or `--router-mode device-aware-weighted` with both static and dynamic endpoints.
 
