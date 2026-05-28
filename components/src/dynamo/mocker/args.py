@@ -543,6 +543,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Set to 0 to disable.",
     )
     parser.add_argument(
+        "--enable-g4-storage",
+        action="store_true",
+        default=False,
+        help="Enable shared KVBM mock G4 object-storage simulation.",
+    )
+    parser.add_argument(
         "--offload-batch-size",
         type=non_negative_int,
         default=None,
@@ -571,6 +577,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=non_negative_float,
         default=None,
         help="Mock shared G3->G2 staging bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g2-to-g4-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock shared G2->G4 object offload bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g4-to-g2-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock shared G4->G2 object staging bandwidth in GB/s.",
     )
 
     parser.add_argument(
