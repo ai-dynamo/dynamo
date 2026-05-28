@@ -116,6 +116,17 @@ pub trait ReasoningParser: Send + std::fmt::Debug {
         token_ids: &[u32],
     ) -> ParserResult;
 
+    /// Finalizes a stream after the last chunk, before parser state is dropped.
+    ///
+    /// Incremental parsing may buffer a partial delimiter prefix instead of
+    /// emitting it immediately because the next chunk could complete a marker
+    /// like `<think>` or `</think>`. At EOF, no next chunk is coming, so the
+    /// parser must flush the undecided bytes as normal or reasoning text based
+    /// on its current state.
+    fn finish_reasoning_stream(&mut self) -> ParserResult {
+        ParserResult::default()
+    }
+
     /// Override the parser's initial reasoning state. When called with `true`, the parser
     /// starts in reasoning mode without waiting for the start token in the completion stream.
     /// Use this when the chat template already injected the start token (e.g., `<think>`)
@@ -169,6 +180,10 @@ impl ReasoningParser for ReasoningParserWrapper {
     ) -> ParserResult {
         self.parser
             .parse_reasoning_streaming_incremental(text, token_ids)
+    }
+
+    fn finish_reasoning_stream(&mut self) -> ParserResult {
+        self.parser.finish_reasoning_stream()
     }
 
     fn set_in_reasoning(&mut self, in_reasoning: bool) {
