@@ -659,6 +659,7 @@ mod tests {
         let tools = vec![ToolDefinition {
             name: "get_weather".to_string(),
             parameters: None,
+            strict: None,
         }];
         let (calls, _) = try_tool_call_parse_gemma4(input, Some(&tools)).unwrap();
         assert_eq!(calls.len(), 1);

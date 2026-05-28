@@ -5,6 +5,10 @@ title: Tool Calling
 subtitle: Parse tool calls from model output and surface them as OpenAI-compatible tool_calls
 ---
 
+<p align="left">
+  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 Dynamo can connect models to external tools and services by parsing tool-call
 syntax out of raw model output and surfacing it as OpenAI-compatible
 `tool_calls` on the response. Tool calling is controlled by the `tool_choice`
@@ -45,6 +49,10 @@ request and share the response. See
 [Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
 include when reporting an issue.
 
+## Optional: structural tags
+
+You can optionally turn on **xgrammar structural tags** so guided decoding matches the parser's tool-call format at token granularity. See [Structural tag (guided decoding for tool calls)](structural-tag.md).
+
 ## See Also
 
 - [Troubleshooting Tool Calls](troubleshooting.md) -- capture raw model
@@ -54,3 +62,5 @@ include when reporting an issue.
   tool-call parser and a reasoning parser configured together.
 - [Frontend Configuration Reference](../components/frontend/configuration.md) --
   full CLI flag reference.
+- [Structural tag (guided decoding)](structural-tag.md) — optional xgrammar
+  constraints aligned with Dynamo tool-call parsers.

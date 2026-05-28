@@ -59,6 +59,7 @@ class SearchStrategy(str, Enum):
 
 class GPUSKUType(str, Enum):
     GB200SXM = "gb200_sxm"
+    GB10 = "gb10"
     B200SXM = "b200_sxm"
     H200SXM = "h200_sxm"
     H100SXM = "h100_sxm"

@@ -75,6 +75,7 @@ of batch.
 - **`TOOLCALLING.stream.4`** Streaming termination — final chunk arrives with `finish_reason=tool_calls` / EOS; parser flushes any in-flight call.
 - **`TOOLCALLING.stream.4.a`** Truncated before tool-call end — non-happy path where arguments are complete but the model omits `tool_call_end` / section end; recovery is implementation-defined and may diverge.
 - **`TOOLCALLING.stream.4.b`** Truncated mid-call body — non-happy path where the stream terminates before the in-flight argument payload is complete; recovery is implementation-defined and may diverge.
+- **`TOOLCALLING.stream.4.c`** Inner/body payload without required outer wrapper, then close-marker spam — non-happy path from real model output where the parser may recover a call, drop the block, or leak orphan close markers into `normal_text`.
 
 Stream fixtures may include `delta_token_ids` on each chunk. Text-only chunks are enough for most parser families, but token-ID-dependent streaming parsers (currently vLLM's Harmony / `openai` parser) must record `delta_token_ids`; capture should mark those cases unavailable rather than inventing IDs.
 
@@ -207,6 +208,7 @@ class.
 - **`TOOLCALLING.batch.4.e`** Recovery after malformed prefix. A bad tool-looking
   fragment is followed by a valid complete call; parsers may either treat the
   whole string as normal text or resynchronize and extract the later valid call.
+- **`TOOLCALLING.batch.4.f`** Tool name emitted as XML tag instead of function opener. The model emits a well-formed outer wrapper but uses a tool-name tag such as `<terminal>` instead of the required `<function=Terminal>` opener. Tests that parsers do not treat the malformed inner tag as a valid call.
 
 ## `TOOLCALLING.batch.5` — Missing end-token recovery
 
@@ -512,6 +514,7 @@ explicitly per `TOOLCALLING.batch.5`).
 
 - **`TOOLCALLING.stream.4.a`** Truncated before tool-call end. The model emits a start fence, function name, argument-begin marker, and complete JSON arguments, then terminates before `tool_call_end` / section end. This is a non-happy path: Dynamo currently treats the call as incomplete and emits no tool call, while vLLM/SGLang may recover the call from the complete argument JSON.
 - **`TOOLCALLING.stream.4.b`** Truncated mid-call body. The model emits a start fence and begins the argument payload, then terminates before the JSON/value body is complete. This is a non-happy path: parsers may drop the in-flight call, preserve residual markup as normal text, emit an error, or surface a raw partial argument string.
+- **`TOOLCALLING.stream.4.c`** Inner/body payload without required outer wrapper, then close-marker spam. The model emits a parser-recognizable inner invocation or body without the required outer wrapper, emits repeated close markers, and terminates with `finish_reason=length`. This pins whether recovery leaks orphan protocol markers such as `</function>` into user-visible text.
 
 ---
 

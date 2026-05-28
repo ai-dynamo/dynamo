@@ -24,6 +24,11 @@ pub struct MockerMetrics {
     pub active_decode_blocks: u64,
     pub total_blocks: u64,
     pub gpu_cache_usage_perc: f64,
+    pub running_requests: u64,
+    pub waiting_requests: u64,
+    pub vllm_preemptions_total: u64,
+    pub sglang_cache_hit_tokens: u64,
+    pub sglang_cache_total_tokens: u64,
 }
 
 impl MockerMetrics {
@@ -31,6 +36,20 @@ impl MockerMetrics {
         dp_rank: dynamo_kv_router::protocols::DpRank,
         active_decode_blocks: u64,
         total_blocks: u64,
+    ) -> Self {
+        Self::from_parts(dp_rank, active_decode_blocks, total_blocks, 0, 0, 0, 0, 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        dp_rank: dynamo_kv_router::protocols::DpRank,
+        active_decode_blocks: u64,
+        total_blocks: u64,
+        running_requests: u64,
+        waiting_requests: u64,
+        vllm_preemptions_total: u64,
+        sglang_cache_hit_tokens: u64,
+        sglang_cache_total_tokens: u64,
     ) -> Self {
         let gpu_cache_usage_perc = if total_blocks == 0 {
             0.0
@@ -42,6 +61,11 @@ impl MockerMetrics {
             active_decode_blocks,
             total_blocks,
             gpu_cache_usage_perc,
+            running_requests,
+            waiting_requests,
+            vllm_preemptions_total,
+            sglang_cache_hit_tokens,
+            sglang_cache_total_tokens,
         }
     }
 }
@@ -163,11 +187,7 @@ impl Scheduler {
                 flush_output_signals(&mut core, &output_tx, pass.output_signals);
                 publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
-                let _ = metrics_tx.send(MockerMetrics::new(
-                    dp_rank,
-                    core.kv_manager.num_active_blocks() as u64,
-                    total_blocks,
-                ));
+                let _ = metrics_tx.send(core.mocker_metrics());
             }
         });
 

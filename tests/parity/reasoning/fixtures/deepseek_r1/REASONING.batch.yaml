@@ -122,6 +122,7 @@ cases:
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated by Dynamo
     ref: *upstream_ref
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: <think>first</think> middle <think>second</think> done
     expected:
       dynamo:
@@ -130,5 +131,6 @@ cases:
       vllm:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
+        reason: Dynamo extracts each complete reasoning span; vLLM leaves the later complete span in normal_text.
       sglang:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'

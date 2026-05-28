@@ -258,12 +258,6 @@ args:
   - "3"
 ```
 
-## Benchmarking
-
-To benchmark your deployment with AIPerf, see this utility script: [perf.sh](../../../../benchmarks/llm/perf.sh)
-
-Configure the `model` name and `host` based on your deployment.
-
 ## Further Reading
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)

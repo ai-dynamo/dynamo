@@ -479,7 +479,7 @@ Disaggregated deployments transfer KV cache between prefill and decode workers. 
 
 1. **RDMA-capable network** (InfiniBand or RoCE)
 2. **RDMA device plugin** installed on the cluster (provides `rdma/ib` resources)
-3. **ETCD and NATS** deployed (for coordination)
+3. Discovery and event-plane infrastructure configured for your deployment (for example, Kubernetes-native discovery with ZMQ or NATS events, or etcd/NATS when those backends are selected)
 
 #### Disaggregated DGD with RDMA
 
@@ -748,7 +748,7 @@ aiconfigurator cli support \
 - Verify `volumeMounts` and `HF_HOME` are configured on workers
 
 **"Context stopped or killed" errors (disaggregated only)**:
-- Deploy ETCD and NATS infrastructure (required for KV cache transfer)
+- Verify that discovery and event-plane services are reachable for the selected backends. KV cache transfer uses the NIXL/RDMA data path; etcd or NATS are only needed when your deployment selects those discovery or event transports.
 - See [Dynamo Kubernetes Guide](../../kubernetes/README.md) for platform setup
 
 ### Performance Issues

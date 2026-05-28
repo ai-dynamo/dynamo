@@ -29,6 +29,9 @@ class DynamoRuntimeConfig(ConfigBase):
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
+    dyn_enable_structural_tag: bool = False
+    dyn_structural_tag_scope: str = "auto"
+    dyn_structural_tag_schema: str = "auto"
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
@@ -160,6 +163,36 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=True,
             help="Exclude tool definitions from the chat template when tool_choice='none'. "
             "Prevents models from generating raw XML tool calls in the content field.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--dyn-enable-structural-tag",
+            env_var="DYN_ENABLE_STRUCTURAL_TAG",
+            default=False,
+            help="Enable structural tag guided decoding for tool calls.",
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-structural-tag-scope",
+            env_var="DYN_STRUCTURAL_TAG_SCOPE",
+            default="auto",
+            choices=["auto", "always"],
+            help="Controls when structural tags are activated. "
+            "'auto': for required/named tool_choice, and if any tool has strict=true "
+            "or parallel_tool_calls is false. "
+            "'always': also for auto without those conditions. "
+            "tool_choice none is unaffected by auto vs always.",
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-structural-tag-schema",
+            env_var="DYN_STRUCTURAL_TAG_SCHEMA",
+            default="auto",
+            choices=["auto", "strict"],
+            help="Controls parameter schema strictness inside structural tags. "
+            "'auto': real schema only for tools with strict=true; "
+            "syntactically constrained but schema-unconstrained for all other tools. "
+            "'strict': real parameter schema for all tools.",
         )
         add_argument(
             g,

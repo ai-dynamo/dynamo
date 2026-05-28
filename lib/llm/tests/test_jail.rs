@@ -2219,6 +2219,7 @@ mod tests {
                     "filter": {"type": "string"},
                 },
             })),
+            strict: None,
         }];
 
         let input_stream = stream::iter(chunks);
@@ -3339,6 +3340,7 @@ fahrenheit
             Some("qwen3_coder".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             input_stream,
         )
         .collect()
@@ -3426,6 +3428,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             input_stream,
         )
         .collect()
@@ -3518,6 +3521,7 @@ fahrenheit
             Some("minimax_m2".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3620,6 +3624,7 @@ fahrenheit
                 Some("minimax_m2".to_string()),
                 None,
                 None,
+                false,
                 stream::iter(input_chunks),
             )
             .collect()
@@ -3670,6 +3675,7 @@ fahrenheit
             Some("hermes".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3723,6 +3729,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3781,6 +3788,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3826,6 +3834,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
