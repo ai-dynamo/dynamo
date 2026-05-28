@@ -2432,6 +2432,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
+ "bytes",
  "dashmap",
  "derive_builder",
  "dynamo-runtime",
@@ -2448,6 +2449,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2455,6 +2457,7 @@ dependencies = [
  "tracing",
  "uuid",
  "validator",
+ "velo",
  "xxhash-rust",
  "zmq",
 ]

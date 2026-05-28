@@ -1,27 +1,33 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Standalone HTTP KV-cache indexer.
+//! Standalone KV-cache indexer.
 //!
-//! Hosts an Axum HTTP server with `/register`, `/unregister`, `/query`,
-//! `/query_by_hash`, and peer-discovery routes that workers / gateways can
-//! call to drive cache-aware routing decisions. Each registered worker spawns
-//! a ZMQ listener that ingests its KV events into a per-(model, tenant)
-//! [`indexer::Indexer`].
+//! Two transport backends are available, each behind its own feature gate:
 //!
-//! ## Multi-tier responses
+//! - **`indexer-runtime`** (HTTP + ZMQ): hosts an Axum HTTP server with
+//!   `/register`, `/unregister`, `/query`, `/query_by_hash`, and peer-discovery
+//!   routes.  Each registered worker spawns a ZMQ listener that ingests its KV
+//!   events.  Entry point: [`run_server`].
 //!
-//! `/query` and `/query_by_hash` return both:
-//! - the legacy flat `scores`/`frequencies`/`tree_sizes` (device-tier overlap),
-//!   for backward compatibility, and
-//! - a per-instance `instances` map keyed by `instance_id` with `gpu`, `cpu`,
-//!   `disk`, per-`dp_rank` device counts, and `longest_matched`.
+//! - **`velo-runtime`** (velo AM + unary RPC): workers fire-and-forget event
+//!   batches over velo active messaging; gateways call a velo unary RPC for
+//!   prefix-match queries.  No per-worker sockets, no HTTP overhead.  Entry
+//!   point: [`run_server_velo`].
 //!
-//! The `instances` shape is intended to align with Mooncake's
-//! "[RFC]: KV-Store Indexer API Standardization"
-//! (<https://github.com/kvcache-ai/Mooncake/issues/1403>).
-//! Tier counts are CUMULATIVE through each tier's walk — see the doc on the
-//! response struct in [`server`] for the exact semantics.
+//! ## Response shapes
+//!
+//! The two backends return **different wire formats**:
+//!
+//! - **`indexer-runtime`** (HTTP) returns a `ScoreResponse` with token counts
+//!   scaled by `block_size`, aligned with the Mooncake KV-Store Indexer API
+//!   Standardization RFC (<https://github.com/kvcache-ai/Mooncake/issues/1403>).
+//!   Tier counts are cumulative — see [`server`] for the exact semantics.
+//!
+//! - **`velo-runtime`** returns
+//!   [`crate::indexer::IndexerQueryResponse::TieredScores`] with raw
+//!   block-level overlap counts.  This is a Velo-native API; callers switching
+//!   from HTTP must update their response parsing accordingly.
 
 pub mod indexer;
 pub mod listener;
@@ -30,6 +36,9 @@ pub mod recovery;
 pub mod registry;
 pub mod server;
 mod zmq;
+
+#[cfg(feature = "velo-runtime")]
+pub mod runtime;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -268,6 +277,115 @@ async fn run_common(
         })
         .await?;
 
+    Ok(())
+}
+
+// ── Velo-runtime entry point ──────────────────────────────────────────────
+
+/// Configuration for the velo-based standalone indexer.
+#[cfg(feature = "velo-runtime")]
+pub struct VeloIndexerConfig {
+    /// Number of indexer threads per shard.  0 = single-threaded.
+    pub threads: usize,
+    /// TCP port to bind.  0 = OS-assigned.
+    pub tcp_port: u16,
+    /// If set, publish a [`runtime::discovery::IndexerPeerSnapshot`] JSON file
+    /// (`kv-indexer.json`) to this directory.  Workers call
+    /// `discovery::connect_to_indexer(&messenger, dir)` to read the file and
+    /// register the indexer peer.  This is **not** velo's built-in
+    /// `FilesystemPeerDiscovery` — the on-disk format differs.
+    pub discovery_dir: Option<std::path::PathBuf>,
+    /// If set, also bind a Unix domain socket at this path (Linux only).
+    /// Velo prefers UDS over TCP for same-host connections automatically,
+    /// which is useful for benchmarking co-located workers.
+    #[cfg(unix)]
+    pub uds_path: Option<std::path::PathBuf>,
+}
+
+/// Run the standalone KV cache indexer using velo as the transport layer.
+///
+/// Workers push KV events via velo active messaging (fire-and-forget);
+/// gateways query via velo unary RPC.  Shards are created lazily on the
+/// first event batch for each `(model_name, tenant_id)` pair.
+///
+/// Gracefully shuts down on `Ctrl-C`.
+#[cfg(feature = "velo-runtime")]
+pub async fn run_server_velo(config: VeloIndexerConfig) -> anyhow::Result<()> {
+    use std::net::TcpListener as StdTcpListener;
+    use std::sync::Arc as StdArc;
+
+    use velo::Messenger;
+    use velo::backend::tcp::TcpTransportBuilder;
+
+    use runtime::{RuntimeRegistry, discovery::IndexerDiscovery, query_engine, subscriber};
+
+    // ── Build TCP transport ──────────────────────────────────────────────
+    let listener = StdTcpListener::bind(("0.0.0.0", config.tcp_port)).map_err(|e| {
+        anyhow::anyhow!("failed to bind TCP listener on port {}: {e}", config.tcp_port)
+    })?;
+    let actual_addr = listener.local_addr()?;
+
+    let tcp_transport = TcpTransportBuilder::new()
+        .from_listener(listener)?
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build TCP transport: {e}"))?;
+
+    tracing::info!(addr = %actual_addr, "Velo TCP transport bound");
+
+    // ── Optionally add UDS transport (Linux only) ────────────────────────
+    // UDS is registered BEFORE TCP so that velo's insertion-order priority
+    // selects it automatically for same-host peers, giving the documented
+    // low-latency fast path without any explicit peer-side configuration.
+    let mut builder = Messenger::builder();
+
+    #[cfg(unix)]
+    if let Some(ref uds_path) = config.uds_path {
+        use velo::backend::uds::UdsTransportBuilder;
+
+        let uds_transport = UdsTransportBuilder::new()
+            .socket_path(uds_path)
+            .build()
+            .map_err(|e| {
+                anyhow::anyhow!("failed to build UDS transport at {}: {e}", uds_path.display())
+            })?;
+
+        builder = builder.add_transport(StdArc::new(uds_transport));
+        tracing::info!(path = %uds_path.display(), "Velo UDS transport bound");
+    }
+
+    let builder = builder.add_transport(StdArc::new(tcp_transport));
+
+    let messenger: StdArc<Messenger> = builder
+        .build()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to build velo Messenger: {e}"))?;
+
+    // ── Register velo handlers first ─────────────────────────────────────
+    // Handlers must be registered before the peer info is published.  A worker
+    // that discovers the indexer immediately can send an AM event while Velo
+    // still has no registered handler for that endpoint, causing a silent drop.
+    let registry = StdArc::new(RuntimeRegistry::new(config.threads));
+    subscriber::register(&messenger, registry.clone())?;
+    query_engine::register(&messenger, registry.clone())?;
+
+    // ── Publish peer info for workers/routers to discover ────────────────
+    let _discovery_handle = if let Some(ref discovery_dir) = config.discovery_dir {
+        Some(
+            IndexerDiscovery::publish(messenger.clone(), discovery_dir)
+                .map_err(|e| anyhow::anyhow!("failed to publish peer info: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    tracing::info!(
+        instance_id = ?messenger.instance_id(),
+        "Velo-based KV cache indexer running"
+    );
+
+    // ── Wait for Ctrl-C ───────────────────────────────────────────────────
+    tokio::signal::ctrl_c().await.ok();
+    tracing::info!("Received shutdown signal, stopping velo indexer");
     Ok(())
 }
 

@@ -21,11 +21,13 @@ profile = []
 shard-metrics = []
 standalone-indexer = ["dep:axum", "dep:serde_json", "dep:reqwest", "dep:zmq"]
 indexer-runtime = ["metrics", "runtime-protocols", "standalone-indexer"]
+velo-runtime = ["dep:velo", "dep:serde_json", "dep:bytes", "standalone-indexer"]
 
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
 dynamo-tokens = { workspace = true }
+velo = { workspace = true, optional = true }
 
 # workspace
 anyhow = { workspace = true }
@@ -47,6 +49,7 @@ validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
 # dependencies
+bytes = { workspace = true, optional = true }
 flume = "0.12.0"
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
@@ -61,6 +64,7 @@ reqwest = { workspace = true, optional = true }
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
