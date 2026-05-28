@@ -34,8 +34,8 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
-  # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
-  - 'skills/**'
+# Root-level compatibility symlink -> .agents/skills (skills live there).
+  - 'skills'
 
 examples:
   - 'recipes/**'
