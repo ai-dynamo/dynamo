@@ -6,9 +6,9 @@ This skill is ready for commercial/non-commercial use. <br>
 ## Owner: NVIDIA <br>
 
 ### License/Terms of Use: <br>
-Apache 2.0 <br>
+Apache-2.0 <br>
 ## Use Case: <br>
-Developers and infrastructure engineers use this skill to configure Dynamo routing modes (round-robin, KV-aware, least-loaded, or device-aware) and validate endpoint health via smoke tests. <br>
+Developers and infrastructure engineers use this skill to configure Dynamo routing modes (round-robin, KV-aware, least-loaded, device-aware) and verify endpoint health via smoke tests during cluster bring-up. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -19,11 +19,10 @@ Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
 - [Router Modes Reference](references/router-modes.md) <br>
-- [KV Router A/B Testing Guide](docs/benchmarks/kv-router-ab-testing.md) <br>
 
 
 ## Skill Output: <br>
-**Output Type(s):** [Shell commands, Configuration instructions, Smoke-test results] <br>
+**Output Type(s):** [Shell commands, Configuration instructions] <br>
 **Output Format:** [Markdown with inline bash code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>

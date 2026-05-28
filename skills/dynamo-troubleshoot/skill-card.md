@@ -8,7 +8,7 @@ This skill is ready for commercial/non-commercial use. <br>
 ### License/Terms of Use: <br>
 Apache 2.0 <br>
 ## Use Case: <br>
-Developers and platform engineers use this skill to diagnose and resolve failures in Dynamo inference deployments on Kubernetes, covering pod scheduling, model-cache provisioning, operator reconciliation, and endpoint health. <br>
+Developers and platform engineers use this skill to diagnose and resolve failures in Dynamo Kubernetes deployments, including pod crashes, PVC issues, model-download job failures, GPU scheduling problems, and endpoint health checks. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -23,7 +23,7 @@ Mitigation: Review and scan skill before deployment. <br>
 
 
 ## Skill Output: <br>
-**Output Type(s):** [Shell commands, Analysis, Configuration instructions] <br>
+**Output Type(s):** [Analysis, Shell commands, Configuration instructions] <br>
 **Output Format:** [Markdown with inline bash code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>

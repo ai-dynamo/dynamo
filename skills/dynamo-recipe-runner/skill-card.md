@@ -1,14 +1,14 @@
 ## Description: <br>
-Select, validate, patch, and deploy existing NVIDIA Dynamo Kubernetes recipes. <br>
+Select, validate, patch, and deploy existing NVIDIA Dynamo Kubernetes recipes. Use for model/backend/GPU/deployment-mode recipe bring-up; use router-starter for router-only mode work and troubleshoot for broken deployments. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
 ## Owner: NVIDIA <br>
 
 ### License/Terms of Use: <br>
-Apache-2.0 <br>
+Apache 2.0 <br>
 ## Use Case: <br>
-Developers and engineers use this skill to select, validate, patch, and deploy existing NVIDIA Dynamo Kubernetes recipes for LLM inference serving bring-up on GPU clusters. <br>
+Developers and infrastructure engineers use this skill to select, configure, and deploy NVIDIA Dynamo inference recipes on Kubernetes clusters, minimizing manual manifest editing and deployment steps. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -20,6 +20,7 @@ Mitigation: Review and scan skill before deployment. <br>
 ## Reference(s): <br>
 - [Kubernetes Recipe Workflow](references/k8s-recipe-workflow.md) <br>
 - [Dynamo Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) <br>
+- [Dynamo Documentation](https://docs.nvidia.com/dynamo/) <br>
 
 
 ## Skill Output: <br>
