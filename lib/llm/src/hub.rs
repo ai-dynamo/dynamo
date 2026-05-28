@@ -93,9 +93,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let model_name = name.display().to_string();
 
     // Cache-first in all modes: if the snapshot is already on disk with the files we
-    // need, return it without touching the network. Previously this short-circuit was
-    // gated behind HF_HUB_OFFLINE=1, which forced operators to set the env var to avoid
-    // HF API hangs on nodes whose cache was already populated. See DIS-1803.
+    // need, return it without touching the network.
     if let Some(cached_path) = get_cached_model_path(&model_name, ignore_weights) {
         return Ok(cached_path);
     }
