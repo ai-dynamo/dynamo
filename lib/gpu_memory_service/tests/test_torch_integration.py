@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Torch integration coverage for GMS-backed tensors and modules.
@@ -16,23 +16,31 @@ import time
 from typing import cast
 
 import pytest
+from _deps import HAS_CUDA, HAS_GMS, HAS_TORCH
 
-try:
-    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-    from gpu_memory_service.client.torch.module import (
-        materialize_module_from_gms,
-        register_module_tensors,
-    )
-    from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
-    from gpu_memory_service.common.locks import RequestedLockType
-    from gpu_memory_service.server.rpc import GMSRPCServer
-except ModuleNotFoundError:
+if not HAS_GMS:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
         allow_module_level=True,
     )
 
-torch = pytest.importorskip("torch", reason="torch is required")
+if not HAS_TORCH:
+    pytest.skip("torch is required", allow_module_level=True)
+
+if not HAS_CUDA:
+    pytest.skip(
+        "CUDA is required for torch GMS integration tests", allow_module_level=True
+    )
+
+import torch
+from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.client.torch.module import (
+    materialize_module_from_gms,
+    register_module_tensors,
+)
+from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
+from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -44,12 +52,6 @@ pytestmark = [
 _SERVER_START_TIMEOUT_SECONDS = 5.0
 _SERVER_STOP_TIMEOUT_SECONDS = 5.0
 _POLL_INTERVAL_SECONDS = 0.01
-
-
-if not torch.cuda.is_available():
-    pytest.skip(
-        "CUDA is required for torch GMS integration tests", allow_module_level=True
-    )
 
 
 class _TinyModule(torch.nn.Module):

@@ -48,3 +48,28 @@ cases:
       sglang: *id002
       vllm:
         unavailable: vLLM streaming parser for family='harmony' requires `delta_token_ids` in fixture chunks
+  TOOLCALLING.stream.4.c:
+    description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
+      repeated close markers
+    ref: derived from nemotron-ultra-preview-tool-call-leak-repro/repro_tool_call_leak.py
+    chunks:
+    - delta_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|call|><|call|>
+    - delta_text: ''
+      finish_reason: length
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM streaming parser for family='harmony' requires `delta_token_ids` in fixture chunks
+      sglang: *id003
