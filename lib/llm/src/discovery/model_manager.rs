@@ -1,10 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig, protocols::WorkerId};
+use dynamo_kv_router::{
+    PrefillLoadEstimator,
+    config::KvRouterConfig,
+    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId},
+};
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -22,7 +29,7 @@ use crate::{
         KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
         shared_cache::HicacheSharedKvCache,
     },
-    local_model::runtime_config::DisaggregatedEndpoint,
+    local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -1080,11 +1087,101 @@ impl ModelManager {
         let configs = rx.borrow();
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
+
+    /// Whether any worker on this endpoint advertises a required KV-transfer topology policy.
+    pub fn has_kv_transfer_required_routing_policy(&self, endpoint_id: &EndpointId) -> bool {
+        let Some(rx) = self.runtime_configs.get(endpoint_id) else {
+            return false;
+        };
+        let configs = rx.borrow();
+        has_required_kv_transfer_policy(&configs)
+    }
+
+    /// Build topology routing constraints from a selected prefill worker's metadata.
+    pub fn get_kv_transfer_routing_constraints(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+    ) -> anyhow::Result<Option<RoutingConstraints>> {
+        let Some(rx) = self.runtime_configs.get(endpoint_id) else {
+            tracing::debug!(%endpoint_id, worker_id, "no runtime configs for topology routing");
+            return Ok(None);
+        };
+        let configs = rx.borrow();
+        let Some(config) = configs.get(&worker_id) else {
+            tracing::debug!(
+                %endpoint_id,
+                worker_id,
+                num_workers = configs.len(),
+                worker_ids = ?configs.keys().collect::<Vec<_>>(),
+                "selected prefill worker missing from runtime configs for topology routing"
+            );
+            if has_required_kv_transfer_policy(&configs) {
+                anyhow::bail!(
+                    "selected prefill worker {worker_id} missing from runtime configs for endpoint {endpoint_id}; \
+                     cannot derive KV transfer topology constraints for required policy"
+                );
+            }
+            return Ok(None);
+        };
+        let Some(domain) = config.kv_transfer_domain.as_deref() else {
+            tracing::debug!(
+                %endpoint_id,
+                worker_id,
+                topology_domains = ?config.topology_domains,
+                "selected prefill worker has no kv_transfer_domain"
+            );
+            return Ok(None);
+        };
+        let Some(value) = config.topology_domains.get(domain) else {
+            anyhow::bail!(
+                "selected prefill worker {worker_id} configured kv_transfer_domain={domain:?}, \
+                 but topology_domains does not contain that domain"
+            );
+        };
+
+        let taint = topology_taint(domain, value);
+        let mut constraints = RoutingConstraints::default();
+        match config.kv_transfer_enforcement {
+            Some(KvTransferEnforcement::Required) => {
+                constraints.required_taints.insert(taint);
+            }
+            Some(KvTransferEnforcement::Preferred) => {
+                let Some(weight) = config.kv_transfer_preferred_weight else {
+                    anyhow::bail!(
+                        "selected prefill worker {worker_id} configured preferred KV transfer \
+                         enforcement for domain {domain:?}, but kv_transfer_preferred_weight is missing"
+                    );
+                };
+                constraints.preferred_taints.insert(taint, weight);
+            }
+            None => {
+                anyhow::bail!(
+                    "selected prefill worker {worker_id} configured kv_transfer_domain={domain:?}, \
+                     but kv_transfer_enforcement is missing"
+                );
+            }
+        };
+
+        Ok(Some(constraints))
+    }
+}
+
+fn has_required_kv_transfer_policy(configs: &HashMap<WorkerId, ModelRuntimeConfig>) -> bool {
+    configs.values().any(|config| {
+        matches!(
+            config.kv_transfer_enforcement,
+            Some(KvTransferEnforcement::Required)
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use crate::model_card::ModelDeploymentCard;
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
@@ -1093,6 +1190,136 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    fn insert_runtime_configs(
+        mm: &ModelManager,
+        endpoint_id: &EndpointId,
+        configs: HashMap<WorkerId, ModelRuntimeConfig>,
+    ) {
+        let (_tx, rx) = tokio::sync::watch::channel(configs);
+        mm.runtime_configs.insert(endpoint_id.clone(), rx);
+    }
+
+    fn topology_runtime_config(
+        enforcement: KvTransferEnforcement,
+        preferred_weight: Option<f32>,
+    ) -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig {
+            kv_transfer_domain: Some("zone".to_string()),
+            kv_transfer_enforcement: Some(enforcement),
+            kv_transfer_preferred_weight: preferred_weight,
+            ..Default::default()
+        };
+        config
+            .topology_domains
+            .insert("zone".to_string(), "us-east-1a".to_string());
+        config
+    }
+
+    #[test]
+    fn kv_transfer_constraints_build_required_and_preferred_constraints() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+
+        for (worker_id, config) in [
+            (
+                7,
+                topology_runtime_config(KvTransferEnforcement::Required, None),
+            ),
+            (
+                8,
+                topology_runtime_config(KvTransferEnforcement::Preferred, Some(0.85)),
+            ),
+        ] {
+            insert_runtime_configs(&mm, &endpoint_id, HashMap::from([(worker_id, config)]));
+
+            let constraints = mm
+                .get_kv_transfer_routing_constraints(&endpoint_id, worker_id)
+                .unwrap()
+                .unwrap();
+
+            match worker_id {
+                7 => {
+                    assert!(
+                        constraints
+                            .required_taints
+                            .contains("dynamo.topology/zone=us-east-1a")
+                    );
+                    assert!(constraints.preferred_taints.is_empty());
+                }
+                8 => {
+                    assert!(constraints.required_taints.is_empty());
+                    assert_eq!(
+                        constraints.preferred_taints["dynamo.topology/zone=us-east-1a"],
+                        0.85
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn kv_transfer_required_policy_presence_ignores_preferred_policy() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Preferred, Some(0.85)),
+            )]),
+        );
+        assert!(!mm.has_kv_transfer_required_routing_policy(&endpoint_id));
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Required, None),
+            )]),
+        );
+        assert!(mm.has_kv_transfer_required_routing_policy(&endpoint_id));
+    }
+
+    #[test]
+    fn kv_transfer_constraints_missing_selected_worker_fails_closed_for_required_policy() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let missing_worker_id = 99;
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Preferred, Some(0.85)),
+            )]),
+        );
+        assert!(
+            mm.get_kv_transfer_routing_constraints(&endpoint_id, missing_worker_id)
+                .unwrap()
+                .is_none()
+        );
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Required, None),
+            )]),
+        );
+        let err = mm
+            .get_kv_transfer_routing_constraints(&endpoint_id, missing_worker_id)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("selected prefill worker 99 missing from runtime configs"));
+        assert!(err.contains("required policy"));
     }
 
     // -- CRUD delegation tests --
