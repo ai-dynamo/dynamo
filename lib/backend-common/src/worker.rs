@@ -519,11 +519,8 @@ impl Worker {
         let route_count = routes.len();
         for route in routes {
             let route_name = route.route;
-            let callback = wrap_engine_route_callback(
-                route_name.clone(),
-                route.callback,
-                endpoint.clone(),
-            );
+            let callback =
+                wrap_engine_route_callback(route_name.clone(), route.callback, endpoint.clone());
             registry.register(&route_name, callback);
         }
         tracing::info!(route_count, "registered engine management routes");
@@ -1232,7 +1229,10 @@ mod tests {
             engine_route_policy("start_profile"),
             EngineRoutePolicy::Direct
         );
-        assert_eq!(engine_route_policy("stop_profile"), EngineRoutePolicy::Direct);
+        assert_eq!(
+            engine_route_policy("stop_profile"),
+            EngineRoutePolicy::Direct
+        );
         assert_eq!(
             engine_route_policy("update_weights_from_disk"),
             EngineRoutePolicy::Direct
