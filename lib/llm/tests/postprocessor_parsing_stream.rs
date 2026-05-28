@@ -1520,7 +1520,7 @@ async fn tool_choice_deepseek_v4_required_prompt_injected_bare_json_recovers() {
             .map(Annotated::from_data),
     );
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true)
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
         .expect("postprocessor_parsing_stream should build");
     let DrainOutput {
         reasoning,
@@ -1557,7 +1557,7 @@ async fn tool_choice_deepseek_v4_named_prompt_injected_bare_params_recovers() {
             .map(Annotated::from_data),
     );
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true)
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
         .expect("postprocessor_parsing_stream should build");
     let DrainOutput {
         reasoning,
