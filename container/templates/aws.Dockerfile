@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #}
 # === BEGIN templates/aws.Dockerfile ===
+# TEMP: trigger EFA builds in PR for container-filter validation (revert before merge)
 #############################
 ########## AWS EFA ##########
 #############################
