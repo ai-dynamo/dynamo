@@ -23,7 +23,7 @@ For `--target=runtime` (the focus of this guide), `container/render.py` emits a 
 2. Builds the Dynamo wheels (`ai-dynamo`, `ai-dynamo-runtime`, optionally `kvbm`) in a separate `wheel_builder` manylinux stage, and
 3. Installs those wheels into a `/opt/dynamo/venv` virtual environment created with `--system-site-packages` so the upstream Python solve stays importable.
 
-The `dev` and `local-dev` targets create `/opt/dynamo/venv` in `container/templates/dev.Dockerfile` instead and install Dynamo from source (typically via `maturin develop`), so the layout differs for those targets.
+The `dev` and `local-dev` targets create `/opt/dynamo/venv` in `container/templates/dev.Dockerfile` and lay down the build toolchain (`maturin`, `uv`) so the user can run `maturin develop` against a mounted workspace at runtime for an editable install — the Dynamo wheels in `/opt/dynamo/wheelhouse/` are left uninstalled in these targets.
 
 The upstream `nvcr.io/nvidia/tensorrt-llm/release` image ships a multi-arch manifest (`linux/amd64` and `linux/arm64`), so the Dynamo TensorRT-LLM image can be built for either architecture.
 

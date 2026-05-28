@@ -45,7 +45,7 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/bin/etcd/ | COPY from dynamo_base |
 |  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
 |  upstream Python/site-packages | inherited from the upstream runtime image — `vllm/vllm-openai` (vLLM; multi-arch amd64/arm64, separate tag per CUDA family), `lmsysorg/sglang` (SGLang; multi-arch amd64/arm64), or `nvcr.io/nvidia/tensorrt-llm/release` (TRT-LLM; multi-arch amd64/arm64) |
-|  /workspace/ | COPY from build context. Always: `tests`, `examples`, `dev`, `lib`, `components/src/dynamo/{common,frontend,<framework>}`. SGLang and TRT-LLM runtimes also copy `deploy` and `components/src/dynamo/mocker`; SGLang additionally copies `recipes`. (`<framework>` is `vllm`, `sglang`, or `trtllm`) |
+|  /workspace/ | COPY from build context. Subset of the source tree, varies by framework. Common to all three: `tests`, `examples`, `dev`, `components/src/dynamo/{common,frontend,<framework>}`. vLLM and TRT-LLM also copy `lib`; SGLang and TRT-LLM also copy `deploy` and `components/src/dynamo/mocker`; SGLang additionally copies `recipes`. See each framework's `templates/<framework>_runtime.Dockerfile` for the exact list. |
 | **STAGE: dev** | **FROM runtime (via dev/Dockerfile.dev)** |
 |  /usr/bin/, /usr/lib/, etc. | COPY from dynamo_tools (dev utilities, git, sudo, etc.) |
 |  /usr/local/rustup/ | COPY from dynamo_tools |
