@@ -213,6 +213,9 @@ _RECOMPUTABLE_MLA_TENSOR_ATTR_NAMES = frozenset(
         "W_V_scale",
     }
 )
+_RECOMPUTABLE_ATTENTION_SCALE_BUFFER_NAMES = frozenset(
+    {"_q_scale", "_k_scale", "_v_scale", "_prob_scale"}
+)
 
 
 def _callable_takes_no_required_args(fn: Any) -> bool:
@@ -258,6 +261,34 @@ def _is_recomputable_non_persistent_buffer_path(
         and name in module._buffers
         and _is_recomputable_non_persistent_buffer(module, name)
     )
+
+
+def _is_recomputable_attention_scale_buffer(
+    module: torch.nn.Module,
+    name: str,
+) -> bool:
+    """Return true for vLLM attention scales that are runtime defaults."""
+    if name not in _RECOMPUTABLE_ATTENTION_SCALE_BUFFER_NAMES:
+        return False
+    if name not in getattr(module, "_buffers", {}):
+        return False
+    if not hasattr(module, "kv_cache_dtype") or not hasattr(module, "layer_name"):
+        return False
+
+    kv_cache_dtype = str(getattr(module, "kv_cache_dtype", "auto") or "auto")
+    calculates_scales = bool(getattr(module, "calculate_kv_scales", False))
+    return calculates_scales or not kv_cache_dtype.startswith("fp8")
+
+
+def _is_recomputable_attention_scale_buffer_path(
+    root: torch.nn.Module,
+    qualified_name: str,
+) -> bool:
+    try:
+        module, name = _resolve_module_attr(root, qualified_name)
+    except AttributeError:
+        return False
+    return _is_recomputable_attention_scale_buffer(module, name)
 
 
 def _is_recomputable_mla_tensor_attr(
@@ -407,6 +438,19 @@ def _move_recomputed_buffer_to_device(
     )
 
 
+def _recompute_attention_scale_buffer(
+    old_buffer: torch.Tensor,
+    *,
+    device_index: int,
+) -> torch.Tensor:
+    return torch.full(
+        tuple(old_buffer.shape),
+        1.0,
+        dtype=old_buffer.dtype,
+        device=torch.device("cuda", device_index),
+    )
+
+
 def _recompute_non_persistent_buffer(
     module: torch.nn.Module,
     name: str,
@@ -485,6 +529,47 @@ def _materialize_recomputable_non_persistent_meta_buffers(
             subprefix = f"{prefix}{name}." if prefix else f"{name}."
             materialized.extend(
                 _materialize_recomputable_non_persistent_meta_buffers(
+                    submodule,
+                    device_index=device_index,
+                    alias_map=alias_map,
+                    prefix=subprefix,
+                )
+            )
+
+    return materialized
+
+
+def _materialize_recomputable_attention_scale_meta_buffers(
+    module: torch.nn.Module,
+    *,
+    device_index: int,
+    alias_map: _TensorAliasMap,
+    prefix: str = "",
+) -> list[str]:
+    materialized: list[str] = []
+
+    for name, buf in module._buffers.items():
+        if (
+            buf is None
+            or not buf.is_meta
+            or not _is_recomputable_attention_scale_buffer(module, name)
+        ):
+            continue
+        qualified = f"{prefix}{name}" if prefix else name
+        replacement = _recompute_attention_scale_buffer(
+            buf,
+            device_index=device_index,
+        )
+        _copy_tensor_attrs(buf, replacement)
+        _set_tensor_alias(alias_map, buf, replacement)
+        module._buffers[name] = replacement
+        materialized.append(qualified)
+
+    for name, submodule in module._modules.items():
+        if submodule is not None:
+            subprefix = f"{prefix}{name}." if prefix else f"{name}."
+            materialized.extend(
+                _materialize_recomputable_attention_scale_meta_buffers(
                     submodule,
                     device_index=device_index,
                     alias_map=alias_map,
@@ -1255,14 +1340,20 @@ def register_module_tensors(
     """
     referenced_allocation_ids: set[str] = set()
     for name, tensor, tensor_type in _iter_module_tensors(model):
-        if tensor_type == "buffer" and _is_recomputable_non_persistent_buffer_path(
-            model, name
-        ):
-            logger.debug(
-                "[GMS] Skipping non-persistent buffer %r - recomputed at init",
-                name,
-            )
-            continue
+        if tensor_type == "buffer":
+            if _is_recomputable_non_persistent_buffer_path(model, name):
+                logger.debug(
+                    "[GMS] Skipping non-persistent buffer %r - recomputed at init",
+                    name,
+                )
+                continue
+
+            if _is_recomputable_attention_scale_buffer_path(model, name):
+                logger.debug(
+                    "[GMS] Skipping attention scale buffer %r - rebuilt after load",
+                    name,
+                )
+                continue
 
         if tensor_type == "tensor_attr" and _is_recomputable_mla_tensor_attr_path(
             model, name
@@ -1357,6 +1448,14 @@ def materialize_module_from_gms(
                 tensor_type == "buffer"
                 and hasattr(mod, "_buffers")
                 and attr in mod._buffers
+                and _is_recomputable_attention_scale_buffer(mod, attr)
+            ):
+                logger.debug("[GMS] Ignoring attention scale buffer metadata %r", name)
+                continue
+            if (
+                tensor_type == "buffer"
+                and hasattr(mod, "_buffers")
+                and attr in mod._buffers
             ):
                 old = mod._buffers[attr]
                 replacement = _clone_mutable_gms_tensor(
@@ -1444,6 +1543,18 @@ def materialize_module_from_gms(
             "[GMS] Recomputed %d non-persistent meta buffers: %s",
             len(recomputed_meta_buffers),
             recomputed_meta_buffers[:10],
+        )
+
+    recomputed_attention_scale_buffers = (
+        _materialize_recomputable_attention_scale_meta_buffers(
+            model, device_index=device_index, alias_map=alias_map
+        )
+    )
+    if recomputed_attention_scale_buffers:
+        logger.info(
+            "[GMS] Rebuilt %d attention scale meta buffers: %s",
+            len(recomputed_attention_scale_buffers),
+            recomputed_attention_scale_buffers[:10],
         )
 
     runtime_meta_attrs = _materialize_runtime_meta_tensor_attrs(

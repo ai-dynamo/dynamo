@@ -46,16 +46,31 @@ class _FakeStorage:
 class _FakeCudaTensor:
     is_cuda = True
 
-    def __init__(self, *, numel: int, nbytes: int, data_ptr: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        numel: int,
+        nbytes: int,
+        data_ptr: int = 1,
+        shape: tuple[int, ...] = (),
+        stride: tuple[int, ...] = (),
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         self._numel = numel
         self._storage = _FakeStorage(nbytes)
         self._data_ptr = data_ptr
+        self.shape = shape
+        self.dtype = dtype
+        self._stride = stride
 
     def numel(self) -> int:
         return self._numel
 
     def untyped_storage(self) -> _FakeStorage:
         return self._storage
+
+    def stride(self) -> tuple[int, ...]:
+        return self._stride
 
     def data_ptr(self) -> int:
         if self._numel == 0:
@@ -120,6 +135,44 @@ def test_register_module_tensors_skips_recomputable_non_persistent_buffer():
     module._non_persistent_buffers_set.add("cos_sin_cache")
 
     register_module_tensors(_NoMetadataManager(), module)
+
+
+def test_register_module_tensors_skips_default_attention_scale_buffer():
+    """Default attention scale buffers are runtime state, not weights."""
+    module = torch.nn.Module()
+    module.kv_cache_dtype = "auto"
+    module.layer_name = "layers.0.self_attn"
+    module._buffers["_k_scale"] = _FakeCudaTensor(numel=1, nbytes=4)
+
+    register_module_tensors(_NoMetadataManager(), module)
+
+
+def test_register_module_tensors_publishes_fp8_attention_scale_if_gms_backed():
+    """Loaded FP8 KV-cache scales are real model metadata."""
+
+    class _FakeMapping:
+        allocation_id = "alloc"
+        aligned_size = 16
+
+    class _Manager:
+        mappings = {0: _FakeMapping()}
+
+        def __init__(self) -> None:
+            self.puts: list[str] = []
+
+        def metadata_put(self, *, key, allocation_id, offset_bytes, value):
+            self.puts.append(key)
+
+    module = torch.nn.Module()
+    module.kv_cache_dtype = "fp8"
+    module.calculate_kv_scales = False
+    module.layer_name = "layers.0.self_attn"
+    module._buffers["_k_scale"] = _FakeCudaTensor(numel=1, nbytes=4, shape=())
+
+    manager = _Manager()
+    register_module_tensors(manager, module)
+
+    assert manager.puts == ["_k_scale"]
 
 
 def test_register_module_tensors_skips_mla_post_load_attrs(monkeypatch):
@@ -415,6 +468,54 @@ def test_materialize_module_from_gms_ignores_stale_mla_attr_metadata(monkeypatch
     materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
 
     assert module.mla.W_UK_T.is_meta
+
+
+def test_materialize_module_from_gms_rebuilds_attention_scale_meta_buffer(
+    monkeypatch,
+):
+    """Default attention scale metadata should not be cloned from GMS."""
+
+    class _BadTensor:
+        def detach(self):
+            raise RuntimeError("should not clone default attention scale metadata")
+
+    class _FakeSpec:
+        meta = types.SimpleNamespace(
+            tensor_type="buffer",
+            shape=(),
+            stride=(),
+            dtype=torch.float32,
+        )
+        allocation_id = "alloc"
+        offset_bytes = 0
+
+        def materialize(self, _manager, _device_index):
+            return _BadTensor()
+
+    monkeypatch.setattr(
+        "gpu_memory_service.client.torch.module.GMSTensorSpec.load_all",
+        lambda _manager: {"attn._k_scale": _FakeSpec()},
+    )
+    monkeypatch.setattr(
+        "gpu_memory_service.client.torch.module._recompute_attention_scale_buffer",
+        lambda old_buffer, *, device_index: torch.ones(
+            old_buffer.shape, dtype=old_buffer.dtype
+        ),
+    )
+
+    module = torch.nn.Module()
+    module.attn = torch.nn.Module()
+    module.attn.kv_cache_dtype = "auto"
+    module.attn.layer_name = "layers.0.self_attn"
+    module.attn.register_buffer(
+        "_k_scale",
+        torch.empty((), device="meta", dtype=torch.float32),
+    )
+
+    materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
+
+    assert not module.attn._k_scale.is_meta
+    torch.testing.assert_close(module.attn._k_scale, torch.ones(()))
 
 
 def test_materialize_module_from_gms_recomputes_non_persistent_meta_buffer(
