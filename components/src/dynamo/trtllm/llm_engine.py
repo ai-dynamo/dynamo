@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -51,9 +52,11 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import KvEventPublisher, ModelInput
+from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
+from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -85,6 +88,13 @@ _IDLE_SLEEP_S = 0.01
 # Mirror the legacy `dynamo.trtllm` worker — required for TRT-LLM to actually
 # publish KV cache events. Without this, `get_kv_cache_events` returns empty.
 _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+
+# Test-only smoke hook. When set to "1", from_args force-enables the
+# tokenizer and generate() attaches a HelloWorldLogitsProcessor (skipped in
+# PREFILL because prefill emits one visible token before decode resumes;
+# a fresh stateful processor on each side would corrupt the leading
+# characters). Mirrors the legacy `dynamo.trtllm` request-handler hook.
+_TEST_LOGITS_PROCESSOR_ENV = "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR"
 
 # Note: `metrics_dict` is set per-instance on `GenerationResult` (only
 # when TRT-LLM's perf-stats collection is enabled and the request
@@ -256,6 +266,13 @@ class TrtllmLLMEngine(LLMEngine):
             if not kv_cfg.get("event_buffer_max_size"):
                 kv_cfg["event_buffer_max_size"] = _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
             engine_args["kv_cache_config"] = kv_cfg
+
+        # Test logits processor env hook: must run after all overrides so
+        # an explicit `skip_tokenizer_init=True` from user YAML/JSON
+        # cannot starve HelloWorldLogitsProcessor of the tokenizer it
+        # needs. No-op when the env var is off.
+        if os.getenv(_TEST_LOGITS_PROCESSOR_ENV) == "1":
+            engine_args["skip_tokenizer_init"] = False
 
         # Use post-override engine_args so EngineConfig matches what the
         # actual TRT-LLM engine got.
@@ -610,7 +627,20 @@ class TrtllmLLMEngine(LLMEngine):
             else None
         )
 
-        # Prefill returns one non-streaming chunk carrying the handoff —
+        # Test logits processor env hook. Skip in PREFILL: prefill emits
+        # one token that becomes the visible leading token after decode
+        # resumes, and a fresh stateful processor on each side would
+        # corrupt the leading characters. The env check guards tokenizer
+        # access so the hot path is zero-cost when the hook is off.
+        # Processors must be built per request: HelloWorldLogitsProcessor
+        # keeps a state counter, and a singleton would mix token
+        # positions across concurrent streams.
+        if not is_prefill and os.getenv(_TEST_LOGITS_PROCESSOR_ENV) == "1":
+            assert self._engine._llm is not None
+            processors = [HelloWorldLogitsProcessor(self._engine.llm.tokenizer)]
+            sampling_params.logits_processor = create_trtllm_adapters(processors)
+
+        # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
         generation_result = self._engine.llm.generate_async(

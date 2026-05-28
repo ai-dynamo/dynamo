@@ -486,7 +486,6 @@ that the unified path does not yet support.
 
 | Feature | Description |
 |---------|-------------|
-| Custom logits processors | `TrtllmDynamoLogitsAdapter` with CUDA stream support |
 | Attention DP scheduling | `SchedulingParams` with `attention_dp_rank` and `attention_dp_relax` |
 | Video diffusion | Auto-detect pipeline from `model_index.json`, MP4 encoding, MediaOutput |
 | Multimodal processing | `MultimodalRequestProcessor`, image URL processing, embedding injection |

@@ -18,18 +18,29 @@ Logits processors let you modify the next-token logits at every decoding step (e
 
 ### Quick test: HelloWorld processor
 
-You can enable a test-only processor that forces the model to respond with "Hello world!". This is useful to verify the wiring without modifying your model or engine code.
+`DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1` is a built-in test hook (not a production processor loader) that forces the model to respond with "Hello world!". It is useful to verify the callback path without modifying your model or engine code. It works on both the legacy and the unified TRT-LLM aggregated launchers:
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
 export DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1
+
+# legacy aggregated
 ./launch/agg.sh
+
+# unified aggregated
+./launch/agg.sh --unified
 ```
 
 <Note>
 - When enabled, Dynamo initializes the tokenizer so the HelloWorld processor can map text to token IDs.
 - Expected chat response contains "Hello world".
 </Note>
+
+#### Disaggregated caveat
+
+The quick test targets aggregated deployments. In disaggregated mode the prefill worker emits one token before decode resumes, and the test processor has per-request state that resets across the prefill/decode boundary. As a result the leading characters of the response can be duplicated or otherwise corrupted. The unified backend skips the test hook in the prefill role for this reason, but the decode-side output is still affected by the prefill-produced token. Use aggregated mode to verify the wiring.
+
+For a public, user-defined processor loader (CLI/import-string), see the deferred follow-up in the design doc; this env hook intentionally stays test-focused.
 
 ### Bring your own processor
 
