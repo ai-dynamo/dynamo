@@ -156,6 +156,19 @@ class LoadConfig:
     # recovery; the framework's per-pod _get_pod_metrics snapshot at
     # fault-injection time still captures that point.
     extra_server_metrics_urls: Optional[list[str]] = None
+    # aiperf install spec passed to `pip install` inside the load Job pod.
+    # Default: a known-working main commit that supports the --concurrency
+    # list sweep flag (needed for E1 / E3 capacity discovery). Override
+    # per-scenario via this field (also exposed in YAML as `aiperf_ref`)
+    # to test newer / older revisions without rebuilding any image.
+    # Examples:
+    #   "aiperf" (latest PyPI release — lacks sweep flag as of 2026-05-28)
+    #   "aiperf @ git+https://github.com/ai-dynamo/aiperf@main" (moving tip)
+    #   "aiperf @ git+https://github.com/ai-dynamo/aiperf@<commit-sha>" (pinned)
+    aiperf_ref: str = (
+        "aiperf @ git+https://github.com/ai-dynamo/aiperf@"
+        "f93b2ad84d1407f632b84c3fb9d2df7156607654"
+    )
 
     # Inference parameters
     temperature: float = 0.0
@@ -494,6 +507,8 @@ class ManagedLoad:
                 env["value"] = self.endpoint_url
             elif env["name"] == "MODEL_NAME":
                 env["value"] = self.load_config.model_name
+            elif env["name"] == "AIPERF_SPEC":
+                env["value"] = self.load_config.aiperf_ref
 
         # Set PVC reference
         for volume in pod_spec.get("volumes", []):

@@ -1,0 +1,124 @@
+# Session-level SANITY Run 2 — DIS-2147 fidelity gate (~10 min)
+#
+# Per observe handoff: 2026-05-28-three-experiment-validation-session.md + SANITY.md.
+# Validates DIS-2147 (mocker prefill-KV residency + abort timeout) actually
+# models production prefill-KV-pinning, vs the unpatched mocker baseline.
+#
+# CHANGES vs SANITY.md handoff (flag back to observe in return handoff):
+#   - Run 2 v1.1.1 comparison replaced with image #2 (cascade-test-69d496df9a)
+#     for cleaner controlled comparison — only DIS-2147 differs between
+#     image #3 (with-dis2147) and image #2 (no-dis2147). v1.1.1 conflates
+#     DIS-2147 absence with entire 1.1.1 → 1.2 stack delta. If observe wants
+#     the historical-baseline rope, add a third parametrize row.
+#
+# This YAML covers the with-dis2147 arm. The no-dis2147 comparison runs the
+# SAME YAML with the image overridden (in pytest, via the --image flag, or
+# via a sibling YAML if framework doesn't expose that override).
+#
+# Setup deliberately small (1 set) and decode --max-num-seqs=8 (tight) so
+# decode saturates fast — the DIS-2147 mechanism is what's under test, not
+# routing or scale.
+
+kind: router_memory
+name: sanity_run2_dis2147_fidelity
+description: |
+  1-set mocker disagg, LL routing, tight decode --max-num-seqs=8.
+  Forces decode saturation fast so DIS-2147 prefill-KV-pinning is exercised.
+  Verifies F1-F5 setup correctness via collected data (post-hoc).
+
+labels:
+  purpose: session_sanity
+  run: 2
+  router_mode: least_loaded
+  deployment: disagg
+  backend: mocker
+
+deployment:
+  backend: mocker
+  topology: disagg
+  # image #3 (with DIS-2147). For the no-dis2147 control arm, override
+  # at pytest time with --image <image #2 tag>:
+  #   pytest test_router_modes.py -k sanity_run2 \
+  #     --image nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-cascade-test-69d496df9a-neelays \
+  #     ...
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-mocker-prefill-pinning-3951afa0e1-neelays
+  replicas:
+    Frontend: 1
+    prefill: 1
+    decode: 1
+
+router:
+  # LL — DIS-2147 mechanism is what we're testing, not routing.
+  mode: least-loaded
+  knobs:
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_EVENT_PLANE: "zmq"
+    DYN_DISCOVERY_BACKEND: "kubernetes"
+    DYN_STORE_KV: "mem"
+    DYN_LOG: "info"
+
+admission:
+  knobs:
+    DYN_TCP_WORKER_POOL_SIZE: "128"
+    DYN_TCP_WORK_QUEUE_SIZE: "5"
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "30"
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30"
+
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 5
+    prefix_prompt_length: 740
+    seq_dist: "100,200:5;500,200:15;1000,200:20;1600,200:30;3400,200:20;7000,200:10"
+  rungs:
+    - name: saturate
+      concurrency: 50
+      duration_minutes: 5.0
+  common:
+    request_timeout_seconds: 60
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+events:
+  - kind: WaitForModelReady
+    timeout: 900
+  - kind: PodMemoryPoller
+    services: [Frontend, prefill, decode]
+    interval_s: 5
+  - kind: StartLoad
+    load_ref: saturate
+  - kind: WaitForLoadCompletion
+    name: saturate
+
+reports:
+  - PerWorkerLatencyReport
+  - ErrorBreakdownReport
+
+# Minimal live checks. F1-F5 from the SANITY handoff are computed POST-HOC
+# from the collected data by scripts/sanity-verify.py — see that script for
+# the per-check methodology (the DIS-2147 forensic events emit at
+# target=mocker::dis2147 INFO; grep + room_id-pair).
+checks:
+  - kind: LoadApplied
+    load_name: saturate
+    min_requests: 200
+  - kind: WorkerPanics
+    services: [Frontend, prefill, decode]
+    acceptable: true
+  - kind: RestartCountIncreased
+    services: [Frontend, prefill, decode]
+    expect_min_increment: 0
+
+expectations:
+  notes: |
+    Post-hoc F1-F5 verification via scripts/sanity-verify.py:
+      F1 prefill active_decode_blocks > 0 while decode kv_util >= 0.99
+      F2 prefill_kv_pin_start <-> prefill_kv_pin_end pair on room_id
+      F3 prefill_kv_pin_end{outcome=aborted, duration_ms ~= 30000}
+      F4 ABORT_BYTE in decode logs
+      F5 prefill KV ~= 100% sustained until abort fires or decode frees
+
+    Run with image #3 (default) — expect F1-F5 PASS.
+    Run with image #2 override — expect F1+F5 FAIL (control: isolates
+    DIS-2147 as the cause of the new behavior).

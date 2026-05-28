@@ -1,0 +1,126 @@
+# Session-level SANITY Run 3 — GPU N=1 unit sanity (~25 min)
+#
+# Companion to Run 1 (mocker, 3 sets) and Run 2 (mocker, 1 set DIS-2147).
+# This verifies the same plumbing items on REAL vllm workers, not mocker.
+#
+# Why this exists:
+#   - Mocker sanity can't validate vLLM-specific engine args
+#     (--max-num-batched-tokens=65536 actually takes effect on prefill).
+#   - Mocker emits events on its own cadence; this confirms real workers
+#     actually publish to ZMQ + the FE receives them.
+#   - Real /metrics endpoints expose vllm:kv_cache_usage_perc etc. that
+#     the mocker fakes.
+#   - Closest possible setup to E1/E2/E3 at minimum cost (6 GPU).
+#
+# What it does NOT cover:
+#   - F1-F5 DIS-2147 forensic events — those are mocker-only by design.
+#   - The 3-FE distribution check H2 — only 1 FE here.
+#
+# Topology: 1 unit = 1 FE + 2 prefill (TP=2, 4 GPU) + 1 decode (TP=2, 2 GPU).
+# Fits in any 6-GPU envelope.
+#
+# Image: #2 (cascade-test-69d496df9a) — production-recommendation-aligned,
+# no mocker-specific DIS-2147 (real workers don't use it).
+
+kind: router_memory
+name: sanity_run3_gpu_n1_unit
+description: |
+  Single-unit (1 FE + 2 prefill + 1 decode) real-vllm GPU sanity.
+  Verifies production-tuned engine + routing + admission on real workers.
+  c=50 sustained 5 min with production seq_dist.
+
+labels:
+  purpose: session_sanity
+  run: 3
+  router_mode: kv_recommended
+  deployment: disagg
+  backend: vllm
+
+deployment:
+  backend: vllm
+  topology: disagg
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-cascade-test-69d496df9a-neelays
+  replicas:
+    Frontend: 1
+    VllmPrefillWorker: 2
+    VllmDecodeWorker: 1
+
+router:
+  mode: kv
+  knobs:
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "0.0"
+    DYN_ROUTER_PREFILL_LOAD_SCALE: "1.0"
+    DYN_ROUTER_QUEUE_THRESHOLD: "4.0"
+    DYN_ROUTER_QUEUE_POLICY: "fcfs"
+    DYN_ROUTER_REPLICA_SYNC: "true"
+    DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
+    DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
+    DYN_EVENT_PLANE: "zmq"
+    DYN_DISCOVERY_BACKEND: "kubernetes"
+    DYN_STORE_KV: "mem"
+    # Tactical DEBUG (same as Run 1) so we can verify H3 + H4 via FE log
+    DYN_LOG: "info,dynamo_runtime::transports::event_plane::zmq_transport=debug,dynamo_llm::discovery::worker_monitor=debug"
+
+admission:
+  knobs:
+    DYN_TCP_WORKER_POOL_SIZE: "128"
+    DYN_TCP_WORK_QUEUE_SIZE: "5"
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "30"
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30"
+
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 5
+    prefix_prompt_length: 740
+    seq_dist: "100,200:5;500,200:15;1000,200:20;1600,200:30;3400,200:20;7000,200:10"
+  rungs:
+    - name: warmup
+      concurrency: 20
+      duration_minutes: 1.0
+    - name: steady
+      concurrency: 50
+      duration_minutes: 4.0
+  common:
+    request_timeout_seconds: 40
+    streaming: true
+    ignore_eos: false
+    connection_reuse_strategy: never
+
+events:
+  - kind: WaitForModelReady
+    timeout: 2400
+  - kind: PodMemoryPoller
+    services: [Frontend, VllmPrefillWorker, VllmDecodeWorker]
+    interval_s: 5
+  - kind: StartLoad
+    load_ref: warmup
+  - kind: WaitForLoadCompletion
+    name: warmup
+  - kind: StartLoad
+    load_ref: steady
+  - kind: WaitForLoadCompletion
+    name: steady
+
+reports:
+  - PerWorkerLatencyReport
+  - ErrorBreakdownReport
+
+# Minimal live checks. Full H1-H13 (minus mocker-specific) computed
+# POST-HOC via scripts/sanity-verify.py against the collected data.
+checks:
+  - kind: LoadApplied
+    load_name: steady
+    min_requests: 100
+  - kind: WorkerPanics
+    services: [Frontend, VllmPrefillWorker, VllmDecodeWorker]
+    acceptable: true
+  - kind: RestartCountIncreased
+    services: [Frontend, VllmDecodeWorker]
+    expect_min_increment: 0
+
+expectations:
+  notes: |
+    GPU N=1 sanity. ~25 min wall.
+    Post-hoc verify with scripts/sanity-verify.py. Skip F1-F5 (mocker-only).

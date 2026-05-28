@@ -24,8 +24,13 @@ spec:
               set -e
 
               echo "=== Installing dependencies ==="
-              apt-get update && apt-get install -y --no-install-recommends curl jq procps && apt-get clean
-              pip install --quiet aiperf
+              apt-get update && apt-get install -y --no-install-recommends curl jq procps git && apt-get clean
+              # AIPERF_SPEC is templated by ManagedLoad from LoadConfig.aiperf_ref.
+              # Default: pin to a known-working main commit that supports the
+              # --concurrency list sweep flag. Override per-scenario via the
+              # `aiperf_ref` LoadConfig field (also exposed in scenario YAML).
+              echo "Installing aiperf from: ${AIPERF_SPEC}"
+              pip install --quiet "${AIPERF_SPEC}"
 
               echo "=== Creating output directories ==="
               # Per-Job marker path under /tmp/aiperf/status/<job-name>/.
@@ -114,6 +119,8 @@ spec:
               value: "TEMPLATE_MODEL_NAME"
             - name: PYTHONUNBUFFERED
               value: "1"
+            - name: AIPERF_SPEC
+              value: "TEMPLATE_AIPERF_SPEC"
           volumeMounts:
             - name: results-volume
               mountPath: /tmp/aiperf
