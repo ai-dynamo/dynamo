@@ -17,8 +17,7 @@ cases:
         reasoning_text: ''
         normal_text: ''
       vllm: *d_s0
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_s0
   REASONING.stream.2.a:
     description: Harmony analysis block across chunks
     ref: *upstream_ref
@@ -32,8 +31,7 @@ cases:
         reasoning_text: thinking
         normal_text: answer
       vllm: *d_s1
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_s1
   REASONING.stream.2.b:
     description: Multiple Harmony analysis spans across chunks
     ref: *upstream_ref
@@ -49,7 +47,8 @@ cases:
         normal_text: done
       vllm: *d_s5
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+        reasoning_text: firstsecond
+        normal_text: done
   REASONING.stream.3.a:
     description: Harmony start marker split across chunks
     ref: *upstream_ref
@@ -61,8 +60,7 @@ cases:
         reasoning_text: thinking
         normal_text: answer
       vllm: *d_s2
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_s2
   REASONING.stream.3.b:
     description: Harmony end marker split across chunks
     ref: *upstream_ref
@@ -70,13 +68,14 @@ cases:
     - <|channel|>analysis<|message|>thinking<|e
     - nd|><|start|>assistant<|channel|>final<|message|>answer
     expected:
-      dynamo: &d_s3
+      dynamo:
         reasoning_text: thinking
         normal_text: answer
       vllm:
         unavailable: vLLM gpt-oss streaming parity for a split Harmony end token needs explicit token_chunks; text-only chunks are not faithful.
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+        reasoning_text: thinking<|end|><|start|>assistant<|channel|>final<|message|>answer
+        normal_text: ''
   REASONING.stream.3.c:
     description: Partial Harmony channel marker prefix later becomes non-channel text
     ref: *upstream_ref
@@ -84,14 +83,13 @@ cases:
     - plain <|chan
     - ce answer
     expected:
-      dynamo:
+      dynamo: &id001
         reasoning_text: ''
         normal_text: ''
       vllm:
         reasoning_text: ''
         normal_text: ''
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *id001
   REASONING.stream.4.a:
     description: Recipientless Harmony commentary is visible normal text across chunks
     ref: *upstream_ref
@@ -106,7 +104,8 @@ cases:
           Done.
       vllm: *d_s6
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+        reasoning_text: ''
+        normal_text: I will check that.Done.
   REASONING.stream.4.b:
     description: Directed Harmony commentary tool recipient split across chunks
     ref: *upstream_ref
@@ -114,16 +113,14 @@ cases:
     - <|channel|>commentary to=functions.get_
     - weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
     expected:
-      dynamo:
+      dynamo: &id002
         reasoning_text: ''
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
-        reason: >-
-          This is expected in Dynamo today because streaming reasoning parsing and tool-call parsing are separate stages, and `normal_text` is the only handoff path between them. Confirmed that the `normal_text` handoff to the tool-call parser is processed properly: the downstream Harmony parser emits the tool call and leaves no final `normal_text` leak. If the reasoning parser removed the directed commentary envelope here, the downstream Harmony tool-call parser would never see the call. Matching vLLM's reasoning-layer output would require an architectural change to carry tool-call candidates through a structured side channel instead of reusing `normal_text`.
+        reason: 'This is expected in Dynamo today because streaming reasoning parsing and tool-call parsing are separate stages, and `normal_text` is the only handoff path between them. Confirmed that the `normal_text` handoff to the tool-call parser is processed properly: the downstream Harmony parser emits the tool call and leaves no final `normal_text` leak. If the reasoning parser removed the directed commentary envelope here, the downstream Harmony tool-call parser would never see the call. Matching vLLM''s reasoning-layer output would require an architectural change to carry tool-call candidates through a structured side channel instead of reusing `normal_text`.'
       vllm:
         reasoning_text: ''
         normal_text: ''
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *id002
   REASONING.stream.4.c:
     description: Two directed Harmony commentary tool calls in one stream
     ref: *upstream_ref
@@ -131,16 +128,14 @@ cases:
     - <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|start|>assistant
     - <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{"tz":"PST"}<|call|>
     expected:
-      dynamo:
+      dynamo: &id003
         reasoning_text: ''
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{"tz":"PST"}<|call|>
-        reason: >-
-          This is expected in Dynamo today because streaming reasoning parsing and tool-call parsing are separate stages, and `normal_text` is the only handoff path between them. Confirmed that the `normal_text` handoff to the tool-call parser is processed properly: the downstream Harmony parser emits the tool calls and leaves no final `normal_text` leak. If the reasoning parser removed the directed commentary envelopes here, the downstream Harmony tool-call parser would never see the calls. Matching vLLM's reasoning-layer output would require an architectural change to carry tool-call candidates through a structured side channel instead of reusing `normal_text`.
+        reason: 'This is expected in Dynamo today because streaming reasoning parsing and tool-call parsing are separate stages, and `normal_text` is the only handoff path between them. Confirmed that the `normal_text` handoff to the tool-call parser is processed properly: the downstream Harmony parser emits the tool calls and leaves no final `normal_text` leak. If the reasoning parser removed the directed commentary envelopes here, the downstream Harmony tool-call parser would never see the calls. Matching vLLM''s reasoning-layer output would require an architectural change to carry tool-call candidates through a structured side channel instead of reusing `normal_text`.'
       vllm:
         reasoning_text: ''
         normal_text: ''
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *id003
   REASONING.stream.1.b:
     description: Plain text without Harmony channel markers
     ref: *upstream_ref
@@ -152,5 +147,4 @@ cases:
         reasoning_text: ''
         normal_text: ''
       vllm: *d_s4
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_s4

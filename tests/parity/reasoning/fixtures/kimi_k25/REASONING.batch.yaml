@@ -19,7 +19,8 @@ cases:
         reasoning_text: plain answer
         normal_text: ''
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+        reasoning_text: ''
+        normal_text: plain answer
   REASONING.batch.2.a:
     description: Force-reasoning parser with explicit think tags
     ref: *upstream_ref
@@ -29,8 +30,7 @@ cases:
         reasoning_text: thinking
         normal_text: answer
       vllm: *d_1
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *d_1
   REASONING.batch.3.b:
     description: Tool-call section marker force-exits an open reasoning block
     ref: *upstream_ref
@@ -43,7 +43,8 @@ cases:
         reasoning_text: 'thinking '
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+        reasoning_text: ''
+        normal_text: thinking <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
   REASONING.batch.2.c:
     description: Force-reasoning parser treats plain output as reasoning
     ref: *upstream_ref
@@ -56,7 +57,8 @@ cases:
         reasoning_text: thinking without explicit tags
         normal_text: ''
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+        reasoning_text: ''
+        normal_text: thinking without explicit tags
   REASONING.batch.4:
     description: Dangling end marker exits force-reasoning mode
     ref: *upstream_ref
@@ -69,7 +71,8 @@ cases:
         reasoning_text: normal
         normal_text: answer
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+        reasoning_text: ''
+        normal_text: normal</think>answer
   REASONING.batch.5:
     description: Missing end marker keeps the remaining text as reasoning
     ref: *upstream_ref
@@ -82,20 +85,20 @@ cases:
         reasoning_text: partial reasoning
         normal_text: ''
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+        reasoning_text: ''
+        normal_text: partial reasoning
   REASONING.batch.2.e:
     description: Empty reasoning block
     ref: *upstream_ref
     model_text: <think></think>answer
     expected:
-      dynamo:
+      dynamo: &id001
         reasoning_text: ''
         normal_text: answer
       vllm:
         reasoning_text: ''
         normal_text: answer
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *id001
   REASONING.batch.2.f:
     description: Complex reasoning content with Unicode and newlines
     ref: *upstream_ref
@@ -104,7 +107,7 @@ cases:
       Unicode: café
       JSON-ish: {"x": [1, true]}</think>Done.
     expected:
-      dynamo:
+      dynamo: &id002
         reasoning_text: |-
           Line 1
           Unicode: café
@@ -116,21 +119,19 @@ cases:
           Unicode: café
           JSON-ish: {"x": [1, true]}
         normal_text: Done.
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *id002
   REASONING.batch.1.a:
     description: Empty input
     ref: *upstream_ref
     model_text: ''
     expected:
-      dynamo:
+      dynamo: &id003
         reasoning_text: ''
         normal_text: ''
       vllm:
         reasoning_text: ''
         normal_text: ''
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *id003
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated
     ref: *upstream_ref
@@ -144,7 +145,8 @@ cases:
         normal_text: ' middle <think>second</think> done'
         reason: Dynamo extracts each complete reasoning span; vLLM Kimi K2 parser leaves the later complete span in normal_text.
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+        reasoning_text: first
+        normal_text: ' middle <think>second</think> done'
   REASONING.batch.2.d:
     description: Normal text around reasoning is not applicable in force-reasoning mode
     reason: Force-reasoning parser families start inside reasoning; marker-free prefix text is not a normal-text prefix.
@@ -153,11 +155,10 @@ cases:
     ref: *upstream_ref
     model_text: <think>choose tool</think><|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
     expected:
-      dynamo:
+      dynamo: &id004
         reasoning_text: choose tool
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       vllm:
         reasoning_text: choose tool
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *id004
