@@ -747,6 +747,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                     .await
                     .map_err(|e| Error::msg(format!("Decode KV wait failed: {e}")))?;
             }
+            // DIS-2147 forensic logging: emit decode-side wait-start event so post-hoc
+            // analysis can reconstruct (decode_worker, target_prefill, room) stranding graphs.
+            tracing::info!(
+                target: "mocker::dis2147",
+                decode_dp_rank = dp_rank,
+                room_id = bootstrap_info.bootstrap_room,
+                target_host = %bootstrap_info.bootstrap_host,
+                target_port = bootstrap_info.bootstrap_port,
+                "decode_kv_wait_start"
+            );
             connect_to_prefill(
                 &bootstrap_info.bootstrap_host,
                 bootstrap_info.bootstrap_port,
@@ -841,6 +851,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                                 && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
                                 && let Some(timeout) = abort_timeout
                             {
+                                // DIS-2147 forensic logging: pin-start event with room_id +
+                                // prefill dp_rank. Lets post-hoc analysis join with decode
+                                // logs on room_id to build stranding graphs.
+                                let pin_start = std::time::Instant::now();
+                                tracing::info!(
+                                    target: "mocker::dis2147",
+                                    prefill_dp_rank = dp_rank,
+                                    room_id,
+                                    "prefill_kv_pin_start"
+                                );
                                 match server.wait_for_decode_arrival(room_id, timeout).await {
                                     Ok(()) => {
                                         let _ = stream_tx.send(output);
@@ -851,6 +871,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                                             .await;
                                         }
                                         server.complete_room(room_id);
+                                        tracing::info!(
+                                            target: "mocker::dis2147",
+                                            prefill_dp_rank = dp_rank,
+                                            room_id,
+                                            outcome = "completed",
+                                            duration_ms = pin_start.elapsed().as_millis() as u64,
+                                            "prefill_kv_pin_end"
+                                        );
                                         let _ = stream_tx.send(LLMEngineOutput::length());
                                     }
                                     Err(e) => {
@@ -858,6 +886,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                                             "Prefill aborting transfer for room {room_id}: {e}"
                                         );
                                         server.abort_room(room_id);
+                                        tracing::info!(
+                                            target: "mocker::dis2147",
+                                            prefill_dp_rank = dp_rank,
+                                            room_id,
+                                            outcome = "aborted",
+                                            duration_ms = pin_start.elapsed().as_millis() as u64,
+                                            "prefill_kv_pin_end"
+                                        );
                                         let _ = stream_tx.send(LLMEngineOutput::error(format!(
                                             "NIXL transfer aborted: {e}"
                                         )));
