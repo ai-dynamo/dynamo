@@ -385,9 +385,11 @@ func TestBuildCheckpointJobPreservesPreparedEnvAndSharedMemory(t *testing.T) {
 
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: "NATS_SERVER", Value: "nats://custom:4222"})
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "10090"})
-	assert.NotContains(t, main.Env, corev1.EnvVar{Name: "ETCD_ENDPOINTS", Value: "http://etcd:2379"})
-	assert.NotContains(t, main.Env, corev1.EnvVar{Name: "MODEL_EXPRESS_URL", Value: "http://model-express:8000"})
-	assert.NotContains(t, main.Env, corev1.EnvVar{Name: "PROMETHEUS_ENDPOINT", Value: "http://prometheus:9090"})
+	for _, env := range main.Env {
+		assert.NotEqual(t, "ETCD_ENDPOINTS", env.Name)
+		assert.NotEqual(t, "MODEL_EXPRESS_URL", env.Name)
+		assert.NotEqual(t, "PROMETHEUS_ENDPOINT", env.Name)
+	}
 }
 
 func TestCheckpointReconciler_Reconcile(t *testing.T) {

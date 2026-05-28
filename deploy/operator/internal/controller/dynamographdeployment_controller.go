@@ -993,7 +993,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpointGMSResourceClaimTem
 		if gmsSpec.Mode == nvidiacomv1beta1.GMSModeInterPod {
 			return fmt.Errorf("GMS checkpoint jobs for mode %q are not implemented", gmsSpec.Mode)
 		}
-		targetResources, err := r.checkpointTargetContainerResources(ctx, dynamoDeployment, component, identity, hash)
+		targetResources, err := r.checkpointTargetContainerResources(dynamoDeployment, component, identity)
 		if err != nil {
 			return err
 		}
@@ -1017,26 +1017,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpointGMSResourceClaimTem
 }
 
 func (r *DynamoGraphDeploymentReconciler) checkpointTargetContainerResources(
-	ctx context.Context,
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	identity nvidiacomv1alpha1.DynamoCheckpointIdentity,
-	hash string,
 ) (corev1.ResourceRequirements, error) {
-	if existing, err := checkpoint.FindCheckpointByIdentityHash(ctx, r.Client, dynamoDeployment.Namespace, hash, ""); err != nil {
-		return corev1.ResourceRequirements{}, err
-	} else if existing != nil {
-		targetContainerName := existing.Spec.Job.TargetContainerName
-		if targetContainerName == "" {
-			targetContainerName = consts.MainContainerName
-		}
-		targetContainer, err := findPodTemplateContainer(&existing.Spec.Job.PodTemplateSpec, targetContainerName)
-		if err != nil {
-			return corev1.ResourceRequirements{}, err
-		}
-		return targetContainer.Resources, nil
-	}
-
 	podTemplate, err := r.buildCheckpointJobPodTemplate(
 		dynamoDeployment,
 		component,

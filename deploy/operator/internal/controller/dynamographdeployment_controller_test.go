@@ -704,10 +704,32 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Crea
 			},
 		},
 	}
+	existingCheckpoint := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-" + hash, Namespace: "default"},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				TargetContainerName: commonconsts.MainContainerName,
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name: commonconsts.MainContainerName,
+							Resources: corev1.ResourceRequirements{
+								Claims: []corev1.ResourceClaim{{Name: dra.ClaimName}},
+							},
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			IdentityHash: hash,
+		},
+	}
 	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(dgd, deviceClass).
+		WithObjects(dgd, existingCheckpoint, deviceClass).
 		Build()
 	r := &DynamoGraphDeploymentReconciler{
 		Client:        cl,
