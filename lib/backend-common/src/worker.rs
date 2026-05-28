@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::local_model::LocalModelBuilder;
-use dynamo_llm::local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig};
+use dynamo_llm::local_model::runtime_config::{
+    DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
+    StructuralTagScope,
+};
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::pipeline::network::Ingress;
@@ -35,6 +38,10 @@ const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 /// Environment variable name for overriding the grace-period.
 /// Shared with the Python helper so a single env var controls both.
 const GRACE_PERIOD_ENV: &str = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS";
+
+/// Operator override for the health-check canary, mirrors the Python helper
+/// in `lib/bindings/python/src/dynamo/health_check.py`.
+const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
 
 /// Runtime / transport configuration applied to the process before the
 /// distributed runtime is constructed.
@@ -134,6 +141,17 @@ pub struct WorkerConfig {
     /// but force-disables the local KV indexer because decode workers do not
     /// host the indexer endpoint.
     pub disaggregation_mode: DisaggregationMode,
+    /// Operator override. `Worker` resolves precedence: this field >
+    /// `DYN_HEALTH_CHECK_PAYLOAD` env > `engine.health_check_payload()`.
+    /// Python sets this via `--health-check-payload` / env; Rust-only
+    /// engines leave it `None` and let `Worker` read the env directly.
+    pub health_check_payload: Option<serde_json::Value>,
+    /// Structural tag guided decoding mode.
+    pub structural_tag_mode: StructuralTagMode,
+    /// Structural tag activation scope.
+    pub structural_tag_scope: StructuralTagScope,
+    /// Structural tag schema strictness.
+    pub structural_tag_schema: StructuralTagSchemaMode,
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
@@ -166,6 +184,10 @@ impl Default for WorkerConfig {
             enable_kv_routing: true,
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
+            health_check_payload: None,
+            structural_tag_mode: StructuralTagMode::Off,
+            structural_tag_scope: StructuralTagScope::Auto,
+            structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
         }
     }
@@ -598,11 +620,11 @@ impl Worker {
             self.config.endpoint
         );
 
-        let ingress = Ingress::for_engine(Arc::new(EngineAdapter::new(
+        let engine_adapter = Arc::new(EngineAdapter::new(
             self.engine.clone(),
             self.config.disaggregation_mode,
-        )))
-        .map_err(|e| {
+        ));
+        let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
             err(
                 ErrorType::Backend(BackendError::Unknown),
                 format!("ingress: {e}"),
@@ -623,12 +645,52 @@ impl Worker {
         // — discovery unregister, grace period, drain, cleanup — finishes.
         let _orchestrator_registration = endpoint.drt().register_graceful_task();
 
-        let serve_fut = endpoint
+        // Precedence: WorkerConfig (Python argparse plumbs CLI/env here) >
+        // DYN_HEALTH_CHECK_PAYLOAD env (backstop for Rust-only engines) >
+        // engine default. Every override path stamps the `_HEALTH_CHECK`
+        // marker so engines can branch on `is_probe(request)` regardless of
+        // where the payload came from.
+        let probe = match std::mem::take(&mut self.config.health_check_payload)
+            .or_else(load_health_check_payload_from_env)
+        {
+            Some(p) => stamp_canary_marker(p),
+            None => self
+                .engine
+                .health_check_payload()
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        "engine.health_check_payload() failed; canary disabled for this endpoint",
+                    );
+                    None
+                })
+                .and_then(stamp_canary_marker),
+        };
+
+        let mut builder = endpoint
             .endpoint_builder()
             .handler(ingress)
             .metrics_labels(metrics_labels)
-            .graceful_shutdown(true)
-            .start();
+            .graceful_shutdown(true);
+        if let Some(payload) = probe {
+            builder = builder.health_check_payload(payload);
+            // The runtime's `HealthCheckManager` fires the canary by looking
+            // up a `LocalAsyncEngine` for this endpoint name. Register a
+            // JSON-shaped wrapper over our `EngineAdapter` so the probe
+            // exercises the same `generate()` path as real traffic.
+            builder = builder
+                .register_local_engine(Arc::new(crate::adapter::JsonProbeAdapter::new(
+                    engine_adapter,
+                )))
+                .map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("register_local_engine: {e}"),
+                    )
+                })?;
+        }
+        let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
         tokio::select! {
@@ -734,6 +796,57 @@ fn shutdown_deadline(timeout: Duration, grace_secs: f64) -> Duration {
         Duration::ZERO
     };
     timeout.saturating_add(grace)
+}
+
+/// Validate that `value` is a JSON object and stamp the canary marker on
+/// it. Returns `None` for non-object payloads (logs a warning) so the
+/// canary stays disabled rather than being registered with an invalid
+/// shape. Operator overrides reach the engine's `generate()` with the
+/// marker set so `is_probe(request)` detects them.
+fn stamp_canary_marker(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let Some(obj) = value.as_object_mut() else {
+        tracing::warn!(
+            ?value,
+            "health_check_payload override is not a JSON object; canary disabled"
+        );
+        return None;
+    };
+    obj.insert(
+        crate::engine::HEALTH_CHECK_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    Some(value)
+}
+
+/// Read `DYN_HEALTH_CHECK_PAYLOAD` (JSON object or `@/path/to/file.json`).
+/// Returns `None` when the env is unset or the value is invalid; an invalid
+/// value logs a warning so it can't silently disable the engine default.
+fn load_health_check_payload_from_env() -> Option<serde_json::Value> {
+    let raw = std::env::var(HEALTH_CHECK_PAYLOAD_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let parsed: Result<serde_json::Value, _> = if let Some(path) = raw.strip_prefix('@') {
+        std::fs::read_to_string(path).map_or_else(
+            |e| Err(format!("read {path}: {e}")),
+            |s| serde_json::from_str(&s).map_err(|e| e.to_string()),
+        )
+    } else {
+        serde_json::from_str(&raw).map_err(|e| e.to_string())
+    };
+    match parsed {
+        Ok(v) if v.is_object() => Some(v),
+        Ok(_) => {
+            tracing::warn!(
+                env = HEALTH_CHECK_PAYLOAD_ENV,
+                "value must be a JSON object"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(env = HEALTH_CHECK_PAYLOAD_ENV, error = %e, "parse failed");
+            None
+        }
+    }
 }
 
 /// Read the grace-period seconds from `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`,
@@ -892,6 +1005,9 @@ async fn build_local_model(
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
+        structural_tag_mode: config.structural_tag_mode,
+        structural_tag_scope: config.structural_tag_scope,
+        structural_tag_schema: config.structural_tag_schema,
         enable_local_indexer,
         disaggregated_endpoint,
         runtime_data: engine_config.runtime_data.clone(),
@@ -1490,6 +1606,61 @@ mod tests {
         with_env(GRACE_PERIOD_ENV, Some(""), || {
             assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
         });
+    }
+
+    // -------------------------------------------------------------------
+    // load_health_check_payload_from_env
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn health_check_payload_env_returns_object() {
+        with_env(
+            HEALTH_CHECK_PAYLOAD_ENV,
+            Some(r#"{"token_ids":[1]}"#),
+            || {
+                let got = load_health_check_payload_from_env().unwrap();
+                assert_eq!(got["token_ids"], serde_json::json!([1]));
+            },
+        );
+    }
+
+    #[test]
+    fn health_check_payload_env_rejects_non_object() {
+        with_env(HEALTH_CHECK_PAYLOAD_ENV, Some("[1,2,3]"), || {
+            assert!(load_health_check_payload_from_env().is_none());
+        });
+    }
+
+    // -------------------------------------------------------------------
+    // stamp_canary_marker
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn stamp_canary_marker_injects_into_object() {
+        let stamped = stamp_canary_marker(serde_json::json!({"token_ids": [1]})).unwrap();
+        assert_eq!(
+            stamped[crate::engine::HEALTH_CHECK_KEY],
+            serde_json::json!(true)
+        );
+        assert_eq!(stamped["token_ids"], serde_json::json!([1]));
+    }
+
+    #[test]
+    fn stamp_canary_marker_rejects_non_object() {
+        assert!(stamp_canary_marker(serde_json::json!([1, 2, 3])).is_none());
+        assert!(stamp_canary_marker(serde_json::json!(42)).is_none());
+    }
+
+    #[test]
+    fn stamp_canary_marker_overrides_falsy_marker() {
+        // An operator can't disarm the marker by setting it false in their override.
+        let stamped =
+            stamp_canary_marker(serde_json::json!({crate::engine::HEALTH_CHECK_KEY: false}))
+                .unwrap();
+        assert_eq!(
+            stamped[crate::engine::HEALTH_CHECK_KEY],
+            serde_json::json!(true)
+        );
     }
 
     // -------------------------------------------------------------------

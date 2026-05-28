@@ -35,6 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
+    metadata::extract_metadata_from_http,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
         process_response_and_observe_metrics,
@@ -43,6 +44,7 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
+use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
@@ -58,8 +60,9 @@ use crate::protocols::openai::{
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
-use crate::request_template::RequestTemplate;
+use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
 use dynamo_runtime::logging::get_distributed_tracing_context;
@@ -210,6 +213,19 @@ impl ErrorMessage {
     pub fn not_implemented_error<T: Display>(msg: T) -> ErrorResponse {
         tracing::error!("Not Implemented error: {msg}");
         let code = StatusCode::NOT_IMPLEMENTED;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
+    pub fn request_headers_too_large(msg: &str) -> ErrorResponse {
+        let code = StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE;
         let error_type = map_error_code_to_error_type(code);
         (
             code,
@@ -398,6 +414,18 @@ fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, heade
     }
 }
 
+fn context_from_headers<T: Send + Sync + 'static>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+) -> Result<Context<T>, ErrorResponse> {
+    let metadata = extract_metadata_from_http(headers)
+        .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
+    let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    attach_x_request_id(&mut request, headers);
+    Ok(request)
+}
+
 fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
@@ -436,12 +464,14 @@ async fn handler_completions(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
-        model: request.inner.model.clone(),
+        model: state
+            .manager()
+            .metric_model_for(&request.inner.model)
+            .to_string(),
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -514,17 +544,18 @@ async fn completions_single(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     let model = request.inner.model.clone();
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Completions,
         streaming,
         &request_id,
     );
 
     // Create http_queue_guard early - tracks time waiting to be processed
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
     let (engine, parsing_options) = state
@@ -536,7 +567,9 @@ async fn completions_single(
             err_response
         })?;
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -663,17 +696,18 @@ async fn completions_batch(
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
     let model = request.inner.model.clone();
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Completions,
         streaming,
         &request_id,
     );
 
     // Create http_queue_guard early - tracks time waiting to be processed
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     let (engine, parsing_options) = state
         .manager()
@@ -684,7 +718,9 @@ async fn completions_batch(
             err_response
         })?;
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -703,7 +739,11 @@ async fn completions_batch(
 
         // Generate unique request_id for each prompt: original_id-{prompt_idx}
         let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
-        let mut single_request_context = Context::with_id(single_request, unique_request_id);
+        let mut single_request_context = Context::with_id_and_metadata(
+            single_request,
+            unique_request_id,
+            request.metadata().clone(),
+        );
         copy_x_request_id(&request, &mut single_request_context);
 
         // Generate stream for this prompt
@@ -846,7 +886,7 @@ async fn embeddings(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // Embeddings are typically not streamed, so we default to non-streaming
@@ -855,17 +895,25 @@ async fn embeddings(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
+    let metric_model = state.manager().metric_model_for(model).to_string();
+
+    // Start the embedding-specific latency timer. Distinct from
+    // `request_duration` (which has 1..512s LLM-gen buckets); pooling-model
+    // requests are sub-second and need finer-grained buckets to be useful for
+    // SLO tracking. Only observed on the success path -- error/cancel paths
+    // already increment requests_total with status=error.
+    let embedding_start = std::time::Instant::now();
 
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        model,
+        &metric_model,
         Endpoint::Embeddings,
         streaming,
         &request_id,
     );
 
     // Create http_queue_guard early - tracks time waiting to be processed
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
     let engine = state.manager().get_embeddings_engine(model).map_err(|e| {
@@ -874,7 +922,9 @@ async fn embeddings(
         err_response
     })?;
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
     let model_name = model.to_string();
 
     // issue the generate call on the engine
@@ -916,6 +966,9 @@ async fn embeddings(
             err_response
         })?;
 
+    state
+        .metrics_clone()
+        .observe_embedding_latency(&model_name, embedding_start.elapsed().as_secs_f64());
     inflight.mark_ok();
     Ok(Json(response).into_response())
 }
@@ -933,13 +986,13 @@ async fn handler_chat_completions(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
+    let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     let cancellation_labels = CancellationLabels {
-        model: request.inner.model.clone(),
+        model: state.manager().metric_model_for(resolved_model).to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -1109,7 +1162,7 @@ fn make_dispatch_event(
 }
 
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
-/// `role` is excluded — backends set it on every delta.
+/// `role` is excluded; backends set it on every delta.
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     if resp.nvext.is_some() {
         return false;
@@ -1124,8 +1177,16 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 refusal,
                 reasoning_content,
             } = &c.delta;
+            // `Text("")` happens during multi-byte UTF-8 token assembly;
+            // `Parts(vec![])` is a structurally empty multimodal payload.
+            let content_empty = match content {
+                None => true,
+                Some(ChatCompletionMessageContent::Text(t)) => t.is_empty(),
+                Some(ChatCompletionMessageContent::Parts(p)) => p.is_empty(),
+            };
             c.finish_reason.is_none()
-                && content.is_none()
+                && c.logprobs.is_none()
+                && content_empty
                 && function_call.is_none()
                 && tool_calls.is_none()
                 && refusal.is_none()
@@ -1275,12 +1336,13 @@ async fn chat_completions(
     // todo - when optional, if none, apply a default
     // todo - determine the proper error code for when a request model is not present
     let model = request.inner.model.clone();
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::ChatCompletions,
         streaming,
         &request_id,
@@ -1314,7 +1376,7 @@ async fn chat_completions(
     }
 
     // Create HTTP queue guard after template resolution so labels are correct
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
@@ -1327,7 +1389,9 @@ async fn chat_completions(
             err_response
         })?;
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     let annotations = request.annotations();
 
@@ -1596,13 +1660,14 @@ async fn handler_responses(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
+    let raw_model = request.inner.model.as_deref().unwrap_or("");
+    let resolved_model = resolve_request_model(raw_model, template.as_ref());
     let cancellation_labels = CancellationLabels {
-        model: request.inner.model.clone().unwrap_or_default(),
+        model: state.manager().metric_model_for(resolved_model).to_string(),
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -1641,8 +1706,9 @@ async fn responses(
     check_ready(&state)?;
 
     // Apply template values if present. When no template and no client-supplied
-    // max_output_tokens, leave it as None and let the underlying engine apply its
-    // own default — matching the chat completions path.
+    // max_output_tokens, leave it as None for response echoing and let the
+    // backend adapter compute the dynamic generation cap from its effective
+    // prompt length.
     if let Some(template) = template {
         if request.inner.model.as_deref().unwrap_or("").is_empty() {
             request.inner.model = Some(template.model.clone());
@@ -1658,11 +1724,12 @@ async fn responses(
 
     let model = request.inner.model.clone().unwrap_or_default();
     let streaming = request.inner.stream.unwrap_or(false);
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create http_queue_guard early - tracks time waiting to be processed
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Responses,
         streaming,
         request.id(),
@@ -1738,7 +1805,10 @@ async fn responses(
             continuous_usage_stats: false,
         });
 
-    let request = context.map(|mut _req| chat_request);
+    let mut request = context.map(|mut _req| chat_request);
+    if response_params.max_output_tokens.is_none() {
+        request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
+    }
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
@@ -1751,7 +1821,9 @@ async fn responses(
             err_response
         })?;
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     tracing::trace!("Issuing generate call for responses");
 
@@ -2188,7 +2260,7 @@ async fn images(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // Images are typically not streamed, so we default to non-streaming
@@ -2209,8 +2281,10 @@ async fn images(
         })
         .unwrap_or_else(|| "diffusion".to_string());
 
+    let metric_model = state.manager().metric_model_for(&model).to_string();
+
     // Create http_queue_guard early - tracks time waiting to be processed
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // Get the image generation engine
     let engine = state
@@ -2318,16 +2392,17 @@ async fn videos(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     let streaming = request.stream.unwrap_or(false);
 
     // Get the model name from the request (video generation model)
     let model = request.model.clone();
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create http_queue_guard early - tracks time waiting to be processed
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // Get the video generation engine
     let engine = state
@@ -2437,10 +2512,11 @@ async fn video_stream(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let model = request.model.clone();
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     let engine = state
         .manager()
@@ -2600,7 +2676,7 @@ async fn audio_speech(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     let streaming = false;
@@ -2614,8 +2690,9 @@ async fn audio_speech(
             .next()
             .unwrap_or_default()
     });
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     let engine = state
         .manager()
@@ -4565,6 +4642,75 @@ mod tests {
                 }),
             )),
             "function_call present → not empty",
+        );
+    }
+
+    #[test]
+    fn test_chat_predicate_filters_text_empty_string() {
+        use dynamo_protocols::types::{
+            ChatChoiceLogprobs, ChatCompletionMessageContent, ChatCompletionResponseContentPart,
+            ChatCompletionResponseContentPartText, ChatCompletionTokenLogprob,
+        };
+
+        // `Text("")` arises during multi-byte UTF-8 token assembly and must be
+        // filtered, matching `is_empty_completion_stream_response`'s `""` case.
+        let resp = make_delta(Some(""), None, None, None, None, None, None, None);
+        assert!(
+            is_empty_stream_response(&resp),
+            "Text(\"\") delta should be filtered as empty",
+        );
+
+        // Structurally empty multimodal `Parts(vec![])` is also empty.
+        let mut resp = make_delta(None, None, None, None, None, None, None, None);
+        resp.inner.choices[0].delta.content = Some(ChatCompletionMessageContent::Parts(Vec::new()));
+        assert!(
+            is_empty_stream_response(&resp),
+            "Parts(vec![]) delta should be filtered as empty",
+        );
+
+        // Non-empty multimodal Parts must be preserved.
+        let mut resp = make_delta(None, None, None, None, None, None, None, None);
+        resp.inner.choices[0].delta.content = Some(ChatCompletionMessageContent::Parts(vec![
+            ChatCompletionResponseContentPart::Text(ChatCompletionResponseContentPartText {
+                text: "hi".to_string(),
+            }),
+        ]));
+        assert!(
+            !is_empty_stream_response(&resp),
+            "Parts with content must not be filtered",
+        );
+
+        // Empty content alongside a semantic field (finish_reason) must survive.
+        let resp = make_delta(
+            Some(""),
+            None,
+            None,
+            Some(FinishReason::Stop),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !is_empty_stream_response(&resp),
+            "Text(\"\") + finish_reason must not be filtered",
+        );
+
+        // Per-token logprobs can arrive while content is still `Text("")` during
+        // multi-byte assembly; that payload is meaningful and must survive.
+        let mut resp = make_delta(Some(""), None, None, None, None, None, None, None);
+        resp.inner.choices[0].logprobs = Some(ChatChoiceLogprobs {
+            content: Some(vec![ChatCompletionTokenLogprob {
+                token: "h".to_string(),
+                logprob: -0.5,
+                bytes: Some(vec![104]),
+                top_logprobs: vec![],
+            }]),
+            refusal: None,
+        });
+        assert!(
+            !is_empty_stream_response(&resp),
+            "Text(\"\") + logprobs must not be filtered",
         );
     }
 

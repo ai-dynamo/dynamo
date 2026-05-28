@@ -22,6 +22,7 @@ import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
@@ -33,10 +34,16 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.health_check import (
+    bos_token_id_or,
+    build_health_check_payload,
+    is_probe,
+)
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import (
@@ -46,6 +53,11 @@ from dynamo.sglang._disagg import (
     warmup_prefill_engine,
 )
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.capacity import (
+    kv_metrics_block_values,
+    local_dp_rank_bounds,
+    runtime_capacity,
+)
 from dynamo.sglang.publisher import format_zmq_endpoint
 
 if TYPE_CHECKING:
@@ -79,15 +91,7 @@ def _local_dp_rank_range(server_args) -> tuple[int, int]:
     """Per-node local-rank slice for this worker. Under DP attention each
     node owns ``dp_size // nnodes`` ranks starting at
     ``node_rank * local_dp_size``; otherwise rank 0 only."""
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
-    nnodes = getattr(server_args, "nnodes", 1) or 1
-    node_rank = getattr(server_args, "node_rank", 0) or 0
-    if enable_dp_attention and dp_size > 1:
-        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-        start = node_rank * local_dp_size
-        return start, start + local_dp_size
-    return 0, 1
+    return local_dp_rank_bounds(server_args)
 
 
 class SglangLLMEngine(LLMEngine):
@@ -175,32 +179,22 @@ class SglangLLMEngine(LLMEngine):
                     _DYN_SGLANG_SKIP_WARMUP_ENV,
                 )
 
-        # Capacity fields — match register.py in the legacy path.
-        total_kv_blocks = None
         scheduler_info = get_scheduler_info(self.engine)
-        max_total_tokens = scheduler_info.get("max_total_num_tokens")
+        capacity = runtime_capacity(self.server_args, scheduler_info)
         page_size = self.server_args.page_size
-        if max_total_tokens and page_size:
-            total_kv_blocks = (max_total_tokens + page_size - 1) // page_size
-
-        # Prefer max_prefill_tokens; fall back so planner has a signal.
-        max_num_batched_tokens = (
-            getattr(self.server_args, "max_prefill_tokens", None) or max_total_tokens
-        )
 
         self._start_metrics_task()
 
-        dp_start, dp_end = _local_dp_rank_range(self.server_args)
-        self._dp_start = dp_start
-        self._dp_size = dp_end - dp_start
+        self._dp_start = capacity.data_parallel_start_rank
+        self._dp_size = capacity.data_parallel_size
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
             context_length=self.server_args.context_length,
             kv_cache_block_size=page_size,
-            total_kv_blocks=total_kv_blocks,
-            max_num_seqs=getattr(self.server_args, "max_running_requests", None),
-            max_num_batched_tokens=max_num_batched_tokens,
+            total_kv_blocks=capacity.total_kv_blocks,
+            max_num_seqs=capacity.max_num_seqs,
+            max_num_batched_tokens=capacity.max_num_batched_tokens,
             # Router needs the rank range to enumerate per-rank load.
             data_parallel_size=self._dp_size,
             data_parallel_start_rank=self._dp_start,
@@ -256,11 +250,14 @@ class SglangLLMEngine(LLMEngine):
             # versions; older releases (pre-N-1) may omit it.
             hit_rate = getattr(kv_metrics, "cache_hit_rate_perc", None)
             if self._snapshot_publisher is not None:
+                kv_used_blocks, kv_total_blocks = kv_metrics_block_values(
+                    kv_metrics, self.server_args.page_size
+                )
                 self._snapshot_publisher.publish(
                     dp_rank,
                     ComponentSnapshot(
-                        kv_used_blocks=kv_metrics.kv_active_blocks,
-                        kv_total_blocks=kv_metrics.kv_total_blocks,
+                        kv_used_blocks=kv_used_blocks,
+                        kv_total_blocks=kv_total_blocks,
                         gpu_cache_usage=kv_metrics.gpu_cache_usage_perc,
                         kv_cache_hit_rate=hit_rate,
                         dp_rank=dp_rank,
@@ -310,6 +307,31 @@ class SglangLLMEngine(LLMEngine):
         # above) before we yield the bootstrap chunk — otherwise the
         # decode peer can connect to a room that doesn't exist yet.
         if self.serving_mode == DisaggregationMode.PREFILL:
+            # Canary probes: drain the engine stream and yield a single
+            # terminal so `HealthCheckManager` observes actual engine
+            # completion. Without this, the bootstrap chunk below makes
+            # the probe "succeed" before the engine has done any work.
+            if is_probe(request):
+                try:
+                    async for _ in stream:
+                        if context.is_stopped():
+                            break
+                except Exception as e:
+                    logger.warning(
+                        "prefill canary stream failed (rid=%s): %s",
+                        context.trace_id,
+                        e,
+                        exc_info=True,
+                    )
+                    self._abort_sglang_request(context.trace_id)
+                    yield {
+                        "token_ids": [],
+                        "index": 0,
+                        "finish_reason": f"error: {e}",
+                    }
+                    return
+                yield {"token_ids": [], "index": 0, "finish_reason": "stop"}
+                return
             yield {
                 "token_ids": [],
                 "index": 0,
@@ -548,14 +570,13 @@ class SglangLLMEngine(LLMEngine):
                 rid,
                 exc_info=True,
             )
-            if rid is not None:
-                self._abort_sglang_request(rid)
+            self._abort_sglang_request(rid)
 
-    def _abort_sglang_request(self, rid: str) -> None:
+    def _abort_sglang_request(self, rid: Optional[str]) -> None:
         """Best-effort abort. Failures here are swallowed — SGLang is
         already in a bad state and we want to surface the original
         failure, not a follow-up abort error."""
-        if self.engine is None:
+        if rid is None or self.engine is None:
             return
         tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
         if tokenizer_manager is None:
@@ -621,6 +642,38 @@ class SglangLLMEngine(LLMEngine):
             multiprocess.MultiProcessCollector(sgl_registry)
             register_engine_registry(metrics, sgl_registry, prefix_filters=["sglang:"])
 
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        # `--use-sglang-tokenizer` consumes `messages`/`prompt`/`text` via
+        # `_input_param_manager.get_input_param(use_tokenizer=True)` and
+        # reads flat sampling fields. Neither shape survives the
+        # `PreprocessedRequest` typed deserialize on the canary path
+        # (no `prompt`/`messages` fields on the struct), so the canary
+        # is opted out in tokenizer mode. Activity-driven health remains.
+        if self._use_sglang_tokenizer:
+            logger.warning(
+                "SGLang tokenizer-mode worker: health-check canary disabled — "
+                "PreprocessedRequest has no prompt/messages field for the "
+                "JSON probe adapter. Endpoint readiness will rely on real "
+                "request traffic."
+            )
+            return None
+        extras: Optional[dict[str, Any]] = None
+        # FAKE_BOOTSTRAP_HOST tells SGLang to short-circuit real KV transfer;
+        # room=0 always routes to DP rank 0.
+        if self.serving_mode in (DisaggregationMode.PREFILL, DisaggregationMode.DECODE):
+            bootstrap_port = (
+                getattr(self.server_args, "disaggregation_bootstrap_port", None) or 0
+            )
+            extras = {
+                "bootstrap_info": {
+                    "bootstrap_host": FAKE_BOOTSTRAP_HOST,
+                    "bootstrap_port": bootstrap_port,
+                    "bootstrap_room": 0,
+                }
+            }
+        bos = bos_token_id_or(getattr(self.engine, "tokenizer_manager", None))
+        return build_health_check_payload(bos_token_id=bos, extras=extras)
+
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
         if not self._use_sglang_tokenizer:
             sampling_opts = request.get("sampling_options", {})
@@ -655,9 +708,7 @@ class SglangLLMEngine(LLMEngine):
                 return {"json_schema": json.dumps(json_schema)}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
-                if hasattr(structural_tag, "model_dump"):
-                    structural_tag = structural_tag.model_dump()
-                return {"structural_tag": json.dumps(structural_tag)}
+                return {"structural_tag": serialize_structural_tag(structural_tag)}
         return {}
 
     def _get_input_param(self, request: GenerateRequest) -> dict:

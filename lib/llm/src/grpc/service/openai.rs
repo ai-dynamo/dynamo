@@ -9,6 +9,7 @@ use dynamo_runtime::{
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
+use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
@@ -25,7 +26,7 @@ use crate::http::service::{
 };
 use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
-use tonic::Status;
+use tonic::{Status, metadata::MetadataMap};
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
@@ -44,6 +45,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 pub async fn completion_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateCompletionRequest,
+    metadata: &MetadataMap,
 ) -> Result<
     (
         impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
@@ -61,7 +63,9 @@ pub async fn completion_response_stream(
         endpoint: "grpc_completions".to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id.clone());
+    let metadata = extract_metadata_from_grpc(metadata)
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+    let request = Context::with_id_and_metadata(request, request_id.clone(), metadata);
     let context = request.context();
 
     // create the connection handles

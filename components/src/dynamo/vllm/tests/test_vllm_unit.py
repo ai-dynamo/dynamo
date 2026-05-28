@@ -42,6 +42,7 @@ pytestmark = [
     # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
     # runners with "Failed to infer device type" even for mock tests.
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
@@ -294,6 +295,7 @@ def test_uses_nixl_connector_direct_and_nested():
     assert _uses_nixl_connector(_make_engine_cfg("NixlConnector")) is True
     assert _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheConnectorV1")) is False
+    assert _uses_nixl_connector(_make_engine_cfg("LMCacheMPConnector")) is False
     assert _uses_nixl_connector(_make_engine_cfg("FlexKVConnectorV1")) is False
     assert _uses_nixl_connector(_make_engine_cfg()) is False
 
@@ -726,6 +728,46 @@ class TestBenchmarkGrid:
         total_kv = 100 * 16
         for ctx_len, bs in points:
             assert ctx_len <= total_kv
+
+
+@pytest.mark.asyncio
+async def test_health_check_decode_opts_out_with_warning():
+    # mock.patch the module logger directly: dynamo's logging setup
+    # turns off propagation on per-module loggers, so pytest's caplog
+    # (which attaches at root) doesn't see these warnings.
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.DECODE,
+        served_model_name="test",
+        component="backend",
+    )
+    with patch("dynamo.vllm.llm_engine.logger") as mock_logger:
+        payload = await engine.health_check_payload()
+
+    assert payload is None
+    assert mock_logger.warning.call_count == 1
+    msg = mock_logger.warning.call_args.args[0]
+    assert "DECODE worker: health-check canary disabled" in msg
+
+
+@pytest.mark.asyncio
+async def test_health_check_aggregated_returns_canary():
+    from dynamo.common.backend.health_check import HEALTH_CHECK_KEY
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        served_model_name="test",
+        component="backend",
+    )
+    payload = await engine.health_check_payload()
+
+    assert payload is not None
+    assert payload[HEALTH_CHECK_KEY] is True
+    assert payload["token_ids"]
 
 
 def test_build_sampling_params_maps_max_thinking_tokens():
