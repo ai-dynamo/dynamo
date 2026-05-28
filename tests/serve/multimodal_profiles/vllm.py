@@ -106,7 +106,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
-                profiled_vram_gib=18.7,
+                profiled_vram_gib=16.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
                 tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
@@ -121,7 +121,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router_chat_processor": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
-                profiled_vram_gib=18.7,
+                profiled_vram_gib=16.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
@@ -138,7 +138,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router_frontend_decode": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
-                profiled_vram_gib=18.7,
+                profiled_vram_gib=16.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={
                     "SINGLE_GPU": "true",
