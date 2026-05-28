@@ -29,7 +29,7 @@ The `--help` output is organized into the following groups:
 
 ### Tool and Reasoning Parsers
 
-Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Calling](../../agents/tool-calling.md#supported-tool-call-parsers) and [Reasoning](../../agents/reasoning.md#supported-reasoning-parsers).
+Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/dynamo.md#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/dynamo.md#supported-reasoning-parsers).
 
 ### Prompt Embeddings
 

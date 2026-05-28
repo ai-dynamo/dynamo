@@ -18,8 +18,9 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
     pytest.mark.unified,
-    pytest.mark.gpu_0,
+    pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
     pytest.mark.skipif(
         importlib.util.find_spec("tensorrt_llm") is None,
         reason="tensorrt_llm not installed in this container",

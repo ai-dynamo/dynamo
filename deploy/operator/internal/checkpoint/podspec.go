@@ -22,7 +22,9 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -85,18 +87,6 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		snapshotprotocol.ApplyCheckpointStorageMetadata(annotations, storage)
 	}
 	return nil
-}
-
-func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
-	if podSpec == nil {
-		return nil, fmt.Errorf("pod spec is nil")
-	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i], nil
-		}
-	}
-	return nil, fmt.Errorf("pod spec has no container named %q", commonconsts.MainContainerName)
 }
 
 func InjectCheckpointIntoPodSpec(
@@ -201,32 +191,47 @@ func injectCheckpointIntoPodSpec(
 	}
 
 	EnsurePodInfoVolume(podSpec)
+	targetContainers := make([]*corev1.Container, 0, len(targets))
 	for _, name := range targets {
-		container := findPodSpecContainer(podSpec, name)
+		var container *corev1.Container
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == name {
+				container = &podSpec.Containers[i]
+				break
+			}
+		}
 		if container == nil {
 			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
 		}
 		EnsurePodInfoMount(container)
+		targetContainers = append(targetContainers, container)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
-		mainContainer, err := RequireMainContainer(podSpec)
-		if err != nil {
-			return fmt.Errorf("gpuMemoryService enabled: %w", err)
+		switch info.GPUMemoryService.Mode {
+		case "", nvidiacomv1alpha1.GMSModeIntraPod:
+			gms.EnsureServerSidecar(podSpec, targetContainers[0])
+			for _, container := range targetContainers {
+				gms.EnsureClient(podSpec, container)
+			}
+			for _, name := range info.GPUMemoryService.ExtraClientContainers {
+				var container *corev1.Container
+				for i := range podSpec.Containers {
+					if podSpec.Containers[i].Name == name {
+						container = &podSpec.Containers[i]
+						break
+					}
+				}
+				if container == nil {
+					continue
+				}
+				gms.EnsureClient(podSpec, container)
+			}
+		case nvidiacomv1alpha1.GMSModeInterPod:
+			return fmt.Errorf("gpuMemoryService checkpoint restore for mode %q is not implemented", info.GPUMemoryService.Mode)
+		default:
+			return fmt.Errorf("gpuMemoryService checkpoint restore has unsupported mode %q", info.GPUMemoryService.Mode)
 		}
-		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
 	}
 
-	return nil
-}
-
-func findPodSpecContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
-	if podSpec == nil {
-		return nil
-	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == name {
-			return &podSpec.Containers[i]
-		}
-	}
 	return nil
 }

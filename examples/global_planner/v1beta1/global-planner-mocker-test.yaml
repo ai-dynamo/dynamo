@@ -1,0 +1,399 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mocker-based GlobalPlanner test: 2 prefill pools + 2 decode pools.
+# Each pool SLA Planner reads router histogram metrics from cluster Prometheus
+# and delegates scaling decisions to the GlobalPlanner (no-op mode).
+#
+# Architecture:
+#   DGD gp-ctrl:      Frontend + GlobalRouter + GlobalPlanner (no-op)
+#   DGD gp-prefill-0: LocalRouter + MockerPrefill + Planner
+#   DGD gp-prefill-1: LocalRouter + MockerPrefill + Planner
+#   DGD gp-decode-0:  LocalRouter + MockerDecode  + Planner
+#   DGD gp-decode-1:  LocalRouter + MockerDecode  + Planner
+#
+# Usage:
+#   envsubst < global-planner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
+#   envsubst < global-planner-mocker-test.yaml | kubectl delete -n ${K8S_NAMESPACE} -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gp-global-router-config
+data:
+  global_router_config.json: |
+    {
+      "num_prefill_pools": 2,
+      "num_decode_pools": 2,
+      "prefill_pool_dynamo_namespaces": [
+        "${K8S_NAMESPACE}-gp-prefill-0",
+        "${K8S_NAMESPACE}-gp-prefill-1"
+      ],
+      "decode_pool_dynamo_namespaces": [
+        "${K8S_NAMESPACE}-gp-decode-0",
+        "${K8S_NAMESPACE}-gp-decode-1"
+      ],
+      "prefill_pool_selection_strategy": {
+        "ttft_min_ms": 10, "ttft_max_ms": 3000, "ttft_resolution": 2,
+        "isl_min": 0,   "isl_max": 32000, "isl_resolution": 2,
+        "prefill_pool_mapping": [[0,1],[0,1]]
+      },
+      "decode_pool_selection_strategy": {
+        "itl_min_ms": 10,  "itl_max_ms": 500,   "itl_resolution": 2,
+        "context_length_min": 0, "context_length_max": 32000, "context_length_resolution": 2,
+        "decode_pool_mapping": [[0,1],[0,1]]
+      }
+    }
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-ctrl
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --router-mode
+          - round-robin
+          - --namespace
+          - ${K8S_NAMESPACE}-gp-ctrl
+          - --model-name
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          image: ${DYNAMO_IMAGE}
+          name: main
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: frontend
+  - name: GlobalPlanner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --no-operation
+          command:
+          - python3
+          - -m
+          - dynamo.global_planner
+          image: ${DYNAMO_IMAGE}
+          name: main
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: planner
+  - name: GlobalRouter
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - /config/global_router_config.json
+          - --model-name
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          - --namespace
+          - ${K8S_NAMESPACE}-gp-ctrl
+          command:
+          - python3
+          - -m
+          - dynamo.global_router
+          image: ${DYNAMO_IMAGE}
+          name: main
+          volumeMounts:
+          - mountPath: /config
+            name: global-router-config
+            readOnly: true
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+        volumes:
+        - configMap:
+            name: gp-global-router-config
+          name: global-router-config
+    replicas: 1
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-prefill-0
+spec:
+  components:
+  - name: LocalRouter
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --endpoint
+          - ${K8S_NAMESPACE}-gp-prefill-0.prefill.generate
+          - --no-router-kv-events
+          command:
+          - python3
+          - -m
+          - dynamo.router
+          env:
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          image: ${DYNAMO_IMAGE}
+          name: main
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+  - name: MockerPrefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          - --model-name
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          - --speedup-ratio
+          - "5.0"
+          - --planner-profile-data
+          - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+          - --is-prefill-worker
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          image: ${DYNAMO_IMAGE}
+          name: main
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: prefill
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"prefill","throughput_metrics_source":"router","throughput_adjustment_interval_seconds":30,"ttft_ms":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
+          command:
+          - python3
+          - -m
+          - dynamo.planner
+          image: ${DYNAMO_IMAGE}
+          name: main
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: planner
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-prefill-1
+spec:
+  components:
+  - name: LocalRouter
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --endpoint
+          - ${K8S_NAMESPACE}-gp-prefill-1.prefill.generate
+          - --no-router-kv-events
+          command:
+          - python3
+          - -m
+          - dynamo.router
+          env:
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          image: ${DYNAMO_IMAGE}
+          name: main
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+  - name: MockerPrefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          - --model-name
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          - --speedup-ratio
+          - "5.0"
+          - --planner-profile-data
+          - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+          - --is-prefill-worker
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          image: ${DYNAMO_IMAGE}
+          name: main
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: prefill
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"prefill","throughput_metrics_source":"router","throughput_adjustment_interval_seconds":30,"ttft_ms":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
+          command:
+          - python3
+          - -m
+          - dynamo.planner
+          image: ${DYNAMO_IMAGE}
+          name: main
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: planner
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-decode-0
+spec:
+  components:
+  - name: LocalRouter
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --endpoint
+          - ${K8S_NAMESPACE}-gp-decode-0.backend.generate
+          - --no-router-kv-events
+          - --router-kv-overlap-score-credit=0
+          command:
+          - python3
+          - -m
+          - dynamo.router
+          env:
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          image: ${DYNAMO_IMAGE}
+          name: main
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+  - name: MockerDecode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          - --model-name
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          - --speedup-ratio
+          - "5.0"
+          - --planner-profile-data
+          - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          image: ${DYNAMO_IMAGE}
+          name: main
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: decode
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"decode","throughput_metrics_source":"router","throughput_adjustment_interval_seconds":30,"itl_ms":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
+          command:
+          - python3
+          - -m
+          - dynamo.planner
+          image: ${DYNAMO_IMAGE}
+          name: main
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: planner
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-decode-1
+spec:
+  components:
+  - name: LocalRouter
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --endpoint
+          - ${K8S_NAMESPACE}-gp-decode-1.backend.generate
+          - --no-router-kv-events
+          - --router-kv-overlap-score-credit=0
+          command:
+          - python3
+          - -m
+          - dynamo.router
+          env:
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          image: ${DYNAMO_IMAGE}
+          name: main
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+  - name: MockerDecode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          - --model-name
+          - nvidia/Llama-3.1-8B-Instruct-FP8
+          - --speedup-ratio
+          - "5.0"
+          - --planner-profile-data
+          - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          image: ${DYNAMO_IMAGE}
+          name: main
+          workingDir: /workspace
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: decode
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"decode","throughput_metrics_source":"router","throughput_adjustment_interval_seconds":30,"itl_ms":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
+          command:
+          - python3
+          - -m
+          - dynamo.planner
+          image: ${DYNAMO_IMAGE}
+          name: main
+        imagePullSecrets:
+        - name: docker-imagepullsecret
+    replicas: 1
+    type: planner

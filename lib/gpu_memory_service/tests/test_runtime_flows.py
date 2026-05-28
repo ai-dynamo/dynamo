@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """GMS runtime flow coverage.
@@ -21,8 +21,18 @@ import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
-import pynvml
 import pytest
+from _deps import HAS_GMS, HAS_PYNVML
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
+if HAS_PYNVML:
+    import pynvml
+
 from gpu_memory_service.client import memory_manager as client_memory_manager
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
@@ -886,6 +896,7 @@ async def test_allocation_manager_caches_exported_fd(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
+@pytest.mark.skipif(not HAS_PYNVML, reason="pynvml is not available")
 async def test_large_allocation_unblocks_after_export_fd_holder_dies(
     tmp_path,
 ):

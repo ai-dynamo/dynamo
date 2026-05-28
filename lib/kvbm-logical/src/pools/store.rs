@@ -11,8 +11,8 @@
 //! - `free: VecDeque<BlockId>` — reset pool (FIFO).
 //! - `inactive: Box<dyn InactiveIndex>` — pluggable eviction-order index
 //!   over slots in `Inactive` state.
-//! - `active_by_hash: HashMap<SequenceHash, BlockId>` — primary block_id
-//!   for each currently-registered hash.
+//! - `active_by_hash: SeqHashMap<BlockId>` — primary block_id for each
+//!   currently-registered hash (identity-hashed; see [`IdHasher`](super::IdHasher)).
 //!
 //! Active-pool lookup, slot transitions, and resurrection all happen
 //! under one lock, so no across-lock gap can leave a hash unreachable
@@ -23,7 +23,7 @@
 //! `BlockRegistrationHandle.attachments` (Mutex inside the registry) →
 //! `BlockStore.inner` (Mutex). Never the reverse.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
 
 // Under `#[cfg(test)]` use `tracing-mutex`'s parking_lot wrapper, which
@@ -44,6 +44,10 @@ use crate::blocks::{
 };
 use crate::metrics::BlockPoolMetrics;
 use crate::registry::BlockRegistrationHandle;
+
+// Identity hashing for `SequenceHash`-keyed maps lives in `pools` — it is
+// shared by `active_by_hash` here and by the inactive-pool backends.
+use super::SeqHashMap;
 
 /// Index trait for inactive-pool eviction backends. T-free: backends only
 /// need `(SequenceHash, BlockId)` pairs.
@@ -125,6 +129,22 @@ pub(crate) enum SlotState<T: BlockMetadata> {
         inner: Weak<ImmutableBlockInner<T>>,
     },
     /// Idle, evictable, registered. In the inactive index under `seq_hash`.
+    ///
+    /// The per-block "reset on last drop" override lives in
+    /// `BlockStoreInner::reset_on_release[block_id]` (a parallel `Vec<bool>`
+    /// under the same mutex as this variant) rather than in the variant
+    /// itself, so the override survives every transition into and out of
+    /// `Inactive` without an extra hand-off:
+    ///
+    /// - `Primary → Inactive` (both `release_primary` and the
+    ///   lookup-driven eager path): the bool is untouched, so the value
+    ///   the last holder set via `set_evict_on_reset` is preserved.
+    /// - `Inactive → Primary` (resurrection): the bool is untouched, so
+    ///   the new `ImmutableBlockInner` reads the carried value on its
+    ///   own drop.
+    /// - `Inactive → Mutable` (eviction): the bool is reset to the
+    ///   store-wide default, since a fresh tenant should not inherit a
+    ///   previous holder's override.
     Inactive {
         seq_hash: SequenceHash,
         handle: BlockRegistrationHandle,
@@ -172,7 +192,28 @@ pub(crate) struct BlockStoreInner<T: BlockMetadata> {
     inactive: Box<dyn InactiveIndex>,
     /// Primary `block_id` for each currently-registered sequence hash.
     /// Updated atomically with the slot's `Primary`/`Inactive` state.
-    active_by_hash: HashMap<SequenceHash, BlockId>,
+    /// Uses the identity [`IdHasher`](super::IdHasher) — the key is
+    /// already a content hash.
+    active_by_hash: SeqHashMap<BlockId>,
+    /// Per-slot "reset on last drop" override, indexed by `BlockId`.
+    /// Length is fixed to `total_blocks` at construction.
+    ///
+    /// Written by [`crate::blocks::ImmutableBlock::set_evict_on_reset`]
+    /// (which acquires this same mutex for the write); read by
+    /// `release_primary` to choose the `Primary → Inactive` vs
+    /// `Primary → Reset` transition. The eager `Primary → Inactive`
+    /// path does *not* touch this field — it just transitions the slot
+    /// — so a per-block override set by the dropping holder is
+    /// preserved across the race window where a concurrent lookup
+    /// beats `release_primary` to the mutex. The value rides through
+    /// `Primary → Inactive → Primary` (resurrection) untouched, and is
+    /// reset to the store-wide default on every transition into
+    /// `Mutable` so a fresh tenant starts clean.
+    ///
+    /// Both writes and reads happen under the store mutex, so all
+    /// visibility comes from the mutex's release-acquire semantics —
+    /// no atomic-ordering subtleties.
+    reset_on_release: Vec<bool>,
 }
 
 /// Single-mutex bookkeeping store for the reset, active, and inactive
@@ -186,6 +227,12 @@ pub(crate) struct BlockStore<T: BlockMetadata> {
     block_size: usize,
     total_blocks: usize,
     metrics: Arc<BlockPoolMetrics>,
+    /// Store-wide default for the per-slot "reset on last drop" override.
+    /// When `true`, every primary release bypasses the inactive pool and
+    /// goes straight to `Reset` (mirrors `release_duplicate`). Individual
+    /// holders can still override per-block via
+    /// `ImmutableBlock::set_evict_on_reset`.
+    default_reset_on_release: bool,
     /// Test-only hook to deterministically widen the
     /// "Arc strong=0 but `release_primary` not yet run" race window.
     /// `release_primary` acquires this gate *before* taking the store
@@ -213,6 +260,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         block_size: usize,
         inactive: Box<dyn InactiveIndex>,
         metrics: Arc<BlockPoolMetrics>,
+        default_reset_on_release: bool,
     ) -> Arc<Self> {
         let mut slots = Vec::with_capacity(total_blocks);
         let mut free = VecDeque::with_capacity(total_blocks);
@@ -223,22 +271,44 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             });
             free.push_back(i);
         }
+        let reset_on_release = vec![default_reset_on_release; total_blocks];
         Arc::new(Self {
             id: crate::ManagerId::next(),
             inner: Mutex::new(BlockStoreInner {
                 slots,
                 free,
                 inactive,
-                active_by_hash: HashMap::new(),
+                active_by_hash: SeqHashMap::default(),
+                reset_on_release,
             }),
             block_size,
             total_blocks,
             metrics,
+            default_reset_on_release,
             #[cfg(test)]
             release_primary_gate: Mutex::new(()),
             #[cfg(test)]
             release_primary_arrivals: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Store-wide default for the per-slot "reset on last drop" override.
+    /// `true` makes registered blocks bypass the inactive pool on release
+    /// (mirrors `release_duplicate`) unless a holder explicitly opts out
+    /// via `ImmutableBlock::set_evict_on_reset(false)`.
+    pub(crate) fn default_reset_on_release(&self) -> bool {
+        self.default_reset_on_release
+    }
+
+    /// Set the per-block "reset on last drop" override for `block_id`.
+    /// Backs [`crate::blocks::ImmutableBlock::set_evict_on_reset`].
+    ///
+    /// Acquires the store mutex so the write is published to any future
+    /// mutex acquirer through release-acquire on the mutex itself —
+    /// the per-slot value lives inside `BlockStoreInner` and is only
+    /// read under that same mutex.
+    pub(crate) fn store_reset_on_release(&self, block_id: BlockId, value: bool) {
+        self.inner.lock().reset_on_release[block_id] = value;
     }
 
     /// Stable, process-unique identifier of this store. See
@@ -314,6 +384,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         for _ in 0..take {
             let id = inner.free.pop_front().unwrap();
             inner.slots[id].state = SlotState::Mutable;
+            inner.reset_on_release[id] = self.default_reset_on_release;
             let block_size = inner.slots[id].block_size;
             out.push(MutableBlock::from_store(self.clone(), id, block_size));
         }
@@ -377,14 +448,17 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         let mut blocks = Vec::with_capacity(count);
         for id in reset_ids {
             inner.slots[id].state = SlotState::Mutable;
+            inner.reset_on_release[id] = self.default_reset_on_release;
             let block_size = inner.slots[id].block_size;
             blocks.push(MutableBlock::from_store(self.clone(), id, block_size));
         }
         let mut evicted = Vec::with_capacity(from_inactive);
         let mut handles = Vec::with_capacity(from_inactive);
         for (seq_hash, block_id) in evicted_pairs {
+            // Eviction discards the override; the slot leaves Inactive.
             let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
             inner.slots[block_id].state = SlotState::Mutable;
+            inner.reset_on_release[block_id] = self.default_reset_on_release;
             let block_size = inner.slots[block_id].block_size;
             blocks.push(MutableBlock::from_store(self.clone(), block_id, block_size));
             evicted.push(seq_hash);
@@ -415,8 +489,10 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         let mut handles = Vec::with_capacity(count);
         let mut out = Vec::with_capacity(count);
         for (_seq_hash, block_id) in drained {
+            // Eviction discards the override; the slot leaves Inactive.
             let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
             inner.slots[block_id].state = SlotState::Mutable;
+            inner.reset_on_release[block_id] = self.default_reset_on_release;
             handles.push(handle);
             let block_size = inner.slots[block_id].block_size;
             out.push(MutableBlock::from_store(self.clone(), block_id, block_size));
@@ -430,20 +506,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         out
     }
 
-    /// Promote up to `hashes.len()` inactive slots to `Primary`, building
-    /// fresh `ImmutableBlockInner`s. Stops on first miss.
-    pub(crate) fn find_inactive_primaries(
-        self: &Arc<Self>,
-        hashes: &[SequenceHash],
-        touch: bool,
-    ) -> Vec<Arc<ImmutableBlockInner<T>>> {
-        self.promote_inactive(hashes, touch, /*scan*/ false)
-            .into_iter()
-            .map(|(_, inner_arc)| inner_arc)
-            .collect()
-    }
-
-    /// Scan-style version of [`find_inactive_primaries`] — does not stop on miss.
+    /// Promote inactive slots to `Primary`, building fresh
+    /// `ImmutableBlockInner`s. Scan-style — does not stop on first miss.
     pub(crate) fn scan_inactive_primaries(
         self: &Arc<Self>,
         hashes: &[SequenceHash],
@@ -498,6 +562,10 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         let block_id = inner.inactive.find_match(seq_hash, touch)?.1;
         self.metrics.dec_inactive_pool_size();
         let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
+        // Resurrection: the per-slot `reset_on_release` atomic carries
+        // the previous holder's override across this transition
+        // untouched, so the new `ImmutableBlockInner` will read the
+        // right value on its own drop.
         let inner_arc =
             ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash, handle.clone());
         inner.slots[block_id].state = SlotState::Primary {
@@ -507,6 +575,41 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         };
         inner.active_by_hash.insert(seq_hash, block_id);
         Some(inner_arc)
+    }
+
+    /// Batched active-or-inactive prefix lookup under **one** store-mutex
+    /// acquisition. Walks `hashes` left-to-right, stopping at the first
+    /// hash that hits neither pool.
+    ///
+    /// Per hash this is exactly [`acquire_for_hash_locked`] — active hit /
+    /// eager `Primary → Inactive` on a dead `Weak` / inactive resurrection —
+    /// so the `self_ptr` race handling and eager-transition semantics are
+    /// unchanged. This is literally the per-hash [`acquire_for_hash`] body
+    /// hoisted above a single `lock()`, replacing the old N-acquisitions
+    /// per-hash loop in `BlockManager::match_blocks`.
+    ///
+    /// Passes `touch = false`: the frequency tracker is **not** touched
+    /// here. The caller is responsible for touching the returned hashes
+    /// *after* this returns (store lock released) — see
+    /// `BlockManager::match_blocks`. Keeping the explicit touch outside the
+    /// store lock avoids widening the store-lock hold across the TinyLFU
+    /// mutex. (The eager `Primary → Inactive` branch still nests
+    /// store → frequency-tracker via `inactive.insert`, exactly as it does
+    /// on the pre-existing per-call path — that ordering is consistent and
+    /// not affected by this batching.)
+    pub(crate) fn match_prefix_locked_batch(
+        self: &Arc<Self>,
+        hashes: &[SequenceHash],
+    ) -> Vec<Arc<ImmutableBlockInner<T>>> {
+        let mut inner = self.inner.lock();
+        let mut out = Vec::with_capacity(hashes.len());
+        for &h in hashes {
+            match self.acquire_for_hash_locked(&mut inner, h, /*touch*/ false) {
+                Some(arc) => out.push(arc),
+                None => break,
+            }
+        }
+        out
     }
 
     /// Atomic registration of a [`CompleteBlock`]: lookup-then-transition
@@ -625,6 +728,14 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             SlotState::Primary { handle, .. } => handle.clone(),
             other => panic!("eager_primary_to_inactive: slot {block_id} was {other:?}"),
         };
+        // The per-block `reset_on_release` override lives in
+        // `inner.reset_on_release[block_id]`, not in the dropping
+        // `ImmutableBlockInner`. We leave it untouched here so the value
+        // the holder set via `set_evict_on_reset` rides through this
+        // race-window transition. Visibility: both `set_evict_on_reset`
+        // and the eventual `release_primary` read go through this same
+        // store mutex, so the value is published reliably regardless of
+        // which thread wins the race for the lock.
         slot.state = SlotState::Inactive { seq_hash, handle };
         inner.inactive.insert(seq_hash, block_id);
         inner.active_by_hash.remove(&seq_hash);
@@ -673,6 +784,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             .into_iter()
             .map(|(seq_hash, block_id)| {
                 let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
+                // Resurrection: the per-slot `reset_on_release` atomic
+                // carries the previous holder's override untouched.
                 let inner_arc = ImmutableBlockInner::new_primary(
                     self.clone(),
                     block_id,
@@ -719,6 +832,9 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             SlotState::Staged { .. }
         ));
         inner.slots[block_id].state = SlotState::Mutable;
+        // Defensive: the Staged → Mutable rollback opens this slot to a
+        // fresh tenant. Clear any leftover per-slot override.
+        inner.reset_on_release[block_id] = self.default_reset_on_release;
         self.metrics.inc_inflight_mutable();
     }
 
@@ -734,10 +850,19 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         self.metrics.inc_reset_pool_size();
     }
 
-    /// Drop transition for the last clone of a primary `ImmutableBlockInner`:
-    /// `Primary` → `Inactive`, but only if the slot still references this
-    /// specific Inner. If a concurrent `acquire_for_hash` already eagerly
-    /// transitioned the slot, this is a no-op.
+    /// Drop transition for the last clone of a primary `ImmutableBlockInner`.
+    ///
+    /// Identity-checked against `self_ptr`. If a concurrent
+    /// `acquire_for_hash` already eagerly transitioned the slot (or the
+    /// slot has since been resurrected to a different Inner), this is a
+    /// no-op.
+    ///
+    /// Reads `reset_on_release[block_id]` to select the destination:
+    /// - `false` (default) → `SlotState::Inactive` + insert into the
+    ///   inactive index, available for cache hits and cold eviction.
+    /// - `true` → `SlotState::Reset` + push to free list +
+    ///   `handle.mark_absent::<T>()`. Mirrors `release_duplicate`. The
+    ///   block is *not* cached and cannot be matched/resurrected later.
     pub(crate) fn release_primary(&self, block_id: BlockId, self_ptr: *const ()) {
         // Test-only deterministic race-window widening:
         //   1. Bump the arrival counter so a coordinating test can
@@ -752,26 +877,53 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         #[cfg(test)]
         let _gate = self.release_primary_gate.lock();
-        let mut inner = self.inner.lock();
-        let slot = &mut inner.slots[block_id];
-        let (seq_hash, handle) = match &slot.state {
-            SlotState::Primary {
-                seq_hash,
-                handle,
-                inner: weak,
-            } if weak.as_ptr() as *const () == self_ptr => (*seq_hash, handle.clone()),
-            // Eager lookup-driven transition already ran, OR this slot has
-            // since been resurrected to a different Inner. No-op.
-            _ => {
-                self.metrics.inc_release_primary_noop();
-                return;
+        let handle_to_mark_absent = {
+            let mut inner = self.inner.lock();
+            let (seq_hash, handle) = match &inner.slots[block_id].state {
+                SlotState::Primary {
+                    seq_hash,
+                    handle,
+                    inner: weak,
+                } if weak.as_ptr() as *const () == self_ptr => (*seq_hash, handle.clone()),
+                // Eager lookup-driven transition already ran, OR this slot has
+                // since been resurrected to a different Inner. No-op.
+                _ => {
+                    self.metrics.inc_release_primary_noop();
+                    return;
+                }
+            };
+            // Read the per-slot override. Both the writer
+            // (`set_evict_on_reset`) and this read go through the store
+            // mutex, so visibility comes from the mutex's
+            // release-acquire — no atomic-ordering assumptions about
+            // `Arc::drop` or `Weak::upgrade`.
+            let reset_on_release = inner.reset_on_release[block_id];
+            if reset_on_release {
+                self.reset_slot_locked(&mut inner, block_id);
+                // Only the primary owns the `active_by_hash` mapping;
+                // duplicates have a different `block_id` under the same
+                // hash and must never clear it.
+                inner.active_by_hash.remove(&seq_hash);
+                tracing::trace!(?seq_hash, block_id, "Primary released to reset pool");
+                Some(handle)
+            } else {
+                // The atomic carries the holder's override into the
+                // Inactive period untouched; a future resurrection will
+                // inherit it via the same atomic.
+                inner.slots[block_id].state = SlotState::Inactive { seq_hash, handle };
+                inner.inactive.insert(seq_hash, block_id);
+                inner.active_by_hash.remove(&seq_hash);
+                self.metrics.inc_inactive_pool_size();
+                tracing::trace!(?seq_hash, block_id, "Block stored in inactive pool");
+                None
             }
         };
-        slot.state = SlotState::Inactive { seq_hash, handle };
-        inner.inactive.insert(seq_hash, block_id);
-        inner.active_by_hash.remove(&seq_hash);
-        self.metrics.inc_inactive_pool_size();
-        tracing::trace!(?seq_hash, block_id, "Block stored in inactive pool");
+        // mark_absent takes the attachments lock; lock-order
+        // (attachments → store) is satisfied because the store lock has
+        // already been released. Matches the `release_duplicate` pattern.
+        if let Some(handle) = handle_to_mark_absent {
+            handle.mark_absent::<T>();
+        }
     }
 
     /// Drop transition for the last clone of a duplicate `ImmutableBlockInner`:
@@ -779,8 +931,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
     pub(crate) fn release_duplicate(&self, block_id: BlockId, self_ptr: *const ()) {
         let handle = {
             let mut inner = self.inner.lock();
-            let slot = &mut inner.slots[block_id];
-            let handle = match &slot.state {
+            let handle = match &inner.slots[block_id].state {
                 SlotState::Duplicate {
                     handle,
                     inner: weak,
@@ -794,12 +945,26 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                     return;
                 }
             };
-            slot.state = SlotState::Reset;
-            inner.free.push_back(block_id);
-            self.metrics.inc_reset_pool_size();
+            // Duplicates do NOT clear `active_by_hash` — that mapping
+            // belongs to the primary, which has a different `block_id`
+            // and is kept alive by `_primary_keepalive` until this drop.
+            self.reset_slot_locked(&mut inner, block_id);
             handle
         };
         handle.mark_absent::<T>();
+    }
+
+    /// Slot transition shared by `release_primary` (when
+    /// `reset_on_release = true`) and `release_duplicate`:
+    /// `*` → `SlotState::Reset`, push to the free list, bump the
+    /// reset-pool gauge. Does **not** touch `active_by_hash` — callers
+    /// that own that mapping (the primary release path) must clear it
+    /// themselves. Callers must invoke `handle.mark_absent::<T>()`
+    /// *after* the store lock is released.
+    fn reset_slot_locked(&self, inner: &mut BlockStoreInner<T>, block_id: BlockId) {
+        inner.slots[block_id].state = SlotState::Reset;
+        inner.free.push_back(block_id);
+        self.metrics.inc_reset_pool_size();
     }
 }
 
@@ -814,8 +979,11 @@ impl<T: BlockMetadata> std::fmt::Debug for BlockStore<T> {
 
 // ---------- helpers ----------
 
-/// Clone the [`BlockRegistrationHandle`] out of an `Inactive` slot. The
-/// caller must overwrite `slot.state` before releasing the store lock.
+/// Clone the [`BlockRegistrationHandle`] out of an `Inactive` slot
+/// without consuming the slot itself. The per-block `reset_on_release`
+/// override no longer rides in this variant — it lives in the
+/// store-owned atomic array and is read directly via `BlockStore::reset_on_release`.
+/// The caller must overwrite `slot.state` before releasing the store lock.
 fn take_inactive_handle<T: BlockMetadata>(
     slot: &mut BlockSlot<T>,
     block_id: BlockId,
@@ -836,4 +1004,69 @@ pub(crate) fn upgrade_or_resurrect<T: BlockMetadata + Sync>(
     touch: bool,
 ) -> Option<Arc<ImmutableBlockInner<T>>> {
     store.acquire_for_hash(handle.seq_hash(), touch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pools::IdBuildHasher;
+
+    /// A handful of distinct, realistically-constructed `SequenceHash`
+    /// values. `SequenceHash` (`PositionalLineageHash`) packs
+    /// `(current_hash, parent_hash, position)` into its backing `u128`,
+    /// so varying any component yields a distinct key.
+    fn sample_keys() -> Vec<SequenceHash> {
+        vec![
+            SequenceHash::new(0x1234, None, 0),
+            SequenceHash::new(0x1234, Some(0x1234), 1),
+            SequenceHash::new(0x5678, Some(0x1234), 2),
+            SequenceHash::new(0xdead_beef, Some(0x5678), 3),
+            SequenceHash::new(0xffff_ffff_ffff_ffff, Some(0xdead_beef), 255),
+        ]
+    }
+
+    /// A `SeqHashMap` must round-trip `SequenceHash` keys. This locks in
+    /// the assumption behind [`IdHasher`]: the derived `Hash` for
+    /// `SequenceHash` forwards to `write_u128` (so `IdHasher::write`'s
+    /// `unreachable!` is never hit — the test would panic there), and
+    /// distinct keys do not collide into the same slot.
+    #[test]
+    fn seq_hash_map_round_trips_keys() {
+        let keys = sample_keys();
+        let mut map: SeqHashMap<u32> = SeqHashMap::default();
+
+        for (i, &k) in keys.iter().enumerate() {
+            map.insert(k, i as u32);
+        }
+        assert_eq!(map.len(), keys.len(), "no key collisions / overwrites");
+        for (i, &k) in keys.iter().enumerate() {
+            assert_eq!(map.get(&k).copied(), Some(i as u32), "round-trip key {i}");
+        }
+
+        // Overwrite + remove behave as a normal HashMap.
+        map.insert(keys[0], 999);
+        assert_eq!(map.get(&keys[0]).copied(), Some(999));
+        assert_eq!(map.remove(&keys[1]), Some(1));
+        assert!(!map.contains_key(&keys[1]));
+    }
+
+    /// `IdHasher` must produce distinct digests for distinct keys (no
+    /// catastrophic folding collision among realistic values) and must
+    /// run through `write_u128` — never the `write` byte-slice path
+    /// (`hash_one` would panic in `IdHasher::write` if a key did not).
+    #[test]
+    fn id_hasher_distinguishes_distinct_keys() {
+        use std::collections::HashSet;
+        use std::hash::BuildHasher;
+
+        let digests: HashSet<u64> = sample_keys()
+            .iter()
+            .map(|k| IdBuildHasher.hash_one(k))
+            .collect();
+        assert_eq!(
+            digests.len(),
+            5,
+            "distinct keys must produce distinct digests"
+        );
+    }
 }

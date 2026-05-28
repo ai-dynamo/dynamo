@@ -29,7 +29,6 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
@@ -39,8 +38,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -67,6 +66,9 @@ const (
 	KubeAnnotationDeploymentStrategy                    = "nvidia.com/deployment-strategy"
 	KubeAnnotationDeploymentRollingUpdateMaxSurge       = "nvidia.com/deployment-rolling-update-max-surge"
 	KubeAnnotationDeploymentRollingUpdateMaxUnavailable = "nvidia.com/deployment-rolling-update-max-unavailable"
+	// Marks pre-native-scaling LWS/PodGroup objects: <dcd-name>-0, -1, ...
+	// Native-scaling LWS objects must not carry it.
+	legacyLWSInstanceIDLabel = "instance-id"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -182,29 +184,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		if err != nil {
 			return
 		}
-	}
-
-	// Sync GMS ResourceClaimTemplate before creating workload resources
-	if r.RuntimeConfig.DRAEnabled {
-		componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
-		spec := &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec
-		gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(dynamo.GetGPUMemoryService(spec), dynamo.GetMainContainerResources(spec))
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate: %w", err)
-		}
-		parentName := dynamoComponentDeployment.GetParentGraphDeploymentName()
-		if parentName == "" {
-			parentName = dynamoComponentDeployment.Name
-		}
-		claimTemplateName := dra.ResourceClaimTemplateName(parentName, componentName)
-		_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoComponentDeployment.Namespace, gpuCount, deviceClassName)
-		})
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate: %w", err)
-		}
-	} else if dynamo.GetGPUMemoryService(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) != nil {
-		return ctrl.Result{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
 	}
 
 	// Create the appropriate workload resource based on deployment type
@@ -341,12 +320,20 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		anyModified = true
 	}
 
-	// Clean up legacy per-replica LeaderWorkerSets and PodGroups created
-	// before the move to native LWS scaling. The legacy code path stamped an
-	// "instance-id" label on each per-replica resource; the single-LWS path
-	// no longer sets it, so its presence reliably identifies legacy objects.
-	// We list once per resource type and prune anything we still own.
-	hasInstanceID, err := labels.NewRequirement("instance-id", selection.Exists, nil)
+	// The native LWS adopts the old <dcd-name>-0 object. Drop stale legacy
+	// metadata so the cleanup below does not classify it as excess.
+	if _, ok := lwsObj.Labels[legacyLWSInstanceIDLabel]; ok {
+		original := lwsObj.DeepCopy()
+		delete(lwsObj.Labels, legacyLWSInstanceIDLabel)
+		if err := r.Patch(ctx, lwsObj, client.MergeFrom(original)); err != nil {
+			return ComponentReconcileResult{}, fmt.Errorf("remove legacy instance-id label from LeaderWorkerSet %q: %w", lwsObj.Name, err)
+		}
+		anyModified = true
+	}
+
+	// Prune old per-replica LWS/PodGroups. The legacy path stamped
+	// instance-id; native scaling does not.
+	hasInstanceID, err := labels.NewRequirement(legacyLWSInstanceIDLabel, selection.Exists, nil)
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("build legacy label selector: %w", err)
 	}
@@ -362,6 +349,10 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	for i := range legacyLWSList.Items {
 		legacy := &legacyLWSList.Items[i]
 		if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
+			continue
+		}
+		// Keep the adopted <dcd-name>-0 LWS even if stale labels remain.
+		if legacy.Name == lwsObj.Name {
 			continue
 		}
 		logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacy.Name)
@@ -565,12 +556,16 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	logs := log.FromContext(ctx)
 	logs.Info("Generating LeaderWorkerSet")
 
-	kubeName := opt.dynamoComponentDeployment.Name
+	kubeName := leaderWorkerSetName(opt.dynamoComponentDeployment)
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
 
 	if labels == nil {
 		labels = make(map[string]string)
+	}
+	podLabels, err := r.getDCDWorkloadPodLabels(ctx, opt.dynamoComponentDeployment)
+	if err != nil {
+		return nil, false, err
 	}
 
 	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
@@ -582,7 +577,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	leaderPodLabels := make(map[string]string)
-	for k, v := range labels {
+	for k, v := range podLabels {
 		leaderPodLabels[k] = v
 	}
 	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, leaderPodLabels)
@@ -591,7 +586,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	workerPodLabels := make(map[string]string)
-	for k, v := range labels {
+	for k, v := range podLabels {
 		workerPodLabels[k] = v
 	}
 	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, workerPodLabels)
@@ -616,6 +611,36 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	return leaderWorkerSet, false, nil
+}
+
+// getDCDWorkloadPodLabels keeps LWS pod labels aligned with the workload
+// component type used by Deployment and Service rendering.
+func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadPodLabels(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (map[string]string, error) {
+	labels := dynamo.GetDCDKubeLabels(dcd)
+	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
+	if err != nil {
+		return nil, err
+	}
+	if componentType == "" {
+		return labels, nil
+	}
+	labels[commonconsts.KubeLabelDynamoComponentType] = componentType
+	specType := string(dcd.Spec.ComponentType)
+	if componentType == commonconsts.ComponentTypeWorker &&
+		(specType == commonconsts.ComponentTypePrefill || specType == commonconsts.ComponentTypeDecode) &&
+		labels[commonconsts.KubeLabelDynamoSubComponentType] == "" {
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = specType
+	}
+	return labels, nil
+}
+
+// leaderWorkerSetName keeps the native LWS at <dcd-name>-0 so it can adopt
+// legacy replicas and avoid colliding with the operator ClusterIP service.
+func leaderWorkerSetName(dcd *nvidiacomv1beta1.DynamoComponentDeployment) string {
+	return fmt.Sprintf("%s-0", dcd.Name)
 }
 
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) error {
@@ -959,6 +984,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if dynamo.IsIntraPodFailoverEnabled(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) {
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
+		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
+			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
+		}
 		checkpointInfo = info
 		if err := checkpoint.EnsureStoragePVC(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, r.Config.Checkpoint.Storage); err != nil {
 			return nil, errors.Wrap(err, "failed to ensure checkpoint storage PVC")
@@ -1136,8 +1164,10 @@ func (r *DynamoComponentDeploymentReconciler) hasExistingLegacyWorkerSelector(
 	}
 
 	if r.RuntimeConfig != nil && r.RuntimeConfig.LWSEnabled {
+		// Check the adopted "-0" LWS to keep alpha-era worker labels stable.
+		lwsName := leaderWorkerSetName(dcd)
 		leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{}
-		if err := r.Get(ctx, types.NamespacedName{Name: dcd.Name, Namespace: dcd.Namespace}, leaderWorkerSet); err == nil {
+		if err := r.Get(ctx, types.NamespacedName{Name: lwsName, Namespace: dcd.Namespace}, leaderWorkerSet); err == nil {
 			template := leaderWorkerSet.Spec.LeaderWorkerTemplate
 			if template.LeaderTemplate != nil && hasLegacyWorkerSelector(template.LeaderTemplate.Labels, componentType) {
 				return true, nil
@@ -1146,7 +1176,7 @@ func (r *DynamoComponentDeploymentReconciler) hasExistingLegacyWorkerSelector(
 				return true, nil
 			}
 		} else if !k8serrors.IsNotFound(err) {
-			return false, fmt.Errorf("failed to get leaderworkerset %s/%s: %w", dcd.Namespace, dcd.Name, err)
+			return false, fmt.Errorf("failed to get leaderworkerset %s/%s: %w", dcd.Namespace, lwsName, err)
 		}
 	}
 

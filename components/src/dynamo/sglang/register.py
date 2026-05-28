@@ -14,16 +14,20 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     MediaDecoder,
     MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     register_model,
 )
 from dynamo.sglang._compat import get_scheduler_info
+from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig
+from dynamo.sglang.capacity import local_dp_rank_bounds, runtime_capacity
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 
@@ -52,6 +56,8 @@ async def _register_model_with_runtime_config(
     dynamo_args: DynamoConfig,
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
+    worker_type: Optional[WorkerType] = None,
+    needs: Optional[List[List[WorkerType]]] = None,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -62,6 +68,14 @@ async def _register_model_with_runtime_config(
         dynamo_args: Dynamo-specific configuration.
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
+        worker_type: Topology role of this worker (Prefill/Decode/Encode/Aggregated).
+            Callers are expected to pass an explicit value; `None` is accepted only
+            so the optional kwarg can flow through the wrapper unchanged. Once the
+            PR 1 compat shim in `Model::ws_role_and_needs` is removed (Phase 3),
+            registration with `None` will fail in the Rust binding.
+        needs: DNF list of peer roles this worker requires to serve. Empty (or
+            `None`) means no peer dependency, which is the correct value for
+            Aggregated workers.
 
     Returns:
         True if registration succeeded, False otherwise.
@@ -97,6 +111,8 @@ async def _register_model_with_runtime_config(
             custom_template_path=dynamo_args.custom_jinja_template,
             media_decoder=media_decoder,
             media_fetcher=media_fetcher,
+            worker_type=worker_type,
+            needs=needs,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -264,18 +280,47 @@ async def _get_runtime_config(
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )
+    runtime_config.set_structural_tag_mode(
+        "on" if dynamo_args.dyn_enable_structural_tag else "off"
+    )
+    runtime_config.set_structural_tag_scope(dynamo_args.dyn_structural_tag_scope)
+    runtime_config.set_structural_tag_schema(dynamo_args.dyn_structural_tag_schema)
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
 
-    # Set data_parallel_size for DP attention mode
-    # This enables the router to correctly track per-(worker_id, dp_rank) pairs
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    runtime_config.data_parallel_size = dp_size
-    if dp_size > 1:
-        logging.info(f"Registering with data_parallel_size={dp_size}")
+    start_dp_rank, end_dp_rank = local_dp_rank_bounds(server_args)
+    local_dp_size = end_dp_rank - start_dp_rank
+    runtime_config.data_parallel_start_rank = start_dp_rank
+    runtime_config.data_parallel_size = local_dp_size
+    if local_dp_size > 1:
+        logging.info(
+            "Registering with local data_parallel rank range [%s, %s)",
+            start_dp_rank,
+            end_dp_rank,
+        )
+
+    worker_group_id = get_sglang_worker_group_id(server_args)
+    if worker_group_id is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SGLANG_WORKER_GROUP_ID_KEY,
+                json.dumps(worker_group_id),
+            )
+            logging.info(
+                "Published SGLang worker group metadata for KV attribution: %s",
+                worker_group_id,
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to attach SGLang worker group metadata to registration: %s",
+                e,
+            )
+
+    # Set topology and KV transfer policy for topology-aware routing
+    apply_topology_config(runtime_config)
 
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
     bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
@@ -288,13 +333,11 @@ async def _get_runtime_config(
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
     # Note: If --max-running-requests is not specified, SGLang uses an internal default
     # undocumented value. The value here will be None if not explicitly set by user.
-    max_running_requests = getattr(server_args, "max_running_requests", None)
-    if max_running_requests:
-        runtime_config.max_num_seqs = max_running_requests
-
-    max_prefill_tokens = getattr(server_args, "max_prefill_tokens", None)
-    if max_prefill_tokens:
-        runtime_config.max_num_batched_tokens = max_prefill_tokens
+    base_capacity = runtime_capacity(server_args, {})
+    if base_capacity.max_num_seqs is not None:
+        runtime_config.max_num_seqs = base_capacity.max_num_seqs
+    if base_capacity.max_num_batched_tokens is not None:
+        runtime_config.max_num_batched_tokens = base_capacity.max_num_batched_tokens
 
     if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
         runtime_config.enable_eagle = True
@@ -314,31 +357,28 @@ async def _get_runtime_config(
 
     try:
         scheduler_info = get_scheduler_info(engine)
+        capacity = runtime_capacity(server_args, scheduler_info)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
 
         if max_total_tokens:
-            page_size = server_args.page_size
-            if page_size:
-                runtime_config.total_kv_blocks = (
-                    max_total_tokens + page_size - 1
-                ) // page_size
+            if capacity.total_kv_blocks is not None:
+                runtime_config.total_kv_blocks = capacity.total_kv_blocks
                 logging.info(
                     f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
-                    f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
+                    f"(max_total_tokens={max_total_tokens}, page_size={server_args.page_size})"
                 )
 
-            # When max_prefill_tokens is not explicitly set by the user, fall back
-            # to max_total_num_tokens from the scheduler. This ensures the planner
-            # always has a prefill load signal for aggregated scaling decisions.
-            if not max_prefill_tokens:
-                runtime_config.max_num_batched_tokens = max_total_tokens
-                logging.info(
-                    f"max_prefill_tokens not set, using max_total_num_tokens "
-                    f"from scheduler as max_num_batched_tokens: {max_total_tokens}"
-                )
+            if capacity.max_num_batched_tokens is not None:
+                runtime_config.max_num_batched_tokens = capacity.max_num_batched_tokens
+                if getattr(server_args, "max_prefill_tokens", None) is None:
+                    logging.info(
+                        f"max_prefill_tokens not set, using max_total_num_tokens "
+                        f"from scheduler as max_num_batched_tokens: "
+                        f"{capacity.max_num_batched_tokens}"
+                    )
         else:
             unpublished = "total_kv_blocks"
-            if not max_prefill_tokens:
+            if getattr(server_args, "max_prefill_tokens", None) is None:
                 unpublished += " and max_num_batched_tokens"
             logging.warning(
                 f"Could not access scheduler info from SGLang engine. "
@@ -360,6 +400,8 @@ async def register_model_with_readiness_gate(
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
+    worker_type: Optional[WorkerType] = None,
+    needs: Optional[List[List[WorkerType]]] = None,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -371,6 +413,8 @@ async def register_model_with_readiness_gate(
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
         readiness_gate: Optional event to signal when registration completes.
+        worker_type: Topology role; see `_register_model_with_runtime_config`.
+        needs: DNF peer requirements; see `_register_model_with_runtime_config`.
 
     Raises:
         RuntimeError: If model registration fails.
@@ -382,6 +426,8 @@ async def register_model_with_readiness_gate(
         dynamo_args,
         input_type,
         output_type,
+        worker_type=worker_type,
+        needs=needs,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")
@@ -443,6 +489,11 @@ async def register_image_diffusion_model(
             endpoint,
             server_args.model_path,
             model_name,
+            # Diffusion has no prefill/decode split: a single worker owns the
+            # whole pipeline, so it always advertises as Aggregated with no
+            # peer dependencies.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
         )
         logging.info(f"Successfully registered diffusion model: {model_name}")
     except Exception as e:
@@ -484,6 +535,10 @@ async def register_video_generation_model(
             endpoint,
             server_args.model_path,
             model_name,
+            # See `register_image_diffusion_model` — diffusion is always
+            # Aggregated.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
         )
         logging.info(f"Successfully registered video generation model: {model_name}")
     except Exception as e:

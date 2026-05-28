@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import pickle
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,43 +43,43 @@ _AIC_MODEL = "Qwen/Qwen3-32B"
 _AIC_SYSTEM = "h200_sxm"
 
 
-def _base_prefill_args() -> MockEngineArgs:
-    return MockEngineArgs(
-        engine_type="vllm",
-        num_gpu_blocks=128,
-        block_size=64,
-        max_num_seqs=16,
-        max_num_batched_tokens=4096,
-        enable_prefix_caching=True,
-        enable_chunked_prefill=False,
-        worker_type="prefill",
-    )
+def _base_prefill_args() -> dict[str, Any]:
+    return {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 128,
+        "block_size": 64,
+        "max_num_seqs": 16,
+        "max_num_batched_tokens": 4096,
+        "enable_prefix_caching": True,
+        "enable_chunked_prefill": False,
+        "worker_type": "prefill",
+    }
 
 
-def _base_decode_args() -> MockEngineArgs:
-    return MockEngineArgs(
-        engine_type="vllm",
-        num_gpu_blocks=192,
-        block_size=64,
-        max_num_seqs=32,
-        max_num_batched_tokens=4096,
-        enable_prefix_caching=True,
-        enable_chunked_prefill=False,
-        worker_type="decode",
-    )
+def _base_decode_args() -> dict[str, Any]:
+    return {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 192,
+        "block_size": 64,
+        "max_num_seqs": 32,
+        "max_num_batched_tokens": 4096,
+        "enable_prefix_caching": True,
+        "enable_chunked_prefill": False,
+        "worker_type": "decode",
+    }
 
 
-def _base_agg_args() -> MockEngineArgs:
-    return MockEngineArgs(
-        engine_type="vllm",
-        num_gpu_blocks=160,
-        block_size=64,
-        max_num_seqs=24,
-        max_num_batched_tokens=4096,
-        enable_prefix_caching=True,
-        enable_chunked_prefill=False,
-        worker_type="aggregated",
-    )
+def _base_agg_args() -> dict[str, Any]:
+    return {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 160,
+        "block_size": 64,
+        "max_num_seqs": 24,
+        "max_num_batched_tokens": 4096,
+        "enable_prefix_caching": True,
+        "enable_chunked_prefill": False,
+        "worker_type": "aggregated",
+    }
 
 
 def _write_trace(tmp_path: Path) -> Path:
@@ -203,8 +204,8 @@ def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
     replay_optimize.evaluate._run_replay_for_state(
         state=DenseReplayState(1, 1, 1, 1, 0.5),
         workload=workload,
-        prefill_engine_args=_base_prefill_args(),
-        decode_engine_args=_base_decode_args(),
+        prefill_engine_args=MockEngineArgs.from_json(json.dumps(_base_prefill_args())),
+        decode_engine_args=MockEngineArgs.from_json(json.dumps(_base_decode_args())),
         router_config=KvRouterConfig(),
     )
 
@@ -224,7 +225,7 @@ def _disagg_spec(
     router_mode: str = "kv_router",
     overlap_credits: list[float] | None = None,
     prefill_load_scales: list[float] | None = None,
-    base_router_config: KvRouterConfig | None = None,
+    base_router_config: dict[str, Any] | None = None,
     max_parallel_evals: int = 1,
 ) -> ReplayOptimizeSpec:
     return ReplayOptimizeSpec(
@@ -256,7 +257,7 @@ def _agg_spec(
     router_mode: str = "kv_router",
     overlap_credits: list[float] | None = None,
     prefill_load_scales: list[float] | None = None,
-    base_router_config: KvRouterConfig | None = None,
+    base_router_config: dict[str, Any] | None = None,
     max_parallel_evals: int = 1,
 ) -> ReplayOptimizeSpec:
     return ReplayOptimizeSpec(
@@ -367,24 +368,6 @@ def test_iter_agg_tp_states_with_max_workers_respects_gpu_budget() -> None:
     assert set(state.router_mode for state in states) == {"round_robin"}
 
 
-def test_mock_engine_args_dump_json_round_trips_explicit_none_fields() -> None:
-    base_args = MockEngineArgs(
-        engine_type="vllm",
-        num_gpu_blocks=128,
-        block_size=64,
-        max_num_seqs=None,
-        max_num_batched_tokens=None,
-        enable_prefix_caching=True,
-        worker_type="decode",
-    )
-
-    restored = MockEngineArgs.from_json(base_args.dump_json())
-
-    assert restored.worker_type == "decode"
-    assert restored.max_num_seqs is None
-    assert restored.max_num_batched_tokens is None
-
-
 def test_iter_agg_worker_states_collapses_round_robin_overlap() -> None:
     states = replay_optimize._iter_agg_worker_states(
         tp=2,
@@ -402,6 +385,65 @@ def test_iter_agg_worker_states_collapses_round_robin_overlap() -> None:
     ]
     assert set(state.router_mode for state in states) == {"round_robin"}
     assert set(state.overlap_score_credit for state in states) == {0.0}
+
+
+def test_candidate_engine_args_do_not_synthesize_base_only_fields(monkeypatch) -> None:
+    captured_payloads: list[dict[str, Any]] = []
+
+    class FakeMockEngineArgs:
+        @staticmethod
+        def from_json(payload: str) -> object:
+            captured_payloads.append(json.loads(payload))
+            return object()
+
+    monkeypatch.setattr(
+        replay_optimize.engine_args,
+        "MockEngineArgs",
+        FakeMockEngineArgs,
+    )
+
+    replay_optimize._build_candidate_engine_args(
+        base_args={"block_size": 64},
+        tp_size=4,
+        worker_type="prefill",
+        backend="vllm",
+        system=_AIC_SYSTEM,
+        model=_AIC_MODEL,
+    )
+
+    assert "num_gpu_blocks" not in captured_payloads[0]
+    assert "enable_prefix_caching" not in captured_payloads[0]
+    assert captured_payloads[0]["aic_tp_size"] == 4
+
+    replay_optimize._build_candidate_engine_args(
+        base_args={"block_size": 64, "enable_prefix_caching": False},
+        tp_size=4,
+        worker_type="prefill",
+        backend="vllm",
+        system=_AIC_SYSTEM,
+        model=_AIC_MODEL,
+    )
+
+    assert captured_payloads[1]["enable_prefix_caching"] is False
+
+
+def test_replay_optimize_spec_pickles_without_rust_bound_args() -> None:
+    restored = pickle.loads(pickle.dumps(_disagg_spec()))
+
+    assert restored.engine.basePrefillEngineArgs == _base_prefill_args()
+    assert restored.engine.baseDecodeEngineArgs == _base_decode_args()
+
+
+def test_replay_optimize_spec_rejects_rust_bound_config_objects() -> None:
+    with pytest.raises(ValueError):
+        EngineSpec(
+            model=_AIC_MODEL,
+            backend="vllm",
+            baseEngineArgs=MockEngineArgs.from_json(json.dumps(_base_agg_args())),
+        )
+
+    with pytest.raises(ValueError):
+        RouterSpec(baseRouterConfig=KvRouterConfig())
 
 
 # ---- public-API tests (reshaped to ReplayOptimizeSpec) ----

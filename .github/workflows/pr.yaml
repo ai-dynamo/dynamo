@@ -26,6 +26,7 @@ jobs:
       core: ${{ steps.changes.outputs.core }}
       planner: ${{ steps.changes.outputs.planner }}
       operator: ${{ steps.changes.outputs.operator }}
+      snapshot: ${{ steps.changes.outputs.snapshot }}
       deploy: ${{ steps.changes.outputs.deploy }}
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
@@ -33,6 +34,7 @@ jobs:
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
+      efa: ${{ steps.changes.outputs.efa }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -70,6 +72,9 @@ jobs:
       - trtllm-test
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
+      - vllm-efa-build
+      - sglang-efa-build
+      - trtllm-efa-build
       - planner-build
       - planner-test
       - frontend-build
@@ -155,7 +160,7 @@ jobs:
 
   snapshot-agent:
     needs: changed-files
-    if: needs.changed-files.outputs.deploy == 'true'
+    if: needs.changed-files.outputs.snapshot == 'true'
     name: Snapshot Agent
     runs-on: prod-default-v2
     steps:
@@ -263,6 +268,51 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-efa-build:
+    name: vllm-runtime-efa
+    needs: [changed-files]
+    if: needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.efa == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '["12.9"]'
+      platform: 'linux/amd64,linux/arm64'
+      make_efa: true
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  sglang-efa-build:
+    name: sglang-runtime-efa
+    needs: [changed-files]
+    if: needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.efa == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '["12.9"]'
+      platform: 'linux/amd64,linux/arm64'
+      make_efa: true
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-efa-build:
+    name: trtllm-runtime-efa
+    needs: [changed-files]
+    if: needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.efa == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      make_efa: true
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -542,7 +592,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
+      cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -558,7 +608,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
+      cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -592,7 +642,7 @@ jobs:
        needs.changed-files.outputs.deploy == 'true') &&
       (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
-    runs-on: prod-default-small-v2
+    runs-on: prod-deploy-tester-v1
     outputs:
       namespace: ${{ steps.setup.outputs.namespace }}
       vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
@@ -603,7 +653,6 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -620,7 +669,7 @@ jobs:
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
-      image_suffix: vllm-runtime-cuda12
+      image_suffix: vllm-runtime-cuda13
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -636,7 +685,7 @@ jobs:
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
-      image_suffix: sglang-runtime-cuda12
+      image_suffix: sglang-runtime-cuda13
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -661,14 +710,13 @@ jobs:
   deploy-cleanup:
     if: always()
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    runs-on: prod-default-small-v2
+    runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Teardown vCluster
         if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
         uses: ./.github/actions/teardown-dynamo-operator
         with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
@@ -682,10 +730,13 @@ jobs:
       - planner-test
       - vllm-copy-to-acr
       - vllm-multi-gpu-test
+      - vllm-efa-build
       - sglang-copy-to-acr
       - sglang-multi-gpu-test
+      - sglang-efa-build
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
+      - trtllm-efa-build
       - dynamo-pipeline
     steps:
       - name: Checkout repository

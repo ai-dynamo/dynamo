@@ -37,7 +37,7 @@ use tokio_util::codec::FramedRead;
 
 #[path = "common/ports.rs"]
 mod ports;
-use ports::get_random_port;
+use ports::bind_random_port;
 
 struct CounterEngine {}
 
@@ -266,7 +266,7 @@ fn inc_counter(
 #[allow(deprecated)]
 #[tokio::test]
 async fn test_http_service() {
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
         .enable_chat_endpoints(true)
@@ -278,7 +278,8 @@ async fn test_http_service() {
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
-    let task = tokio::spawn(async move { service.run(token.clone()).await });
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
 
     // Wait for the service to be ready before proceeding
     wait_for_service_ready(port).await;
@@ -580,7 +581,7 @@ async fn wait_for_service_ready(port: u16) {
 // TODO: Rewrite these tests using the upstream async-openai client.
 #[tokio::test]
 async fn test_client_disconnect_cancellation_unary() {
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -594,7 +595,7 @@ async fn test_client_disconnect_cancellation_unary() {
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -672,7 +673,7 @@ async fn test_client_disconnect_cancellation_unary() {
 async fn test_client_disconnect_cancellation_streaming() {
     dynamo_runtime::logging::init();
 
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -686,7 +687,7 @@ async fn test_client_disconnect_cancellation_streaming() {
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -775,7 +776,7 @@ async fn test_request_id_annotation() {
     // TODO(ryan): make better fixtures, this is too much to test sometime so simple
     dynamo_runtime::logging::init();
 
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -789,7 +790,7 @@ async fn test_request_id_annotation() {
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;

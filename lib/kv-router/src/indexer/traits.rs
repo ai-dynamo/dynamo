@@ -28,7 +28,7 @@ pub trait SharedKvCache: Send + Sync {
 /// `worker_count` and `block_count` are always populated.
 /// `node_count` is populated only when the `shard-metrics` feature is enabled
 /// on the `dynamo-kv-router` crate; otherwise it is `0`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShardSizeSnapshot {
     /// Zero-based shard index.
     pub shard_idx: usize,
@@ -178,7 +178,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
 
     /// Install a shared structural anchor for branch-sharded suffix routing.
     ///
-    /// Backends that do not support anchor-aware routing keep the default
+    /// Backends that do not support anchored routing keep the default
     /// unsupported response. This is only called by the branch-sharded wrapper
     /// when a routed subtree starts on a different shard than its parent prefix.
     fn apply_anchor(
@@ -196,7 +196,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
         _suffix: &[LocalBlockHash],
     ) -> Result<OverlapScores, KvRouterError> {
         Err(KvRouterError::Unsupported(
-            "backend does not support anchor-aware find_matches".to_string(),
+            "backend does not support anchored find_matches".to_string(),
         ))
     }
 

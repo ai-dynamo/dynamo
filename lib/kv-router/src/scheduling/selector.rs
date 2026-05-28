@@ -7,7 +7,7 @@ use rand::Rng;
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
-use super::types::{KvSchedulerError, SchedulingRequest, pinned_worker_config};
+use super::types::{KvSchedulerError, RoutingEligibility, SchedulingRequest, pinned_worker_config};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// A trait that users can implement to define custom selection logic.
@@ -18,6 +18,7 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         &self,
         workers: &HashMap<WorkerId, C>,
         request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
@@ -200,18 +201,29 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         &self,
         workers: &HashMap<WorkerId, C>,
         request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
-        request.validate_worker_constraints()?;
+        eligibility.validate_pinned_worker_allowed()?;
 
-        let pinned_worker = request.pinned_worker;
+        let pinned_worker = eligibility.pinned_worker();
 
         if pinned_worker.is_none()
-            && !workers
-                .keys()
-                .any(|worker_id| request.is_worker_allowed(*worker_id))
+            && !eligibility.has_eligible_worker(
+                workers
+                    .iter()
+                    .map(|(&worker_id, config)| (worker_id, config)),
+            )
         {
+            if eligibility.has_eligible_worker_ignoring_overload(
+                workers
+                    .iter()
+                    .map(|(&worker_id, config)| (worker_id, config)),
+            ) {
+                return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+            }
+
             return Err(KvSchedulerError::NoEndpoints);
         }
 
@@ -236,7 +248,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         };
 
         if let Some(worker) = pinned_worker {
-            pinned_worker_config(workers, worker)?;
+            let config = pinned_worker_config(workers, worker)?;
+            if !eligibility.allows_worker_ignoring_overload(worker.worker_id, config) {
+                return Err(KvSchedulerError::NoEndpoints);
+            }
+            if eligibility.is_worker_overloaded(worker.worker_id) {
+                return Err(KvSchedulerError::PinnedWorkerOverloaded {
+                    worker_id: worker.worker_id,
+                });
+            }
 
             let logit = self.worker_logit(request, worker, block_size, weights, "Pinned formula");
             let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
@@ -264,14 +284,23 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.kv_router_config.router_temperature);
-
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            self.worker_logit(request, worker, block_size, weights, "Formula")
+            let base_score = self.worker_logit(request, worker, block_size, weights, "Formula");
+            let Some(config) = workers.get(&worker.worker_id) else {
+                return base_score;
+            };
+            match request
+                .routing_constraints
+                .preferred_taint_multiplier(config.taints())
+            {
+                Some(multiplier) => base_score * multiplier,
+                None => base_score,
+            }
         };
 
         let worker_iter = workers
             .iter()
-            .filter(move |(worker_id, _)| request.is_worker_allowed(**worker_id))
+            .filter(move |(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
             .flat_map(|(worker_id, config)| {
                 let data_parallel_size = config.data_parallel_size();
                 let data_parallel_start_rank = config.data_parallel_start_rank();
@@ -280,25 +309,29 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             });
 
         let (best_worker, best_logit) = if temperature == 0.0 {
-            let mut min_workers = Vec::new();
-            let mut min_score = f64::INFINITY;
+            let mut best_worker = None;
+            let mut best_logit = f64::INFINITY;
+            let mut tie_count = 0usize;
+            let mut rng = rand::rng();
             for worker in worker_iter {
                 let score = get_score(worker);
-                if score < min_score {
-                    min_workers.clear();
-                    min_workers.push(worker);
-                    min_score = score;
-                } else if score == min_score {
-                    min_workers.push(worker);
+                if score < best_logit {
+                    best_worker = Some(worker);
+                    best_logit = score;
+                    tie_count = 1;
+                    continue;
+                }
+
+                if score == best_logit {
+                    tie_count += 1;
+                    // Reservoir sampling keeps tied minima uniform without collecting workers.
+                    if rng.random_range(0..tie_count) == 0 {
+                        best_worker = Some(worker);
+                    }
                 }
             }
 
-            if min_workers.len() > 1 {
-                let idx = rand::rng().random_range(0..min_workers.len());
-                (min_workers[idx], min_score)
-            } else {
-                (min_workers[0], min_score)
-            }
+            (best_worker.expect("worker_iter non-empty"), best_logit)
         } else {
             let mut worker_logits = FxHashMap::default();
             for worker in worker_iter {
@@ -375,8 +408,61 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
-    use crate::protocols::SharedCacheHits;
+    use crate::protocols::{SharedCacheHits, WorkerConfigLike};
+
+    #[derive(Clone, Default)]
+    struct TaintedWorkerConfig {
+        taints: HashSet<String>,
+    }
+
+    impl WorkerConfigLike for TaintedWorkerConfig {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            None
+        }
+
+        fn taints(&self) -> &HashSet<String> {
+            &self.taints
+        }
+    }
+
+    fn base_request(isl_tokens: usize) -> SchedulingRequest {
+        SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
+            shared_cache_hits: None,
+            resp_tx: None,
+        }
+    }
 
     #[test]
     fn test_softmax_sample_single_key() {
@@ -487,6 +573,417 @@ mod tests {
         assert_eq!(result, entries[target_idx]);
     }
 
+    #[test]
+    fn test_default_selector_randomizes_zero_temperature_ties() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let config = KvRouterConfig {
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+        let selector = DefaultWorkerSelector::new(Some(config), "test");
+        let workers = HashMap::from([
+            (10, SimpleWorkerConfig::default()),
+            (20, SimpleWorkerConfig::default()),
+            (30, SimpleWorkerConfig::default()),
+        ]);
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: 16,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
+            shared_cache_hits: None,
+            resp_tx: None,
+        };
+        let mut selected = [false; 3];
+
+        for _ in 0..120 {
+            let result = selector
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap();
+            match result.worker.worker_id {
+                10 => selected[0] = true,
+                20 => selected[1] = true,
+                30 => selected[2] = true,
+                worker_id => panic!("unexpected worker id: {worker_id}"),
+            }
+        }
+
+        let selected_count = selected.into_iter().filter(|seen| *seen).count();
+        assert!(
+            selected_count > 1,
+            "zero-temperature tie-breaking should not always select the same worker"
+        );
+    }
+
+    #[test]
+    fn test_overloaded_high_overlap_worker_is_skipped() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.0,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.effective_overlap_blocks.insert(worker0, 4.0);
+        request.effective_cached_tokens.insert(worker0, 64);
+
+        let overloaded_worker_ids = HashSet::from([0]);
+        let result = selector
+            .select_worker(
+                &workers,
+                &request,
+                request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+                16,
+            )
+            .unwrap();
+
+        assert_eq!(result.worker.worker_id, 1);
+    }
+
+    #[test]
+    fn test_all_eligible_workers_overloaded_returns_overload_error() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let request = base_request(16);
+        let overloaded_worker_ids = HashSet::from([0, 1]);
+
+        let result = selector.select_worker(
+            &workers,
+            &request,
+            request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+            16,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+    }
+
+    #[test]
+    fn test_overloaded_pinned_worker_is_not_rerouted() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(0));
+        let overloaded_worker_ids = HashSet::from([0]);
+
+        let result = selector.select_worker(
+            &workers,
+            &request,
+            request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+            16,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::PinnedWorkerOverloaded { worker_id: 0 })
+        ));
+    }
+
+    #[test]
+    fn test_required_taints_return_no_endpoints_when_no_worker_matches() {
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([(
+            10,
+            TaintedWorkerConfig {
+                taints: HashSet::from(["mdc-a".to_string()]),
+            },
+        )]);
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: 16,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints {
+                required_taints: HashSet::from(["mdc-b".to_string()]),
+                preferred_taints: HashMap::new(),
+            },
+            shared_cache_hits: None,
+            resp_tx: None,
+        };
+
+        let result = selector.select_worker(&workers, &request, request.eligibility(), 16);
+        assert!(matches!(result, Err(KvSchedulerError::NoEndpoints)));
+    }
+
+    #[test]
+    fn test_required_taints_filter_out_incompatible_workers() {
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([
+            (
+                10,
+                TaintedWorkerConfig {
+                    taints: HashSet::from(["mdc-a".to_string()]),
+                },
+            ),
+            (
+                20,
+                TaintedWorkerConfig {
+                    taints: HashSet::from(["mdc-b".to_string()]),
+                },
+            ),
+        ]);
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: 16,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints {
+                required_taints: HashSet::from(["mdc-b".to_string()]),
+                preferred_taints: HashMap::new(),
+            },
+            shared_cache_hits: None,
+            resp_tx: None,
+        };
+
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        assert_eq!(result.worker.worker_id, 20);
+    }
+
+    #[test]
+    fn test_required_taints_switch_matching_worker_sets_by_label() {
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let name_a = "mdc-a".to_string();
+        let name_b = "mdc-b".to_string();
+        let name_c = "mdc-c".to_string();
+        let taint_a = TaintedWorkerConfig {
+            taints: HashSet::from([name_a.clone()]),
+        };
+        let taint_b = TaintedWorkerConfig {
+            taints: HashSet::from([name_b.clone()]),
+        };
+        let taint_c = TaintedWorkerConfig {
+            taints: HashSet::from([name_c.clone()]),
+        };
+        let workers = HashMap::from([
+            (10, taint_a.clone()),
+            (11, taint_a),
+            (20, taint_b.clone()),
+            (21, taint_b),
+            (30, taint_c.clone()),
+            (31, taint_c),
+        ]);
+
+        for (required_taint, expected_worker_id, noisy_worker_id) in [
+            (name_a, 10_u64, 11_u64),
+            (name_b, 20_u64, 21_u64),
+            (name_c, 30_u64, 31_u64),
+        ] {
+            let mut decode_blocks = FxHashMap::default();
+            decode_blocks.insert(WorkerWithDpRank::from_worker_id(expected_worker_id), 0);
+            decode_blocks.insert(WorkerWithDpRank::from_worker_id(noisy_worker_id), 400_000);
+
+            let request = SchedulingRequest {
+                maybe_request_id: Some("test".into()),
+                token_seq: None,
+                isl_tokens: 16,
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+                decode_blocks,
+                prefill_tokens: FxHashMap::default(),
+                track_prefill_tokens: true,
+                router_config_override: None,
+                update_states: false,
+                lora_name: None,
+                priority_jump: 0.0,
+                expected_output_tokens: None,
+                pinned_worker: None,
+                allowed_worker_ids: None,
+                routing_constraints: crate::protocols::RoutingConstraints {
+                    required_taints: HashSet::from([required_taint.clone()]),
+                    preferred_taints: HashMap::new(),
+                },
+                shared_cache_hits: None,
+                resp_tx: None,
+            };
+
+            let result = selector
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap();
+            assert_eq!(
+                result.worker.worker_id, expected_worker_id,
+                "required taint {required_taint} should route only within its compatible worker set"
+            );
+        }
+    }
+
+    #[test]
+    fn test_preferred_taints_prefer_matching_worker() {
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([
+            (
+                10,
+                TaintedWorkerConfig {
+                    taints: HashSet::from(["mdc-a".to_string()]),
+                },
+            ),
+            (
+                20,
+                TaintedWorkerConfig {
+                    taints: HashSet::from(["mdc-b".to_string()]),
+                },
+            ),
+        ]);
+        let mut decode_blocks = FxHashMap::default();
+        decode_blocks.insert(WorkerWithDpRank::from_worker_id(10), 100);
+        decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 90);
+
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: 16,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks,
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints {
+                required_taints: HashSet::new(),
+                preferred_taints: HashMap::from([("mdc-a".to_string(), 0.85)]),
+            },
+            shared_cache_hits: None,
+            resp_tx: None,
+        };
+
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        assert_eq!(result.worker.worker_id, 10);
+    }
+
+    #[test]
+    fn test_negative_preferred_taints_avoid_matching_worker() {
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([
+            (
+                10,
+                TaintedWorkerConfig {
+                    taints: HashSet::from(["mdc-a".to_string()]),
+                },
+            ),
+            (
+                20,
+                TaintedWorkerConfig {
+                    taints: HashSet::from(["mdc-b".to_string()]),
+                },
+            ),
+        ]);
+        let mut decode_blocks = FxHashMap::default();
+        decode_blocks.insert(WorkerWithDpRank::from_worker_id(10), 90);
+        decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 100);
+
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: 16,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks,
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints {
+                required_taints: HashSet::new(),
+                preferred_taints: HashMap::from([("mdc-a".to_string(), -0.25)]),
+            },
+            shared_cache_hits: None,
+            resp_tx: None,
+        };
+
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        assert_eq!(result.worker.worker_id, 20);
+    }
+
     /// Test the scoring formula with shared cache hits.
     ///
     /// Request [A, B, C, D], shared_cache_multiplier=0.5, block_size=1
@@ -547,12 +1044,13 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: Some(shared_hits),
             resp_tx: Some(tx),
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         // Worker 0 should win: logit 1.0 < 2.0
@@ -611,12 +1109,13 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(
@@ -670,12 +1169,13 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(
@@ -719,12 +1219,13 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(result.worker, worker0);

@@ -148,7 +148,7 @@ See the [frontend benchmarking guide](https://github.com/ai-dynamo/dynamo/tree/m
 ## Troubleshooting
 
 **I enabled `fastokens`, but the logs do not show `Using fastokens tokenizer backend`.**
-Make sure the setting is applied to the frontend process, not only to the backend worker. For local launches, pass `--tokenizer fastokens` to `python -m dynamo.frontend` or set `DYN_TOKENIZER=fastokens` before starting the frontend. For benchmark DGD templates, use `DYN_TOKENIZER_BACKEND=fast`; the sweep runner maps `--tokenizers fastokens` to that value and restarts the frontend pod.
+Make sure the setting is applied to the frontend process, not only to the backend worker. For local launches, pass `--tokenizer fastokens` to `python -m dynamo.frontend` or set `DYN_TOKENIZER=fastokens` before starting the frontend. For benchmark DGD templates, use `DYN_TOKENIZER=fastokens`; the sweep runner maps `--tokenizers fastokens` to that value and restarts the frontend pod.
 
 **The frontend logs `Failed to load fastokens, falling back to HuggingFace`.**
 The model's tokenizer file uses a feature that `fastokens` does not support, or it is not a BPE `tokenizer.json` path. Dynamo has already fallen back to HuggingFace and should keep serving traffic. Check the tokenizer format, compare against the [tested models list](https://github.com/crusoecloud/fastokens#tested-models), and use `--tokenizer default` if you want to avoid the warning.
@@ -163,7 +163,7 @@ The `fastokens` flag has no effect for TikToken-format tokenizers. Dynamo uses t
 First confirm the fast path is active in logs. If it is, tokenization may not be the bottleneck for this workload. Check prompt length, cache hit rate, backend prefill time, frontend CPU saturation, and the `dynamo_frontend_tokenizer_latency_ms` metric. Short prompts and decode-heavy traffic often show little end-to-end change.
 
 **The benchmark shows no difference between `hf` and `fastokens`.**
-Inspect each run artifact and frontend log to confirm the backend actually changed. In Kubernetes mode, the DGD frontend pod must be replaced after `DYN_TOKENIZER_BACKEND` changes. In local mocker mode, start with larger ISL values such as 8192 or higher so tokenization is large enough to measure.
+Inspect each run artifact and frontend log to confirm the backend actually changed. In Kubernetes mode, the DGD frontend pod must be replaced after `DYN_TOKENIZER` changes. In local mocker mode, start with larger ISL values such as 8192 or higher so tokenization is large enough to measure.
 
 **Token IDs differ between backends.**
 Do not roll out that model with `fastokens`. Reproduce the mismatch with a minimal prompt and file an issue with the model name, tokenizer file, prompt, and whether the model appears on the tested models list.

@@ -29,6 +29,8 @@ from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 logger = logging.getLogger(__name__)
 
+_ENDPOINT_DISCOVERY_TIMEOUT_S = 10.0
+
 
 async def fetch_pre_deployment_metrics(
     runtime: "object",  # DistributedRuntime; typed loosely to avoid hard import
@@ -124,11 +126,11 @@ async def _try_endpoint(
         return []
 
     try:
-        endpoint = runtime.endpoint(  # type: ignore[attr-defined]
-            f"{namespace}.{worker_info.component_name}.get_perf_metrics"
-        )
+        endpoint_name = f"{namespace}.{worker_info.component_name}.get_perf_metrics"
+        endpoint = runtime.endpoint(endpoint_name)  # type: ignore[attr-defined]
         client = await endpoint.client()
-        await asyncio.sleep(0.1)
+        if not await _wait_for_endpoint_instances(client, endpoint_name):
+            return []
 
         response_stream = await client.round_robin(None)
         benchmark_data = None
@@ -161,6 +163,31 @@ async def _try_endpoint(
     except Exception as e:
         logger.warning(f"get_perf_metrics unexpected error: {e}")
         return []
+
+
+async def _wait_for_endpoint_instances(
+    client: object,
+    endpoint_name: str,
+    timeout_s: float = _ENDPOINT_DISCOVERY_TIMEOUT_S,
+) -> bool:
+    """Wait for Kubernetes discovery to surface at least one endpoint instance."""
+    instance_ids = client.instance_ids()  # type: ignore[attr-defined]
+    if instance_ids:
+        return True
+
+    try:
+        instance_ids = await asyncio.wait_for(
+            client.wait_for_instances(), timeout=timeout_s  # type: ignore[attr-defined]
+        )
+    except asyncio.TimeoutError:
+        logger.info(
+            "Timed out after %.1fs waiting for get_perf_metrics endpoint instances: %s",
+            timeout_s,
+            endpoint_name,
+        )
+        return False
+
+    return bool(instance_ids or client.instance_ids())  # type: ignore[attr-defined]
 
 
 def _extract_fpms_from_benchmark(

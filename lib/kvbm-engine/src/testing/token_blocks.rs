@@ -8,12 +8,16 @@
 //! be replaced with re-exports from `kvbm_logical::testing`.
 
 use crate::SequenceHash;
-use kvbm_common::tokens::{TokenBlock, TokenBlockSequence, compute_hash_v2};
+use kvbm_common::tokens::{CHAIN_XXH3_SEED, SaltHash, TokenBlock, TokenBlockSequence};
 use kvbm_logical::KvbmSequenceHashProvider;
 
 /// Compute the default salt hash for requests with no salt and no lora.
-pub fn default_request_salt_hash() -> u64 {
-    compute_hash_v2(b"{}", 0)
+///
+/// Matches what `dynamo_kv_hashing::Request::salt_hash()` would return for a default
+/// request, so test fixtures and production code agree on per-block hashes for the
+/// same tokens. See `lib/kv-hashing/src/salt.rs` for the canonical formula.
+pub fn default_request_salt_hash() -> SaltHash {
+    CHAIN_XXH3_SEED
 }
 
 /// Create a token block from a slice of tokens.

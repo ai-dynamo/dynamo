@@ -30,10 +30,15 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,6 +59,7 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		corev1.AddToScheme,
 		autoscalingv1.AddToScheme,
 		networkingv1.AddToScheme,
+		resourcev1.AddToScheme,
 		v1alpha1.AddToScheme,
 		v1beta1.AddToScheme,
 		grovev1alpha1.AddToScheme,
@@ -543,6 +549,113 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DRAV
 	}
 }
 
+func TestDynamoGraphDeploymentReconciler_reconcileResources_ValidatesGMSResourceClaimTemplatesBeforePathway(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
+					},
+				},
+			},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dgd).
+			Build(),
+		Recorder: record.NewFakeRecorder(100),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: false},
+	}
+
+	_, err := reconciler.reconcileResources(ctx, dgd)
+	g.Expect(err).To(gomega.HaveOccurred())
+	g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
+	g.Expect(err.Error()).To(gomega.ContainSubstring("explicitly disabled"))
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_ToleratesNonGMSComponents(t *testing.T) {
+	ctx := context.Background()
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "frontend",
+					ComponentType: v1beta1.ComponentTypeFrontend,
+				},
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+				},
+			},
+		},
+	}
+	r := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dgd).
+			Build(),
+		Recorder:      record.NewFakeRecorder(100),
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
+	}
+
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dgd); err != nil {
+		t.Fatalf("reconcileGMSResourceClaimTemplates() returned error for non-GMS components: %v", err)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_CleansStaleNonGMSResourceClaimTemplate(t *testing.T) {
+	ctx := context.Background()
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+				},
+			},
+		},
+	}
+	templateName := "test-dgd-decode-gpu"
+	rct := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dgd, rct).
+		Build()
+	r := &DynamoGraphDeploymentReconciler{
+		Client:        cl,
+		Recorder:      record.NewFakeRecorder(100),
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
+	}
+
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dgd); err != nil {
+		t.Fatalf("reconcileGMSResourceClaimTemplates() returned error: %v", err)
+	}
+	got := &resourcev1.ResourceClaimTemplate{}
+	err := cl.Get(ctx, client.ObjectKey{Name: templateName, Namespace: "default"}, got)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected stale ResourceClaimTemplate to be deleted, got %v", err)
+	}
+}
+
 func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
@@ -632,6 +745,211 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 	if updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image != "keep-existing:latest" {
 		t.Fatalf("existing job image was mutated to %s", updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image)
 	}
+}
+
+func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClient(t *testing.T) {
+	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+	})
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: string(commonconsts.ComponentTypeWorker),
+		Resources: &v1alpha1.Resources{
+			Limits: &v1alpha1.ResourceItem{GPU: "1"},
+		},
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeIntraPod,
+		},
+		Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+			Enabled: true,
+			Mode:    v1alpha1.CheckpointModeAuto,
+			Identity: &v1alpha1.DynamoCheckpointIdentity{
+				Model:                identity.Model,
+				BackendFramework:     identity.BackendFramework,
+				TensorParallelSize:   1,
+				PipelineParallelSize: 1,
+				ExtraParameters:      map[string]string{},
+			},
+		},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Name:  commonconsts.MainContainerName,
+				Image: "checkpoint-writer:latest",
+			},
+		},
+	}
+	component.Checkpoint.Job = &v1alpha1.ServiceCheckpointJobConfig{
+		GMSClientContainers: []string{"gms-saver"},
+		PodTemplate: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:    "gms-saver",
+					Image:   "custom-saver:latest",
+					Command: []string{"/bin/custom-saver"},
+				}},
+			},
+		},
+	}
+
+	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component))
+	if err != nil {
+		t.Fatalf("createCheckpointCR() error = %v", err)
+	}
+	if ckpt.Spec.GPUMemoryService == nil || !ckpt.Spec.GPUMemoryService.Enabled {
+		t.Fatalf("expected auto-created checkpoint to carry enabled GMS spec, got %#v", ckpt.Spec.GPUMemoryService)
+	}
+	if diff := cmp.Diff([]string{"gms-saver"}, ckpt.Spec.GPUMemoryService.ExtraClientContainers); diff != "" {
+		t.Fatalf("checkpoint GMS extra clients mismatch (-want +got):\n%s", diff)
+	}
+	saver := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "gms-saver")
+	if saver == nil {
+		t.Fatalf("expected checkpoint job pod template to include saver")
+	}
+	if got := saver.Image; got != "custom-saver:latest" {
+		t.Fatalf("checkpoint saver image = %q, want custom-saver:latest", got)
+	}
+	if got := saver.Command; len(got) != 1 || got[0] != "/bin/custom-saver" {
+		t.Fatalf("checkpoint saver command = %#v, want [/bin/custom-saver]", got)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Env: []corev1.EnvVar{
+				{Name: "HF_HOME", Value: "/models/huggingface"},
+				{Name: "OVERRIDE_ME", Value: "graph"},
+			},
+		},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  commonconsts.MainContainerName,
+					Image: "checkpoint-writer:latest",
+					Env:   []corev1.EnvVar{{Name: "OVERRIDE_ME", Value: "component"}},
+				}},
+			},
+		},
+		Experimental: &v1beta1.ExperimentalSpec{
+			Checkpoint: &v1beta1.ComponentCheckpointConfig{
+				Mode: v1beta1.CheckpointModeAuto,
+				Identity: &v1beta1.DynamoCheckpointIdentity{
+					Model:                identity.Model,
+					BackendFramework:     identity.BackendFramework,
+					TensorParallelSize:   1,
+					PipelineParallelSize: 1,
+					ExtraParameters:      map[string]string{},
+				},
+			},
+		},
+	}
+
+	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", component)
+	require.NoError(t, err)
+	main := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName)
+	require.NotNil(t, main)
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "HF_HOME", Value: "/models/huggingface"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "OVERRIDE_ME", Value: "component"})
+}
+
+func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t *testing.T) {
+	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+	})
+	checkpointIdentity := v1beta1.DynamoCheckpointIdentity{
+		Model:            identity.Model,
+		BackendFramework: identity.BackendFramework,
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: commonconsts.MainContainerName, Image: "main:latest"},
+					{Name: "snapshot-me", Image: "target:latest"},
+					{Name: "serve-sidecar", Image: "serve-sidecar:latest"},
+				},
+			},
+		},
+		Experimental: &v1beta1.ExperimentalSpec{
+			GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
+				Mode: v1beta1.GMSModeIntraPod,
+			},
+			Checkpoint: &v1beta1.ComponentCheckpointConfig{
+				Mode:                v1beta1.CheckpointModeAuto,
+				TargetContainerName: "snapshot-me",
+				Identity:            &checkpointIdentity,
+				Job: &v1beta1.ComponentCheckpointJobConfig{
+					GMSClientContainers: []string{"gms-saver"},
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "gms-saver",
+								Image: "saver:latest",
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", component)
+	require.NoError(t, err)
+	assert.Equal(t, "snapshot-me", ckpt.Spec.Job.TargetContainerName)
+	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "snapshot-me"))
+	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "gms-saver"))
+	assert.Equal(t, []string{"gms-saver"}, ckpt.Spec.GPUMemoryService.ExtraClientContainers)
+	assert.Nil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName))
+	assert.Nil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "serve-sidecar"))
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
@@ -814,6 +1132,148 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 	if !checkpointStatuses["worker"].Ready {
 		t.Fatalf("expected checkpoint status to be ready")
 	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_overlaysServiceGMSLoader(t *testing.T) {
+	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	referenced := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      friendlyCheckpointName,
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity:         identity,
+			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	ref := friendlyCheckpointName
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+						Enabled:               true,
+						Mode:                  v1alpha1.GMSModeIntraPod,
+						ExtraClientContainers: []string{"gms-loader"},
+					},
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled:       true,
+						Mode:          v1alpha1.CheckpointModeManual,
+						CheckpointRef: &ref,
+					},
+				},
+			},
+		},
+	})
+
+	_, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	if err != nil {
+		t.Fatalf("reconcileCheckpoints() error = %v", err)
+	}
+
+	info := checkpointInfos["worker"]
+	if info == nil || info.GPUMemoryService == nil {
+		t.Fatalf("expected resolved GMS checkpoint info, got %#v", info)
+	}
+	if diff := cmp.Diff([]string{"gms-loader"}, info.GPUMemoryService.ExtraClientContainers); diff != "" {
+		t.Fatalf("restore GMS extra clients mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_rejectsServiceGMSWithNonGMSCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	require.NoError(t, err)
+
+	referenced := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      friendlyCheckpointName,
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	ref := friendlyCheckpointName
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+						Enabled:               true,
+						Mode:                  v1alpha1.GMSModeIntraPod,
+						ExtraClientContainers: []string{"gms-loader"},
+					},
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled:       true,
+						Mode:          v1alpha1.CheckpointModeManual,
+						CheckpointRef: &ref,
+					},
+				},
+			},
+		},
+	})
+
+	_, _, err = reconciler.reconcileCheckpoints(ctx, dgd)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
+	assert.Contains(t, err.Error(), friendlyCheckpointName)
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_createsCheckpointStoragePVC(t *testing.T) {
@@ -1312,25 +1772,6 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 		},
-		{
-			name: "inter-pod GMS failover requires DRA - returns clear error when DRA is disabled",
-			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
-				BackendFramework: "vllm",
-				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-					"decode": {
-						ComponentType: string(commonconsts.ComponentTypeDecode),
-						Replicas:      ptr.To(int32(1)),
-						Failover: &v1alpha1.FailoverSpec{
-							Enabled:    true,
-							Mode:       v1alpha1.GMSModeInterPod,
-							NumShadows: 1,
-						},
-					},
-				},
-			},
-			draEnabled:       false,
-			wantErrSubstring: "requires DRA",
-		},
 	}
 
 	for _, tt := range tests {
@@ -1565,6 +2006,57 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesL
 	})
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(decodeService.Spec.Selector[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
+}
+
+func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	desired := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "prefill", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "new-worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 5}},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode-group", CliqueNames: []string{"decode"}, Replicas: ptr.To(int32(1))},
+					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(1))},
+					{Name: "new-group", Replicas: ptr.To(int32(7))},
+				},
+			},
+		},
+	}
+	existing := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}},
+					{Name: "prefill", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 4}},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode-group", CliqueNames: []string{"decode"}},
+					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(6))},
+				},
+			},
+		},
+	}
+
+	preserveGrovePodCliqueSetReplicas(desired, existing)
+
+	replicasByClique := map[string]int32{}
+	for _, clique := range desired.Spec.Template.Cliques {
+		replicasByClique[clique.Name] = clique.Spec.Replicas
+	}
+	g.Expect(replicasByClique).To(gomega.Equal(map[string]int32{
+		"frontend":   2,
+		"prefill":    1,
+		"new-worker": 5,
+	}))
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.BeNil())
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).NotTo(gomega.BeNil())
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).To(gomega.Equal(int32(6)))
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[2].Replicas).To(gomega.Equal(int32(7)))
 }
 
 func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_KeepsNativeWorkerSelectors(t *testing.T) {
@@ -2544,6 +3036,68 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				State:   v1beta1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
+					"frontend": {
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-frontend-deployment"},
+						Replicas:          2,
+						UpdatedReplicas:   2,
+						ReadyReplicas:     ptr.To(int32(2)),
+						AvailableReplicas: ptr.To(int32(2)),
+					},
+				},
+			},
+		},
+		{
+			name: "single service - DCD stale observed generation stays pending",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ServiceName:     "frontend",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeFrontend),
+						Replicas:        ptr.To(int32(2)),
+					},
+				},
+			},
+			existingDCDs: []client.Object{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						BackendFramework: "vllm",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName: "frontend",
+							Replicas:    ptr.To(int32(2)),
+						},
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status: metav1.ConditionTrue,
+							},
+						},
+						Service: &v1alpha1.ServiceReplicaStatus{
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
+							ComponentNames:    []string{"test-dgd-frontend-deployment"},
+							Replicas:          2,
+							UpdatedReplicas:   2,
+							ReadyReplicas:     ptr.To(int32(2)),
+							AvailableReplicas: ptr.To(int32(2)),
+						},
+					},
+				}),
+			},
+			wantReconcileResult: ReconcileResult{
+				State:   v1beta1.DGDStatePending,
+				Reason:  "some_resources_are_not_ready",
+				Message: "Resources not ready: test-dgd-frontend: spec not yet processed: generation=2, observedGeneration=1",
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,

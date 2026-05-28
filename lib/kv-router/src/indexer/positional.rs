@@ -473,14 +473,11 @@ impl PositionalIndexer {
 
 impl PositionalIndexer {
     /// Compute sequence hash incrementally from previous hash and current local hash.
+    /// Delegates to [`dynamo_tokens::compute_next_sequence_hash`] so the request-side
+    /// chain agrees with whatever produced the event stream.
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
-        let mut bytes = [0u8; 16];
-
-        bytes[..8].copy_from_slice(&prev_seq_hash.to_le_bytes());
-        bytes[8..].copy_from_slice(&current_local_hash.to_le_bytes());
-
-        dynamo_tokens::compute_hash_v2(&bytes, crate::protocols::XXH3_SEED)
+        dynamo_tokens::compute_next_sequence_hash(prev_seq_hash, current_local_hash)
     }
 
     /// Ensure seq_hashes is computed up to and including target_pos.

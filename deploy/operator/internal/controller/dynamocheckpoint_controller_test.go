@@ -136,12 +136,19 @@ func makeCheckpointLease(name string, renewTime time.Time, durationSeconds int32
 
 func requireCheckpointContainer(t *testing.T, containers []corev1.Container, name string) *corev1.Container {
 	t.Helper()
+	if container := findCheckpointContainer(containers, name); container != nil {
+		return container
+	}
+	t.Fatalf("container %q not found", name)
+	return nil
+}
+
+func findCheckpointContainer(containers []corev1.Container, name string) *corev1.Container {
 	for i := range containers {
 		if containers[i].Name == name {
 			return &containers[i]
 		}
 	}
-	t.Fatalf("container %q not found", name)
 	return nil
 }
 
@@ -165,18 +172,14 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, testHash, job.Spec.Template.Labels[snapshotprotocol.CheckpointIDLabel])
 
 	// Env vars (checkpoint-specific + user-provided preserved)
-	envMap := make(map[string]string, len(main.Env))
-	for _, e := range main.Env {
-		envMap[e.Name] = e.Value
-	}
-	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, envMap[snapshotprotocol.SnapshotControlDirEnv])
-	assert.Equal(t, "manual-checkpoint", envMap[consts.DynamoNamespaceEnvVar])
-	assert.Equal(t, consts.ComponentTypeWorker, envMap[consts.DynamoComponentEnvVar])
-	assert.Equal(t, "worker-1234", envMap[consts.DynamoNamespaceWorkerSuffixEnvVar])
-	assert.Equal(t, "kubernetes", envMap[consts.DynamoDiscoveryBackendEnvVar])
-	assert.Equal(t, "9090", envMap["DYN_SYSTEM_PORT"])
-	assert.Equal(t, "true", envMap["DYN_SYSTEM_ENABLED"])
-	assert.Equal(t, "secret", envMap["HF_TOKEN"])
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: snapshotprotocol.SnapshotControlDirEnv, Value: snapshotprotocol.SnapshotControlMountPath})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: "manual-checkpoint"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: consts.DynamoComponentEnvVar, Value: consts.ComponentTypeWorker})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar, Value: "worker-1234"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: consts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "9090"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_SYSTEM_ENABLED", Value: "true"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "HF_TOKEN", Value: "secret"})
 
 	var podNameEnv *corev1.EnvVar
 	for i := range main.Env {
@@ -215,15 +218,12 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.True(t, volNames[consts.PodInfoVolumeName])
 	assert.True(t, volNames[snapshotprotocol.SnapshotControlVolumeName])
 
-	mountPaths := make(map[string]string)
-	for _, m := range main.VolumeMounts {
-		mountPaths[m.Name] = m.MountPath
+	for _, mount := range main.VolumeMounts {
+		assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, mount.Name)
 	}
-	_, hasCheckpointMount := mountPaths[snapshotprotocol.CheckpointVolumeName]
-	assert.False(t, hasCheckpointMount)
-	assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
-	assert.Equal(t, consts.DefaultSharedMemoryMountPath, mountPaths[consts.KubeValueNameSharedMemory])
-	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, mountPaths[snapshotprotocol.SnapshotControlVolumeName])
+	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: consts.PodInfoVolumeName, MountPath: consts.PodInfoMountPath, ReadOnly: true})
+	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: consts.KubeValueNameSharedMemory, MountPath: consts.DefaultSharedMemoryMountPath})
+	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.SnapshotControlVolumeName, MountPath: snapshotprotocol.SnapshotControlMountPath, SubPath: consts.MainContainerName})
 
 	foundSharedMemoryVolume := false
 	for _, v := range podSpec.Volumes {
@@ -308,12 +308,8 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	assert.Nil(t, main.LivenessProbe)
 	assert.Nil(t, main.StartupProbe)
 
-	mainEnv := map[string]string{}
-	for _, env := range main.Env {
-		mainEnv[env.Name] = env.Value
-	}
-	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, mainEnv[snapshotprotocol.SnapshotControlDirEnv])
-	assert.Equal(t, "secret", mainEnv["HF_TOKEN"])
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: snapshotprotocol.SnapshotControlDirEnv, Value: snapshotprotocol.SnapshotControlMountPath})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "HF_TOKEN", Value: "secret"})
 
 	sidecar := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "sidecar")
 	assert.Equal(t, []string{"sleep"}, sidecar.Command)
@@ -326,11 +322,61 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	}
 }
 
-func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
+func TestBuildCheckpointJobUsesTargetContainerName(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
-	ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
+	ckpt.Spec.Job.TargetContainerName = "worker"
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers = []corev1.Container{
+		{
+			Name:    consts.MainContainerName,
+			Image:   "main:latest",
+			Command: []string{"python3", "-m", "main"},
+		},
+		{
+			Name:    "worker",
+			Image:   "worker:latest",
+			Command: []string{"python3", "-m", "worker"},
+			Env:     []corev1.EnvVar{{Name: "USER_ENV", Value: "1"}},
+		},
+	}
+
+	r := makeCheckpointReconciler(s, ckpt)
+	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+
+	assert.Equal(t, "worker", job.Spec.Template.Annotations[snapshotprotocol.TargetContainersAnnotation])
+	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
+	target := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "worker")
+
+	assert.Nil(t, main.ReadinessProbe)
+	for _, env := range main.Env {
+		assert.NotEqual(t, snapshotprotocol.SnapshotControlDirEnv, env.Name)
+	}
+	for _, mount := range main.VolumeMounts {
+		assert.NotEqual(t, snapshotprotocol.SnapshotControlVolumeName, mount.Name)
+	}
+
+	require.NotNil(t, target.ReadinessProbe)
+	assert.Contains(t, target.Env, corev1.EnvVar{Name: snapshotprotocol.SnapshotControlDirEnv, Value: snapshotprotocol.SnapshotControlMountPath})
+	assert.Contains(t, target.Env, corev1.EnvVar{Name: "USER_ENV", Value: "1"})
+	assert.Contains(t, target.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.SnapshotControlVolumeName, MountPath: snapshotprotocol.SnapshotControlMountPath, SubPath: "worker"})
+	assert.Contains(t, target.VolumeMounts, corev1.VolumeMount{Name: consts.PodInfoVolumeName, MountPath: consts.PodInfoMountPath, ReadOnly: true})
+}
+
+func TestBuildCheckpointJobAddsGMSCheckpointClient(t *testing.T) {
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+		Enabled:               true,
+		ExtraClientContainers: []string{"gms-saver"},
+	}
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers = append(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, corev1.Container{
+		Name:    "gms-saver",
+		Image:   "saver:latest",
+		Command: []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"},
+		Args:    []string{"--checkpoint-dir", "/artifacts/gms"},
+	})
 	snapshotAgentDaemonSet := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "snapshot-agent",
@@ -369,38 +415,24 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 
 	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
 	weightsServer := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, gms.ServerContainerName)
-	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, checkpoint.GMSSaverContainer)
+	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "gms-saver")
 
 	volNames := map[string]bool{}
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		volNames[v.Name] = true
 	}
 	assert.True(t, volNames[gms.SharedVolumeName])
-	assert.True(t, volNames[snapshotprotocol.CheckpointVolumeName])
 	assert.True(t, volNames[snapshotprotocol.SnapshotControlVolumeName])
 
-	mainMounts := map[string]string{}
-	for _, m := range main.VolumeMounts {
-		mainMounts[m.Name] = m.MountPath
-	}
-	assert.Equal(t, gms.SharedMountPath, mainMounts[gms.SharedVolumeName])
+	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
 
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, weightsServer.Command)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
-	require.NotNil(t, weightsServer.StartupProbe)
+	assert.Nil(t, weightsServer.StartupProbe, "no probe — clients drive readiness via connect-retry")
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"}, saver.Command)
-
-	saverMounts := map[string]string{}
-	for _, m := range saver.VolumeMounts {
-		saverMounts[m.Name] = m.MountPath
-	}
-	assert.Equal(t, "/checkpoints", saverMounts[snapshotprotocol.CheckpointVolumeName])
-
-	saverEnv := map[string]string{}
-	for _, env := range saver.Env {
-		saverEnv[env.Name] = env.Value
-	}
-	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", saverEnv["GMS_CHECKPOINT_DIR"])
+	assert.Equal(t, []string{"--checkpoint-dir", "/artifacts/gms"}, saver.Args)
+	assert.Nil(t, saver.RestartPolicy, "saver runs as a regular Job container so Job completion waits for it")
+	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
@@ -436,16 +468,11 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 	require.True(t, foundCustomShmVolume, "shared-memory volume not found: "+consts.KubeValueNameSharedMemory)
 	main := job.Spec.Template.Spec.Containers[0]
 
-	envMap := make(map[string]string, len(main.Env))
-	for _, e := range main.Env {
-		envMap[e.Name] = e.Value
-	}
-
-	assert.Equal(t, "nats://custom:4222", envMap["NATS_SERVER"])
-	assert.Equal(t, "10090", envMap["DYN_SYSTEM_PORT"])
-	assert.Equal(t, "http://etcd:2379", envMap["ETCD_ENDPOINTS"])
-	assert.Equal(t, "http://model-express:8000", envMap["MODEL_EXPRESS_URL"])
-	assert.Equal(t, "http://prometheus:9090", envMap["PROMETHEUS_ENDPOINT"])
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "NATS_SERVER", Value: "nats://custom:4222"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "10090"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "ETCD_ENDPOINTS", Value: "http://etcd:2379"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "MODEL_EXPRESS_URL", Value: "http://model-express:8000"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: "PROMETHEUS_ENDPOINT", Value: "http://prometheus:9090"})
 }
 
 func TestCheckpointReconciler_Reconcile(t *testing.T) {

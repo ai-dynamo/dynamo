@@ -1247,7 +1247,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 	Context("When creating profiling job with inline config", func() {
 		It("Should pass config as --config argument for online profiling", func() {
 			ctx := context.Background()
-			namespace := "default"
+			namespace := defaultNamespace
 			dgdrName := "test-args-online"
 
 			// Create ServiceAccount
@@ -1290,7 +1290,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
 
 			// Create profiling job with properly initialized DGDR
-			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			_, err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify job was created
@@ -1355,7 +1355,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
 
 			// Create profiling job with properly initialized DGDR
-			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			_, err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify job was created
@@ -1376,7 +1376,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 
 		It("Should set fsGroup in pod security context for volume permissions", func() {
 			ctx := context.Background()
-			namespace := "default"
+			namespace := defaultNamespace
 			dgdrName := "test-fsgroup"
 
 			// Create ServiceAccount
@@ -1419,7 +1419,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
 
 			// Create profiling job with properly initialized DGDR
-			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			_, err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify job was created

@@ -50,6 +50,18 @@ controllerManager:
   tolerations: []
   affinity: {}
 
+  # -- Extra labels to add to the controller-manager pod template.
+  # Useful for unified service tagging conventions
+  # (e.g. Datadog `tags.datadoghq.com/manager.{service,env,version}`)
+  # and external selectors that target the controller pods directly.
+  podLabels: {}
+
+  # -- Extra annotations to add to the controller-manager pod template.
+  # Useful for autodiscovery integrations that key off pod annotations
+  # (e.g. Datadog `ad.datadoghq.com/manager.checks`, Prometheus
+  # `prometheus.io/scrape`) without forking the chart.
+  podAnnotations: {}
+
   # Leader election configuration
   leaderElection:
     # Leader election ID for cluster-wide coordination

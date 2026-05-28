@@ -70,6 +70,7 @@ struct StateFlags {
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
+    realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
 }
@@ -83,6 +84,7 @@ impl StateFlags {
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Realtime => self.realtime_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
@@ -109,6 +111,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Audios => self
                 .audios_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Realtime => self
+                .realtime_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
@@ -137,6 +142,7 @@ impl State {
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
+                realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
@@ -289,6 +295,45 @@ impl HttpService {
     }
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
+        self.run_inner(cancel_token, None).await
+    }
+
+    /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
+    /// port-allocation gap for tests that need to know the bound port up front. Not
+    /// supported in TLS mode: TLS uses `axum_server::bind_rustls`, which owns its own
+    /// bind, so a pre-bound listener cannot be threaded through and dropping it before
+    /// `bind_rustls` would just re-open the same race. Returns an error if invoked on a
+    /// service built with `enable_tls(true)`.
+    ///
+    /// [`spawn`]: HttpService::spawn
+    pub async fn spawn_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> JoinHandle<Result<()>> {
+        let this = self.clone();
+        tokio::spawn(async move { this.run_with_listener(cancel_token, listener).await })
+    }
+
+    /// Like [`run`], but serves on a caller-provided pre-bound listener instead of
+    /// binding `{host}:{port}` internally. See [`spawn_with_listener`] for the TLS
+    /// restriction.
+    ///
+    /// [`run`]: HttpService::run
+    /// [`spawn_with_listener`]: HttpService::spawn_with_listener
+    pub async fn run_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> Result<()> {
+        self.run_inner(cancel_token, Some(listener)).await
+    }
+
+    async fn run_inner(
+        &self,
+        cancel_token: CancellationToken,
+        listener: Option<tokio::net::TcpListener>,
+    ) -> Result<()> {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
@@ -298,11 +343,17 @@ impl HttpService {
 
         let state_cancel = self.state.cancel_token().clone();
 
-        let addr: SocketAddr = address
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
-
         if self.enable_tls {
+            if listener.is_some() {
+                return Err(anyhow::anyhow!(
+                    "Pre-bound listener is not supported in TLS mode; \
+                     axum_server::bind_rustls owns its own bind. \
+                     Use run()/spawn() (which bind internally) when enable_tls is set."
+                ));
+            }
+            let addr: SocketAddr = address
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
             let cert_path = self
                 .tls_cert_path
                 .as_ref()
@@ -345,27 +396,35 @@ impl HttpService {
                 }
             }
         } else {
-            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-                tracing::error!(
-                    protocol = %protocol,
-                    address = %address,
-                    error = %e,
-                    "Failed to bind server to address"
-                );
-                match e.kind() {
-                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                        protocol,
-                        self.port
-                    ),
-                    _ => anyhow::anyhow!(
-                        "Failed to start {} server on {}: {}",
-                        protocol,
-                        address,
-                        e
-                    ),
+            let listener = match listener {
+                Some(l) => l,
+                None => {
+                    let addr: SocketAddr = address
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
+                    tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                        tracing::error!(
+                            protocol = %protocol,
+                            address = %address,
+                            error = %e,
+                            "Failed to bind server to address"
+                        );
+                        match e.kind() {
+                            std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                                "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                                protocol,
+                                self.port
+                            ),
+                            _ => anyhow::anyhow!(
+                                "Failed to start {} server on {}: {}",
+                                protocol,
+                                address,
+                                e
+                            ),
+                        }
+                    })?
                 }
-            })?;
+            };
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
@@ -549,13 +608,6 @@ impl HttpServiceConfigBuilder {
             inference_router = inference_router.merge(route);
             all_docs.extend(route_docs);
         }
-        // Experimental WebSocket endpoint (`/v1/realtime`) — see #9173 ("Streaming Request Support").
-        // Registered unconditionally; the underlying engine is opt-in via
-        // `crate::http::service::realtime::install_engine`. If no engine is installed when
-        // a connection arrives, the handler closes with an error frame.
-        let (realtime_docs, realtime_route) = super::realtime::realtime_router(state.clone(), None);
-        inference_router = inference_router.merge(realtime_route);
-        all_docs.extend(realtime_docs);
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_inference_request_span)
@@ -614,6 +666,7 @@ impl HttpServiceConfigBuilder {
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
+        let (realtime_docs, realtime_route) = super::realtime::realtime_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
@@ -626,6 +679,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
+        endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
         if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
@@ -672,22 +726,27 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
-    #[serial]
     async fn test_liveness_endpoint_reflects_cancellation() {
-        // 1. Setup service & token
+        // 1. Setup service & token. Pre-bind to a random loopback port and hand the
+        //    listener to `run_with_listener` to avoid colliding with parallel tests.
         let cancel_token = Arc::new(CancellationToken::new());
-        let service = HttpService::builder().build().unwrap();
-        let port = service.port;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
 
         // 2. Spawn service with shared token
         let service_token = cancel_token.clone();
         let handle = tokio::spawn(async move {
-            service.run((*service_token).clone()).await.unwrap();
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;

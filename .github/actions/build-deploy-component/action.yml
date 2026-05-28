@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: 'Build Deploy Component'
-description: 'Lint, test, and build/push a deploy component container (operator or snapshot)'
+description: 'Build and push a deploy component container (operator or snapshot)'
 
 inputs:
   component:
@@ -54,10 +54,8 @@ runs:
       shell: bash
       run: |
         if [[ "${{ inputs.component }}" == "operator" ]]; then
-          echo "lint_platform=linux/arm64" >> $GITHUB_OUTPUT
           echo "build_platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
         else
-          echo "lint_platform=linux/amd64" >> $GITHUB_OUTPUT
           echo "build_platforms=linux/amd64" >> $GITHUB_OUTPUT
         fi
 
@@ -77,49 +75,6 @@ runs:
         azure_acr_user: ${{ inputs.azure_acr_user }}
         azure_acr_password: ${{ inputs.azure_acr_password }}
         ngc_ci_access_token: ${{ inputs.ngc_ci_access_token }}
-
-    - name: Linter
-      shell: bash
-      working-directory: ./deploy/${{ inputs.component }}
-      env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
-      run: |
-        docker buildx build --platform ${{ steps.settings.outputs.lint_platform }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
-
-    - name: Tester
-      shell: bash
-      working-directory: ./deploy/${{ inputs.component }}
-      env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
-      run: |
-        docker buildx build --platform ${{ steps.settings.outputs.lint_platform }} --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
-
-    - name: Set up Go
-      if: ${{ inputs.component == 'operator' }}
-      uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-      with:
-        go-version: '1.25'
-
-    - name: Set up Python
-      if: ${{ inputs.component == 'operator' }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
-
-    - name: Install Python dependencies for operator codegen
-      if: ${{ inputs.component == 'operator' }}
-      shell: bash
-      working-directory: ./deploy/operator
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
-
-    - name: Check for uncommitted changes
-      if: ${{ inputs.component == 'operator' }}
-      shell: bash
-      working-directory: ./deploy/operator
-      run: |
-        make check
 
     - name: Build and push Container
       shell: bash
