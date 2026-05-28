@@ -169,9 +169,11 @@ class RLMixin:
         if isinstance(result, list):
             return {
                 "result": [
-                    dataclasses.asdict(item)
-                    if dataclasses.is_dataclass(item) and not isinstance(item, type)
-                    else item
+                    (
+                        dataclasses.asdict(item)
+                        if dataclasses.is_dataclass(item) and not isinstance(item, type)
+                        else item
+                    )
                     for item in result
                 ]
             }

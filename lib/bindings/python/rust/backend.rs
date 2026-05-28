@@ -1067,15 +1067,12 @@ fn python_engine_route_callback(
                 let py_body = pythonize(py, &body).map_err(|e| {
                     anyhow::anyhow!("Failed to convert route request body to Python: {e}")
                 })?;
-                let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
-                    anyhow::anyhow!("Failed to call Python route callback: {e}")
-                })?;
+                let coroutine = callback
+                    .call1(py, (py_body,))
+                    .map_err(|e| anyhow::anyhow!("Failed to call Python route callback: {e}"))?;
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::into_future_with_locals(
-                    &locals,
-                    coroutine.into_bound(py),
-                )
-                .map_err(|e| anyhow::anyhow!("Failed to convert route coroutine: {e}"))
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
+                    .map_err(|e| anyhow::anyhow!("Failed to convert route coroutine: {e}"))
             })?;
 
             let py_result = py_future
@@ -1083,9 +1080,8 @@ fn python_engine_route_callback(
                 .map_err(|e| anyhow::anyhow!("Python route callback failed: {e}"))?;
 
             Python::with_gil(|py| {
-                depythonize::<serde_json::Value>(py_result.bind(py)).map_err(|e| {
-                    anyhow::anyhow!("Failed to serialize route response: {e}")
-                })
+                depythonize::<serde_json::Value>(py_result.bind(py))
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize route response: {e}"))
             })
         })
     })

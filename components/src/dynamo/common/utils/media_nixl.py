@@ -22,7 +22,8 @@ async def read_decoded_media_via_nixl(
     connector: nixl_connect.Connector,
     decoded_meta: Dict[str, Any],
     return_metadata: Literal[False] = False,
-) -> np.ndarray: ...
+) -> np.ndarray:
+    ...
 
 
 @overload
@@ -30,7 +31,8 @@ async def read_decoded_media_via_nixl(
     connector: nixl_connect.Connector,
     decoded_meta: Dict[str, Any],
     return_metadata: Literal[True],
-) -> Tuple[np.ndarray, Dict[str, Any] | None]: ...
+) -> Tuple[np.ndarray, Dict[str, Any] | None]:
+    ...
 
 
 async def read_decoded_media_via_nixl(

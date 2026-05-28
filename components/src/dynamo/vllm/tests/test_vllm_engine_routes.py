@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 pytest.importorskip("vllm.v1.engine.async_llm")
+pytest.importorskip("vllm.usage.usage_lib")
 
 from dynamo.vllm.handlers import VllmEngineQuiesceController  # noqa: E402
 from dynamo.vllm.llm_engine import VllmLLMEngine  # noqa: E402

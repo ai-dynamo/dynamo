@@ -460,9 +460,9 @@ class TrtllmLLMEngine(LLMEngine):
                             kv_used_blocks=int(kv_used),
                             kv_total_blocks=kv_total,
                             gpu_cache_usage=(kv_used / kv_total) if kv_total else 0.0,
-                            kv_cache_hit_rate=float(hit_rate)
-                            if hit_rate is not None
-                            else None,
+                            kv_cache_hit_rate=(
+                                float(hit_rate) if hit_rate is not None else None
+                            ),
                             dp_rank=rank,
                         ),
                     )
