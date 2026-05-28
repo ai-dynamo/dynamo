@@ -71,6 +71,7 @@ ARG NIXL_REF={{ context[framework].nixl_ref }}
 {% endif -%}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
+ARG NIXL_LIBFABRIC_REPO={{ context.dynamo.nixl_libfabric_repo }}
 ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
 ARG HWLOC_VERSION={{ context.dynamo.hwloc_version }}
 {% endif %}

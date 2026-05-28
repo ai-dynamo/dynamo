@@ -2579,6 +2579,7 @@ name = "dynamo-mocker"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "dashmap",
  "derive-getters",
  "derive_builder",
@@ -2595,6 +2596,7 @@ dependencies = [
  "ndarray-interp",
  "ndarray-npy",
  "rand 0.9.4",
+ "rmp-serde",
  "rstest 0.18.2",
  "rustc-hash 2.1.2",
  "serde",
@@ -2602,6 +2604,7 @@ dependencies = [
  "serde_path_to_error",
  "slotmap",
  "tempfile",
+ "tmq",
  "tokio",
  "tokio-timerfd",
  "tokio-util",
@@ -2637,7 +2640,6 @@ name = "dynamo-parsers"
 version = "1.2.0"
 dependencies = [
  "anyhow",
- "dynamo-protocols",
  "num-traits",
  "openai-harmony",
  "regex",

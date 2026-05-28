@@ -378,6 +378,25 @@ func generateSingleDCD(
 		}
 	}
 
+	// Stamp sidecar.istio.io/inject: "false" on EPP pod templates before
+	// DGD-level annotations are merged in. EPP serves its own TLS on port 9002
+	// (--secure-serving true); an Istio sidecar intercepting that port causes a
+	// double-TLS handshake failure when the namespace has STRICT mTLS, which
+	// surfaces as cx_connect_fail / HTTP 500 on the gateway.
+	//
+	// Placement before applyDGDTemplateDefaults is intentional: the merge
+	// function (mergeLowPriorityMetadata) does not overwrite keys already
+	// present in the destination map, so a graph-wide DGD Spec.Annotations
+	// entry of sidecar.istio.io/inject: "true" cannot silently bypass the
+	// EPP opt-out. An explicit per-EPP podTemplate annotation set by the user
+	// is preserved by the !exists guard.
+	if component.ComponentType == commonconsts.ComponentTypeEPP {
+		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
+		if _, exists := podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject]; !exists {
+			podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject] = "false"
+		}
+	}
+
 	applyDGDTemplateDefaults(&deployment.Spec.DynamoComponentDeploymentSharedSpec, parentDGD)
 
 	// Topology label controller marker: set on the DCD so it propagates to pods.

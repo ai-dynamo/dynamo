@@ -217,6 +217,22 @@ impl ModelManager {
         }
     }
 
+    /// Whether `model` has at least one WorkerSet that can serve an inference
+    /// request right now. See [`Model::is_ready_to_serve`].
+    pub fn is_model_ready_to_serve(&self, model: &str) -> bool {
+        self.models
+            .get(model)
+            .is_some_and(|m| m.is_ready_to_serve())
+    }
+
+    /// Whether any registered model can serve at least one inference request
+    /// right now. See [`Model::is_ready_to_serve`].
+    pub fn has_any_ready_model(&self) -> bool {
+        self.models
+            .iter()
+            .any(|entry| entry.value().is_ready_to_serve())
+    }
+
     pub fn model_display_names(&self) -> HashSet<String> {
         self.models
             .iter()
@@ -1605,5 +1621,89 @@ mod tests {
             mm.model_display_names().contains("llama"),
             "model must be visible again after prefill rejoin"
         );
+    }
+
+    // -- is_model_ready_to_serve / has_any_ready_model tests --
+    //
+    // Regression coverage for the KServe gRPC race where `model_ready` returned
+    // true as soon as a ModelDeploymentCard was saved -- before the WorkerSet
+    // with engines was attached. These checks must stay false until at least
+    // one WorkerSet carries an actual serving engine.
+
+    fn make_chat_engine()
+    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+        Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ))
+    }
+
+    #[test]
+    fn test_is_model_ready_to_serve_false_for_unknown_model() {
+        let mm = ModelManager::new();
+        assert!(!mm.is_model_ready_to_serve("llama"));
+        assert!(!mm.has_any_ready_model());
+    }
+
+    #[test]
+    fn test_is_model_ready_to_serve_false_for_card_only() {
+        // Reproduces the KServe race: a ModelDeploymentCard is saved before the
+        // WorkerSet is registered. `is_model_ready_to_serve` must still be false.
+        let mm = ModelManager::new();
+        let mut card = ModelDeploymentCard::default();
+        card.display_name = "llama".to_string();
+        mm.save_model_card("instance-1", card).unwrap();
+
+        assert!(!mm.get_model_cards().is_empty(), "card was saved");
+        assert!(
+            !mm.is_model_ready_to_serve("llama"),
+            "card-only registration must not report ready"
+        );
+        assert!(
+            !mm.has_any_ready_model(),
+            "card-only registration must not flip server_ready"
+        );
+    }
+
+    #[test]
+    fn test_is_model_ready_to_serve_false_for_prefill_only_worker_set() {
+        // Worker set exists but has no engines attached (the lifecycle state
+        // between save_model_card and engine wire-up).
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+
+        assert!(
+            !mm.is_model_ready_to_serve("llama"),
+            "WorkerSet without engines must not report ready"
+        );
+        assert!(!mm.has_any_ready_model());
+    }
+
+    #[test]
+    fn test_is_model_ready_to_serve_true_after_chat_engine_added() {
+        let mm = ModelManager::new();
+        mm.add_chat_completions_model("llama", "abc", make_chat_engine())
+            .unwrap();
+
+        assert!(mm.is_model_ready_to_serve("llama"));
+        assert!(mm.has_any_ready_model());
+    }
+
+    #[test]
+    fn test_has_any_ready_model_with_mixed_models() {
+        // One model is fully wired, another is only card-registered. The
+        // server-wide check must report ready as soon as any one model is.
+        let mm = ModelManager::new();
+        let mut card = ModelDeploymentCard::default();
+        card.display_name = "pending-llama".to_string();
+        mm.save_model_card("instance-pending", card).unwrap();
+
+        assert!(!mm.has_any_ready_model());
+
+        mm.add_chat_completions_model("ready-llama", "abc", make_chat_engine())
+            .unwrap();
+
+        assert!(mm.has_any_ready_model());
+        assert!(mm.is_model_ready_to_serve("ready-llama"));
+        assert!(!mm.is_model_ready_to_serve("pending-llama"));
     }
 }

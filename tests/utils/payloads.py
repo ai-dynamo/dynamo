@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import re
+import struct
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -908,6 +909,14 @@ class EmbeddingPayload(BasePayload):
     def extract_embeddings(response):
         """
         Process embeddings API responses.
+
+        Accepts both shapes from the OpenAI spec:
+        - ``encoding_format="float"`` (default) -- each ``data[].embedding``
+          is a JSON array of floats.
+        - ``encoding_format="base64"`` -- each ``data[].embedding`` is a
+          base64-encoded string of little-endian f32 bytes. The string
+          is decoded here so the dimension count in the summary string
+          stays comparable across both shapes.
         """
         response.raise_for_status()
         result = response.json()
@@ -926,11 +935,25 @@ class EmbeddingPayload(BasePayload):
                 item["object"] == "embedding"
             ), f"Expected object='embedding', got {item['object']}"
             assert "embedding" in item, "Missing 'embedding' vector in item"
-            assert isinstance(
-                item["embedding"], list
-            ), "Embedding should be a list of floats"
-            assert len(item["embedding"]) > 0, "Embedding vector should not be empty"
-            embeddings.append(item["embedding"])
+            raw = item["embedding"]
+            if isinstance(raw, str):
+                # base64: decode to a float list so downstream dimension
+                # checks are uniform.
+                decoded = base64.b64decode(raw)
+                assert (
+                    len(decoded) % 4 == 0
+                ), f"base64 payload not f32-aligned: {len(decoded)} bytes"
+                count = len(decoded) // 4
+                vec = list(struct.unpack(f"<{count}f", decoded))
+            elif isinstance(raw, list):
+                vec = raw
+            else:
+                raise AssertionError(
+                    f"Embedding should be a list of floats or a base64 "
+                    f"string, got {type(raw).__name__}"
+                )
+            assert len(vec) > 0, "Embedding vector should not be empty"
+            embeddings.append(vec)
 
         # Return a summary string for validation
         return f"Generated {len(embeddings)} embeddings with dimension {len(embeddings[0])}"

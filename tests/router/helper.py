@@ -442,12 +442,17 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime(store_backend="etcd", request_plane="tcp"):
+def get_runtime(
+    store_backend: str = "etcd",
+    request_plane: str = "tcp",
+    event_plane: Optional[str] = None,
+):
     """Create a DistributedRuntime instance for testing.
 
     Args:
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: How frontend talks to backend ("tcp", "nats"). Defaults to "tcp".
+        event_plane: How KV events are transported ("nats" or "zmq"). Defaults to runtime behavior.
     """
     try:
         # Try to get running loop (works in async context)
@@ -456,7 +461,9 @@ def get_runtime(store_backend="etcd", request_plane="tcp"):
         # No running loop, create a new one (sync context)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return DistributedRuntime(loop, store_backend, request_plane)
+    return DistributedRuntime(
+        loop, store_backend, request_plane, event_plane=event_plane
+    )
 
 
 async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):

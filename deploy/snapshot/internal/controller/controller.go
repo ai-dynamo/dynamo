@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
@@ -301,7 +302,8 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 
-	if pod.Status.Phase != corev1.PodRunning {
+	if pod.DeletionTimestamp != nil ||
+		(pod.Status.Phase != corev1.PodPending && pod.Status.Phase != corev1.PodRunning) {
 		return
 	}
 
@@ -373,6 +375,34 @@ func restoreContainerIDFromStatus(pod *corev1.Pod, containerName string) string 
 	return ""
 }
 
+func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *corev1.Pod, podKey, containerName string) (*corev1.Pod, bool) {
+	livePod, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			w.log.V(1).Info("Skipping restore; pod disappeared while polling runtime",
+				"pod", podKey,
+				"container", containerName,
+			)
+			return nil, false
+		}
+		w.log.Error(err, "Failed to refresh restore pod state before starting restore",
+			"pod", podKey,
+			"container", containerName,
+		)
+		return nil, false
+	}
+	if livePod.DeletionTimestamp != nil ||
+		(livePod.Status.Phase != corev1.PodPending && livePod.Status.Phase != corev1.PodRunning) {
+		w.log.V(1).Info("Skipping restore; pod became ineligible while polling runtime",
+			"pod", podKey,
+			"container", containerName,
+			"phase", livePod.Status.Phase,
+		)
+		return nil, false
+	}
+	return livePod, true
+}
+
 func (w *NodeController) pollForContainerID(
 	ctx context.Context,
 	pod *corev1.Pod,
@@ -389,12 +419,16 @@ func (w *NodeController) pollForContainerID(
 		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, containerName)
 		cancel()
 		if err == nil && containerID != "" {
+			livePod, ok := w.refreshRestorePodForStart(ctx, pod, podKey, containerName)
+			if !ok {
+				return
+			}
 			w.log.V(1).Info("Resolved restore container via node runtime",
 				"pod", podKey,
 				"container", containerName,
 				"container_id", containerID,
 			)
-			w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, podKey)
+			w.startRestoreForContainer(ctx, livePod, containerName, containerID, checkpointID, podKey)
 			return
 		}
 
