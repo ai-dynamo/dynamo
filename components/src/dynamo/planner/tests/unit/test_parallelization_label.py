@@ -13,6 +13,14 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    # TODO: revert to pytest.mark.post_merge after pre_merge validation on this PR
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
+
 try:
     from dynamo.planner.config.parallelization import PickedParallelConfig
     from dynamo.profiler.utils.aic_dataframe import make_parallel_label
@@ -26,6 +34,10 @@ _NUM_GPUS = [1, 2, 4, 8, 16]
 
 
 def _enumerate() -> list[tuple[int, int, int, int, int]]:
+    """Enumerate realistic ``(tp, pp, dp, moe_tp, moe_ep)`` tuples used as
+    test inputs — mirrors ``filter_real_silicon_configs`` across four
+    archetypes (pure TP-of-experts / pure TEP-of-attention / pure DEP /
+    dense) at ``num_gpus ∈ {1, 2, 4, 8, 16}``."""
     out: list[tuple[int, int, int, int, int]] = []
     for n in _NUM_GPUS:
         if n == 1:
@@ -40,10 +52,11 @@ def _enumerate() -> list[tuple[int, int, int, int, int]]:
 
 @pytest.mark.parametrize("tup", _enumerate())
 def test_label_unique_per_tuple(tup: tuple[int, int, int, int, int]) -> None:
+    """Both label producers (``PickedParallelConfig.label`` and
+    ``make_parallel_label``) must agree on every enumerated tuple."""
     tp, pp, dp, moe_tp, moe_ep = tup
     cfg = PickedParallelConfig(tp=tp, pp=pp, dp=dp, moe_tp=moe_tp, moe_ep=moe_ep)
     df = make_parallel_label(tp, pp, dp, moe_tp, moe_ep)
-    # Both label producers must agree.
     assert cfg.label() == df
 
 

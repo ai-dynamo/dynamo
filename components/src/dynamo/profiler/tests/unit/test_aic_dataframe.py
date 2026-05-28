@@ -12,6 +12,14 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    # TODO: revert to pytest.mark.post_merge after pre_merge validation on this PR
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
+
 try:
     from dynamo.profiler.utils.aic_dataframe import make_parallel_label
 except ImportError as e:
@@ -22,6 +30,10 @@ _NUM_GPUS = [1, 2, 4, 8, 16]
 
 
 def _enumerate() -> list[tuple[int, int, int, int, int]]:
+    """Enumerate realistic ``(tp, pp, dp, moe_tp, moe_ep)`` tuples used as
+    test inputs across four archetypes (pure TP-of-experts /
+    pure TEP-of-attention / pure DEP / dense) at
+    ``num_gpus ∈ {1, 2, 4, 8, 16}``."""
     out: list[tuple[int, int, int, int, int]] = []
     for n in _NUM_GPUS:
         if n == 1:
@@ -35,6 +47,7 @@ def _enumerate() -> list[tuple[int, int, int, int, int]]:
 
 
 def test_label_distinct_across_all_enumerated_tuples() -> None:
+    """Every distinct 5-tuple must yield a distinct label string."""
     seen: dict[str, tuple[int, int, int, int, int]] = {}
     for tup in _enumerate():
         label = make_parallel_label(*tup)
