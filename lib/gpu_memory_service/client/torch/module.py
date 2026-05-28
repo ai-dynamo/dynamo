@@ -203,6 +203,16 @@ _DUAL_CHUNK_COS_SIN_BUFFER_ORDER = (
     "cos_sin_qc_no_clamp_cache",
     "cos_sin_q_inter_cache",
 )
+_RECOMPUTABLE_MLA_TENSOR_ATTR_NAMES = frozenset(
+    {
+        "W_UK_T",
+        "W_UV",
+        "W_K",
+        "W_K_scale",
+        "W_V",
+        "W_V_scale",
+    }
+)
 
 
 def _callable_takes_no_required_args(fn: Any) -> bool:
@@ -248,6 +258,31 @@ def _is_recomputable_non_persistent_buffer_path(
         and name in module._buffers
         and _is_recomputable_non_persistent_buffer(module, name)
     )
+
+
+def _is_recomputable_mla_tensor_attr(
+    module: torch.nn.Module,
+    name: str,
+) -> bool:
+    """Return true for vLLM MLA tensors rebuilt after weight materialization."""
+    return (
+        name in _RECOMPUTABLE_MLA_TENSOR_ATTR_NAMES
+        and hasattr(module, "kv_b_proj")
+        and hasattr(module, "kv_lora_rank")
+        and hasattr(module, "num_heads")
+        and callable(getattr(module, "process_weights_after_loading", None))
+    )
+
+
+def _is_recomputable_mla_tensor_attr_path(
+    root: torch.nn.Module,
+    qualified_name: str,
+) -> bool:
+    try:
+        module, name = _resolve_module_attr(root, qualified_name)
+    except AttributeError:
+        return False
+    return _is_recomputable_mla_tensor_attr(module, name)
 
 
 def _materialize_zero_size_meta_tensors(
@@ -1229,6 +1264,15 @@ def register_module_tensors(
             )
             continue
 
+        if tensor_type == "tensor_attr" and _is_recomputable_mla_tensor_attr_path(
+            model, name
+        ):
+            logger.debug(
+                "[GMS] Skipping MLA tensor attr %r - recomputed after load",
+                name,
+            )
+            continue
+
         if _is_zero_size_tensor(tensor):
             logger.debug(
                 "[GMS] Skipping zero-size %s %r - no allocation to register",
@@ -1280,6 +1324,13 @@ def materialize_module_from_gms(
     ] = {}
 
     for name, spec in specs.items():
+        mod, attr = _resolve_module_attr(model, name)
+        tensor_type = spec.meta.tensor_type
+
+        if tensor_type == "tensor_attr" and _is_recomputable_mla_tensor_attr(mod, attr):
+            logger.debug("[GMS] Ignoring MLA tensor attr metadata %r", name)
+            continue
+
         location = (
             spec.allocation_id,
             int(spec.offset_bytes),
@@ -1291,8 +1342,6 @@ def materialize_module_from_gms(
         if tensor is None:
             tensor = spec.materialize(gms_client_memory_manager, device_index)
             materialized_by_location[location] = tensor
-        mod, attr = _resolve_module_attr(model, name)
-        tensor_type = spec.meta.tensor_type
 
         # Tensor attrs and buffers: clone since they may be mutated
         if tensor_type in ("tensor_attr", "buffer"):

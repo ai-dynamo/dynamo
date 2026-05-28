@@ -122,6 +122,30 @@ def test_register_module_tensors_skips_recomputable_non_persistent_buffer():
     register_module_tensors(_NoMetadataManager(), module)
 
 
+def test_register_module_tensors_skips_mla_post_load_attrs(monkeypatch):
+    """MLA projection caches are rebuilt by vLLM post-load processing."""
+
+    class _MLA(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.kv_b_proj = object()
+            self.kv_lora_rank = 1
+            self.num_heads = 1
+            self.W_UK_T = _CudaLikeTensor()
+
+        def process_weights_after_loading(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(
+        torch, "is_tensor", lambda value: isinstance(value, _CudaLikeTensor)
+    )
+
+    module = torch.nn.Module()
+    module.mla = _MLA()
+
+    register_module_tensors(_NoMetadataManager(), module)
+
+
 def test_materialize_module_from_gms_recreates_zero_size_meta_tensors(monkeypatch):
     """Skipped zero-size meta tensors should become real tensors on read side."""
     original_empty_strided = torch.empty_strided
@@ -347,6 +371,50 @@ def test_materialize_module_from_gms_reports_mutable_tensor_clone_context(
     assert "shape=(2, 3)" in message
     assert "dtype=torch.float16" in message
     assert "offset_bytes=128" in message
+
+
+def test_materialize_module_from_gms_ignores_stale_mla_attr_metadata(monkeypatch):
+    """Stale metadata for derived MLA attrs should not be cloned."""
+
+    class _BadTensor:
+        def detach(self):
+            raise RuntimeError("should not clone stale MLA metadata")
+
+    class _FakeSpec:
+        meta = types.SimpleNamespace(
+            tensor_type="tensor_attr",
+            shape=(2, 3, 4),
+            stride=(12, 1, 3),
+            dtype=torch.float16,
+        )
+        allocation_id = "alloc"
+        offset_bytes = 0
+
+        def materialize(self, _manager, _device_index):
+            return _BadTensor()
+
+    class _MLA(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.kv_b_proj = object()
+            self.kv_lora_rank = 1
+            self.num_heads = 1
+            self.W_UK_T = torch.empty((2, 3, 4), device="meta")
+
+        def process_weights_after_loading(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(
+        "gpu_memory_service.client.torch.module.GMSTensorSpec.load_all",
+        lambda _manager: {"mla.W_UK_T": _FakeSpec()},
+    )
+
+    module = torch.nn.Module()
+    module.mla = _MLA()
+
+    materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
+
+    assert module.mla.W_UK_T.is_meta
 
 
 def test_materialize_module_from_gms_recomputes_non_persistent_meta_buffer(

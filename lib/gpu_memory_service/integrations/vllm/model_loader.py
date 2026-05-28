@@ -183,11 +183,19 @@ def _load_read_mode(
     global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
 
     try:
+        target_device = torch.device("cuda", device_index)
+
         logger.info("[GMS] Read mode: creating meta model")
         model = _create_meta_model(vllm_config, model_config)
 
         logger.info("[GMS] Read mode: materializing tensors")
         materialize_module_from_gms(gms_client, model, device_index=device_index)
+
+        _process_mla_weights_after_gms_materialization(
+            model,
+            model_config,
+            target_device,
+        )
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
@@ -206,6 +214,40 @@ def _load_read_mode(
         logger.exception("[GMS] Read mode failed while importing weights")
         gms_client.close(best_effort=True)
         raise
+
+
+def _is_mla_post_load_module(module: torch.nn.Module) -> bool:
+    return (
+        hasattr(module, "kv_b_proj")
+        and hasattr(module, "kv_lora_rank")
+        and hasattr(module, "num_heads")
+        and callable(getattr(module, "process_weights_after_loading", None))
+    )
+
+
+def _process_mla_weights_after_gms_materialization(
+    model: torch.nn.Module,
+    model_config,
+    target_device: torch.device,
+) -> None:
+    """Rebuild derived MLA projection tensors skipped from GMS metadata."""
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    processed: list[str] = []
+    with set_default_torch_dtype(model_config.dtype):
+        with target_device:
+            for name, module in model.named_modules():
+                if not _is_mla_post_load_module(module):
+                    continue
+                module.process_weights_after_loading(model_config.dtype)
+                processed.append(name)
+
+    if processed:
+        logger.info(
+            "[GMS] Read mode: rebuilt %d MLA post-load modules: %s",
+            len(processed),
+            processed[:8],
+        )
 
 
 def _load_write_mode(
