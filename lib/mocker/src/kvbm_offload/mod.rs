@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! G1↔G2 and G2↔G3 offload simulation for the vLLM mocker.
+//! G1↔G2, G2↔G3, and G2↔G4 offload simulation for the vLLM mocker.
 //!
 //! Drives a real kvbm-engine `OffloadEngine` + `InstanceLeader` in process
 //! without touching real GPU/CPU memory. Bandwidth is modelled as a
@@ -15,6 +15,7 @@ pub(crate) mod capacity_reservation;
 pub mod config;
 pub mod engine;
 pub(crate) mod shared_g3;
+pub(crate) mod shared_g4;
 pub mod worker;
 
 pub use bandwidth_sharing_model::{BandwidthSharingModel, TransferId};
