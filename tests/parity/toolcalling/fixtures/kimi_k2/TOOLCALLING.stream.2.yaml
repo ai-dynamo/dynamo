@@ -66,4 +66,5 @@ cases:
       sglang:
         calls: []
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|>
+        reason: Model streams two complete Kimi calls with markers split across chunks. SGLang leaks the raw Kimi section as normal_text and emits no calls; Dynamo buffers the marker fragments and emits both calls.
       vllm: *id001
