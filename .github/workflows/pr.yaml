@@ -34,7 +34,7 @@ jobs:
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
-      container: ${{ steps.changes.outputs.container }}
+      efa: ${{ steps.changes.outputs.efa }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -274,7 +274,7 @@ jobs:
   vllm-efa-build:
     name: vllm-runtime-efa
     needs: [changed-files]
-    if: needs.changed-files.outputs.container == 'true'
+    if: needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.efa == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -289,7 +289,7 @@ jobs:
   sglang-efa-build:
     name: sglang-runtime-efa
     needs: [changed-files]
-    if: needs.changed-files.outputs.container == 'true'
+    if: needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.efa == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -304,7 +304,7 @@ jobs:
   trtllm-efa-build:
     name: trtllm-runtime-efa
     needs: [changed-files]
-    if: needs.changed-files.outputs.container == 'true'
+    if: needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.efa == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
