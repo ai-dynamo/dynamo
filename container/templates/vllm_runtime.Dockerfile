@@ -197,6 +197,16 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
 
+# Replace any imageio-ffmpeg from upstream (which ships a GPL-encumbered prebuilt
+# ffmpeg binary) with a source build that leaves no binary on disk. vLLM-Omni
+# uses diffusers.export_to_video and doesn't invoke imageio-ffmpeg, so no
+# IMAGEIO_FFMPEG_EXE is needed; this is purely to clear the GPL binary.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    if uv pip show imageio-ffmpeg >/dev/null 2>&1; then \
+        uv pip install --reinstall-package imageio-ffmpeg --no-deps --no-binary imageio-ffmpeg "imageio-ffmpeg>=0.6.0"; \
+    fi
+
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
 # tool scripts referencing files not present in Dynamo's build context.

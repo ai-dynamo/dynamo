@@ -30,13 +30,19 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 {% if context.sglang.enable_media_ffmpeg == "true" %}
-# Copy ffmpeg
+# Copy ffmpeg from wheel_builder: shared libs for the Rust media-ffmpeg decoder,
+# plus the LGPL CLI binary (built with h264_nvenc + libvpx_vp9 encoders) that
+# imageio targets via IMAGEIO_FFMPEG_EXE for video encoding.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
     cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
+ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
@@ -85,6 +91,16 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
+
+# Replace the upstream lmsysorg/sglang image's imageio-ffmpeg (which ships a
+# GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)
+# with a source install that leaves no binary on disk. IMAGEIO_FFMPEG_EXE points
+# imageio at the LGPL CLI we copied from wheel_builder above.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    if pip show --break-system-packages imageio-ffmpeg >/dev/null 2>&1; then \
+        pip install --break-system-packages --force-reinstall --no-deps --no-binary imageio-ffmpeg "imageio-ffmpeg>=0.6.0"; \
+    fi
 
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
