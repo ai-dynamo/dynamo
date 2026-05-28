@@ -13,6 +13,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 
+/// Client-facing message for oversized request payloads.
+///
+/// Intentionally generic: it must not leak the NATS subject, byte counts, the
+/// `max_payload` limit, or deployment-configuration instructions. Internal
+/// diagnostics (subject, payload_bytes, max_payload_bytes) live in logs and
+/// the `nats_errors_total` metric instead.
+const MAX_PAYLOAD_USER_MESSAGE: &str =
+    "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.";
+
 /// NATS implementation of RequestPlaneClient
 ///
 /// This client wraps the async_nats::Client and adapts it to the
@@ -29,6 +38,10 @@ impl NatsRequestClient {
     ///
     /// * `client` - The underlying NATS client
     pub fn new(client: async_nats::Client) -> Self {
+        // Snapshot the server-advertised max_payload at construction time. This is
+        // not re-read on reconnect, so if the client later reconnects to a server
+        // advertising a smaller limit, oversized payloads fall through to the
+        // server's own enforcement rather than being caught by the early check below.
         let max_payload = client.server_info().max_payload;
         Self {
             client,
@@ -39,9 +52,7 @@ impl NatsRequestClient {
     fn max_payload_error() -> DynamoError {
         DynamoError::builder()
             .error_type(ErrorType::InvalidArgument)
-            .message(
-                "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.",
-            )
+            .message(MAX_PAYLOAD_USER_MESSAGE)
             .build()
     }
 }
@@ -54,6 +65,11 @@ impl RequestPlaneClient for NatsRequestClient {
         payload: Bytes,
         headers: Headers,
     ) -> Result<Bytes> {
+        // Best-effort early rejection. This compares the payload body only, not the
+        // header/subject framing that also counts toward the server's max_payload for
+        // header messages (HPUB). It is therefore a lower bound: it reliably catches
+        // oversized payloads without ever false-rejecting a valid request, while
+        // borderline messages inflated by large headers are still caught server-side.
         let payload_len = payload.len();
         let max_payload = self.max_payload;
         if max_payload > 0 && payload_len > max_payload {

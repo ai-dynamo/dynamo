@@ -260,6 +260,10 @@ impl ErrorMessage {
         }
 
         // Check for DynamoError with InvalidArgument anywhere in the chain → HTTP 400.
+        // This matches *any* nested InvalidArgument DynamoError, not only the NATS
+        // oversized-payload case, so previously-opaque nested InvalidArgument errors
+        // now surface as 400 instead of 500. Intentional: 400 is the correct class
+        // for a malformed/invalid request.
         if let Some(dynamo_err) = find_dynamo_error_in_chain(
             err.as_ref(),
             dynamo_runtime::error::ErrorType::InvalidArgument,
