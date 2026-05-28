@@ -57,7 +57,7 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     MultimodalModelProfile(
-        name="Qwen/Qwen3-VL-2B-Instruct",
+        name="Qwen/Qwen3-VL-2B-Instruct-FP8",
         short_name="qwen3-vl-2b",
         topologies={
             "agg": TopologyConfig(
@@ -106,8 +106,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
-                profiled_vram_gib=16.0,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
                 tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
@@ -121,8 +121,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router_chat_processor": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
-                profiled_vram_gib=16.0,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
@@ -138,8 +138,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router_frontend_decode": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
-                profiled_vram_gib=16.0,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={
                     "SINGLE_GPU": "true",
                     "VLLM_EXTRA_ARGS": "--frontend-decoding",
@@ -196,7 +196,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=19.0,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
@@ -209,8 +209,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
-                profiled_vram_gib=16.0,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
@@ -229,7 +229,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=22.0,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged (2nd identical request hits the warm worker's KV
