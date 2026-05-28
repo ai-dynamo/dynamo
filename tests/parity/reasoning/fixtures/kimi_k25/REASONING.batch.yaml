@@ -10,20 +10,20 @@ cases:
   REASONING.batch.1.b:
     description: Plain text stays in force-reasoning mode
     ref: *upstream_ref
+    force_reasoning: true
     model_text: plain answer
     expected:
-      dynamo:
+      dynamo: &sg_batch_1_b
         reasoning_text: plain answer
         normal_text: ''
       vllm:
         reasoning_text: plain answer
         normal_text: ''
-      sglang:
-        reasoning_text: ''
-        normal_text: plain answer
+      sglang: *sg_batch_1_b
   REASONING.batch.2.a:
     description: Force-reasoning parser with explicit think tags
     ref: *upstream_ref
+    force_reasoning: true
     model_text: <think>thinking</think>answer
     expected:
       dynamo: &d_1
@@ -34,62 +34,59 @@ cases:
   REASONING.batch.3.b:
     description: Tool-call section marker force-exits an open reasoning block
     ref: *upstream_ref
+    force_reasoning: true
     model_text: thinking <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
     expected:
-      dynamo:
+      dynamo: &sg_batch_3_b
         reasoning_text: 'thinking '
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       vllm:
         reasoning_text: 'thinking '
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
-      sglang:
-        reasoning_text: ''
-        normal_text: thinking <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
+      sglang: *sg_batch_3_b
   REASONING.batch.2.c:
     description: Force-reasoning parser treats plain output as reasoning
     ref: *upstream_ref
+    force_reasoning: true
     model_text: thinking without explicit tags
     expected:
-      dynamo:
+      dynamo: &sg_batch_2_c
         reasoning_text: thinking without explicit tags
         normal_text: ''
       vllm:
         reasoning_text: thinking without explicit tags
         normal_text: ''
-      sglang:
-        reasoning_text: ''
-        normal_text: thinking without explicit tags
+      sglang: *sg_batch_2_c
   REASONING.batch.4:
     description: Dangling end marker exits force-reasoning mode
     ref: *upstream_ref
+    force_reasoning: true
     model_text: normal</think>answer
     expected:
-      dynamo:
+      dynamo: &sg_batch_4
         reasoning_text: normal
         normal_text: answer
       vllm:
         reasoning_text: normal
         normal_text: answer
-      sglang:
-        reasoning_text: ''
-        normal_text: normal</think>answer
+      sglang: *sg_batch_4
   REASONING.batch.5:
     description: Missing end marker keeps the remaining text as reasoning
     ref: *upstream_ref
+    force_reasoning: true
     model_text: partial reasoning
     expected:
-      dynamo:
+      dynamo: &sg_batch_5
         reasoning_text: partial reasoning
         normal_text: ''
       vllm:
         reasoning_text: partial reasoning
         normal_text: ''
-      sglang:
-        reasoning_text: ''
-        normal_text: partial reasoning
+      sglang: *sg_batch_5
   REASONING.batch.2.e:
     description: Empty reasoning block
     ref: *upstream_ref
+    force_reasoning: true
     model_text: <think></think>answer
     expected:
       dynamo: &id001
@@ -102,6 +99,7 @@ cases:
   REASONING.batch.2.f:
     description: Complex reasoning content with Unicode and newlines
     ref: *upstream_ref
+    force_reasoning: true
     model_text: |-
       <think>Line 1
       Unicode: café
@@ -123,6 +121,7 @@ cases:
   REASONING.batch.1.a:
     description: Empty input
     ref: *upstream_ref
+    force_reasoning: true
     model_text: ''
     expected:
       dynamo: &id003
@@ -135,6 +134,7 @@ cases:
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated
     ref: *upstream_ref
+    force_reasoning: true
     model_text: <think>first</think> middle <think>second</think> done
     expected:
       dynamo:
@@ -153,6 +153,7 @@ cases:
   REASONING.batch.3.a:
     description: Closed reasoning span followed by Kimi tool-call section marker
     ref: *upstream_ref
+    force_reasoning: true
     model_text: <think>choose tool</think><|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
     expected:
       dynamo: &id004
