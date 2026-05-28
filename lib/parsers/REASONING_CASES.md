@@ -112,6 +112,10 @@ content.
 - **`REASONING.batch.2.f`** Complex reasoning body — large blocks, multi-paragraph, special characters, Unicode, newlines, and marker-looking strings inside the reasoning body.
 - **`REASONING.batch.3.a`** Closed reasoning followed by downstream tool-call text — reasoning parser must extract the think content **and leave a valid paired-parser tool-call payload intact in `normal_text`** for the downstream tool-call parser to consume.
 - **`REASONING.batch.3.b`** Open reasoning interrupted by downstream tool-call text — tool-call markers can terminate or escape an open reasoning span for families that define that boundary.
+- **`REASONING.batch.3.c`** Recipientless downstream channel text — format-specific non-tool commentary or equivalent content should remain visible as normal text.
+- **`REASONING.batch.3.d`** Directed downstream tool-call channel without reasoning — parser must suppress tool-call payload from visible normal text when that payload belongs to the downstream tool parser.
+- **`REASONING.batch.3.e`** Directed reasoning-channel tool-call payload — parser must keep the payload in reasoning output when the format labels the channel as reasoning/analysis.
+- **`REASONING.batch.3.f`** Reasoning, downstream directed tool call, then final answer — parser must extract reasoning, suppress downstream tool payload from visible normal text, and preserve later final text.
 - **`REASONING.batch.4`** Malformed reasoning marker syntax — dangling close marker, invalid channel marker, or marker that does not belong to the family grammar.
 - **`REASONING.batch.5`** Missing end-marker recovery — engine hit `max_tokens` mid-think; pin behavior: recover partial reasoning, surface as truncated, or treat all as `normal_text`.
 - **`REASONING.batch.6.a`** Multiple reasoning spans, adjacent or separated by normal text — e.g., two `<think>...</think>` blocks in one response. Behavior is impl-defined: concatenate, surface only the first, or document a divergence.
@@ -223,6 +227,7 @@ extract the reasoning content and preserve the tool-call-shaped text in
   closed before downstream tool-call text begins.
 - `3.b` applies only to parser families that intentionally configure a
   downstream boundary while reasoning is still open.
+- `3.c` through `3.f` pin format-specific downstream channel behavior: visible recipientless channel text, directed tool-call handoff preservation, directed reasoning payload extraction, and final-text recovery after a directed downstream tool call.
 - Failure mode: greedy reasoning parser eats the tool-call content
   that follows. Pin the boundary explicitly.
 

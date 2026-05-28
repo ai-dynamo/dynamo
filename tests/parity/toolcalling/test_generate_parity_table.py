@@ -95,15 +95,16 @@ def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> N
     )
     split_end_cell = _cell_for(html, "REASONING.stream.3.b — gpt_oss")
     assert re.search(
-        r'<td class="cell research[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">S\?</a>',
+        r'<td class="cell documented[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">S</a>',
         split_end_cell,
     )
     handoff_cell = _cell_for(html, "REASONING.stream.4.b — gpt_oss")
     assert re.search(
-        r'<td class="cell leak[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">↯V</a>',
+        r'<td class="cell documented[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">V</a>',
         handoff_cell,
     )
-    assert "↯ Dynamo reasoning leaks" in handoff_cell
+    assert "↯ Dynamo leaks" not in handoff_cell
+    assert "Dynamo: Unlike vLLM streaming reasoning" in handoff_cell
     assert "Divergent reasons" not in handoff_cell
     assert re.search(
         r'<td class="cell ok[^"]*"[^>]*><a href="fixtures/kimi_k25/REASONING\.batch\.yaml">=</a>'
