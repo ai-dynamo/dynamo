@@ -147,6 +147,7 @@ cases:
       sglang:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
+        reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span, with its literal markers, in normal_text.
   REASONING.batch.2.d:
     description: Normal text around reasoning is not applicable in force-reasoning mode
     reason: Force-reasoning parser families start inside reasoning; marker-free prefix text is not a normal-text prefix.

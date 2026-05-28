@@ -68,6 +68,7 @@ cases:
       sglang:
         reasoning_text: Hello. rumination
         normal_text: ' Goodbye.'
+        reason: Dynamo keeps text emitted before the reasoning open marker as normal_text; SGLang strips the start marker in place and folds that prefix into reasoning_text.
   REASONING.batch.1.b:
     description: No reasoning markers pass through as normal text
     ref: *upstream_ref
@@ -90,6 +91,7 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: normal<channel|>answer
+        reason: Dynamo treats the text before an unpaired end marker as reasoning (implicit-opener recovery, matching vLLM); SGLang enters reasoning only on an explicit start marker, so the dangling end marker and surrounding text stay in normal_text.
   REASONING.batch.5:
     description: Open thought channel without close treats suffix as reasoning
     ref: *upstream_ref
@@ -108,6 +110,7 @@ cases:
       sglang:
         reasoning_text: intro partial
         normal_text: ''
+        reason: Dynamo keeps text before an unclosed reasoning channel as normal_text and the channel body as reasoning; SGLang strips the open marker in place and folds the entire prefix into reasoning_text.
   REASONING.batch.2.e:
     description: Empty Gemma reasoning channel
     ref: *upstream_ref
@@ -170,3 +173,4 @@ cases:
         normal_text: |2-
            middle <|channel>thought
           second<channel|> done
+        reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span, with its literal markers, in normal_text.

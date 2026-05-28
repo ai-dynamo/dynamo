@@ -79,6 +79,7 @@ cases:
       sglang:
         reasoning_text: before thinking
         normal_text: ' after'
+        reason: Dynamo keeps text emitted before the reasoning open marker as normal_text; SGLang strips the start marker in place and folds that prefix into reasoning_text.
   REASONING.batch.4:
     description: Dangling end marker without an opening think tag
     ref: *upstream_ref
@@ -93,6 +94,7 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: normal</think>answer
+        reason: Dynamo treats the text before an unpaired end marker as reasoning (implicit-opener recovery, matching vLLM); SGLang enters reasoning only on an explicit start marker, so the dangling end marker and surrounding text stay in normal_text.
   REASONING.batch.5:
     description: Open think marker starts reasoning from an outside-reasoning initial state
     ref: *upstream_ref
@@ -155,3 +157,4 @@ cases:
       sglang:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
+        reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span, with its literal markers, in normal_text.
