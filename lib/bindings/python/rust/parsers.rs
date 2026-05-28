@@ -161,6 +161,7 @@ async fn parse_response_stream(
         tool_parser,
         None,
         tool_definitions,
+        false,
         stream,
     ));
 
@@ -370,7 +371,11 @@ fn parse_tools_json(tools_json: Option<&str>) -> PyResult<Option<Vec<ToolDefinit
             })?
             .to_string();
         let parameters = inner.get("parameters").cloned();
-        defs.push(ToolDefinition { name, parameters });
+        defs.push(ToolDefinition {
+            name,
+            parameters,
+            strict: None,
+        });
     }
     Ok(Some(defs))
 }

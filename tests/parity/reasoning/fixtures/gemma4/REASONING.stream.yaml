@@ -22,7 +22,7 @@ cases:
   REASONING.stream.2.a:
     description: Gemma thought channel across chunks
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     chunks:
     - |
       <|channel>thought
@@ -48,7 +48,7 @@ cases:
   REASONING.stream.2.b:
     description: Multiple Gemma thought channels across chunks
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     chunks:
     - |-
       <|channel>thought
@@ -70,7 +70,7 @@ cases:
   REASONING.stream.3.a:
     description: Start marker split across chunks
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     chunks:
     - <|chan
     - |-
@@ -91,7 +91,7 @@ cases:
   REASONING.stream.3.b:
     description: End marker split across chunks
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.vllm.ai/en/v0.21.0/api/vllm/reasoning/gemma4_reasoning_parser/; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     chunks:
     - |-
       <|channel>thought

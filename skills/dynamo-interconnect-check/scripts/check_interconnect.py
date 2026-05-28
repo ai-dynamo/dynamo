@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -26,6 +27,12 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+# Tunables and conventional return codes (kept here to avoid magic numbers).
+DEFAULT_PROBE_TIMEOUT_SEC = 20
+# POSIX-conventional return codes used when the wrapper itself fails before
+# the probed binary can produce a real one.
+RETURNCODE_COMMAND_NOT_FOUND = 127  # binary not found in PATH or pod
 
 # Transport-relevant env vars, grouped by subsystem. ``disagg`` marks the ones
 # whose absence most often makes multi-node disaggregated serving fall back to a
@@ -108,7 +115,7 @@ class Check:
     detail: str
 
 
-def run(cmd: list[str], timeout: int = 20) -> dict[str, Any]:
+def run(cmd: list[str], timeout: int = DEFAULT_PROBE_TIMEOUT_SEC) -> dict[str, Any]:
     """Run a command read-only, never raising on failure or a missing binary."""
     try:
         proc = subprocess.run(
@@ -216,7 +223,7 @@ NODE_PROBES: list[tuple[str, list[str]]] = [
 def classify_node_probe(name: str, res: dict[str, Any]) -> Check:
     """Turn a raw probe result into a triaged Check."""
     out = (res["out"] or "").strip()
-    if res["rc"] == 127:
+    if res["rc"] == RETURNCODE_COMMAND_NOT_FOUND:
         return Check(name, "skipped", "tool/path not present in this environment")
     if res["rc"] != 0:
         return Check(name, "warn", (res["err"] or "non-zero exit").strip()[:200])
@@ -279,7 +286,7 @@ def check_nixl(
         ]
     )
     found = (probe["out"] or "").strip()
-    if probe["rc"] == 127 or not found:
+    if probe["rc"] == RETURNCODE_COMMAND_NOT_FOUND or not found:
         return [
             Check(
                 "nixl:binary",

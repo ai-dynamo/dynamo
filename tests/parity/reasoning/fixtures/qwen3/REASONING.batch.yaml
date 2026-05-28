@@ -10,7 +10,7 @@ cases:
   REASONING.batch.1.b:
     description: Plain text without reasoning markers
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: plain answer
     expected:
       dynamo: &d_0
@@ -72,7 +72,7 @@ cases:
   REASONING.batch.2.d:
     description: Normal text around reasoning
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: before <think>thinking</think> after
     expected:
       dynamo: &d_11
@@ -149,7 +149,7 @@ cases:
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: 'lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
     model_text: <think>first</think> middle <think>second</think> done
     expected:
       dynamo: &d_9
