@@ -743,11 +743,12 @@ jobs:
         env:
           KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
         run: |
-          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
-          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
+          KUBECONFIG_FILE="$(mktemp "${{ github.workspace }}/.kubeconfig_gaie.XXXXXX")"
+          trap 'rm -f "${KUBECONFIG_FILE}"' EXIT
+          echo "${KUBECONFIG_B64}" | base64 -d > "${KUBECONFIG_FILE}"
+          export KUBECONFIG="${KUBECONFIG_FILE}"
           export NAMESPACE=default
           bash deploy/inference-gateway/gateways/agentgateway/install.sh
-          rm -f ${{ github.workspace }}/.kubeconfig_gaie
       - name: Run GAIE Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test

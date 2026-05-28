@@ -56,7 +56,12 @@ if ! command -v istioctl >/dev/null 2>&1; then
 fi
 
 # Install Istio with the Gateway API Inference Extension feature flag enabled.
+# values.global.istioNamespace controls where the istiod control plane is
+# deployed; it must match $ISTIO_NAMESPACE so the subsequent `kubectl wait`
+# on deployment/istiod targets the same namespace. (Istio 1.29 no longer
+# exposes an -i/--istioNamespace flag for this -- use the Helm overlay.)
 istioctl install -y \
+  --set values.global.istioNamespace="$ISTIO_NAMESPACE" \
   --set values.pilot.env.ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true
 
 # Wait for istiod to be ready before creating the Gateway.

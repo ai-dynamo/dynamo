@@ -31,9 +31,17 @@ inference traffic through Istio:
 
 ```bash
 cd deploy/inference-gateway
-export NAMESPACE=my-model
+export NAMESPACE=default
 ./gateways/istio/install.sh
 ```
+
+> [!NOTE]
+> Set `NAMESPACE` to the namespace where you intend to deploy your
+> `DynamoGraphDeployment` and `HTTPRoute`. All three resources (`Gateway`,
+> `HTTPRoute`, `DynamoGraphDeployment`) must live in the **same** namespace.
+> Post-merge CI uses `default`; the example YAMLs in
+> `examples/backends/vllm/deploy/gaie/` are intentionally namespace-agnostic
+> and work with any namespace you choose.
 
 The following environment variables can be overridden:
 
@@ -92,17 +100,26 @@ Install Istio with the Gateway API Inference Extension feature flag enabled:
 
 ```bash
 ISTIO_VERSION=1.29.2
+ISTIO_NAMESPACE=istio-system
 curl -L https://istio.io/downloadIstio | ISTIO_VERSION=${ISTIO_VERSION} sh -
 export PATH="$PWD/istio-${ISTIO_VERSION}/bin:$PATH"
 
 istioctl install -y \
+  --set values.global.istioNamespace=${ISTIO_NAMESPACE} \
   --set values.pilot.env.ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true
 ```
+
+> [!NOTE]
+> `values.global.istioNamespace` controls where the istiod control plane is
+> deployed. Override it to install the Istio control plane outside of
+> `istio-system` (e.g. on shared clusters where you don't have write access
+> to `istio-system`). Istio 1.29 no longer exposes an
+> `-i`/`--istioNamespace` flag for this — use the Helm overlay above.
 
 Verify the installation:
 
 ```bash
-kubectl get pods -n istio-system
+kubectl get pods -n ${ISTIO_NAMESPACE}
 ```
 
 Expected output:
@@ -113,6 +130,12 @@ istiod-xxxxxxxxxx-xxxxx   1/1     Running   0          30s
 ```
 
 ### Step 3: Deploy the Gateway
+
+Ensure the deployment namespace exists (idempotent — safe to re-run):
+
+```bash
+kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+```
 
 Create a `Gateway` resource. Istio watches this resource and creates an
 Envoy-based proxy that accepts incoming traffic.
@@ -165,7 +188,7 @@ curl -X POST http://${IP}/v1/completions \
 ```bash
 kubectl delete gateway inference-gateway -n ${NAMESPACE}
 istioctl uninstall --purge -y
-kubectl delete namespace istio-system
+kubectl delete namespace ${ISTIO_NAMESPACE}
 kubectl delete gatewayclass istio istio-remote
 kubectl delete -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml"
 kubectl delete -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
@@ -177,8 +200,8 @@ kubectl delete -f "https://github.com/kubernetes-sigs/gateway-api/releases/downl
 
 ```bash
 kubectl describe gateway inference-gateway -n ${NAMESPACE}
-kubectl get pods -n istio-system
-kubectl logs -n istio-system deployment/istiod --tail=20
+kubectl get pods -n ${ISTIO_NAMESPACE}
+kubectl logs -n ${ISTIO_NAMESPACE} deployment/istiod --tail=20
 ```
 
 Verify Istio was installed with the inference extension flag enabled.

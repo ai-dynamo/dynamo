@@ -33,9 +33,17 @@ inference traffic through agentgateway:
 
 ```bash
 cd deploy/inference-gateway
-export NAMESPACE=my-model
+export NAMESPACE=default
 ./gateways/agentgateway/install.sh
 ```
+
+> [!NOTE]
+> Set `NAMESPACE` to the namespace where you intend to deploy your
+> `DynamoGraphDeployment` and `HTTPRoute`. All three resources (`Gateway`,
+> `HTTPRoute`, `DynamoGraphDeployment`) must live in the **same** namespace.
+> Post-merge CI uses `default`; the example YAMLs in
+> `examples/backends/vllm/deploy/gaie/` are intentionally namespace-agnostic
+> and work with any namespace you choose.
 
 The following environment variables can be overridden:
 
@@ -94,16 +102,17 @@ enabled:
 
 ```bash
 AGW_VERSION=v1.0.0
+AGW_NAMESPACE=agentgateway-system
 
 helm upgrade --install agentgateway-crds \
   oci://cr.agentgateway.dev/charts/agentgateway-crds \
-  --namespace agentgateway-system \
+  --namespace ${AGW_NAMESPACE} \
   --create-namespace \
   --version ${AGW_VERSION}
 
 helm upgrade --install agentgateway \
   oci://cr.agentgateway.dev/charts/agentgateway \
-  --namespace agentgateway-system \
+  --namespace ${AGW_NAMESPACE} \
   --version ${AGW_VERSION} \
   --set inferenceExtension.enabled=true \
   --wait
@@ -112,7 +121,7 @@ helm upgrade --install agentgateway \
 Verify the installation:
 
 ```bash
-kubectl get pods -n agentgateway-system
+kubectl get pods -n ${AGW_NAMESPACE}
 kubectl get gatewayclass agentgateway
 ```
 
@@ -124,6 +133,12 @@ agentgateway   agentgateway.dev/agentgateway   True       30s
 ```
 
 ### Step 3: Create AgentgatewayParameters (excludes Istio sidecar injection)
+
+Ensure the deployment namespace exists (idempotent — safe to re-run):
+
+```bash
+kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+```
 
 When the deployment namespace has `istio-injection=enabled`, the Istio sidecar
 intercepts the `ext_proc` gRPC connection from `agentgateway-proxy` to EPP
@@ -208,9 +223,9 @@ curl -X POST http://${IP}/v1/completions \
 ```bash
 kubectl delete gateway inference-gateway -n ${NAMESPACE}
 kubectl delete agentgatewayparameters inference-gateway-params -n ${NAMESPACE}
-helm uninstall agentgateway -n agentgateway-system
-helm uninstall agentgateway-crds -n agentgateway-system
-kubectl delete namespace agentgateway-system
+helm uninstall agentgateway -n ${AGW_NAMESPACE}
+helm uninstall agentgateway-crds -n ${AGW_NAMESPACE}
+kubectl delete namespace ${AGW_NAMESPACE}
 kubectl delete gatewayclass agentgateway
 kubectl delete -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml"
 kubectl delete -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
@@ -222,8 +237,8 @@ kubectl delete -f "https://github.com/kubernetes-sigs/gateway-api/releases/downl
 
 ```bash
 kubectl describe gateway inference-gateway -n ${NAMESPACE}
-kubectl get pods -n agentgateway-system
-kubectl logs -n agentgateway-system deployment/agentgateway --tail=20
+kubectl get pods -n ${AGW_NAMESPACE}
+kubectl logs -n ${AGW_NAMESPACE} deployment/agentgateway --tail=20
 ```
 
 Verify the `agentgateway` `GatewayClass` is present and accepted:
