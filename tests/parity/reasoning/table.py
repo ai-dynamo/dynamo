@@ -29,7 +29,7 @@ from tests.parity.markup import colorize_markup
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = REPO_ROOT / "tests/parity/reasoning/fixtures"
-PARSER_FIXTURES = REPO_ROOT / "tests/parity/parser/fixtures"
+PARSER_FIXTURES = REPO_ROOT / "tests/parity/toolcalling/fixtures"
 REASONING_CASES_MD = REPO_ROOT / "lib/parsers/REASONING_CASES.md"
 SCRIPT_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = REPO_ROOT / "tests/parity"
@@ -509,7 +509,7 @@ def _load() -> tuple[dict[str, dict[str, Any]], list[str], dict[tuple[str, str],
 
 def _load_parser_labels() -> dict[str, str]:
     labels = {}
-    for fp in sorted(PARSER_FIXTURES.glob("*/PARSER.batch.yaml")):
+    for fp in sorted(PARSER_FIXTURES.glob("*/TOOLCALLING.batch.yaml")):
         doc = yaml.safe_load(fp.read_text())
         labels[doc["family"]] = doc.get("model_label", doc["family"])
     return labels
@@ -627,6 +627,7 @@ def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, 
     expected = case["expected"]
     dynamo = expected["dynamo"]
     dynamo_leak = _has_dynamo_leak(case, family)
+    dynamo_leak_reason = _dynamo_leak_reason(expected, family) if dynamo_leak else None
     markers = []
     unavailable = 0
     tooltip_parts = [case.get("description", "")]
@@ -644,10 +645,15 @@ def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, 
         if _canonical(spec) == _canonical(dynamo):
             tooltip_parts.append(f"{impl}: matches Dynamo")
             continue
-        suffix = "?" if dynamo_leak or not spec.get("reason") else ""
+        suffix = (
+            "?"
+            if (dynamo_leak and not dynamo_leak_reason)
+            or (not dynamo_leak and not spec.get("reason"))
+            else ""
+        )
         markers.append(f"{letter}{suffix}")
         reason = (
-            "research-needed" if dynamo_leak else spec.get("reason", "research-needed")
+            dynamo_leak_reason if dynamo_leak else spec.get("reason", "research-needed")
         )
         tooltip_parts.append(f"{impl}: diverges — {reason}")
 
@@ -693,7 +699,7 @@ def _markdown(rows: dict[str, dict[str, Any]], columns: list[str]) -> str:
     no_vllm, no_sglang = _derive_no_peer_sets(rows)
     header = [
         "model",
-        "Reasoning Parser Family",
+        "Reasoning family",
         *[_display_case_id(c) for c in columns],
     ]
     out.append("| " + " | ".join(header) + " |")
@@ -791,10 +797,8 @@ def _column_control_header_html(
 
 def _case_group_headers_html(columns: list[str]) -> str:
     headers = [
-        _column_control_header_html("model", "Model", default_visible=False),
-        _column_control_header_html(
-            "parser", "Reasoning Parser Family", default_visible=True
-        ),
+        _column_control_header_html("model", "Model", default_visible=True),
+        _column_control_header_html("parser", "Reasoning family", default_visible=True),
     ]
     for run in _case_runs(columns):
         label = _case_group_label(run[0])
@@ -1361,6 +1365,7 @@ def _tooltip_for(
     parts: list[str] = []
     dynamo_leak = _has_dynamo_leak(case, family)
     expected = case.get("expected", {})
+    dynamo_leak_reason = _dynamo_leak_reason(expected, family) if dynamo_leak else None
     for impl in ("vllm", "sglang"):
         block = expected.get(impl)
         if not isinstance(block, dict) or block is dyn:
@@ -1373,7 +1378,11 @@ def _tooltip_for(
             continue
         if _canonical(block) == _canonical(dyn):
             continue
-        if "reason" in block and not dynamo_leak:
+        if dynamo_leak_reason:
+            continue
+        if dynamo_leak:
+            parts.append(f"{name}: (research-needed — no `reason:` field yet)")
+        elif "reason" in block and not dynamo_leak:
             parts.append(f"{name}: {block['reason']}")
         elif "reasoning_text" in block or "normal_text" in block:
             parts.append(f"{name}: (research-needed — no `reason:` field yet)")
@@ -2045,7 +2054,7 @@ def _html(
         _make_jinja_env()
         .get_template("parity_table.html.j2")
         .render(
-            title="Dynamo Reasoning - Parity Table",
+            title="Dynamo Reasoning Parser - Parity Table",
             stamp=generated,
             sha=sha,
             short_sha=sha[:12] if sha else "",

@@ -71,7 +71,8 @@ sglang = [
 ]
 
 mocker = [
-    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@2103aa286a822d112ea83781ad14e3e022b603d9",
+    # No direct URL: it blocks the wheel release (PyPI/Warehouse rejects direct references).
+    "aiconfigurator>=0.9.0",
 ]
 
 [project.entry-points.pytest11]
@@ -273,7 +274,7 @@ markers = [
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",
     "none: marks tests that do not require a framework-specific runtime",
-    "core: marks tests that exercise core/runtime functionality (residual bucket — disjoint from multimodal/router/kvbm)",
+    "core: marks tests that exercise core/runtime functionality",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",

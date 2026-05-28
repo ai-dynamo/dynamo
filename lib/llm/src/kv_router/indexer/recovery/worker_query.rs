@@ -733,6 +733,7 @@ mod tests {
                 primary: kv_indexer,
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
+                primary_records_routing_decisions: false,
             },
         )
     }

@@ -462,6 +462,15 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         local_hashes: &[LocalBlockHash],
         sequence_hashes: &[SequenceHash],
     ) -> Result<(), KvRouterError> {
+        if local_hashes.len() != sequence_hashes.len() {
+            tracing::warn!(
+                local_len = local_hashes.len(),
+                sequence_len = sequence_hashes.len(),
+                "Mismatched routing-decision hash lengths"
+            );
+            return Err(KvRouterError::IndexerDroppedRequest);
+        }
+
         let Some(prune_manager) = &self.prune_manager else {
             // Approximate routing decisions are only recorded when explicitly enabled.
             return Ok(());
@@ -502,6 +511,16 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
         self.record_routing_decision_hashes(worker, &local_hashes, &sequence_hashes)
+            .await
+    }
+
+    pub async fn process_routing_decision_hash_slices(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(), KvRouterError> {
+        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
             .await
     }
 }

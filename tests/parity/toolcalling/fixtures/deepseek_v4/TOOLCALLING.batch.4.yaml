@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v4
+mode: batch
+cases:
+  TOOLCALLING.batch.4.a:
+    description: Tool_calls wrapper with garbage
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜tool_calls>
+      not a valid invoke
+      </｜DSML｜tool_calls>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: |-
+          <｜DSML｜tool_calls>
+          not a valid invoke
+          </｜DSML｜tool_calls>
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  # TOOLCALLING.batch.4.b (invalid JSON args) n/a: DSML uses attribute-encoded args, not JSON.
+  TOOLCALLING.batch.4.c:
+    description: Invoke without name attribute
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke>
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: |-
+          <｜DSML｜tool_calls>
+          <｜DSML｜invoke>
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          </｜DSML｜tool_calls>
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  TOOLCALLING.batch.4.d:
+    description: Missing </｜DSML｜parameter> end tag
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_4_d
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: ''
+      vllm: *d_4_d
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  TOOLCALLING.batch.4.b:
+    description: Malformed variant 4.b — not yet authored for this family
+    reason: |-
+      Malformed-input variant 4.b not yet authored for deepseek_v4; see 4.a / 4.c / 4.d for this family's malformed-input scenarios.
+  TOOLCALLING.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      TOOLCALLING.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in TOOLCALLING.batch.4.a through 4.d.
+  TOOLCALLING.batch.4.f:
+    description: Tool-name XML tag case - n/a for this family's syntax
+    reason: |-
+      TOOLCALLING.batch.4.f is specific to Qwen3-Coder XML syntax, where the model may emit a tool-name tag such as <terminal> inside <tool_call> instead of the required <function=Terminal> opener. This family does not use Qwen3-Coder's <function=...> opener.

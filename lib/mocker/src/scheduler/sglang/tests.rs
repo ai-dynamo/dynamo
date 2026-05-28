@@ -526,7 +526,7 @@ mod core_behavior {
 
         let pass = core.execute_pass_internal(None, 0.0);
         assert_eq!(pass.completed_requests, 0);
-        assert_eq!(pass.active_decode_blocks, 2);
+        assert_eq!(pass.mocker_metrics.active_decode_blocks, 2);
     }
 
     #[test]
@@ -537,6 +537,13 @@ mod core_behavior {
         let pass = core.execute_pass_internal(None, 0.0);
 
         assert_eq!(pass.router_event_visibility, RouterEventVisibility::PassEnd);
+        assert!(!pass.kv_events.is_empty());
+        assert!(
+            pass.kv_events
+                .iter()
+                .all(|event| event.worker_id == ROUTER_TEST_WORKER_ID)
+        );
+        assert!(pass.kv_events.iter().all(|event| event.event.dp_rank == 0));
     }
 }
 
@@ -1013,6 +1020,39 @@ mod forward_pass_metrics {
         assert!(
             fpm2.sum_decode_kv_tokens > 0,
             "decode requests should have KV context"
+        );
+    }
+
+    #[test]
+    fn test_mocker_metrics_reports_prefix_cache_reuse() {
+        let mut core = SglangCore::new(fpm_args());
+
+        core.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(pass1.mocker_metrics.sglang_cache_hit_tokens, 0);
+        assert_eq!(pass1.mocker_metrics.sglang_cache_total_tokens, 8);
+
+        core.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(2)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let pass2 = core.execute_pass(&mut collector, pass1.end_ms);
+        assert!(pass2.mocker_metrics.sglang_cache_hit_tokens > 0);
+        assert!(
+            pass2.mocker_metrics.sglang_cache_hit_tokens
+                <= pass2.mocker_metrics.sglang_cache_total_tokens
         );
     }
 

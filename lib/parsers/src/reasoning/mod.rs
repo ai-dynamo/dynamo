@@ -488,7 +488,7 @@ mod tests {
         assert_eq!(result.normal_text, "answer");
     }
 
-    #[test] // PARSER.fmt.3 — token-spelling differences across model variants
+    #[test] // TOOLCALLING.fmt.3 — token-spelling differences across model variants
     fn test_kimi_vs_kimi_k25_different_tags() {
         // Kimi (original) uses ◁think▷/◁/think▷, KimiK25 uses <think>/</think>
         let mut kimi = ReasoningParserType::Kimi.get_reasoning_parser();

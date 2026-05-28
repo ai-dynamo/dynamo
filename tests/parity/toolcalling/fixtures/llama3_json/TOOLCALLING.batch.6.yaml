@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: llama3_json
+mode: batch
+cases:
+  TOOLCALLING.batch.6.a:
+    description: 'Canonical "arguments": {}'
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "get_time", "arguments": {}}'
+    tools:
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  TOOLCALLING.batch.6.b:
+    description: Whitespace inside arguments {}
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "get_time", "arguments": { }}'
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id003
+      sglang: *id003
+  TOOLCALLING.batch.6.c:
+    description: No arguments key
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "get_time"}'
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<|python_tag|>{"name": "get_time"}'
+      sglang:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+        reason: treats missing arguments key as an empty argument object

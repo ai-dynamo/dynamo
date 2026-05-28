@@ -43,7 +43,7 @@ pub fn get_reasoning_parser_names() -> Vec<&'static str> {
 /// Dynamo emits at end-of-response, including EOF-recovery for missing
 /// end-token / truncated-JSON inputs. The streaming-safe variant (recovery
 /// disabled) is intentionally NOT exposed here — it would compare the wrong
-/// Dynamo behavior for batch-shaped fixtures (e.g. PARSER.batch.5).
+/// Dynamo behavior for batch-shaped fixtures (e.g. TOOLCALLING.batch.5).
 ///
 /// Args:
 ///     parser_name: Parser name (e.g. "kimi_k25"). Empty string falls back to default.
@@ -161,6 +161,7 @@ async fn parse_response_stream(
         tool_parser,
         None,
         tool_definitions,
+        false,
         stream,
     ));
 
@@ -370,7 +371,11 @@ fn parse_tools_json(tools_json: Option<&str>) -> PyResult<Option<Vec<ToolDefinit
             })?
             .to_string();
         let parameters = inner.get("parameters").cloned();
-        defs.push(ToolDefinition { name, parameters });
+        defs.push(ToolDefinition {
+            name,
+            parameters,
+            strict: None,
+        });
     }
     Ok(Some(defs))
 }

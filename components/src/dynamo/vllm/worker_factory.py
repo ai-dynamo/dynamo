@@ -42,7 +42,10 @@ from .publisher import StatLoggerFactory
 logger = logging.getLogger(__name__)
 
 # (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
-EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
+# component_gauges is None on the embedding-worker path: pooling engines
+# have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
+# LLMBackendMetrics registration there.
+EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
@@ -255,7 +258,15 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint]
 
         fpm_worker_id = str(generate_endpoint.connection_id())
-        factory = StatLoggerFactory(endpoint=generate_endpoint)
+        # Embedding workers run on pooling engines: no KV cache, no
+        # scheduler stats, no decode loop. The factory still has to exist
+        # because vLLM unconditionally invokes it during AsyncLLM init,
+        # but it returns a no-op stat logger and setup_vllm_engine() skips
+        # the chat-shaped LLMBackendMetrics registration.
+        factory = StatLoggerFactory(
+            endpoint=generate_endpoint,
+            embedding_worker=True,
+        )
         (
             engine_client,
             vllm_config,
