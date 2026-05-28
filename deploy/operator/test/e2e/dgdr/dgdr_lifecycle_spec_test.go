@@ -43,6 +43,9 @@ type DGDRLifecycleInput struct {
 	Hardware       *v1beta1.HardwareSpec
 	Features       *v1beta1.FeaturesSpec
 
+	// Overrides contains optional DGD and profiling job overrides.
+	Overrides *v1beta1.OverridesSpec
+
 	// Verification options
 	ExpectDGDReady  bool                          // verify DGD reaches state=successful (skipped in mocker mode)
 	VerifyServices  map[string]ServiceExpectation // per-service expectations on the DGD (optional)
@@ -94,6 +97,9 @@ func DGDRLifecycleSpec(ctx context.Context, inputGetter func() DGDRLifecycleInpu
 	}
 	if input.Features != nil {
 		opts = append(opts, withFeatures(*input.Features))
+	}
+	if input.Overrides != nil {
+		opts = append(opts, withOverrides(*input.Overrides))
 	}
 
 	// Step 1: Create DGDR

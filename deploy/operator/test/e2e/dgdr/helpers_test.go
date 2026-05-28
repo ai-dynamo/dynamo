@@ -133,6 +133,32 @@ func withFeatures(f v1beta1.FeaturesSpec) func(*v1beta1.DynamoGraphDeploymentReq
 	}
 }
 
+func withOverrides(o v1beta1.OverridesSpec) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		if d.Spec.Overrides == nil {
+			d.Spec.Overrides = &o
+		} else {
+			// Merge: only set fields that the caller provided, so
+			// injectRecipeOverrides can still fill in ProfilingJob.
+			if o.DGD != nil {
+				d.Spec.Overrides.DGD = o.DGD
+			}
+			if o.ProfilingJob != nil {
+				d.Spec.Overrides.ProfilingJob = o.ProfilingJob
+			}
+		}
+	}
+}
+
+// dgdOverrideRawExtension builds a RawExtension containing a partial DGD manifest
+// suitable for OverridesSpec.DGD. The map should follow the DGD spec structure,
+// e.g. map[string]interface{}{"spec": map[string]interface{}{"services": ...}}.
+func dgdOverrideRawExtension(m map[string]interface{}) *k8sruntime.RawExtension {
+	raw, err := json.Marshal(m)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed to marshal DGD override")
+	return &k8sruntime.RawExtension{Raw: raw}
+}
+
 // injectRecipeOverrides applies CLI-provided real-GPU overrides to a DGDR:
 // PVC model cache, totalGpus, and HF token secret env injection on the profiling job.
 // Existing user-set values on the DGDR are preserved.

@@ -212,6 +212,123 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 	})
 
 	// -----------------------------------------------------------------------
+	// Model-specific DGDR scenarios — exercise real model configs from the
+	// repo's DGDR YAMLs (qwen-235, llama-70b, gpt-oss-120b).
+	// -----------------------------------------------------------------------
+
+	Context("Model-specific DGDR scenarios", func() {
+
+		It("should complete full lifecycle with Qwen3-235B disagg on H100", func() {
+			By("Running DGDR lifecycle with Qwen3-235B-A22B-FP8 + trtllm + rapid + disagg planner")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("qwen235b-disagg"),
+					Model:          "Qwen/Qwen3-235B-A22B-FP8",
+					Backend:        v1beta1.BackendTypeTrtllm,
+					SearchStrategy: v1beta1.SearchStrategyRapid,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(500.0),
+						ITL:  ptr.To(30.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(3000)),
+						OSL: ptr.To(int32(300)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:    ptr.To(float64(81920)),
+						TotalGPUs: ptr.To(int32(32)),
+					},
+					Features: &v1beta1.FeaturesSpec{
+						Planner: plannerRawExtension(map[string]interface{}{
+							"mode":                     "disagg",
+							"enable_throughput_scaling": true,
+							"enable_load_scaling":       true,
+							"max_gpu_budget":            32,
+						}),
+					},
+					Overrides: &v1beta1.OverridesSpec{
+						DGD: dgdOverrideRawExtension(map[string]interface{}{
+							"apiVersion": "nvidia.com/v1alpha1",
+							"kind":       "DynamoGraphDeployment",
+							"metadata":   map[string]interface{}{"name": "placeholder"},
+							"spec": map[string]interface{}{
+								"services": map[string]interface{}{
+									"prefill": map[string]interface{}{
+										"sharedMemory": map[string]interface{}{"size": "256Gi"},
+									},
+									"decode": map[string]interface{}{
+										"sharedMemory": map[string]interface{}{"size": "256Gi"},
+									},
+								},
+							},
+						}),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+
+		It("should complete full lifecycle with Llama-70B on H100", func() {
+			By("Running DGDR lifecycle with Llama-3.3-70B-FP8 + trtllm + thorough")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("llama70b-disagg"),
+					Model:          "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
+					Backend:        v1beta1.BackendTypeTrtllm,
+					SearchStrategy: v1beta1.SearchStrategyThorough,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(500.0),
+						ITL:  ptr.To(30.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(3000)),
+						OSL: ptr.To(int32(300)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:    ptr.To(float64(81920)),
+						TotalGPUs: ptr.To(int32(8)),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+
+		It("should complete full lifecycle with GPT-OSS-120B on H100", func() {
+			By("Running DGDR lifecycle with gpt-oss-120b + trtllm + rapid")
+			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
+				return DGDRLifecycleInput{
+					Name:           uniqueName("gptoss120b-disagg"),
+					Model:          "openai/gpt-oss-120b",
+					Backend:        v1beta1.BackendTypeTrtllm,
+					SearchStrategy: v1beta1.SearchStrategyRapid,
+					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						TTFT: ptr.To(500.0),
+						ITL:  ptr.To(30.0),
+					},
+					Workload: &v1beta1.WorkloadSpec{
+						ISL: ptr.To(int32(3000)),
+						OSL: ptr.To(int32(300)),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:    ptr.To(float64(81920)),
+						TotalGPUs: ptr.To(int32(32)),
+					},
+					ExpectDGDReady:  true,
+					VerifyConfigMap: true,
+				}
+			})
+		})
+	})
+
+	// -----------------------------------------------------------------------
 	// Multi-step workflows — compose multiple DGDRLifecycleSpec calls within
 	// a single It block to test sequential scenarios (CAAPH helm_test.go style).
 	// -----------------------------------------------------------------------
