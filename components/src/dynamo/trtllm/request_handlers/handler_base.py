@@ -215,6 +215,7 @@ def extract_logprobs(
 
     selected: list[float] = []
     top_per_position: list[list[TopLogprob]] = []
+    any_top_k = False  # Track if any position actually carries top-k data.
     for token_idx, token_logprobs in enumerate(new_logprobs):
         if token_logprobs is None:
             continue
@@ -223,6 +224,7 @@ def extract_logprobs(
             selected.append(float(token_logprobs))
             top_per_position.append([])
             continue
+        any_top_k = True
         actual_token_id = (
             new_token_ids[token_idx] if token_idx < len(new_token_ids) else None
         )
@@ -235,23 +237,22 @@ def extract_logprobs(
             # rather than mis-correlate selected with an arbitrary entry.
             continue
         selected.append(float(info.logprob))
-        top_per_position.append(
-            [
+        entries: list[TopLogprob] = []
+        for rank_idx, (tok_id, entry) in enumerate(token_logprobs.items()):
+            entry_rank = getattr(entry, "rank", None)
+            entries.append(
                 TopLogprob(
-                    rank=(
-                        getattr(entry, "rank", None)
-                        if getattr(entry, "rank", None) is not None
-                        else rank_idx + 1
-                    ),
+                    rank=entry_rank if entry_rank is not None else rank_idx + 1,
                     token_id=tok_id,
                     token=getattr(entry, "decoded_token", None),
                     logprob=float(entry.logprob),
                 )
-                for rank_idx, (tok_id, entry) in enumerate(token_logprobs.items())
-            ]
-        )
+            )
+        top_per_position.append(entries)
 
-    return build_chunk(selected, top_per_position)
+    # If no position carried top-k data (entirely chosen-only stream),
+    # collapse to `None` so the wire chunk doesn't claim top_logprobs.
+    return build_chunk(selected, top_per_position if any_top_k else None)
 
 
 @dataclass

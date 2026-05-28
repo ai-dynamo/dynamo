@@ -131,16 +131,16 @@ def extract_logprobs(
         if output_top
         else len(output_token_logprobs)
     )
-    # Clamp the offset at the high-water mark: if the cumulative arrays
-    # transiently shrink below the persisted cursor (e.g. a future engine
-    # regression rolls back length), holding the cursor where it was would
-    # leave it permanently stranded; advancing it to safe_len makes the
-    # next tick resume cleanly once cumulative catches back up.
-    if num_output_logprobs_so_far > safe_len:
-        return None, None, safe_len
+    # Hold the high-water mark: if the cumulative arrays transiently
+    # shrink (e.g. an engine regression rolls back length), keep the
+    # persisted cursor where it was — rolling back would cause the next
+    # growth tick to re-emit positions that were already streamed.
+    high_water = max(num_output_logprobs_so_far, safe_len)
+    if num_output_logprobs_so_far >= safe_len:
+        return None, None, high_water
     new_logprobs = output_token_logprobs[num_output_logprobs_so_far:safe_len]
     if not new_logprobs:
-        return None, None, safe_len
+        return None, None, high_water
 
     selected = [float(entry[0]) for entry in new_logprobs]
 
@@ -170,4 +170,4 @@ def extract_logprobs(
                 )
 
     log_probs, top_logprobs = build_chunk(selected, top_per_position)
-    return log_probs, top_logprobs, safe_len
+    return log_probs, top_logprobs, high_water

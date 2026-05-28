@@ -618,7 +618,11 @@ def extract_logprobs(
         entries: list[TopLogprob] = []
         for tok_id, entry_info in token_logprobs_dict.items():
             token_str = getattr(entry_info, "decoded_token", None)
-            if not token_str and tokenizer:
+            # `is None` rather than falsy: an empty-string decoded token
+            # (BOS/EOS, byte-pair fragments) is a real value and should
+            # round-trip as `""` rather than be re-decoded via the
+            # tokenizer (which may produce a different canonical form).
+            if token_str is None and tokenizer:
                 try:
                     token_str = tokenizer.decode([tok_id])
                 except Exception:
