@@ -93,21 +93,18 @@ COMMON_ENV=(
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-# Per-worker DYN_SYSTEM_PORT{i} / DYN_VLLM_KV_EVENT_PORT are set by xdist for
-# parallel test runs; fall back to script defaults otherwise.
-HARNESS_KV_EVENT_PORT="${DYN_VLLM_KV_EVENT_PORT:-}"
-
+# Per-worker DYN_SYSTEM_PORT{i} is set by xdist for parallel test runs; fall
+# back to script defaults otherwise. KV-event ports always come from the
+# script's own KV_EVENTS_PORT_BASE block (29090+) — xdist only reserves one
+# DYN_VLLM_KV_EVENT_PORT so deriving `base + (i-1)` from it would collide
+# with adjacent test slots.
 WORKER_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
     DEFAULT_WORKER_PORT=$((SGLANG_SYSTEM_PORT_BASE + (i - 1) * 2))
     HARNESS_VAR="DYN_SYSTEM_PORT${i}"
     WORKER_PORT="${!HARNESS_VAR:-${DEFAULT_WORKER_PORT}}"
     WORKER_PORTS+=("${WORKER_PORT}")
-    if [[ -n "${HARNESS_KV_EVENT_PORT}" ]]; then
-        KV_EVENTS_PORT=$((HARNESS_KV_EVENT_PORT + (i - 1)))
-    else
-        KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
-    fi
+    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
 
     KV_EVENTS_CONFIG="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
@@ -141,6 +138,7 @@ python -m dynamo.frontend \
     --kv-cache-block-size "${BLOCK_SIZE}" &
 
 echo "Waiting for frontend to accept requests ..."
+FRONTEND_READY=false
 DEADLINE=$((SECONDS + 300))
 while (( SECONDS < DEADLINE )); do
     HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
@@ -148,9 +146,13 @@ while (( SECONDS < DEADLINE )); do
         -H "Content-Type: application/json" \
         -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
         2>/dev/null || echo "000")
-    [[ "$HTTP_CODE" == "200" ]] && { echo "Frontend ready"; break; }
+    [[ "$HTTP_CODE" == "200" ]] && { FRONTEND_READY=true; echo "Frontend ready"; break; }
     sleep 2
 done
+if [[ "$FRONTEND_READY" != true ]]; then
+    echo "Frontend did not become ready within 300s" >&2
+    exit 1
+fi
 
 echo
 echo "=== All services are ready ==="
