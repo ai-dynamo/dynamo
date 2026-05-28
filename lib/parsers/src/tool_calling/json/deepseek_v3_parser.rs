@@ -129,12 +129,25 @@ fn parse_single_tool_call_v3(block: &str, separator_tokens: &[String]) -> Option
 }
 
 fn normal_text_before_wrapper_start(message: &str, config: &JsonParserConfig) -> String {
+    wrapper_start_index(message, config)
+        .map(|idx| message[..idx].to_string())
+        .unwrap_or_default()
+}
+
+fn wrapper_start_index(message: &str, config: &JsonParserConfig) -> Option<usize> {
     config
         .tool_call_start_tokens
         .iter()
         .filter(|token| !token.is_empty())
-        .find_map(|token| message.find(token).map(|idx| message[..idx].to_string()))
-        .unwrap_or_default()
+        .filter_map(|token| message.find(token))
+        .min()
+}
+
+fn has_complete_wrapper_end(message: &str, config: &JsonParserConfig) -> bool {
+    config
+        .tool_call_end_tokens
+        .iter()
+        .any(|token| !token.is_empty() && message.contains(token.as_str()))
 }
 
 pub fn parse_tool_calls_deepseek_v3(
@@ -162,14 +175,20 @@ pub fn parse_tool_calls_deepseek_v3(
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
-    // Require the outer wrapper start, but not the outer wrapper end. That
-    // keeps standalone <｜tool▁call▁begin｜> text from being parsed while still
-    // allowing recovery of complete calls from a truncated wrapper.
-    if !detect_tool_call_start_deepseek_v3(trimmed, config) {
+    // Batch parsing requires a complete outer wrapper start; the public
+    // detector also accepts partial prefixes for streaming chunk detection.
+    if wrapper_start_index(trimmed, config).is_none() {
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
     let normal_text = normal_text_before_wrapper_start(trimmed, config);
+
+    // Missing outer end-token recovery is finalize-only. Streaming jail paths
+    // leave allow_eof_recovery=false so they do not release before later calls
+    // or the wrapper end token arrive.
+    if !has_complete_wrapper_end(trimmed, config) && !config.allow_eof_recovery {
+        return Ok((vec![], Some(normal_text)));
+    }
 
     // Extract individual tool call blocks
     let blocks =
@@ -299,6 +318,58 @@ mod tests {
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "New York");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_deepseek_v3_partial_wrapper_prefix_is_normal_text() {
+        let text = "This is normal text <";
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
+
+        assert_eq!(content, Some(text.to_string()));
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_tool_calls_deepseek_v3_missing_wrapper_end_requires_eof_recovery() {
+        let text = r#"prefix <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
+```json
+{"location": "HongKong"}
+```<｜tool▁call▁end｜>"#;
+        let mut config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
+        assert_eq!(content, Some("prefix ".to_string()));
+        assert_eq!(result.len(), 0);
+
+        config.allow_eof_recovery = true;
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
+        assert_eq!(content, Some("prefix ".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "HongKong");
+    }
+
+    #[test]
+    fn test_normal_text_before_wrapper_start_uses_earliest_token() {
+        let mut config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+        config.tool_call_start_tokens = vec!["<later>".to_string(), "<early>".to_string()];
+
+        assert_eq!(
+            normal_text_before_wrapper_start("prefix <early> body <later>", &config),
+            "prefix "
+        );
     }
 
     // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.4.yaml.

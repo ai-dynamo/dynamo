@@ -24,20 +24,22 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
         calls: []
-        normal_text: |-
-          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-          ```json
-          {"location": "NYC"}
-          ```
+        normal_text: ''
       sglang:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *id001
+      vllm:
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"location": "NYC"}
+          ```
   PARSER.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from PARSER.batch.5.c
@@ -57,13 +59,15 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id002
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
           ```json
           {"loc
-      sglang:
-        calls: []
-        normal_text: ''
-      vllm: *id002
