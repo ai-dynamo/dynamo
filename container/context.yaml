@@ -29,9 +29,10 @@ dynamo:
 
   nixl_ref: 0.10.1
   nixl_ucx_ref: v1.20.x
-  nixl_gdrcopy_ref: v2.5.1
+  nixl_gdrcopy_ref: v2.5.2
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
-  nixl_libfabric_ref: v2.3.0
+  nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
+  nixl_libfabric_ref: v2.5.1
   # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.
   hwloc_version: 2.12.2
   enable_kvbm: "true"
@@ -45,22 +46,22 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image_tag: v0.21.0-cu129
+    runtime_image_tag: v0.21.0-cu129-ubuntu2404
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.21.0
+    runtime_image_tag: v0.21.0-ubuntu2404
   xpu:
     base_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
     runtime_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
-    base_image_tag: 132765e3560659ff63ebd236203672e991b70e08-xpu
-    runtime_image_tag: 132765e3560659ff63ebd236203672e991b70e08-xpu
+    base_image_tag: ad7125a431e176d4161099480a66f0169609a690-xpu
+    runtime_image_tag: ad7125a431e176d4161099480a66f0169609a690-xpu
   cpu:
     base_image: ubuntu
-    runtime_image: ubuntu
-    base_image_tag: 24.04
-    runtime_image_tag: 24.04
+    runtime_image: vllm/vllm-openai-cpu
+    base_image_tag: 22.04
+    runtime_image_tag: v0.21.0
   flashinf_ref: v0.6.8.post1
   vllm_omni_ref: "v0.21.0rc1"
   nixl_ref: v1.1.0
@@ -76,12 +77,12 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image_tag: v0.5.11-cu129-runtime
+    runtime_image_tag: v0.5.12.post1-cu129-runtime
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.11-cu130-runtime
+    runtime_image_tag: v0.5.12.post1-cu130-runtime
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
@@ -93,30 +94,11 @@ sglang:
 
 trtllm:
   cuda13.1:
-    base_image: nvcr.io/nvidia/pytorch
-    runtime_image: nvcr.io/nvidia/cuda-dl-base
-    base_image_tag: 26.02-py3
-    runtime_image_tag: 26.02-cuda13.1-runtime-ubuntu24.04
+    base_image: nvcr.io/nvidia/cuda-dl-base
+    runtime_image: nvcr.io/nvidia/tensorrt-llm/release
+    base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
+    runtime_image_tag: 1.3.0rc14
   nixl_ref: 0.10.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
-  python_version: "3.12"
-  index_url: https://pypi.nvidia.com/
-  pip_wheel_dir: /tmp/trtllm_wheel/
-  pip_wheel: tensorrt-llm==1.3.0rc14
-  trtllm_wheel_image: nvcr.io/nvidia/tensorrt-llm/release:${TENSORRTLLM_PIP_WHEEL#*==}
-
-  github_trtllm_commit: v1.3.0rc14
-  torch_version: 2.11.0a0+eb65b36914.nv26.2
-  torch_tensorrt_version: 2.11.0a0
-  torchvision_version: 0.25.0a0+1e53952f.nv26.2.44259020
-  torchao_ver: 0.16.0+gita89eaab2
-  torchdata_ver: 0.11.0
-  torchtitan_ver: 0.2.1+git9f211ec1
-  jinja2_version: 3.1.6
-  sympy_version: 1.14.0
-  pytorch_triton_ver: 3.6.0+git9844da95.nv26.2
-  flash_attn_version: 2.7.4.post1+nv26.2.44259020
-  flashinfer_python_ver: 0.6.6
-  has_trtllm_context: "0"

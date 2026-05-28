@@ -17,6 +17,7 @@ use super::{KvWorkerMonitor, ModelManagerError};
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
+    RealtimeBidirectionalEngine,
     generic::tensor::TensorStreamingEngine,
     openai::{
         audios::OpenAIAudiosStreamingEngine,
@@ -157,6 +158,13 @@ impl Model {
             .any(|entry| entry.value().has_audios_engine())
     }
 
+    /// Check if any WorkerSet has a realtime engine.
+    pub fn has_realtime_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_realtime_engine())
+    }
+
     // -- Topology readiness --
     //
     // A *topology* is the set of WorkerSets in this Model that share the same
@@ -265,29 +273,37 @@ impl Model {
         self.first_ready_workers().is_some()
     }
 
+    /// Whether this model can serve at least one inference request right now.
+    ///
+    /// Differs from [`Self::is_displayable`] in that it does **not** fall back
+    /// to prefill-only WorkerSets: requires a WorkerSet that has a serving
+    /// engine attached, workers connected, and `can_serve_requests()` true.
+    /// Used by KServe gRPC `model_ready` / `server_ready` to avoid the race
+    /// where a `ModelDeploymentCard` is registered before its WorkerSet has
+    /// been wired up.
+    pub fn is_ready_to_serve(&self) -> bool {
+        self.worker_sets.iter().any(|entry| {
+            let ws = entry.value();
+            if ws.worker_count() == 0 || !ws.can_serve_requests() {
+                return false;
+            }
+            ws.has_any_serving_engine()
+        })
+    }
+
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
-        let has_serving_engine = |ws: &WorkerSet| {
-            ws.has_chat_engine()
-                || ws.has_completions_engine()
-                || ws.has_embeddings_engine()
-                || ws.has_images_engine()
-                || ws.has_tensor_engine()
-                || ws.has_videos_engine()
-                || ws.has_audios_engine()
-        };
-
-        let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
-            let ws = entry.value();
-            has_serving_engine(ws.as_ref())
-        });
+        let any_set_has_engine = self
+            .worker_sets
+            .iter()
+            .any(|entry| entry.value().has_any_serving_engine());
 
         self.worker_sets.iter().any(|entry| {
             let ws = entry.value();
             if ws.worker_count() == 0 || !ws.can_serve_requests() {
                 return false;
             }
-            has_serving_engine(ws.as_ref()) || (!has_any_serving_engine && ws.is_prefill_set())
+            ws.has_any_serving_engine() || (!any_set_has_engine && ws.is_prefill_set())
         })
     }
 
@@ -332,6 +348,11 @@ impl Model {
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
+    }
+
+    pub fn get_realtime_engine(&self) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.realtime_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -627,6 +648,32 @@ mod tests {
         assert!(model.get_embeddings_engine().is_err());
         assert!(model.get_images_engine().is_err());
         assert!(model.get_tensor_engine().is_err());
+        assert!(model.get_realtime_engine().is_err());
+    }
+
+    fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            "abc".to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn test_realtime_engine_round_trip() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.has_realtime_engine());
+        assert!(model.get_realtime_engine().is_ok());
+    }
+
+    #[test]
+    fn test_realtime_only_model_is_displayable() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.is_displayable());
     }
 
     #[test]
@@ -1061,5 +1108,83 @@ mod tests {
         model.add_worker_set("dynamo".to_string(), _ws);
 
         assert!(model.is_workers_ready("dynamo"));
+    }
+
+    // -- is_ready_to_serve tests --
+    //
+    // Regression coverage for the KServe gRPC `model_ready` race: a
+    // ModelDeploymentCard is saved before the WorkerSet's engines are wired up,
+    // and `is_ready_to_serve` must remain false until at least one serving
+    // engine is attached to a WorkerSet that has workers.
+
+    #[test]
+    fn test_is_ready_to_serve_false_when_no_worker_sets() {
+        let model = Model::new("llama".to_string());
+        assert!(!model.is_ready_to_serve());
+    }
+
+    #[test]
+    fn test_is_ready_to_serve_false_for_prefill_only_set() {
+        // A WorkerSet without any serving engine attached (the lifecycle state
+        // between ModelDeploymentCard save and engine attach) must not count
+        // as ready, even though `is_displayable` treats prefill-only as visible.
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+
+        assert!(
+            model.is_displayable(),
+            "displayable fallback covers prefill"
+        );
+        assert!(
+            !model.is_ready_to_serve(),
+            "prefill-only set must not be ready to serve inference"
+        );
+    }
+
+    #[test]
+    fn test_is_ready_to_serve_false_when_zero_workers_even_with_engine() {
+        // Engine attached but the discovery watcher reports zero connected
+        // workers. KServe must report not-ready until a worker is available.
+        let model = Model::new("llama".to_string());
+        let mut ws = WorkerSet::new(
+            "ns1".to_string(),
+            "abc".to_string(),
+            crate::model_card::ModelDeploymentCard::default(),
+        );
+        // Keep the sender bound for the duration of the test so the watcher
+        // doesn't close.
+        let (_tx, rx) = watch::channel::<Vec<u64>>(vec![]);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(make_test_chat_engine());
+        model.add_worker_set("ns1".to_string(), Arc::new(ws));
+
+        assert!(
+            !model.is_ready_to_serve(),
+            "engine attached but no workers connected -> not ready"
+        );
+    }
+
+    #[test]
+    fn test_is_ready_to_serve_true_with_chat_engine() {
+        // In-process WorkerSet (no instance_count_rx → worker_count==1) with a
+        // chat engine attached is ready to serve.
+        let model = Model::new("llama".to_string());
+        let mut ws = WorkerSet::new(
+            "ns1".to_string(),
+            "abc".to_string(),
+            crate::model_card::ModelDeploymentCard::default(),
+        );
+        ws.chat_engine = Some(make_test_chat_engine());
+        model.add_worker_set("ns1".to_string(), Arc::new(ws));
+
+        assert!(model.is_ready_to_serve());
+    }
+
+    /// Build a chat completions engine backed by the in-tree echo engine.
+    fn make_test_chat_engine()
+    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+        Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ))
     }
 }

@@ -124,9 +124,12 @@ def _resolve_kv_bytes_per_token(raw: dict) -> None:
     if raw.get("kv_bytes_per_token") is not None:
         return
 
-    offload_requested = any(
-        isinstance(raw.get(name), int) and raw[name] > 0
-        for name in ("num_g2_blocks", "num_g3_blocks")
+    offload_requested = (
+        any(
+            isinstance(raw.get(name), int) and raw[name] > 0
+            for name in ("num_g2_blocks", "num_g3_blocks")
+        )
+        or raw.get("enable_g4_storage") is True
     )
     if not offload_requested:
         return
@@ -525,12 +528,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     parser.add_argument(
         "--trace-format",
-        choices=("mooncake", "mooncake-delta", "applied_compute_agentic"),
+        choices=(
+            "mooncake",
+            "mooncake-delta",
+            "agentic_mooncake",
+            "applied_compute_agentic",
+        ),
         default="mooncake",
         help=(
             "format of trace_file when replaying from a file; mooncake-delta "
             "accumulates per-session input deltas into cumulative prompts and "
-            "can use substantially more memory than mooncake"
+            "can use substantially more memory than mooncake; agentic_mooncake "
+            "replays request-level workflow dependencies"
         ),
     )
     parser.add_argument(
@@ -646,6 +655,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("--planner-config only supports --replay-mode=offline")
         if not using_trace_file:
             parser.error("--planner-config requires a trace file (not synthetic)")
+        if args.trace_format != "mooncake":
+            parser.error("--planner-config only supports --trace-format=mooncake")
 
         planner_report = _run_planner_replay(
             trace_file=args.trace_file,

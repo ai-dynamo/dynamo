@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import re
+import struct
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -908,6 +909,14 @@ class EmbeddingPayload(BasePayload):
     def extract_embeddings(response):
         """
         Process embeddings API responses.
+
+        Accepts both shapes from the OpenAI spec:
+        - ``encoding_format="float"`` (default) -- each ``data[].embedding``
+          is a JSON array of floats.
+        - ``encoding_format="base64"`` -- each ``data[].embedding`` is a
+          base64-encoded string of little-endian f32 bytes. The string
+          is decoded here so the dimension count in the summary string
+          stays comparable across both shapes.
         """
         response.raise_for_status()
         result = response.json()
@@ -926,11 +935,25 @@ class EmbeddingPayload(BasePayload):
                 item["object"] == "embedding"
             ), f"Expected object='embedding', got {item['object']}"
             assert "embedding" in item, "Missing 'embedding' vector in item"
-            assert isinstance(
-                item["embedding"], list
-            ), "Embedding should be a list of floats"
-            assert len(item["embedding"]) > 0, "Embedding vector should not be empty"
-            embeddings.append(item["embedding"])
+            raw = item["embedding"]
+            if isinstance(raw, str):
+                # base64: decode to a float list so downstream dimension
+                # checks are uniform.
+                decoded = base64.b64decode(raw)
+                assert (
+                    len(decoded) % 4 == 0
+                ), f"base64 payload not f32-aligned: {len(decoded)} bytes"
+                count = len(decoded) // 4
+                vec = list(struct.unpack(f"<{count}f", decoded))
+            elif isinstance(raw, list):
+                vec = raw
+            else:
+                raise AssertionError(
+                    f"Embedding should be a list of floats or a base64 "
+                    f"string, got {type(raw).__name__}"
+                )
+            assert len(vec) > 0, "Embedding vector should not be empty"
+            embeddings.append(vec)
 
         # Return a summary string for validation
         return f"Generated {len(embeddings)} embeddings with dimension {len(embeddings[0])}"
@@ -1027,12 +1050,18 @@ class MetricsPayload(BasePayload):
 
     Validates common dynamo_component_* metrics shared across all backends.
     Backend-specific subclasses handle engine-specific metrics.
+
+    Set ``check_lifecycle_gauges=True`` to additionally assert the unified-
+    only framework gauges (``cleanup_time_seconds``, ``drain_time_seconds``,
+    ``kv_cache_hit_rate``). Off by default because legacy entry points
+    don't emit them.
     """
 
     endpoint: str = "/metrics"
     method: str = "GET"
     port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
+    check_lifecycle_gauges: bool = False
 
     def with_model(self, model):
         # Metrics does not use model in request body
@@ -1122,6 +1151,46 @@ class MetricsPayload(BasePayload):
             ),
         ]
 
+    def _get_lifecycle_gauge_checks(self) -> list[MetricCheck]:
+        """Unified-only framework lifecycle gauges. Legacy entry points
+        don't emit these — gated by ``check_lifecycle_gauges`` so legacy
+        callers don't trip on the absence.
+
+        - cleanup_time / drain_time: Rust-side ``LifecycleGauges``, owned
+          by ``dynamo_backend_common::Worker``. While the worker is
+          serving the values are 0 (set at shutdown). The "name appears"
+          check catches regressions where the gauges silently fail to
+          register against the runtime's ``MetricsRegistry``.
+
+        ``kv_cache_hit_rate`` is INTENTIONALLY not in this list. With the
+        Rust ``prometheus`` crate, a ``GaugeVec`` family with no labeled
+        children is skipped by the text encoder — so an engine that
+        legitimately reports ``kv_cache_hit_rate=None`` (no prefix cache,
+        or no requests observed) has no HELP line. That's the tri-state
+        contract working as designed; not a regression to test for here.
+        """
+        prefix = prometheus_names.name_prefix.COMPONENT
+
+        def metric_pattern(name):
+            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
+
+        return [
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.lifecycle.CLEANUP_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) >= 0,
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.lifecycle.DRAIN_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) >= 0,
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+        ]
+
     def _get_backend_specific_checks(self) -> list[MetricCheck]:
         """Get backend-specific metric checks. Override in subclasses."""
         return []
@@ -1181,9 +1250,11 @@ class MetricsPayload(BasePayload):
         """Validate Prometheus metrics output"""
         content = self._filter_bucket_metrics(content)
 
-        # Collect all checks: common + backend-specific
+        # Collect all checks: common + backend-specific (+ lifecycle if opted in)
         metrics_to_check = self._get_common_metric_checks()
         metrics_to_check.extend(self._get_backend_specific_checks())
+        if self.check_lifecycle_gauges:
+            metrics_to_check.extend(self._get_lifecycle_gauge_checks())
 
         # Run all validations
         self._validate_metric_checks(metrics_to_check, content)

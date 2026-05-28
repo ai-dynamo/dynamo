@@ -148,3 +148,5 @@ pub mod generic {
             BidirectionalStreamingEngine<RealtimeClientEvent, Annotated<RealtimeServerEvent>>;
     }
 }
+
+pub use generic::realtime::RealtimeBidirectionalEngine;

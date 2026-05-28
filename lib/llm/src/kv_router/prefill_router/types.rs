@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::config::RouterConfigOverride;
+use dynamo_kv_router::protocols::RouterBackpressureReason;
 
 use crate::protocols::common::preprocessor::{BootstrapInfo, PrefillResult};
 
@@ -47,6 +48,29 @@ pub(super) enum PrefillResolveDecision {
     Unavailable,
     NotActivated,
     NoBootstrapEndpoint,
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
+}
+
+/// Structured outcome from `PrefillRouter::query_prefill_worker`.
+///
+/// Backpressure is surfaced as a variant rather than being collapsed into a
+/// generic error so callers (Rust resolve_prefill_worker, C FFI shim) can
+/// distinguish a queue-saturation reject from an ordinary lookup failure and
+/// translate it into a retryable signal upstream.
+pub enum PrefillQueryOutcome {
+    Routed {
+        worker_id: u64,
+        dp_rank: Option<u32>,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
 }
 
 pub(super) fn build_decode_router_override(

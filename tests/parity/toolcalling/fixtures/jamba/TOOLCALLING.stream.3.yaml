@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: jamba
+model_label: AI21 Jamba
+mode: stream
+cases:
+  TOOLCALLING.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: <t
+    - delta_text: ool
+    - delta_text: _call
+    - delta_text: 's>[{"name":'
+    - delta_text: ' "get_weather", "ar'
+    - delta_text: gu
+    - delta_text: men
+    - delta_text: 'ts": '
+    - delta_text: '{"location"'
+    - delta_text: ': "NYC"}}]</tool_ca'
+    - delta_text: ll
+    - delta_text: s>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: <tool_call
