@@ -391,7 +391,7 @@ def _replace_aliases_in_value(
     try:
         attrs = vars(value)
     except TypeError:
-        return value, 0
+        attrs = {}
 
     changed = 0
     for attr_name, attr_val in list(attrs.items()):
@@ -407,6 +407,27 @@ def _replace_aliases_in_value(
         except (AttributeError, TypeError):
             continue
         changed += attr_changed
+
+    slots = getattr(type(value), "__slots__", ())
+    if isinstance(slots, str):
+        slots = (slots,)
+    for slot_name in slots:
+        if slot_name in ("__dict__", "__weakref__") or slot_name.startswith("__"):
+            continue
+        try:
+            slot_val = getattr(value, slot_name)
+        except AttributeError:
+            continue
+        new_val, slot_changed = _replace_aliases_in_value(
+            slot_val, alias_map, visited=visited, depth=depth - 1
+        )
+        if not slot_changed:
+            continue
+        try:
+            setattr(value, slot_name, new_val)
+        except (AttributeError, TypeError):
+            continue
+        changed += slot_changed
     return value, changed
 
 
@@ -414,7 +435,7 @@ def _refresh_tensor_aliases(
     model: torch.nn.Module,
     alias_map: _TensorAliasMap,
     *,
-    max_depth: int = 6,
+    max_depth: int = 12,
 ) -> int:
     """Refresh references that cached tensors before materialization."""
     if not alias_map:
@@ -479,7 +500,7 @@ def move_tensor_attrs_out_of_gms(
     *,
     device_index: int,
     name_substrings: tuple[str, ...] = ("workspace",),
-    max_depth: int = 6,
+    max_depth: int = 12,
 ) -> list[str]:
     """Move mutable runtime tensor attrs out of the GMS weight layout."""
     moved: list[str] = []

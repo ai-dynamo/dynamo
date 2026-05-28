@@ -177,7 +177,10 @@ def _load_read_mode(
     global _last_imported_weights_bytes
 
     try:
+        logger.info("[GMS] Read mode: creating meta model")
         model = _create_meta_model(vllm_config, model_config)
+
+        logger.info("[GMS] Read mode: materializing tensors")
         materialize_module_from_gms(gms_client, model, device_index=device_index)
 
         # MX: register materialized tensors (available for P2P transfer)
@@ -193,7 +196,8 @@ def _load_read_mode(
         )
         return model.eval()
     except Exception:
-        gms_client.close()
+        logger.exception("[GMS] Read mode failed while importing weights")
+        gms_client.close(best_effort=True)
         raise
 
 

@@ -184,6 +184,47 @@ def test_materialize_module_from_gms_refreshes_cached_tensor_aliases(monkeypatch
     torch.testing.assert_close(materialized, torch.arange(3, dtype=torch.float32))
 
 
+def test_materialize_module_from_gms_refreshes_deep_quant_aliases(monkeypatch):
+    """Quant/kernel helper objects can cache tensors several levels deep."""
+
+    class _FakeSpec:
+        meta = types.SimpleNamespace(
+            tensor_type="parameter",
+            shape=(3,),
+            stride=(1,),
+            dtype=torch.float32,
+        )
+        allocation_id = "alloc"
+        offset_bytes = 0
+
+        def materialize(self, _manager, _device_index):
+            return torch.arange(3, dtype=torch.float32)
+
+    monkeypatch.setattr(
+        "gpu_memory_service.client.torch.module.GMSTensorSpec.load_all",
+        lambda _manager: {"experts.w13_weight_scale": _FakeSpec()},
+    )
+
+    module = torch.nn.Module()
+    module.experts = torch.nn.Module()
+    scale = torch.nn.Parameter(torch.empty(3, device="meta", dtype=torch.float32))
+    module.experts.w13_weight_scale = scale
+
+    # Deeper than the old alias-refresh depth of 6.
+    cursor = module
+    for idx in range(8):
+        child = types.SimpleNamespace()
+        setattr(cursor, f"quant_child_{idx}", child)
+        cursor = child
+    cursor.scale = scale
+
+    materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
+
+    materialized = module.experts.w13_weight_scale
+    assert cursor.scale is materialized
+    torch.testing.assert_close(materialized, torch.arange(3, dtype=torch.float32))
+
+
 def test_materialize_module_from_gms_preserves_shared_parameter_aliases(monkeypatch):
     """Duplicate metadata paths for the same Parameter should share one object."""
 
