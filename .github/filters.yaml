@@ -11,6 +11,7 @@
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
+#   container -> vllm/sglang/trtllm EFA runtime image builds (container/** changes)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
@@ -208,5 +209,10 @@ rust:
 
 benchmarks:
   - 'benchmarks/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+container:
+  - 'container/**'
   - '!**/*.md'
   - '!**/*.rst'
