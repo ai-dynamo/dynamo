@@ -92,10 +92,7 @@ jobs:
           fi
 
           if [[ "${NIGHTLY}" == "true" ]]; then
-            # TODO: REVERT — testing only. Allows this dev branch through the
-            # branch=main guard so push-triggered nightlies can run end-to-end.
-            # MUST be removed before merging to main.
-            if [[ "${BRANCH_NAME}" != "main" && "${BRANCH_NAME}" != "pvijayakrish/nightly-notifications" ]]; then
+            if [[ "${BRANCH_NAME}" != "main" ]]; then
               echo "Error: nightly=true requires branch=main (got: ${BRANCH_NAME})"
               exit 1
             fi
