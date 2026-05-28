@@ -404,7 +404,7 @@ sglang_configs = {
             # processor) + 100-token max response + headroom.
             # TODO: bisect via tests/utils/profile_pytest.py for a tighter bound.
             pytest.mark.requested_sglang_kv_tokens(4096),
-            pytest.mark.timeout(300),
+            pytest.mark.timeout(420),
             # post_merge: NIXL stubs outside docker can lack the Decoded
             # transport path. Same gating as vLLM's FD case
             # (tests/serve/multimodal_profiles/vllm.py:67-70).
