@@ -15,8 +15,7 @@ use dynamo_runtime::transports::nats::NatsQueue;
 #[cfg(test)]
 use crate::kv_router::metrics::KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE;
 use crate::kv_router::metrics::{
-    KV_PUBLISHER_EVENT_STAGE_ACCEPTED, KV_PUBLISHER_EVENT_STAGE_RECEIVED,
-    kv_cache_event_type_label, kv_publisher_metrics,
+    KV_PUBLISHER_EVENT_STAGE_RECEIVED, kv_cache_event_type_label, kv_publisher_metrics,
 };
 
 use super::DEFAULT_MAX_BATCH_BLOCKS;
@@ -34,11 +33,12 @@ fn increment_event_metric(
     }
 }
 
-// Counts the generic events_total metric uniformly for every source (ZMQ and
-// the direct event plane) at the same two points in this loop — `received` when
-// an event is pulled off the channel and `accepted` once it has passed dedup and
-// is committed to the outgoing batch. The ZMQ listener only feeds this loop; it
-// does not record events_total itself, so there is no double counting.
+// Records the generic events_total metric uniformly for every source (ZMQ and
+// the direct event plane). `received` is counted here when an event is pulled off
+// the channel; `accepted` is counted in `emit` (post-dedup, post-batch), so
+// `received - accepted` reflects events dropped or coalesced before being sent to
+// Dynamo. The ZMQ listener only feeds this loop and does not record events_total
+// itself, so there is no double counting.
 #[allow(clippy::too_many_arguments)]
 async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
@@ -58,13 +58,13 @@ async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send +
         tokio::select! {
             _ = cancellation_token.cancelled() => {
                 tracing::info!("KV Event source received cancellation signal");
-                batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup, metric_source).await;
                 break;
             }
             event = rx.recv() => {
                 let Some(placement_event) = event else {
                     tracing::debug!("Event processor channel closed.");
-                    batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                    batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup, metric_source).await;
                     break;
                 };
 
@@ -117,7 +117,7 @@ async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send +
                             || dp_rank_changed
                             || storage_tier_changed
                         {
-                            batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                            batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup, metric_source).await;
                         }
                         match &mut batching_state.pending_removed {
                             Some(pending) => pending.block_hashes.extend(data.block_hashes),
@@ -134,7 +134,7 @@ async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send +
                                 data.parent_hash != p.blocks.last().map(|b| b.block_hash)
                             });
                         if should_flush {
-                            batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                            batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup, metric_source).await;
                         }
                         match &mut batching_state.pending_stored {
                             Some(pending) => pending.blocks.extend(data.blocks),
@@ -144,7 +144,7 @@ async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send +
                         }
                     }
                     KvCacheEventData::Cleared => {
-                        batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                        batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup, metric_source).await;
                         dedup.clear();
                         emit(
                             &publisher,
@@ -156,17 +156,13 @@ async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send +
                                 data: KvCacheEventData::Cleared,
                                 dp_rank: event.dp_rank,
                             },
+                            metric_source,
                         )
                         .await;
                         batching_state.next_publish_id += 1;
                     }
                 }
 
-                increment_event_metric(
-                    metric_source,
-                    KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
-                    event_type,
-                );
                 batching_state.last_dp_rank = event.dp_rank;
                 batching_state.last_storage_tier = storage_tier;
 
@@ -174,7 +170,7 @@ async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send +
                     && (timeout_ms.is_none_or(|ms| batching_state.is_timeout_elapsed(ms))
                         || batching_state.pending_block_count() > max_batch_blocks)
                 {
-                    batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                    batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup, metric_source).await;
                 }
             }
             _ = tokio::time::sleep(
@@ -182,7 +178,7 @@ async fn run_event_processor_loop_with_metric_source<P: RouterEventSink + Send +
                     .map(|ms| batching_state.remaining_timeout(ms))
                     .unwrap_or(Duration::from_secs(3600))
             ), if timeout_ms.is_some() && batching_state.has_pending() => {
-                batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup, metric_source).await;
             }
         }
     }

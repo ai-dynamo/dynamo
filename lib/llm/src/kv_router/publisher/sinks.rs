@@ -13,6 +13,9 @@ use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::transports::nats::NatsQueue;
 
 use crate::kv_router::KV_EVENT_SUBJECT;
+use crate::kv_router::metrics::{
+    KV_PUBLISHER_EVENT_STAGE_ACCEPTED, kv_cache_event_type_label, kv_publisher_metrics,
+};
 
 pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
 
@@ -36,7 +39,19 @@ pub(super) async fn emit<P: RouterEventSink>(
     worker_id: u64,
     storage_tier: StorageTier,
     event: KvCacheEvent,
+    metric_source: &'static str,
 ) {
+    // `emit` is the single point where an event is actually published to Dynamo,
+    // after dedup and batching. Counting `accepted` here (rather than at intake)
+    // makes `received - accepted` the real funnel: events received minus what was
+    // dropped or coalesced before being sent. Counted uniformly for every source.
+    if let Some(metrics) = kv_publisher_metrics() {
+        metrics.increment_event(
+            KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
+            kv_cache_event_type_label(&event.data),
+            metric_source,
+        );
+    }
     let router_event = RouterEvent::with_storage_tier(worker_id, event, storage_tier);
     if let Some(indexer) = local_indexer
         && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await

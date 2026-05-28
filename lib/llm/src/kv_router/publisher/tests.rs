@@ -1913,6 +1913,9 @@ mod event_processor_tests {
                 KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
             ) > accepted_before
         );
+        // `accepted` is counted in `emit`, so it corresponds to events actually
+        // published to the sink — here the single stored event is flushed once.
+        assert_eq!(publisher.get_events().len(), 1);
     }
 
     /// Test that pushing N removed events results in batched output

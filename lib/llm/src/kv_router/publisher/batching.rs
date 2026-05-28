@@ -77,6 +77,7 @@ impl BatchingState {
         local_indexer: &Option<Arc<LocalKvIndexer>>,
         worker_id: u64,
         dedup: &mut EventDedupFilter,
+        metric_source: &'static str,
     ) {
         if !self.has_pending() {
             return;
@@ -96,6 +97,7 @@ impl BatchingState {
                     data: KvCacheEventData::Removed(filtered),
                     dp_rank,
                 },
+                metric_source,
             )
             .await;
             emitted = true;
@@ -112,6 +114,7 @@ impl BatchingState {
                     data: KvCacheEventData::Stored(data),
                     dp_rank,
                 },
+                metric_source,
             )
             .await;
             emitted = true;
