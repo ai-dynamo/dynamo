@@ -19,8 +19,7 @@ use bytes::Bytes;
 /// `max_payload` limit, or deployment-configuration instructions. Internal
 /// diagnostics (subject, payload_bytes, max_payload_bytes) live in logs and
 /// the `nats_errors_total` metric instead.
-const MAX_PAYLOAD_USER_MESSAGE: &str =
-    "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.";
+const MAX_PAYLOAD_USER_MESSAGE: &str = "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.";
 
 /// NATS implementation of RequestPlaneClient
 ///
