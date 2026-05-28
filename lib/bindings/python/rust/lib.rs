@@ -425,11 +425,15 @@ fn register_model<'p>(
             return Ok(());
         }
 
-        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace)
+        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace).
+        // Pass ignore_weights=true: register_model only consumes metadata (config.json,
+        // tokenizer*, generation_config.json, chat template) when building the MDC, so the
+        // weight files would be downloaded and discarded. Backends (SGLang/vLLM) handle their
+        // own weight loading via fetch_model before register_model is called. See DIS-1798.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, false)
+            LocalModel::fetch(&source_path, true)
                 .await
                 .map_err(to_pyerr)?
         };
