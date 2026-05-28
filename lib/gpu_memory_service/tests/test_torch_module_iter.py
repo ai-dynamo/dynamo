@@ -113,6 +113,15 @@ def test_register_module_tensors_keeps_strict_non_empty_parameters():
         register_module_tensors(_NoMetadataManager(), module)
 
 
+def test_register_module_tensors_skips_recomputable_non_persistent_buffer():
+    """RoPE caches are constructor state, not GMS-published weights."""
+    module = torch.nn.Module()
+    module._buffers["cos_sin_cache"] = _FakeCudaTensor(numel=1, nbytes=4)
+    module._non_persistent_buffers_set.add("cos_sin_cache")
+
+    register_module_tensors(_NoMetadataManager(), module)
+
+
 def test_materialize_module_from_gms_recreates_zero_size_meta_tensors(monkeypatch):
     """Skipped zero-size meta tensors should become real tensors on read side."""
     original_empty_strided = torch.empty_strided
@@ -338,6 +347,61 @@ def test_materialize_module_from_gms_reports_mutable_tensor_clone_context(
     assert "shape=(2, 3)" in message
     assert "dtype=torch.float16" in message
     assert "offset_bytes=128" in message
+
+
+def test_materialize_module_from_gms_recomputes_non_persistent_meta_buffer(
+    monkeypatch,
+):
+    """Stale GMS metadata for recomputable caches should not be cloned."""
+
+    class _BadTensor:
+        def detach(self):
+            raise RuntimeError("should not clone stale cache metadata")
+
+    class _FakeSpec:
+        meta = types.SimpleNamespace(
+            tensor_type="buffer",
+            shape=(3, 2),
+            stride=(2, 1),
+            dtype=torch.float32,
+        )
+        allocation_id = "alloc"
+        offset_bytes = 0
+
+        def materialize(self, _manager, _device_index):
+            return _BadTensor()
+
+    class _Rope(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_buffer(
+                "cos_sin_cache",
+                torch.empty((3, 2), device="meta", dtype=torch.float32),
+                persistent=False,
+            )
+
+        def _compute_cos_sin_cache(self):
+            return torch.arange(6, dtype=torch.float32).reshape(3, 2)
+
+    monkeypatch.setattr(
+        "gpu_memory_service.client.torch.module.GMSTensorSpec.load_all",
+        lambda _manager: {"rope.cos_sin_cache": _FakeSpec()},
+    )
+    monkeypatch.setattr(
+        "gpu_memory_service.client.torch.module._move_recomputed_buffer_to_device",
+        lambda tensor, old_buffer, *, device_index: tensor.to(dtype=old_buffer.dtype),
+    )
+
+    module = torch.nn.Module()
+    module.rope = _Rope()
+
+    materialize_module_from_gms(_NoMetadataManager(), module, device_index=0)
+
+    assert not module.rope.cos_sin_cache.is_meta
+    torch.testing.assert_close(
+        module.rope.cos_sin_cache,
+        torch.arange(6, dtype=torch.float32).reshape(3, 2),
+    )
 
 
 def test_materialize_module_from_gms_preserves_shared_parameter_aliases(monkeypatch):

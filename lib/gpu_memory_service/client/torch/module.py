@@ -11,6 +11,7 @@ This module provides module-level tensor operations:
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Mapping, MutableMapping, Sequence
 from types import FunctionType, MethodType, ModuleType
@@ -194,6 +195,61 @@ def _resolve_module_attr(
     return mod, parts[-1]
 
 
+_RECOMPUTABLE_NON_PERSISTENT_BUFFER_SUBSTRINGS = ("cos_sin",)
+_DUAL_CHUNK_COS_SIN_BUFFER_ORDER = (
+    "cos_sin_q_cache",
+    "cos_sin_qc_cache",
+    "cos_sin_k_cache",
+    "cos_sin_qc_no_clamp_cache",
+    "cos_sin_q_inter_cache",
+)
+
+
+def _callable_takes_no_required_args(fn: Any) -> bool:
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return all(
+        param.default is not inspect.Parameter.empty
+        or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD)
+        for param in params
+    )
+
+
+def _is_recomputable_non_persistent_buffer(
+    module: torch.nn.Module,
+    name: str,
+) -> bool:
+    """Return true for constructor caches that are not model state."""
+    if name not in getattr(module, "_non_persistent_buffers_set", set()):
+        return False
+    lowered = name.lower()
+    if not any(
+        substring in lowered
+        for substring in _RECOMPUTABLE_NON_PERSISTENT_BUFFER_SUBSTRINGS
+    ):
+        return False
+    return _callable_takes_no_required_args(
+        getattr(module, "_compute_cos_sin_cache", None)
+    )
+
+
+def _is_recomputable_non_persistent_buffer_path(
+    root: torch.nn.Module,
+    qualified_name: str,
+) -> bool:
+    try:
+        module, name = _resolve_module_attr(root, qualified_name)
+    except AttributeError:
+        return False
+    return (
+        hasattr(module, "_buffers")
+        and name in module._buffers
+        and _is_recomputable_non_persistent_buffer(module, name)
+    )
+
+
 def _materialize_zero_size_meta_tensors(
     module: torch.nn.Module,
     *,
@@ -303,6 +359,105 @@ def _materialize_zero_size_meta_tensors(
 
     return materialized
 
+
+def _move_recomputed_buffer_to_device(
+    tensor: torch.Tensor,
+    old_buffer: torch.Tensor,
+    *,
+    device_index: int,
+) -> torch.Tensor:
+    return tensor.to(
+        device=torch.device("cuda", device_index),
+        dtype=old_buffer.dtype,
+    )
+
+
+def _recompute_non_persistent_buffer(
+    module: torch.nn.Module,
+    name: str,
+    old_buffer: torch.Tensor,
+    *,
+    device_index: int,
+) -> torch.Tensor | None:
+    compute_cache = getattr(module, "_compute_cos_sin_cache", None)
+    if compute_cache is None:
+        return None
+
+    try:
+        computed = compute_cache()
+    except TypeError:
+        logger.debug("[GMS] Cannot recompute non-persistent buffer %r", name)
+        return None
+
+    if isinstance(computed, (list, tuple)):
+        try:
+            computed = computed[_DUAL_CHUNK_COS_SIN_BUFFER_ORDER.index(name)]
+        except ValueError:
+            return None
+
+    if not torch.is_tensor(computed):
+        return None
+
+    replacement = _move_recomputed_buffer_to_device(
+        computed,
+        old_buffer,
+        device_index=device_index,
+    )
+    if tuple(replacement.shape) != tuple(old_buffer.shape):
+        raise RuntimeError(
+            f"Recomputed non-persistent buffer {name!r} has shape "
+            f"{tuple(replacement.shape)}, expected {tuple(old_buffer.shape)}"
+        )
+    return replacement
+
+
+def _materialize_recomputable_non_persistent_meta_buffers(
+    module: torch.nn.Module,
+    *,
+    device_index: int,
+    alias_map: _TensorAliasMap,
+    prefix: str = "",
+) -> list[str]:
+    materialized: list[str] = []
+
+    for name, buf in module._buffers.items():
+        if (
+            buf is None
+            or not buf.is_meta
+            or not _is_recomputable_non_persistent_buffer(module, name)
+        ):
+            continue
+        qualified = f"{prefix}{name}" if prefix else name
+        replacement = _recompute_non_persistent_buffer(
+            module,
+            name,
+            buf,
+            device_index=device_index,
+        )
+        if replacement is None:
+            logger.debug(
+                "[GMS] Leaving non-persistent meta buffer %r unresolved",
+                qualified,
+            )
+            continue
+        _copy_tensor_attrs(buf, replacement)
+        _set_tensor_alias(alias_map, buf, replacement)
+        module._buffers[name] = replacement
+        materialized.append(qualified)
+
+    for name, submodule in module._modules.items():
+        if submodule is not None:
+            subprefix = f"{prefix}{name}." if prefix else f"{name}."
+            materialized.extend(
+                _materialize_recomputable_non_persistent_meta_buffers(
+                    submodule,
+                    device_index=device_index,
+                    alias_map=alias_map,
+                    prefix=subprefix,
+                )
+            )
+
+    return materialized
 
 
 def _materialize_runtime_meta_tensor_attrs(
@@ -1064,6 +1219,15 @@ def register_module_tensors(
     """
     referenced_allocation_ids: set[str] = set()
     for name, tensor, tensor_type in _iter_module_tensors(model):
+        if tensor_type == "buffer" and _is_recomputable_non_persistent_buffer_path(
+            model, name
+        ):
+            logger.debug(
+                "[GMS] Skipping non-persistent buffer %r - recomputed at init",
+                name,
+            )
+            continue
+
         if _is_zero_size_tensor(tensor):
             logger.debug(
                 "[GMS] Skipping zero-size %s %r - no allocation to register",
@@ -1131,6 +1295,14 @@ def materialize_module_from_gms(
 
         # Tensor attrs and buffers: clone since they may be mutated
         if tensor_type in ("tensor_attr", "buffer"):
+            if (
+                tensor_type == "buffer"
+                and hasattr(mod, "_buffers")
+                and attr in mod._buffers
+                and _is_recomputable_non_persistent_buffer(mod, attr)
+            ):
+                logger.debug("[GMS] Ignoring non-persistent buffer metadata %r", name)
+                continue
             if (
                 tensor_type == "buffer"
                 and hasattr(mod, "_buffers")
@@ -1212,6 +1384,16 @@ def materialize_module_from_gms(
             "[GMS] Materialized %d zero-size meta tensors not in metadata: %s",
             len(zero_size_meta_tensors),
             zero_size_meta_tensors[:10],
+        )
+
+    recomputed_meta_buffers = _materialize_recomputable_non_persistent_meta_buffers(
+        model, device_index=device_index, alias_map=alias_map
+    )
+    if recomputed_meta_buffers:
+        logger.info(
+            "[GMS] Recomputed %d non-persistent meta buffers: %s",
+            len(recomputed_meta_buffers),
+            recomputed_meta_buffers[:10],
         )
 
     runtime_meta_attrs = _materialize_runtime_meta_tensor_attrs(

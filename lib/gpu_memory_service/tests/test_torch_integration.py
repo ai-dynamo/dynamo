@@ -116,6 +116,25 @@ class _TinyWorkspaceModule(torch.nn.Module):
         )
 
 
+class _TinyRuntimeCacheModule(torch.nn.Module):
+    def __init__(self, device: str = "cuda") -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(
+            torch.empty(4, 4, device=device, dtype=torch.float32),
+            requires_grad=False,
+        )
+        self.register_buffer(
+            "cos_sin_cache",
+            torch.empty(3, 2, device=device, dtype=torch.float32),
+            persistent=False,
+        )
+        if device != "meta":
+            self.cos_sin_cache.copy_(self._compute_cos_sin_cache().to(device=device))
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        return torch.arange(6, dtype=torch.float32).reshape(3, 2)
+
+
 @pytest.fixture
 def running_gms(tmp_path):
     socket_path = str(tmp_path / "gms.sock")
@@ -294,6 +313,43 @@ def test_mutable_workspace_attrs_are_moved_out_of_gms(running_gms):
     assert not hasattr(materialized, "helper")
     reader.close()
     evict_gms_client_memory_manager(writer)
+
+
+def test_recomputable_non_persistent_buffers_stay_out_of_gms(running_gms):
+    socket_path = running_gms
+    writer = get_or_create_gms_client_memory_manager(
+        socket_path,
+        0,
+        RequestedLockType.RW,
+        tag="weights",
+    )
+
+    with gms_use_mem_pool("weights", torch.device("cuda", 0)):
+        model = _TinyRuntimeCacheModule()
+        expected_weight = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        model.weight.data.copy_(expected_weight.to(device="cuda"))
+
+    register_module_tensors(writer, model)
+    assert writer.commit()
+    del model
+    writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        reader.connect(RequestedLockType.RO)
+        materialized = _TinyRuntimeCacheModule(device="meta")
+        materialize_module_from_gms(reader, materialized, device_index=0)
+
+        _assert_exact_tensor_equal(
+            expected_weight, cast(torch.Tensor, materialized.weight).cpu()
+        )
+        _assert_exact_tensor_equal(
+            torch.arange(6, device="cuda", dtype=torch.float32).reshape(3, 2),
+            cast(torch.Tensor, materialized.cos_sin_cache),
+        )
+    finally:
+        reader.close(best_effort=True)
+        evict_gms_client_memory_manager(writer)
 
 
 def test_zero_size_tensors_are_skipped_then_materialized(running_gms):
