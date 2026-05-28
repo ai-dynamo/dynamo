@@ -114,9 +114,13 @@ Observability:
   egress is auto-injected — engines do nothing.
 
 Request handling:
-- Guided decoding (JSON schema / regex / grammar / choice) —
-  request shape carries `SamplingOptions::guided_decoding`
-  (`GuidedDecodingOptions`); engines forward to their underlying API
+- Guided decoding — request shape carries
+  `SamplingOptions::guided_decoding` (`GuidedDecodingOptions`);
+  engine-side coverage on the existing Python-bridged engines is:
+  vLLM and TRT-LLM forward JSON schema / regex / grammar / choice;
+  SGLang forwards JSON schema only (regex / grammar / choice are
+  silently dropped today). A new Rust engine should forward whichever
+  variants its backend supports
 - Structural tag generation — `WorkerConfig::structural_tag_{mode,
   scope, schema}` (typed enums)
 - Custom Jinja chat templates — `WorkerConfig::custom_jinja_template`
@@ -130,7 +134,7 @@ Request handling:
 
 | Feature | What's missing |
 |---------|----------------|
-| Logprob response wire | Request-side is plumbed; `generate()` does not yet emit `log_probs` / `top_logprobs` / `cum_log_probs` on `LLMEngineOutput` |
+| Logprob response wire | `PreprocessedRequest.output_options.{logprobs, prompt_logprobs}` exists on the request shape. Of the existing engines (Python-bridged through PyO3), only vLLM passes the option through to its sampling params on the unified path; SGLang and TRT-LLM unified `generate()` ignore it. No engine populates `log_probs` / `top_logprobs` / `cum_log_probs` on `LLMEngineOutput` — the response wire is open but unused |
 | Text-in-text-out mode | `ModelInput::Text` is rejected at startup — `Tokens` only |
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers; `ENCODE` disaggregation role |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |

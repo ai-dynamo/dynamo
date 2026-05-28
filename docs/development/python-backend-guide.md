@@ -97,8 +97,12 @@ Observability:
   `telemetry.engine_trace_kwargs(context)`
 
 Request handling:
-- Guided decoding (JSON schema / regex / grammar / choice) wired
-  per-engine on the request side
+- Guided decoding — wired per-engine on the request side with
+  engine-specific coverage. vLLM (`StructuredOutputsParams`) and
+  TRT-LLM (`GuidedDecodingParams`) cover JSON schema / regex / grammar
+  / choice; SGLang (`_get_guided_decoding_params`) covers JSON schema
+  only — regex / grammar / choice are silently dropped today (see the
+  SGLang-specific gaps in the package README)
 - Structural tag generation via `WorkerConfig.structural_tag_{mode,
   scope, schema}` and `serialize_structural_tag`
 - Custom Jinja chat templates via

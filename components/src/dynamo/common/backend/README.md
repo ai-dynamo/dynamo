@@ -465,11 +465,15 @@ Observability:
   See [Telemetry](#telemetry) below.
 
 Request handling:
-- **Guided decoding / structured outputs** — JSON schema / regex /
-  grammar / choice wired per-engine on the request side
-  (`build_sampling_params` → `StructuredOutputsParams` for vLLM;
-  `_get_guided_decoding_params` for SGLang; `GuidedDecodingParams`
-  for TRT-LLM)
+- **Guided decoding / structured outputs** — wired per-engine on the
+  request side, with engine-specific coverage:
+  - vLLM (`build_sampling_params` → `StructuredOutputsParams`):
+    JSON schema, regex, grammar, choice.
+  - TRT-LLM (`GuidedDecodingParams`): JSON schema, regex, grammar,
+    choice, `json_object`.
+  - SGLang (`_get_guided_decoding_params`): JSON schema only;
+    regex / grammar / choice are silently dropped (see SGLang gaps
+    below).
 - **Structural tag generation** — `WorkerConfig.structural_tag_{mode,
   scope, schema}` + `serialize_structural_tag` helper
 - **Custom Jinja chat templates** — `WorkerConfig.custom_jinja_template`
@@ -526,6 +530,7 @@ Request handling:
 | `protocol.py` Pydantic models | `EmbeddingRequest`, `DisaggPreprocessedRequest`, multimodal content types |
 | `--disagg-config` YAML override | `--disagg-config` / `--disagg-config-key` for YAML-based disagg config |
 | `--enable-rl` | RL support via `call_tokenizer_manager` route |
+| Guided-decoding constraint coverage | `_get_guided_decoding_params` forwards only `json` (and `structural_tag`); `regex` / `grammar` / `choice` are silently dropped on the unified path even though SGLang's engine accepts them |
 
 ### TRT-LLM-specific gaps
 
@@ -535,7 +540,7 @@ Request handling:
 | Multimodal processing | `MultimodalRequestProcessor` with image URL fetching (`load_tensor_from_path_or_url`, httpx) and embedding injection |
 | Image / video diffusion | `DiffusionEngine`, auto-detect pipeline from `model_index.json`, MP4 encoding, `MediaOutput`, full `DiffusionConfig` flag family |
 | Encode helper (EPD) | Remote encode via `encode_client`, NIXL tensor reading; full `_encode_and_pack_disaggregated_params` flow |
-| KV cache connector | KVBM connector config (`build_kv_connector_config`), consolidator ZMQ endpoints (`get_consolidator_endpoints`); unified rejects non-`'none'` connectors in `args.py` |
+| KV cache connector | `args.py` accepts `none` or `kvbm` (`VALID_TRTLLM_CONNECTORS`), but unified `TrtllmLLMEngine.from_args()` never calls `build_kv_connector_config()` or `get_consolidator_endpoints()` — `kvbm` is accepted at the CLI but not actually wired |
 | Per-role request handlers | Legacy `PrefillHandler` / `DecodeHandler` / `EncodeHandler` / `AggregatedHandler`; unified collapses into one `generate()` |
 | Fatal vs per-request errors | Legacy distinguishes recoverable `RequestError` (`finish_reason == "error"` branch) from fatal engine errors; unified treats them identically |
 | Backend selection | Legacy `Backend` enum supports `PYTORCH` and `AUTODEPLOY`; unified hardcodes `Backend.PYTORCH` |
