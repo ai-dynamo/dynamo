@@ -14,7 +14,6 @@ from collections.abc import AsyncGenerator
 from typing import Any, Optional
 
 from dynamo._core import Context
-from dynamo._core import backend as _backend
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import KvEventPublisher
 
@@ -93,27 +92,9 @@ class SampleLLMEngine(LLMEngine):
             default=DisaggregationMode.AGGREGATED.value,
             help="Disaggregation role: 'agg' (default), 'prefill', or 'decode'.",
         )
-        # Schema-gate policy is an operator concern, exposed for e2e tests
-        # to flip the worker into strict mode. Capability declarations are
-        # an engine-implementation guarantee and intentionally hard-coded
-        # in `start()` — never a CLI knob.
-        parser.add_argument(
-            "--unsupported-field-policy",
-            choices=["reject", "warn", "ignore"],
-            default="warn",
-            help="Schema-gate policy for forwarded fields the engine does not declare.",
-        )
         args = parser.parse_args(argv)
 
         mode = DisaggregationMode(args.disaggregation_mode)
-        # Explicit map: fails loud on an unrecognized choice rather than
-        # silently AttributeError'ing on a future multi-word variant.
-        _POLICY_BY_NAME = {
-            "reject": _backend.UnsupportedFieldPolicy.Reject,
-            "warn": _backend.UnsupportedFieldPolicy.Warn,
-            "ignore": _backend.UnsupportedFieldPolicy.Ignore,
-        }
-        policy = _POLICY_BY_NAME[args.unsupported_field_policy]
         engine = cls(
             model_name=args.model_name,
             max_tokens=args.max_tokens,
@@ -131,7 +112,6 @@ class SampleLLMEngine(LLMEngine):
             request_plane=args.request_plane,
             event_plane=args.event_plane,
             disaggregation_mode=mode,
-            unsupported_field_policy=policy,
         )
         return engine, worker_config
 

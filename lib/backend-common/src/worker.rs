@@ -30,7 +30,6 @@ use crate::disagg::DisaggregationMode;
 use crate::engine::{EngineConfig, LLMEngine};
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
-use crate::schema::UnsupportedFieldPolicy;
 
 /// Default grace-period in seconds between discovery unregister and engine drain.
 /// Mirrors the Python `_DEFAULT_GRACE_PERIOD_SECS` constant.
@@ -153,12 +152,6 @@ pub struct WorkerConfig {
     pub structural_tag_scope: StructuralTagScope,
     /// Structural tag schema strictness.
     pub structural_tag_schema: StructuralTagSchemaMode,
-    /// Policy for requests that set a `Forwarded` / `Experimental` field
-    /// the engine has not declared a matching capability for. Default
-    /// [`UnsupportedFieldPolicy::Warn`] (logs but passes the request
-    /// through) — `Reject` for strict gating, `Ignore` for the
-    /// pre-schema pass-through behavior.
-    pub unsupported_field_policy: UnsupportedFieldPolicy,
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
@@ -195,7 +188,6 @@ impl Default for WorkerConfig {
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
-            unsupported_field_policy: UnsupportedFieldPolicy::default(),
             runtime: RuntimeConfig::default(),
         }
     }
@@ -631,8 +623,6 @@ impl Worker {
         let engine_adapter = Arc::new(EngineAdapter::new(
             self.engine.clone(),
             self.config.disaggregation_mode,
-            engine_config.capabilities.clone(),
-            self.config.unsupported_field_policy,
         ));
         let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
             err(

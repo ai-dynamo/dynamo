@@ -12,7 +12,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -21,7 +20,6 @@ use futures::stream::BoxStream;
 use tokio::sync::watch;
 
 use crate::error::DynamoError;
-use crate::schema::Capability;
 
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
@@ -161,10 +159,6 @@ pub struct EngineConfig {
     pub bootstrap_port: Option<u16>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
-    /// Forwarded-field capabilities the engine consumes. A `Forwarded`
-    /// request field passes [`crate::schema::check_request`] only if
-    /// its matching [`Capability`] variant is declared here.
-    pub capabilities: HashSet<Capability>,
 }
 
 /// Inference engine trait.

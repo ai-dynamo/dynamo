@@ -12,19 +12,18 @@
 //! Exposed under `dynamo._core.backend` as `Worker`, `WorkerConfig`,
 //! `EngineConfig`, and `RuntimeConfig`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, Capability as RsCapability, ComponentSnapshot,
+    AsyncEngineContext, BackendError, ComponentSnapshot,
     DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
     ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings,
     MetricsCtx, OnPublisherReady, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
-    SnapshotPublisher as RsSnapshotPublisher, UnsupportedFieldPolicy as RsUnsupportedFieldPolicy,
-    Worker as RsWorker, WorkerConfig as RsWorkerConfig,
+    SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
     list_request_fields as rs_list_request_fields,
 };
 use dynamo_llm::local_model::runtime_config::{
@@ -63,11 +62,9 @@ fn list_request_fields() -> Vec<(String, String)> {
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "backend")?;
-    m.add_class::<Capability>()?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
     m.add_class::<RuntimeConfig>()?;
-    m.add_class::<UnsupportedFieldPolicy>()?;
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
     m.add_class::<PySnapshotPublisher>()?;
@@ -79,96 +76,6 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("dynamo._core.backend", &m)?;
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Capability — mirror of `dynamo_backend_common::schema::Capability`.
-// ---------------------------------------------------------------------------
-
-#[pyclass(
-    module = "dynamo._core.backend",
-    name = "Capability",
-    eq,
-    eq_int,
-    hash,
-    frozen
-)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Capability {
-    PromptEmbeds = 1,
-    MultiModalData = 2,
-    MmRoutingInfo = 3,
-    MmProcessorKwargs = 4,
-    RouterConfigOverride = 5,
-    AgentContext = 6,
-    ExtraArgs = 7,
-}
-
-impl From<Capability> for RsCapability {
-    fn from(value: Capability) -> Self {
-        match value {
-            Capability::PromptEmbeds => RsCapability::PromptEmbeds,
-            Capability::MultiModalData => RsCapability::MultiModalData,
-            Capability::MmRoutingInfo => RsCapability::MmRoutingInfo,
-            Capability::MmProcessorKwargs => RsCapability::MmProcessorKwargs,
-            Capability::RouterConfigOverride => RsCapability::RouterConfigOverride,
-            Capability::AgentContext => RsCapability::AgentContext,
-            Capability::ExtraArgs => RsCapability::ExtraArgs,
-        }
-    }
-}
-
-impl From<RsCapability> for Capability {
-    fn from(value: RsCapability) -> Self {
-        match value {
-            RsCapability::PromptEmbeds => Capability::PromptEmbeds,
-            RsCapability::MultiModalData => Capability::MultiModalData,
-            RsCapability::MmRoutingInfo => Capability::MmRoutingInfo,
-            RsCapability::MmProcessorKwargs => Capability::MmProcessorKwargs,
-            RsCapability::RouterConfigOverride => Capability::RouterConfigOverride,
-            RsCapability::AgentContext => Capability::AgentContext,
-            RsCapability::ExtraArgs => Capability::ExtraArgs,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// UnsupportedFieldPolicy — mirror of
-// `dynamo_backend_common::schema::UnsupportedFieldPolicy`.
-// ---------------------------------------------------------------------------
-
-#[pyclass(
-    module = "dynamo._core.backend",
-    name = "UnsupportedFieldPolicy",
-    eq,
-    eq_int
-)]
-#[derive(Copy, Clone, Debug, PartialEq, Default)]
-pub enum UnsupportedFieldPolicy {
-    Reject = 1,
-    #[default]
-    Warn = 2,
-    Ignore = 3,
-}
-
-impl From<UnsupportedFieldPolicy> for RsUnsupportedFieldPolicy {
-    fn from(value: UnsupportedFieldPolicy) -> Self {
-        match value {
-            UnsupportedFieldPolicy::Reject => RsUnsupportedFieldPolicy::Reject,
-            UnsupportedFieldPolicy::Warn => RsUnsupportedFieldPolicy::Warn,
-            UnsupportedFieldPolicy::Ignore => RsUnsupportedFieldPolicy::Ignore,
-        }
-    }
-}
-
-impl From<RsUnsupportedFieldPolicy> for UnsupportedFieldPolicy {
-    fn from(value: RsUnsupportedFieldPolicy) -> Self {
-        match value {
-            RsUnsupportedFieldPolicy::Reject => UnsupportedFieldPolicy::Reject,
-            RsUnsupportedFieldPolicy::Warn => UnsupportedFieldPolicy::Warn,
-            RsUnsupportedFieldPolicy::Ignore => UnsupportedFieldPolicy::Ignore,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +141,6 @@ impl EngineConfig {
         bootstrap_host = None,
         bootstrap_port = None,
         runtime_data = None,
-        capabilities = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -250,7 +156,6 @@ impl EngineConfig {
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
         runtime_data: Option<&Bound<'_, PyDict>>,
-        capabilities: Option<Vec<Capability>>,
     ) -> PyResult<Self> {
         let runtime_data = runtime_data
             .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
@@ -272,11 +177,6 @@ impl EngineConfig {
                 bootstrap_host,
                 bootstrap_port,
                 runtime_data,
-                capabilities: capabilities
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
             },
         })
     }
@@ -334,19 +234,6 @@ impl EngineConfig {
         pythonize(py, &self.inner.runtime_data)
             .map(|value| value.unbind())
             .map_err(to_pyerr)
-    }
-    #[getter]
-    fn capabilities(&self) -> Vec<Capability> {
-        // Sorted by integer value for stable test assertions.
-        let mut v: Vec<Capability> = self
-            .inner
-            .capabilities
-            .iter()
-            .copied()
-            .map(Capability::from)
-            .collect();
-        v.sort_unstable_by_key(|c| *c as u8);
-        v
     }
 }
 
@@ -413,7 +300,6 @@ impl WorkerConfig {
         structural_tag_mode = "off".to_string(),
         structural_tag_scope = "auto".to_string(),
         structural_tag_schema = "auto".to_string(),
-        unsupported_field_policy = UnsupportedFieldPolicy::Warn,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -438,7 +324,6 @@ impl WorkerConfig {
         structural_tag_mode: String,
         structural_tag_scope: String,
         structural_tag_schema: String,
-        unsupported_field_policy: UnsupportedFieldPolicy,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -514,15 +399,9 @@ impl WorkerConfig {
                 structural_tag_mode: st_mode,
                 structural_tag_scope: st_scope,
                 structural_tag_schema: st_schema,
-                unsupported_field_policy: unsupported_field_policy.into(),
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
             },
         })
-    }
-
-    #[getter]
-    fn unsupported_field_policy(&self) -> UnsupportedFieldPolicy {
-        self.inner.unsupported_field_policy.into()
     }
 }
 
@@ -779,24 +658,6 @@ impl LLMEngine for PyLLMEngine {
             if let Ok(cfg) = bound.extract::<EngineConfig>() {
                 return Ok(cfg.inner);
             }
-            // capabilities is optional on the duck-typed object. Missing
-            // attribute or `None` → empty. Accept any iterable yielding
-            // typed `Capability` enum values (list, tuple, set, frozenset);
-            // the Python ABC's `EngineConfig.capabilities` is a `set`.
-            // Only AttributeError is treated as "absent"; any other error
-            // (e.g. a property raising RuntimeError) propagates so the
-            // engine fails to start rather than silently registering with
-            // empty capabilities.
-            let capabilities: HashSet<RsCapability> = match opt_attr_value(bound, "capabilities")? {
-                Some(value) => value
-                    .try_iter()?
-                    .map(|item| item.and_then(|c| c.extract::<Capability>()))
-                    .collect::<PyResult<Vec<Capability>>>()?
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                None => HashSet::new(),
-            };
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
@@ -813,7 +674,6 @@ impl LLMEngine for PyLLMEngine {
                     Some(value) => depythonize(&value).map_err(to_pyerr)?,
                     None => HashMap::new(),
                 },
-                capabilities,
             })
         })
         .map_err(py_err_to_dynamo)

@@ -2672,24 +2672,6 @@ class backend:
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
 
-    class Capability:
-        # Mirrors `dynamo_backend_common::schema::Capability`. Engines declare
-        # which `Forwarded` PreprocessedRequest fields they consume.
-        PromptEmbeds: "backend.Capability"
-        MultiModalData: "backend.Capability"
-        MmRoutingInfo: "backend.Capability"
-        MmProcessorKwargs: "backend.Capability"
-        RouterConfigOverride: "backend.Capability"
-        AgentContext: "backend.Capability"
-        ExtraArgs: "backend.Capability"
-
-    class UnsupportedFieldPolicy:
-        # Mirrors `dynamo_backend_common::schema::UnsupportedFieldPolicy`.
-        # Operator-controlled gate behavior for unsupported forwarded fields.
-        Reject: "backend.UnsupportedFieldPolicy"
-        Warn: "backend.UnsupportedFieldPolicy"
-        Ignore: "backend.UnsupportedFieldPolicy"
-
     class EngineConfig:
         def __init__(
             self,
@@ -2705,7 +2687,6 @@ class backend:
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
             runtime_data: Optional[Dict[str, Any]] = None,
-            capabilities: Optional[List["backend.Capability"]] = None,
         ) -> None: ...
         @property
         def model(self) -> str: ...
@@ -2731,8 +2712,6 @@ class backend:
         def bootstrap_port(self) -> Optional[int]: ...
         @property
         def runtime_data(self) -> Dict[str, Any]: ...
-        @property
-        def capabilities(self) -> List["backend.Capability"]: ...
 
     class RuntimeConfig:
         def __init__(
@@ -2765,10 +2744,7 @@ class backend:
             structural_tag_mode: str = ...,
             structural_tag_scope: str = ...,
             structural_tag_schema: str = ...,
-            unsupported_field_policy: "backend.UnsupportedFieldPolicy" = ...,
         ) -> None: ...
-        @property
-        def unsupported_field_policy(self) -> "backend.UnsupportedFieldPolicy": ...
 
     class Worker:
         def __init__(

@@ -7,7 +7,6 @@
 //! Decode-mode disagg defers `engine.abort()` until the first chunk to
 //! avoid orphaning the prefill peer's NIXL KV transfer.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,7 +30,6 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
 use crate::engine::{GenerateContext, LLMEngine};
-use crate::schema::{Capability, UnsupportedFieldPolicy, check_request};
 
 /// Test-only override count. Compiled out of release builds — tests acquire
 /// an `OtlpExportOverride` RAII guard to force-enable the recording
@@ -137,24 +135,11 @@ impl Drop for CancelMonitorGuard {
 pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
-    /// Capabilities and policy threaded to [`check_request`].
-    capabilities: HashSet<Capability>,
-    policy: UnsupportedFieldPolicy,
 }
 
 impl EngineAdapter {
-    pub(crate) fn new(
-        engine: Arc<dyn LLMEngine>,
-        mode: DisaggregationMode,
-        capabilities: HashSet<Capability>,
-        policy: UnsupportedFieldPolicy,
-    ) -> Self {
-        Self {
-            engine,
-            mode,
-            capabilities,
-            policy,
-        }
+    pub(crate) fn new(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> Self {
+        Self { engine, mode }
     }
 }
 
@@ -221,10 +206,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
-
-        // Gate Forwarded fields before delegating, so misuse surfaces at
-        // the door rather than as a silently degraded response.
-        check_request(&request, self.policy, &self.capabilities).map_err(Error::from)?;
 
         // Per-request worker-side span. Nests under `handle_payload` (set up
         // by the runtime's NATS ingress) so the trace tree has a contiguous
@@ -510,11 +491,8 @@ mod tests {
     use futures::stream::BoxStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Test helper: adapter with no capabilities and Ignore policy so
-    /// existing tests don't trip the schema check. Schema-enforcement
-    /// tests build the adapter directly.
     fn mk_adapter(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> EngineAdapter {
-        EngineAdapter::new(engine, mode, HashSet::new(), UnsupportedFieldPolicy::Ignore)
+        EngineAdapter::new(engine, mode)
     }
 
     /// Mock engine: yields a canned list of chunks with a per-chunk delay, and
@@ -1574,88 +1552,5 @@ mod tests {
             .expect("prefill terminal with no tokens must be stamped via fallback");
         assert_eq!(link.trace_id, trace_id);
         assert_eq!(link.span_id, span_id);
-    }
-
-    // -------------------------------------------------------------------
-    // Schema enforcement (Forwarded-field gating).
-    // -------------------------------------------------------------------
-
-    /// Build a request with `prompt_embeds` set — a `Forwarded` field
-    /// that no engine consumes by default — so we can exercise the
-    /// schema check.
-    fn make_request_with_prompt_embeds() -> PreprocessedRequest {
-        let mut req = make_request(vec![1, 2, 3]);
-        req.prompt_embeds = Some("base64-tensor".to_string());
-        req
-    }
-
-    #[tokio::test]
-    async fn schema_reject_blocks_forwarded_field_without_capability() {
-        let (engine, _) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::stop()]);
-        let adapter = EngineAdapter::new(
-            engine,
-            DisaggregationMode::Aggregated,
-            HashSet::new(),
-            UnsupportedFieldPolicy::Reject,
-        );
-        let input = Context::new(make_request_with_prompt_embeds());
-        let err = adapter
-            .generate(input)
-            .await
-            .expect_err("Reject policy must reject the unsupported field");
-        let msg = err.to_string();
-        assert!(msg.contains("prompt_embeds"), "got: {msg}");
-    }
-
-    #[tokio::test]
-    async fn schema_warn_allows_forwarded_field_through() {
-        let (engine, _) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::stop()]);
-        let adapter = EngineAdapter::new(
-            engine,
-            DisaggregationMode::Aggregated,
-            HashSet::new(),
-            UnsupportedFieldPolicy::Warn,
-        );
-        let input = Context::new(make_request_with_prompt_embeds());
-        let stream = adapter
-            .generate(input)
-            .await
-            .expect("Warn policy must pass the request through");
-        let collected: Vec<_> = stream.collect().await;
-        assert!(!collected.is_empty());
-    }
-
-    #[tokio::test]
-    async fn schema_declared_capability_allows_forwarded_field() {
-        let (engine, _) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::stop()]);
-        let caps: HashSet<Capability> = [Capability::PromptEmbeds].into_iter().collect();
-        let adapter = EngineAdapter::new(
-            engine,
-            DisaggregationMode::Aggregated,
-            caps,
-            UnsupportedFieldPolicy::Reject,
-        );
-        let input = Context::new(make_request_with_prompt_embeds());
-        let stream = adapter
-            .generate(input)
-            .await
-            .expect("declared capability must allow the field even under Reject");
-        let _ = stream.collect::<Vec<_>>().await;
-    }
-
-    #[tokio::test]
-    async fn schema_ignore_policy_is_a_passthrough() {
-        let (engine, _) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::stop()]);
-        let adapter = EngineAdapter::new(
-            engine,
-            DisaggregationMode::Aggregated,
-            HashSet::new(),
-            UnsupportedFieldPolicy::Ignore,
-        );
-        let input = Context::new(make_request_with_prompt_embeds());
-        adapter
-            .generate(input)
-            .await
-            .expect("Ignore policy must pass the request through");
     }
 }

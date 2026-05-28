@@ -321,7 +321,6 @@ impl LLMEngine for MockerBackend {
             bootstrap_host: None,
             bootstrap_port: None,
             runtime_data: Default::default(),
-            capabilities: Default::default(),
         })
     }
 

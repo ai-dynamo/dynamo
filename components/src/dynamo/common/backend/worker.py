@@ -107,12 +107,6 @@ class WorkerConfig:
     structural_tag_mode: str = "off"
     structural_tag_scope: str = "auto"
     structural_tag_schema: str = "auto"
-    # See lib/backend-common/src/schema.rs for the policy semantics.
-    # `default_factory` because dataclasses treat the PyO3 enum class as
-    # a mutable type and reject it as a direct default.
-    unsupported_field_policy: _backend.UnsupportedFieldPolicy = field(
-        default_factory=lambda: _backend.UnsupportedFieldPolicy.Warn
-    )
 
     @classmethod
     def from_runtime_config(
@@ -163,13 +157,6 @@ class WorkerConfig:
                 runtime_cfg, "dyn_structural_tag_schema", "auto"
             ),
         }
-        # Operator-set policy. The runtime_cfg should expose this as a
-        # typed `UnsupportedFieldPolicy`; backends that parse a string
-        # from CLI/env are expected to convert at their args layer (see
-        # `sample_engine.from_args`).
-        policy = getattr(runtime_cfg, "unsupported_field_policy", None)
-        if policy is not None:
-            kwargs["unsupported_field_policy"] = policy
         # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
         # `serving_mode`. Skip the probe when an override is supplied so
         # backends with a foreign enum (TRT-LLM) bypass the coercer.
@@ -242,7 +229,6 @@ class Worker:
             structural_tag_mode=self.config.structural_tag_mode,
             structural_tag_scope=self.config.structural_tag_scope,
             structural_tag_schema=self.config.structural_tag_schema,
-            unsupported_field_policy=self.config.unsupported_field_policy,
             runtime=runtime_cfg,
         )
 

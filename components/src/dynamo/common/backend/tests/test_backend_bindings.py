@@ -347,62 +347,13 @@ def test_worker_config_accepts_default_model_input():
     backend.WorkerConfig(namespace="dynamo")
 
 
-def test_engine_config_capabilities_default_and_round_trip():
-    assert backend.EngineConfig(model="m").capabilities == []
-    cfg = backend.EngineConfig(
-        model="m",
-        capabilities=[backend.Capability.PromptEmbeds, backend.Capability.ExtraArgs],
-    )
-    assert cfg.capabilities == [
-        backend.Capability.PromptEmbeds,
-        backend.Capability.ExtraArgs,
-    ]
-
-
-def test_production_defaults_are_warn_and_empty():
-    """Pin the operator-facing defaults. WorkerConfig defaults to Warn so
-    existing deployments aren't broken by a Reject rollout; EngineConfig
-    defaults to no capabilities so engines must explicitly opt in to
-    consuming Forwarded fields. A silent flip here would either start
-    breaking production traffic (Warn→Reject) or silently disable the
-    gate (Warn→Ignore)."""
-    assert (
-        backend.WorkerConfig(namespace="dynamo").unsupported_field_policy
-        == backend.UnsupportedFieldPolicy.Warn
-    )
-    assert backend.EngineConfig(model="m").capabilities == []
-
-
-def test_worker_config_rejects_non_enum_policy():
-    backend.WorkerConfig(
-        namespace="dynamo",
-        unsupported_field_policy=backend.UnsupportedFieldPolicy.Reject,
-    )
-    with pytest.raises(TypeError):
-        backend.WorkerConfig(namespace="dynamo", unsupported_field_policy="bogus")
-
-
-@pytest.mark.unified
-def test_python_worker_config_from_runtime_config_propagates_policy():
-    """A runtime_cfg that exposes `unsupported_field_policy` must reach
-    the WorkerConfig; absence leaves the default `Warn` in place."""
-    from dynamo.common.backend.worker import WorkerConfig
-
-    class _RuntimeWithPolicy:
-        namespace = "ns"
-        discovery_backend = "etcd"
-        request_plane = "tcp"
-        event_plane = "nats"
-        unsupported_field_policy = backend.UnsupportedFieldPolicy.Reject
-
-    cfg = WorkerConfig.from_runtime_config(_RuntimeWithPolicy(), model_name="m")
-    assert cfg.unsupported_field_policy == backend.UnsupportedFieldPolicy.Reject
-
-    class _RuntimeWithoutPolicy:
-        namespace = "ns"
-        discovery_backend = "etcd"
-        request_plane = "tcp"
-        event_plane = "nats"
-
-    cfg = WorkerConfig.from_runtime_config(_RuntimeWithoutPolicy(), model_name="m")
-    assert cfg.unsupported_field_policy == backend.UnsupportedFieldPolicy.Warn
+def test_list_request_fields_returns_classified_pairs():
+    """Snapshot of the schema registry — the PyO3 bridge mirrors
+    REQUEST_FIELDS so tooling can introspect classifications without
+    re-encoding the list."""
+    entries = backend.list_request_fields()
+    assert entries, "registry must not be empty"
+    names = {name for name, _status in entries}
+    assert "model" in names and "token_ids" in names
+    statuses = {status for _name, status in entries}
+    assert statuses <= {"supported", "forwarded"}

@@ -41,6 +41,6 @@ pub use engine::{
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
 pub use run::run;
-pub use schema::{Capability, UnsupportedFieldPolicy, check_request, list_request_fields};
+pub use schema::list_request_fields;
 pub use snapshot_publisher::SnapshotPublisher;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};

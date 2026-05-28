@@ -14,15 +14,13 @@ SPDX-License-Identifier: Apache-2.0
 > is a thin shim over this crate.
 >
 > The [schema registry](src/schema.rs) classifies every
-> `PreprocessedRequest` field as `Supported` or `Forwarded`. The
-> adapter gates `Forwarded` fields per-request: an engine declares
-> the matching [`Capability`](src/schema.rs) variant in
-> `EngineConfig` to consume the field; otherwise the worker's
-> `unsupported_field_policy` (`Reject` / `Warn` / `Ignore`,
-> operator-controlled) decides what happens.
-> Logprobs and guided decoding live entirely inside `Supported`
-> fields (`output_options.logprobs`, `sampling_options.guided_decoding`)
-> and need no per-engine capability declaration.
+> `PreprocessedRequest` field as `Supported` (part of the unified
+> contract) or `Forwarded` (engine-specific extension). The
+> classification is documentation; the only runtime use is the
+> coverage test in [`tests/schema_coverage.rs`](tests/schema_coverage.rs)
+> which fails CI when a new field lands on `PreprocessedRequest`
+> without classification. Engines self-document which `Forwarded`
+> fields they consume in their per-backend READMEs.
 
 > **Looking for a walkthrough?** Start with
 > [Writing a Rust Unified Backend](../../docs/development/rust-backend-guide.md).

@@ -5,11 +5,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
-from dynamo._core import backend as _backend
 
 from .publisher import KvEventSource
 
@@ -107,9 +106,6 @@ class EngineConfig:
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
     runtime_data: Optional[dict[str, Any]] = None
-    # Forwarded-field capabilities consumed by the Rust schema gate; see
-    # lib/backend-common/src/schema.rs.
-    capabilities: set[_backend.Capability] = field(default_factory=set)
 
 
 class LLMEngine(ABC):
