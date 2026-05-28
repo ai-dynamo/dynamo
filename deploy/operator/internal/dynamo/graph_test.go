@@ -9834,7 +9834,7 @@ func hasVolumeMountNamed(mounts []corev1.VolumeMount, name string) bool {
 }
 
 // TestGenerateEPPDestinationRule_MUTUALPropagatesCerts is the regression test
-// for DYN-713: MUTUAL TLS mode must populate ClientCertificate, PrivateKey,
+// MUTUAL TLS mode must populate ClientCertificate, PrivateKey,
 // and CaCertificates on the generated DestinationRule, otherwise Istio's
 // validation webhook rejects the DR with "client certificate required for
 // mutual tls" / "private key required for mutual tls" and the DGD never

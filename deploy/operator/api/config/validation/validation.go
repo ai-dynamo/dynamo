@@ -175,11 +175,27 @@ func validateIngress(ingress *configv1alpha1.IngressConfiguration, fldPath *fiel
 func validateServiceMesh(sm *configv1alpha1.ServiceMeshConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	if !sm.IsEnabled() || sm.Istio == nil {
+	if !sm.IsEnabled() {
 		return allErrs
 	}
 
+	// IsEnabled() only checks Provider. If the user set provider="istio" but
+	// omitted the istio block, the controller still treats the mesh as
+	// enabled and GenerateEPPDestinationRule (graph.go) silently emits a
+	// stub DestinationRule with no Host/TrafficPolicy — useless and
+	// confusing. Fail fast here instead of letting reconcile proceed with
+	// an incomplete mesh config. Defaulting normally populates this block,
+	// but validation must not depend on the defaulter having run (e.g.,
+	// hand-written configs, programmatic loaders).
 	istioPath := fldPath.Child("istio")
+	if sm.Istio == nil {
+		allErrs = append(allErrs, field.Required(
+			istioPath,
+			`istio configuration is required when serviceMesh.provider is "istio"`,
+		))
+		return allErrs
+	}
+
 	switch sm.Istio.TLSMode {
 	case "", "SIMPLE", "DISABLE", "ISTIO_MUTUAL":
 		// No additional fields required.
