@@ -28,6 +28,22 @@ Mitigation: Review and scan skill before deployment. <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 
+## Evaluation Agent: <br>
+Claude (Anthropic) running the skill harness end-to-end, supplemented by the NV-ACES Tier 1 / NV-BASE 2.12.0 static scorer for schema, license, quality, security, and PII validation. <br>
+
+## Evaluation Tasks: <br>
+Six prompts in `evals/evals.json`, split between three positive cases the skill should trigger and act on, and three negative cases it should defer to the correct sibling skill. <br>
+- Positive: `model-download-job-stuck`, `frontend-crashloop`, `dgd-not-reconciling`. <br>
+- Negative: `neg-deploy-recipe` (defers to `dynamo-recipe-runner`), `neg-enable-kv-routing` (defers to `dynamo-router-starter`), `neg-check-interconnect-ready` (defers to `dynamo-interconnect-check`). <br>
+
+## Evaluation Metrics: <br>
+- Trigger-routing accuracy: does the prompt invoke this skill on positive cases and correctly defer on negatives? <br>
+- NV-ACES 4-dimension static score: correctness (35% weight), discoverability (25%), reliability (25%), efficiency (15%). <br>
+
+## Evaluation Results: <br>
+- Trigger-routing: 6/6 cases routed correctly (3 positive + 3 negative); part of the 24/24 across the four bring-up skills attested on PR #9782. <br>
+- NV-ACES Tier 1 / NV-BASE 2.12.0: 83.2 / 100 (Grade B). Dimension breakdown: correctness 70.0, discoverability 90.0, reliability 85.0, efficiency 100.0. <br>
+
 ## Skill Version(s): <br>
 1.2.0 (source: pyproject.toml) <br>
 
