@@ -133,19 +133,19 @@ class VllmEmbeddingHealthCheckPayload(HealthCheckPayload):
     cycle.
     """
 
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: Optional[str] = None):
         """
         Args:
-            model_name: served model name the handler will accept on
-                ``request["model"]``. The handler also falls back to
-                ``config.served_model_name`` when the field is absent,
-                so this is technically optional, but providing it keeps
-                the probe self-describing in worker logs.
+            model_name: served model name to put on ``request["model"]``.
+                Optional -- ``EmbeddingWorkerHandler.generate`` falls
+                back to ``config.served_model_name`` when the field is
+                absent. Passing it keeps the probe self-describing in
+                worker logs; omit when the caller doesn't have a
+                specific name to advertise.
         """
-        self.default_payload = {
-            "model": model_name,
-            "input": "probe",
-        }
+        self.default_payload: dict[str, Any] = {"input": "probe"}
+        if model_name is not None:
+            self.default_payload["model"] = model_name
         super().__init__()
 
     def to_dict(self) -> dict[str, Any]:

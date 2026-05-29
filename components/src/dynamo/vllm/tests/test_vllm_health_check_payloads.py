@@ -28,15 +28,12 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-# Each entry is a no-arg factory because ``VllmEmbeddingHealthCheckPayload``
-# requires a ``model_name`` -- the other three subclasses are constructed
-# with no args.
 PAYLOAD_FACTORIES = [
     pytest.param(VllmHealthCheckPayload, id="VllmHealthCheckPayload"),
     pytest.param(VllmPrefillHealthCheckPayload, id="VllmPrefillHealthCheckPayload"),
     pytest.param(VllmOmniHealthCheckPayload, id="VllmOmniHealthCheckPayload"),
     pytest.param(
-        lambda: VllmEmbeddingHealthCheckPayload(model_name="test-model"),
+        VllmEmbeddingHealthCheckPayload,
         id="VllmEmbeddingHealthCheckPayload",
     ),
 ]
@@ -44,7 +41,7 @@ PAYLOAD_FACTORIES = [
 
 @pytest.mark.parametrize("make", PAYLOAD_FACTORIES)
 def test_payload_has_marker(make):
-    assert make().to_dict()[HEALTH_CHECK_KEY] is True
+    assert make().to_dict().get(HEALTH_CHECK_KEY) is True
 
 
 @pytest.mark.parametrize("make", PAYLOAD_FACTORIES)
@@ -60,7 +57,7 @@ def test_env_override_preserves_marker(monkeypatch, make):
             }
         ),
     )
-    assert make().to_dict()[HEALTH_CHECK_KEY] is True
+    assert make().to_dict().get(HEALTH_CHECK_KEY) is True
 
 
 def test_embedding_payload_shape_matches_handler_contract():
@@ -73,11 +70,22 @@ def test_embedding_payload_shape_matches_handler_contract():
     payload = VllmEmbeddingHealthCheckPayload(
         model_name="Qwen/Qwen3-Embedding-0.6B"
     ).to_dict()
-    assert payload["model"] == "Qwen/Qwen3-Embedding-0.6B"
-    assert payload["input"] == "probe"
-    assert payload[HEALTH_CHECK_KEY] is True
+    assert payload.get("model") == "Qwen/Qwen3-Embedding-0.6B"
+    assert payload.get("input") == "probe"
+    assert payload.get(HEALTH_CHECK_KEY) is True
     # Must NOT carry chat-shaped keys -- those would make the embedding
     # handler's request shape validation fail.
     assert "token_ids" not in payload
     assert "sampling_options" not in payload
     assert "stop_conditions" not in payload
+
+
+def test_embedding_payload_omits_model_when_no_name():
+    """``model_name`` is optional. When omitted, the ``model`` key is
+    absent from the payload and the handler falls back to
+    ``config.served_model_name`` (see ``EmbeddingWorkerHandler.generate``).
+    """
+    payload = VllmEmbeddingHealthCheckPayload().to_dict()
+    assert "model" not in payload
+    assert payload.get("input") == "probe"
+    assert payload.get(HEALTH_CHECK_KEY) is True
