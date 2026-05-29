@@ -110,3 +110,26 @@ cases:
           observed), so the streamed args end at `{"location": "N` with
           no closing `"` or `}`. Dynamo drops the truncated call
           (`glm47_parser.rs:194-215`). Matches SGLang.
+  TOOLCALLING.stream.4.c:
+    description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
+      repeated close markers
+    ref: derived from nemotron-ultra-preview-tool-call-leak-repro/repro_tool_call_leak.py
+    chunks:
+    - delta_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call></tool_call></tool_call>
+    - delta_text: ''
+      finish_reason: length
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls: []
+        normal_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call></tool_call></tool_call>
+      vllm: *id001
+      sglang:
+        calls: []
+        normal_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>

@@ -62,3 +62,31 @@ cases:
         - name: get_weather
           arguments: {}
         normal_text: ''
+  TOOLCALLING.stream.4.c:
+    description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
+      repeated close markers
+    ref: derived from nemotron-ultra-preview-tool-call-leak-repro/repro_tool_call_leak.py
+    chunks:
+    - delta_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</|python_tag|></|python_tag|></|python_tag|>'
+    - delta_text: ''
+      finish_reason: length
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</|python_tag|></|python_tag|></|python_tag|>'
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''

@@ -300,7 +300,7 @@ BATCH_SUB_CASE_GROUPS = [
     ("Multi-call", ("2.a", "2.b", "2.c", "2.d", "2.e", "10")),
     (
         "Malformed / recovery",
-        ("4.a", "4.b", "4.c", "4.d", "4.e", "5.a", "5.b", "5.c", "5.d", "5.e"),
+        ("4.a", "4.b", "4.c", "4.d", "4.e", "4.f", "5.a", "5.b", "5.c", "5.d", "5.e"),
     ),
     (
         "Args",
@@ -339,7 +339,7 @@ STREAM_SUB_CASE_GROUPS = [
     ("Single-call", ("1.a", "1.b")),
     ("Multi-call", ("2",)),
     ("Partial-token", ("3",)),
-    ("Termination", ("4.a", "4.b")),
+    ("Termination", ("4.a", "4.b", "4.c")),
 ]
 
 SUB_CASE_GROUPS_BY_MODE = {
@@ -1141,7 +1141,7 @@ def _parse_subcase_descriptions(mode: str) -> dict[str, str]:
     if not TOOLCALLING_CASES_MD.exists():
         return {}
     pat = re.compile(
-        rf"\*\*`PARSER\.{re.escape(mode)}\.([0-9]+(?:\.[a-z])?)`\*\*\s+(.+)"
+        rf"\*\*`TOOLCALLING\.{re.escape(mode)}" rf"\.([0-9]+(?:\.[a-z])?)`\*\*\s+(.+)"
     )
     out: dict[str, str] = {}
     lines = TOOLCALLING_CASES_MD.read_text(encoding="utf-8").splitlines()
