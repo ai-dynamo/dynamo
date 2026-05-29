@@ -14,3 +14,6 @@
 # Redirects to networking-docs.nvidia.com which refuses connections from
 # GitHub runners (network/firewall). The page loads from a normal browser.
 ^https://docs\.nvidia\.com/networking/display/cokan10/network\+operator
+
+# Slow from GitHub runners and not part of Dynamo-owned documentation.
+^https://martinfowler\.com/articles/practical-test-pyramid\.html

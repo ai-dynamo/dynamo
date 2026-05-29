@@ -12,7 +12,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding, parse_cha
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers.mistral import MistralTokenizer
 
-from tests.parity.common import ReasoningResult
+from tests.parity.common import _FAMILY_TO_VLLM_REASONING, ReasoningResult
 
 # Harmony text-level fallback regexes. Mirror tests/parity/toolcalling/vllm.py so the
 # behavior matches when get_encoding() can't load the tiktoken vocab (e.g. CI
@@ -39,20 +39,6 @@ class _HarmonyEncodingUnavailable(RuntimeError):
     tests/parity/toolcalling/vllm.py already does for the tool-calling parity path.
     """
 
-
-_FAMILY_TO_VLLM_REASONING = {
-    "deepseek_r1": "deepseek_r1",
-    "deepseek_v3": "deepseek_v3",
-    "deepseek_v4": "deepseek_v4",
-    "gemma4": "gemma4",
-    "gpt_oss": "openai_gptoss",
-    "granite": "granite",
-    "kimi_k25": "kimi_k2",
-    "mistral": "mistral",
-    "minimax_append_think": "minimax_m2_append_think",
-    "nemotron_deci": "glm45",
-    "qwen3": "qwen3",
-}
 
 _SPECIAL_TOKEN_IDS = {
     "<think>": 1_000_001,
