@@ -127,7 +127,9 @@ fn token_ids_contain_sequence(token_ids: &[u32], marker_ids: &[u32]) -> bool {
 
 fn harmony_analysis_block_regex() -> &'static Regex {
     HARMONY_ANALYSIS_BLOCK_REGEX.get_or_init(|| {
-        Regex::new(r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis.*?<\|message\|>.*?(?:<\|end\|>|\z)")
+        Regex::new(
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis.*?<\|message\|>.*?(?:<\|call\|>|<\|end\|>|\z)",
+        )
             .expect("harmony analysis block regex")
     })
 }
@@ -586,6 +588,18 @@ mod tests {
         let text = "<|channel|>analysis<|message|>think<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny.";
         let result = parser.detect_and_parse_reasoning(text, &[]);
         assert_eq!(result.reasoning_text, "think");
+        assert_eq!(
+            result.normal_text,
+            "<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny."
+        );
+    }
+
+    #[test]
+    fn test_gpt_oss_analysis_call_does_not_swallow_commentary_handoff() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let text = "<|channel|>analysis to=functions.search <|constrain|>json<|message|>{\"q\":\"x\"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny.";
+        let result = parser.detect_and_parse_reasoning(text, &[]);
+        assert_eq!(result.reasoning_text, "{\"q\":\"x\"}");
         assert_eq!(
             result.normal_text,
             "<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny."
