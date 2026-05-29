@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Helm values override for the `snapshot` chart (deploy/helm/charts/snapshot)
+# that points the snapshot-agent at an S3-compatible bucket instead of a PVC.
+#
+# Install with:
+#   helm upgrade --install snapshot deploy/helm/charts/snapshot \
+#     -n <snapshot-namespace> --create-namespace \
+#     -f deploy/snapshot/examples/s3/snapshot-agent-values.yaml
+#
+# Prerequisites:
+#   - The bucket below already exists on the S3 endpoint.
+#   - The credentials Secret has been applied (s3-credentials.secret.yaml).
+
+storage:
+  type: s3
+  # s3 requires agent-local staging; the agent uploads after checkpoint.
+  accessMode: agentMount
+  s3:
+    # S3 endpoint (host[:port], no scheme). Examples:
+    #   "s3.us-east-1.amazonaws.com" or in-cluster "object-store.storage.svc:9000".
+    endpoint: "s3.example.com"
+    bucket: "checkpoints"
+    region: "us-east-1"
+    # Optional: namespace many checkpoint roots within one bucket.
+    prefix: ""
+    # Set false for a plain-HTTP in-cluster endpoint.
+    useSSL: true
+    # Parallel per-object transfers.
+    concurrency: 8
+    # Ephemeral on-agent staging dir (emptyDir). Sized by the node's scratch.
+    basePath: /var/lib/dynamo/checkpoints
+    # Secret (same namespace) providing AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+    credentialsSecretRef: snapshot-s3-credentials
+
+# Target GPU nodes (cuda-checkpoint is x86_64 only; the chart already enforces
+# the arch constraint). Adjust to your cluster's GPU node labels/taints.
+daemonset:
+  nodeSelector:
+    nvidia.com/gpu.present: "true"

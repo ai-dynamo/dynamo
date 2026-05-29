@@ -78,8 +78,13 @@ func buildCheckpointJob(
 	if storage, ok, err := checkpoint.StorageFromConfig(config.Checkpoint.Storage); err != nil {
 		return nil, err
 	} else if ok {
-		snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
-		snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
+		// Only mount a checkpoint PVC when one backs the storage. Object-store
+		// (s3) storage stages artifacts on the snapshot-agent's own filesystem,
+		// so the checkpoint pod carries no checkpoint volume/mount.
+		if storage.PVCName != "" {
+			snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
+			snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
+		}
 		if podTemplate.Annotations == nil {
 			podTemplate.Annotations = map[string]string{}
 		}

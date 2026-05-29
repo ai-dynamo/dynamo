@@ -353,6 +353,90 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	assertRestoreStartupGate(t, container.StartupProbe)
 }
 
+func TestPrepareRestorePodSpecS3Staging(t *testing.T) {
+	annotations := map[string]string{TargetContainersAnnotation: "main"}
+	newPod := func() *corev1.PodSpec {
+		return &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Command: []string{"run"}}}}
+	}
+	findStagingVolume := func(ps *corev1.PodSpec) *corev1.Volume {
+		for i := range ps.Volumes {
+			if ps.Volumes[i].Name == CheckpointVolumeName {
+				return &ps.Volumes[i]
+			}
+		}
+		return nil
+	}
+
+	t.Run("default is an emptyDir mounted at basePath", func(t *testing.T) {
+		ps := newPod()
+		storage := Storage{Type: StorageTypeS3, BasePath: "/var/lib/dynamo/checkpoints"}
+		if err := PrepareRestorePodSpec(ps, annotations, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+			t.Fatalf("PrepareRestorePodSpec: %v", err)
+		}
+		v := findStagingVolume(ps)
+		if v == nil || v.EmptyDir == nil {
+			t.Fatalf("expected %s emptyDir staging volume, got %#v", CheckpointVolumeName, ps.Volumes)
+		}
+		if v.PersistentVolumeClaim != nil || v.HostPath != nil {
+			t.Fatalf("expected a pure emptyDir source, got %#v", v.VolumeSource)
+		}
+		hasMount := false
+		for _, m := range ps.Containers[0].VolumeMounts {
+			if m.Name == CheckpointVolumeName && m.MountPath == storage.BasePath {
+				hasMount = true
+			}
+		}
+		if !hasMount {
+			t.Fatalf("expected %s mount at %s, got %#v", CheckpointVolumeName, storage.BasePath, ps.Containers[0].VolumeMounts)
+		}
+		if err := ValidateRestorePodSpec(ps, annotations, storage, DefaultSeccompLocalhostProfile); err != nil {
+			t.Fatalf("ValidateRestorePodSpec rejected s3 staging: %v", err)
+		}
+	})
+
+	t.Run("sizeLimit and medium tune the emptyDir", func(t *testing.T) {
+		ps := newPod()
+		storage := Storage{Type: StorageTypeS3, BasePath: "/stage", StagingSizeLimit: "100Gi", StagingMedium: "Memory"}
+		if err := PrepareRestorePodSpec(ps, annotations, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+			t.Fatalf("PrepareRestorePodSpec: %v", err)
+		}
+		v := findStagingVolume(ps)
+		if v == nil || v.EmptyDir == nil {
+			t.Fatalf("expected emptyDir, got %#v", v)
+		}
+		if v.EmptyDir.SizeLimit == nil || v.EmptyDir.SizeLimit.String() != "100Gi" {
+			t.Fatalf("expected sizeLimit 100Gi, got %#v", v.EmptyDir.SizeLimit)
+		}
+		if v.EmptyDir.Medium != corev1.StorageMediumMemory {
+			t.Fatalf("expected Memory medium, got %q", v.EmptyDir.Medium)
+		}
+	})
+
+	t.Run("hostPath override", func(t *testing.T) {
+		ps := newPod()
+		storage := Storage{Type: StorageTypeS3, BasePath: "/stage", StagingHostPath: "/mnt/nvme/ckpt"}
+		if err := PrepareRestorePodSpec(ps, annotations, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+			t.Fatalf("PrepareRestorePodSpec: %v", err)
+		}
+		v := findStagingVolume(ps)
+		if v == nil || v.HostPath == nil || v.HostPath.Path != "/mnt/nvme/ckpt" {
+			t.Fatalf("expected hostPath staging, got %#v", v)
+		}
+	})
+
+	t.Run("pvc override", func(t *testing.T) {
+		ps := newPod()
+		storage := Storage{Type: StorageTypeS3, BasePath: "/stage", StagingPVCName: "ckpt-pvc"}
+		if err := PrepareRestorePodSpec(ps, annotations, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+			t.Fatalf("PrepareRestorePodSpec: %v", err)
+		}
+		v := findStagingVolume(ps)
+		if v == nil || v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != "ckpt-pvc" {
+			t.Fatalf("expected pvc staging, got %#v", v)
+		}
+	})
+}
+
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) {
 	livenessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{

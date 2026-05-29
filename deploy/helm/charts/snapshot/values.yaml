@@ -30,8 +30,10 @@ openshift:
 
 # Storage configuration for checkpoints
 storage:
-  # Storage type stays snapshot-owned for future backend expansion.
-  # Only pvc is implemented today.
+  # Storage backend: "pvc" (shared filesystem volume) or "s3" (any
+  # S3-compatible object store). With s3, the agent stages artifacts on its own
+  # filesystem (storage.s3.basePath, an emptyDir) and uploads the tree to the
+  # bucket; restore downloads it back before CRIU restore.
   type: pvc
 
   # How snapshot-agent accesses checkpoint storage:
@@ -67,9 +69,53 @@ storage:
     # into checkpoint/restore workload pods at the same path.
     basePath: /checkpoints
 
-  # Reserved for future snapshot-owned backends. Unsupported today.
+  # S3-compatible object store configuration (when type=s3). Requires
+  # storage.accessMode=agentMount. The endpoint, bucket, and (non-secret)
+  # connection details live here; credentials are projected from a Secret via
+  # storage.s3.credentialsSecretRef so they never enter the ConfigMap.
   s3:
-    uri: ""
+    # S3 endpoint host[:port] (scheme optional), e.g. "s3.us-east-1.amazonaws.com"
+    # or an in-cluster Service like "object-store.storage.svc:9000".
+    endpoint: ""
+    # Bucket that holds checkpoint artifacts. Must already exist.
+    bucket: ""
+    # Optional region label (defaults server-side).
+    region: ""
+    # Optional key prefix within the bucket, letting one bucket host several
+    # independent checkpoint roots. Artifacts are keyed
+    # "<prefix>/<checkpointId>/versions/<n>/...".
+    prefix: ""
+    # Use TLS for the endpoint. Set false for a plain-HTTP in-cluster endpoint.
+    useSSL: true
+    # Addressing style. Default (false) uses virtual-hosted (bucket DNS) style;
+    # set true for endpoints that require path-style addressing.
+    forcePathStyle: false
+    # Parallel per-object transfers (0 uses the built-in default of 8).
+    concurrency: 8
+    # Agent-local staging directory where CRIU writes before upload and reads
+    # after download. Backed by an emptyDir on the agent pod (ephemeral; the
+    # durable copy lives in the bucket).
+    basePath: /var/lib/dynamo/checkpoints
+    # Name of a Secret in this namespace providing AWS_ACCESS_KEY_ID and
+    # AWS_SECRET_ACCESS_KEY (and optionally AWS_SESSION_TOKEN). Projected into
+    # the agent container via envFrom. Required for s3.
+    credentialsSecretRef: ""
+    # Staging volume for the agent's checkpoint artifacts (mounted at basePath).
+    # It must hold a full checkpoint artifact; size it for your largest model.
+    # Defaults to an emptyDir backed by node ephemeral storage. For artifacts
+    # that exceed node ephemeral storage, override with a node hostPath (e.g.
+    # local NVMe) or an existing PVC. The same shape is available on the
+    # operator (checkpoint.storage.s3.staging) for restore pods.
+    staging:
+      # emptyDir sizeLimit, e.g. "200Gi". Empty uses the node default (and a
+      # runaway artifact can trigger node DiskPressure — set this in production).
+      sizeLimit: ""
+      # emptyDir medium: "" (disk, recommended) or "Memory" (tmpfs, RAM-backed).
+      medium: ""
+      # Override the emptyDir with a node host path (e.g. "/mnt/nvme/checkpoints").
+      hostPath: ""
+      # Override the emptyDir with an existing PVC.
+      pvcName: ""
 
   # Reserved for future snapshot-owned backends. Unsupported today.
   oci:

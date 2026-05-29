@@ -178,6 +178,7 @@ data:
       {{- with .Values.checkpoint.storage }}
       {{- if .type }}
       {{- $pvc := .pvc | default dict }}
+      {{- $s3 := .s3 | default dict }}
       storage:
         type: {{ .type | quote }}
         {{- if eq .type "pvc" }}
@@ -195,6 +196,37 @@ data:
           {{- end }}
           {{- if $pvc.accessMode }}
           accessMode: {{ $pvc.accessMode | quote }}
+          {{- end }}
+        {{- else if eq .type "s3" }}
+        s3:
+          # basePath is the agent-local staging directory stamped onto workload
+          # pods. It must match snapshot.storage.s3.basePath on the agent. The
+          # S3 endpoint, bucket, and credentials are configured on the agent.
+          basePath: {{ required "checkpoint.storage.s3.basePath is required when checkpoint.storage.type=s3" $s3.basePath | quote }}
+          {{- if $s3.bucket }}
+          bucket: {{ $s3.bucket | quote }}
+          {{- end }}
+          {{- if $s3.endpoint }}
+          endpoint: {{ $s3.endpoint | quote }}
+          {{- end }}
+          {{- if $s3.prefix }}
+          prefix: {{ $s3.prefix | quote }}
+          {{- end }}
+          {{- $staging := $s3.staging | default dict }}
+          {{- if or $staging.sizeLimit $staging.medium $staging.pvcName $staging.hostPath }}
+          staging:
+            {{- if $staging.sizeLimit }}
+            sizeLimit: {{ $staging.sizeLimit | quote }}
+            {{- end }}
+            {{- if $staging.medium }}
+            medium: {{ $staging.medium | quote }}
+            {{- end }}
+            {{- if $staging.pvcName }}
+            pvcName: {{ $staging.pvcName | quote }}
+            {{- end }}
+            {{- if $staging.hostPath }}
+            hostPath: {{ $staging.hostPath | quote }}
+            {{- end }}
           {{- end }}
         {{- end }}
       {{- end }}
