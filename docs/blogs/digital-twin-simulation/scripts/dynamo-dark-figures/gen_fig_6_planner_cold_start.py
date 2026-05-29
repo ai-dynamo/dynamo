@@ -21,7 +21,6 @@ import math
 from pathlib import Path
 
 import plotly.graph_objects as go
-
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -45,14 +44,14 @@ MONO = TY["font_family_mono"]
 # approximated from planner_exp_3.png.
 ROWS = [
     # x=0 dropped so x can render on a log axis without an undefined point.
-    (30,    2000),
-    (60,    2100),
-    (90,    2100),
-    (120,   2500),
-    (150,   3000),
-    (180,   3400),
-    (210,  25000),
-    (240,  80000),
+    (30, 2000),
+    (60, 2100),
+    (90, 2100),
+    (120, 2500),
+    (150, 3000),
+    (180, 3400),
+    (210, 25000),
+    (240, 80000),
     (270, 120000),
     (300, 242000),
 ]
@@ -75,25 +74,33 @@ def main() -> None:
     # Light coral wash to the right of the cliff to reinforce the "SLA
     # broken" region without overpowering the data line.
     fig.add_vrect(
-        x0=CLIFF_S, x1=380,
+        x0=CLIFF_S,
+        x1=380,
         fillcolor=rgba(CORAL, 0.10),
-        line_width=0, layer="below",
+        line_width=0,
+        layer="below",
     )
 
     # Vertical dashed cliff marker.
     fig.add_shape(
         type="line",
-        x0=CLIFF_S, x1=CLIFF_S,
-        y0=0, y1=1, yref="paper",
+        x0=CLIFF_S,
+        x1=CLIFF_S,
+        y0=0,
+        y1=1,
+        yref="paper",
         line=dict(color=CORAL, width=1.4, dash="dash"),
     )
 
     # Cliff callout: Tufte block parked just inside the right half of the
     # plot near the top, with text aligned left.
     fig.add_annotation(
-        xref="x domain", yref="y domain",
-        x=0.72, y=0.93,
-        xanchor="left", yanchor="top",
+        xref="x domain",
+        yref="y domain",
+        x=0.72,
+        y=0.93,
+        xanchor="left",
+        yanchor="top",
         align="left",
         text="<b>SLA Cliff ~200 s</b>",
         showarrow=False,
@@ -101,19 +108,28 @@ def main() -> None:
         bordercolor="rgba(255,255,255,0.18)",
         borderwidth=1,
         borderpad=10,
-        font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
-                  size=12, color=TEXT_PRIMARY, weight=300),
+        font=dict(
+            family="Helvetica Neue, HelveticaNeue, sans-serif",
+            size=12,
+            color=TEXT_PRIMARY,
+            weight=300,
+        ),
     )
 
     # SLA reference line.
     fig.add_hline(
-        y=SLA_MS, line_dash="dash",
-        line_color=TEXT_MUTED, line_width=1.0,
+        y=SLA_MS,
+        line_dash="dash",
+        line_color=TEXT_MUTED,
+        line_width=1.0,
     )
     fig.add_annotation(
-        x=10, y=SLA_MS,
-        xref="x", yref="y",
-        xanchor="left", yanchor="bottom",
+        x=10,
+        y=SLA_MS,
+        xref="x",
+        yref="y",
+        xanchor="left",
+        yanchor="bottom",
         yshift=2,
         text="TTFT SLA 1500 ms",
         showarrow=False,
@@ -121,24 +137,34 @@ def main() -> None:
     )
 
     # Main curve. CPU blue keeps planner figures visually consistent.
-    fig.add_trace(go.Scatter(
-        x=xs, y=ys, mode="lines+markers",
-        line=dict(color=CPU_BLUE, width=2.2),
-        marker=dict(color=CPU_BLUE, size=10,
-                    line=dict(color=C["background"]["primary"], width=1)),
-        hovertemplate="<b>%{x} s startup</b><br>p90 TTFT %{y:,.0f} ms<extra></extra>",
-        showlegend=False,
-        name="p90 TTFT",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=xs,
+            y=ys,
+            mode="lines+markers",
+            line=dict(color=CPU_BLUE, width=2.2),
+            marker=dict(
+                color=CPU_BLUE,
+                size=10,
+                line=dict(color=C["background"]["primary"], width=1),
+            ),
+            hovertemplate="<b>%{x} s startup</b><br>p90 TTFT %{y:,.0f} ms<extra></extra>",
+            showlegend=False,
+            name="p90 TTFT",
+        )
+    )
 
     # Worst-case landmark callout: the 242 s p90 TTFT at startup=300 s.
     # Tufte block parked to the right of and below the cliff, where the
     # eye lands after tracing the steep ascent. Domain refs keep it in
     # frame regardless of axis range changes.
     fig.add_annotation(
-        x=0.98, y=0.78,
-        xref="x domain", yref="y domain",
-        xanchor="right", yanchor="top",
+        x=0.98,
+        y=0.78,
+        xref="x domain",
+        yref="y domain",
+        xanchor="right",
+        yanchor="top",
         align="left",
         text="<b>242 s p90 TTFT</b><br>at 300 s startup",
         showarrow=False,
@@ -146,27 +172,41 @@ def main() -> None:
         bordercolor="rgba(255,255,255,0.18)",
         borderwidth=1,
         borderpad=10,
-        font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
-                  size=12, color=TEXT_PRIMARY, weight=300),
+        font=dict(
+            family="Helvetica Neue, HelveticaNeue, sans-serif",
+            size=12,
+            color=TEXT_PRIMARY,
+            weight=300,
+        ),
     )
 
     fig.update_layout(
         template=dynamo_template,
         title=dict(
             text="Engine Startup Time Sensitivity Sweep",
-            x=0.02, xanchor="left",
-            y=0.95, yanchor="top",
-            font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
-                      size=42, color=TEXT_PRIMARY, weight=300),
+            x=0.02,
+            xanchor="left",
+            y=0.95,
+            yanchor="top",
+            font=dict(
+                family="Helvetica Neue, HelveticaNeue, sans-serif",
+                size=42,
+                color=TEXT_PRIMARY,
+                weight=300,
+            ),
         ),
         showlegend=False,
         margin=dict(l=80, r=40, t=180, b=80),
-        width=1240, height=560,
+        width=1240,
+        height=560,
         shapes=[
             dict(  # cliff line (re-added because update_layout shapes=[] resets template)
                 type="line",
-                x0=CLIFF_S, x1=CLIFF_S,
-                y0=0, y1=1, yref="paper",
+                x0=CLIFF_S,
+                x1=CLIFF_S,
+                y0=0,
+                y1=1,
+                yref="paper",
                 line=dict(color=CORAL, width=1.4, dash="dash"),
             ),
         ],
@@ -180,31 +220,54 @@ def main() -> None:
     #   plot_h       = 560 - 180 - 80   = 300
     #   paper_y      = 1 + (180 - 72) / 300 = 1.360
     fig.add_annotation(
-        x=-0.049, y=1.360,
-        xref="paper", yref="paper",
-        xanchor="left", yanchor="top",
+        x=-0.049,
+        y=1.360,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
         text="Qwen3-32B / TP=2 / H200 — p90 TTFT is flat through ~180 s of startup time, then crosses the SLA.",
         showarrow=False,
-        font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
-                  size=22, color=TEXT_MUTED, weight=300),
+        font=dict(
+            family="Helvetica Neue, HelveticaNeue, sans-serif",
+            size=22,
+            color=TEXT_MUTED,
+            weight=300,
+        ),
     )
 
     fig.update_xaxes(
         type="log",
-        title=dict(text="Engine Startup Time (s, log)",
-                   font=dict(family=SANS, size=11, color=TEXT_MUTED), standoff=8),
-        showline=True, linecolor=BORDER_SUBTLE, linewidth=0.5, mirror=True,
-        ticks="", showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.5,
+        title=dict(
+            text="Engine Startup Time (s, log)",
+            font=dict(family=SANS, size=11, color=TEXT_MUTED),
+            standoff=8,
+        ),
+        showline=True,
+        linecolor=BORDER_SUBTLE,
+        linewidth=0.5,
+        mirror=True,
+        ticks="",
+        showgrid=True,
+        gridcolor=BORDER_SUBTLE,
+        gridwidth=0.5,
         tickvals=[30, 60, 100, 200, 300],
         ticktext=["30", "60", "100", "200", "300"],
         range=[math.log10(25), math.log10(380)],
     )
     fig.update_yaxes(
         type="log",
-        title=dict(text="p90 TTFT (ms, log)",
-                   font=dict(family=SANS, size=11, color=TEXT_MUTED)),
-        showline=True, linecolor=BORDER_SUBTLE, linewidth=0.5, mirror=True,
-        ticks="", showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.5,
+        title=dict(
+            text="p90 TTFT (ms, log)", font=dict(family=SANS, size=11, color=TEXT_MUTED)
+        ),
+        showline=True,
+        linecolor=BORDER_SUBTLE,
+        linewidth=0.5,
+        mirror=True,
+        ticks="",
+        showgrid=True,
+        gridcolor=BORDER_SUBTLE,
+        gridwidth=0.5,
         tickvals=[1e3, 1e4, 1e5, 1e6],
         ticktext=["10³", "10⁴", "10⁵", "10⁶"],
         range=[math.log10(1000), math.log10(1e6)],

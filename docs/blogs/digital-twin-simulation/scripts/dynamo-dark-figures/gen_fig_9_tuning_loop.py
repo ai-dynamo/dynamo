@@ -17,7 +17,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import plotly.graph_objects as go
-
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -33,7 +32,7 @@ TEXT_MUTED = C["text"]["muted"]
 BORDER_SUBTLE = C["border"]["subtle"]
 NV_GREEN = C["accent"]["dynamo_green"]
 FLUORITE = C["accent"]["fluorite"]
-CPU_BLUE = C["accent"]["cpu_blue"]   # replaces emerald so we don't have two greens
+CPU_BLUE = C["accent"]["cpu_blue"]  # replaces emerald so we don't have two greens
 # Local override: design-token amethyst (#5d1682) is too dim against black;
 # use a brighter purple so the feedback loop has equal visual weight to
 # the forward pipeline.
@@ -52,11 +51,11 @@ def rgba(hex_color: str, alpha: float) -> str:
 # phase_tag is an optional temporal marker rendered as a small uppercase
 # kicker above the box; None = no tag.
 STAGES = [
-    ("Configuration Space",   "~10⁹ feasible configs",      TEXT_MUTED,  100, None),
-    ("DynoSim Wide Sweep",    "~10⁵ / hour · $0",           NV_GREEN,    300, None),
-    ("Pareto Shortlist",      "~100 candidates",            FLUORITE,    500, None),
-    ("Cluster A/B Verify",    "~10 / day · GPU $$",         CPU_BLUE,    700, "Initial Verification"),
-    ("Deployed + Telemetry",  "1 config in production",     AMETHYST,    900, "Feedback Loop"),
+    ("Configuration Space", "~10⁹ feasible configs", TEXT_MUTED, 100, None),
+    ("DynoSim Wide Sweep", "~10⁵ / hour · $0", NV_GREEN, 300, None),
+    ("Pareto Shortlist", "~100 candidates", FLUORITE, 500, None),
+    ("Cluster A/B Verify", "~10 / day · GPU $$", CPU_BLUE, 700, "Initial Verification"),
+    ("Deployed + Telemetry", "1 config in production", AMETHYST, 900, "Feedback Loop"),
 ]
 
 BOX_W = 160
@@ -80,35 +79,50 @@ def main() -> None:
             # label reads as a header attached to the box, not a free-floating
             # title.
             fig.add_annotation(
-                x=xc, y=Y_C + BOX_H / 2 + 18,
-                xref="x", yref="y",
-                xanchor="center", yanchor="bottom",
+                x=xc,
+                y=Y_C + BOX_H / 2 + 18,
+                xref="x",
+                yref="y",
+                xanchor="center",
+                yanchor="bottom",
                 text=f"<b>{phase.upper()}</b>",
                 showarrow=False,
                 font=dict(
-                    family=SANS, size=13, color=color,
+                    family=SANS,
+                    size=13,
+                    color=color,
                 ),
             )
         fig.add_shape(
             type="rect",
-            x0=xc - BOX_W / 2, x1=xc + BOX_W / 2,
-            y0=Y_C - BOX_H / 2, y1=Y_C + BOX_H / 2,
+            x0=xc - BOX_W / 2,
+            x1=xc + BOX_W / 2,
+            y0=Y_C - BOX_H / 2,
+            y1=Y_C + BOX_H / 2,
             line=dict(color=color, width=2.0),
-            fillcolor=rgba(color, 0.18) if color != TEXT_MUTED else rgba("#ffffff", 0.04),
+            fillcolor=rgba(color, 0.18)
+            if color != TEXT_MUTED
+            else rgba("#ffffff", 0.04),
             layer="above",
         )
         fig.add_annotation(
-            x=xc, y=Y_C + 12,
-            xref="x", yref="y",
-            xanchor="center", yanchor="middle",
+            x=xc,
+            y=Y_C + 12,
+            xref="x",
+            yref="y",
+            xanchor="center",
+            yanchor="middle",
             text=f"<b>{label}</b>",
             showarrow=False,
             font=dict(family=SANS, size=15, color=TEXT_PRIMARY),
         )
         fig.add_annotation(
-            x=xc, y=Y_C - 14,
-            xref="x", yref="y",
-            xanchor="center", yanchor="middle",
+            x=xc,
+            y=Y_C - 14,
+            xref="x",
+            yref="y",
+            xanchor="center",
+            yanchor="middle",
             text=sub,
             showarrow=False,
             font=dict(family=MONO, size=12, color=color),
@@ -122,20 +136,30 @@ def main() -> None:
         x_to = STAGES[i + 1][3] - BOX_W / 2 - ARROW_GAP
         fig.add_shape(
             type="line",
-            x0=x_from, x1=x_to,
-            y0=Y_C, y1=Y_C,
+            x0=x_from,
+            x1=x_to,
+            y0=Y_C,
+            y1=Y_C,
             line=dict(color=TEXT_SECONDARY, width=1.8),
             layer="above",
         )
         arrow_x_targets.append(x_to)
         arrow_y_targets.append(Y_C)
-    fig.add_trace(go.Scatter(
-        x=arrow_x_targets, y=arrow_y_targets,
-        mode="markers",
-        marker=dict(symbol="triangle-right", size=14,
-                    color=TEXT_SECONDARY, line=dict(width=0)),
-        hoverinfo="skip", showlegend=False,
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=arrow_x_targets,
+            y=arrow_y_targets,
+            mode="markers",
+            marker=dict(
+                symbol="triangle-right",
+                size=14,
+                color=TEXT_SECONDARY,
+                line=dict(width=0),
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
 
     # Feedback loop: stage 5 -> stage 2 (calibration). Squared polyline
     # with two right angles (down from Deployed, left across the figure,
@@ -143,10 +167,10 @@ def main() -> None:
     # the post reads with consistent "wired return path" semantics.
     # Dashed amethyst, thicker than the forward arrows so the feedback
     # channel has its own visual weight while staying secondary.
-    x_start = STAGES[4][3]                  # Deployed + Telemetry center
-    x_end = STAGES[1][3]                    # DynoSim Grid Search center
-    y_box_bottom = Y_C - BOX_H / 2          # 14
-    y_loop = y_box_bottom - 50              # -36 -- depth of the loop
+    x_start = STAGES[4][3]  # Deployed + Telemetry center
+    x_end = STAGES[1][3]  # DynoSim Grid Search center
+    y_box_bottom = Y_C - BOX_H / 2  # 14
+    y_loop = y_box_bottom - 50  # -36 -- depth of the loop
     arc_path = (
         f"M {x_start},{y_box_bottom} "
         f"L {x_start},{y_loop} "
@@ -161,21 +185,29 @@ def main() -> None:
     )
     # Arrow tip sits visibly below DynoSim's box bottom so the arrowhead
     # is clearly "pointing up into the box" rather than buried inside it.
-    fig.add_trace(go.Scatter(
-        x=[x_end], y=[y_box_bottom - 8],
-        mode="markers",
-        marker=dict(symbol="triangle-up", size=14,
-                    color=AMETHYST, line=dict(width=0)),
-        hoverinfo="skip", showlegend=False,
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=[x_end],
+            y=[y_box_bottom - 8],
+            mode="markers",
+            marker=dict(
+                symbol="triangle-up", size=14, color=AMETHYST, line=dict(width=0)
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
     # "TELEMETRY" kicker above the dashed loop -- names what flows back from
     # production and lists concrete signals so the loop reads as a data path
     # rather than an abstract arrow.
-    loop_mid_x = (x_start + x_end) / 2          # midpoint of the dashed segment
+    loop_mid_x = (x_start + x_end) / 2  # midpoint of the dashed segment
     fig.add_annotation(
-        x=loop_mid_x, y=y_loop + 6,
-        xref="x", yref="y",
-        xanchor="center", yanchor="bottom",
+        x=loop_mid_x,
+        y=y_loop + 6,
+        xref="x",
+        yref="y",
+        xanchor="center",
+        yanchor="bottom",
         text="<b>TELEMETRY</b> · TTFT · TPOT · cache hit rate · queue depth",
         showarrow=False,
         font=dict(family=SANS, size=11, color=AMETHYST),
@@ -185,9 +217,12 @@ def main() -> None:
     # dark background, thin white border, white text. Centered on the dashed
     # loop midpoint (not the figure midpoint) so it visually anchors the loop.
     fig.add_annotation(
-        x=loop_mid_x, y=y_loop - 20,
-        xref="x", yref="y",
-        xanchor="center", yanchor="top",
+        x=loop_mid_x,
+        y=y_loop - 20,
+        xref="x",
+        yref="y",
+        xanchor="center",
+        yanchor="top",
         text="<b>Calibration</b> · production telemetry refines DynoSim's timing model",
         showarrow=False,
         bgcolor="rgba(20,20,20,0.65)",
@@ -196,7 +231,9 @@ def main() -> None:
         borderpad=10,
         font=dict(
             family="Helvetica Neue, HelveticaNeue, sans-serif",
-            size=14, color=TEXT_PRIMARY, weight=300,
+            size=14,
+            color=TEXT_PRIMARY,
+            weight=300,
         ),
     )
 
@@ -204,27 +241,38 @@ def main() -> None:
         template=dynamo_template,
         title=dict(
             text="DynoSim in Prod",
-            x=0.02, xanchor="left",
-            y=0.95, yanchor="top",
+            x=0.02,
+            xanchor="left",
+            y=0.95,
+            yanchor="top",
             font=dict(
                 family="Helvetica Neue, HelveticaNeue, sans-serif",
-                size=42, color=TEXT_PRIMARY, weight=300,
+                size=42,
+                color=TEXT_PRIMARY,
+                weight=300,
             ),
         ),
         showlegend=False,
         margin=dict(l=40, r=40, t=180, b=40),
-        width=1240, height=520,
+        width=1240,
+        height=520,
         paper_bgcolor=BG,
         plot_bgcolor=BG,
         xaxis=dict(
             range=[0, 1000],
-            showgrid=False, zeroline=False,
-            showticklabels=False, ticks="", showline=False,
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            ticks="",
+            showline=False,
         ),
         yaxis=dict(
             range=[-80, 165],
-            showgrid=False, zeroline=False,
-            showticklabels=False, ticks="", showline=False,
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            ticks="",
+            showline=False,
         ),
     )
 
@@ -238,14 +286,19 @@ def main() -> None:
     #   plot_h       = 520 - 180 - 40   = 300
     #   paper_y      = 1 + (180 - 70) / 300 = 1.367
     fig.add_annotation(
-        x=-0.013, y=1.367,
-        xref="paper", yref="paper",
-        xanchor="left", yanchor="top",
+        x=-0.013,
+        y=1.367,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
         text="Sweep in sim, verify on the cluster, calibrate from telemetry.",
         showarrow=False,
         font=dict(
             family="Helvetica Neue, HelveticaNeue, sans-serif",
-            size=22, color=TEXT_MUTED, weight=300,
+            size=22,
+            color=TEXT_MUTED,
+            weight=300,
         ),
     )
 

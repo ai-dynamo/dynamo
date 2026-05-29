@@ -54,7 +54,9 @@ def mape(pred: list[float], truth: list[float]) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep-c4", action="store_true")
-    parser.add_argument("--out", default=str(HERE.parent / "images" / "fig-3-fidelity.svg"))
+    parser.add_argument(
+        "--out", default=str(HERE.parent / "images" / "fig-3-fidelity.svg")
+    )
     args = parser.parse_args()
 
     data = load_csv(HERE / "data.csv")
@@ -71,42 +73,67 @@ def main() -> None:
 
     # Compute MAPE ranges across the 4 metrics, used in legend labels.
     metrics = ["tps_gpu", "tps_user", "tpot_ms", "ttft_ms"]
-    mocker_mapes = [mape([data["mocker"][c][m] for c in concs],
-                         [data["hardware"][c][m] for c in concs]) for m in metrics]
-    aic_mapes = [mape([data["aic"][c][m] for c in concs],
-                      [data["hardware"][c][m] for c in concs]) for m in metrics]
+    mocker_mapes = [
+        mape(
+            [data["mocker"][c][m] for c in concs],
+            [data["hardware"][c][m] for c in concs],
+        )
+        for m in metrics
+    ]
+    aic_mapes = [
+        mape(
+            [data["aic"][c][m] for c in concs], [data["hardware"][c][m] for c in concs]
+        )
+        for m in metrics
+    ]
     mocker_lo, mocker_hi = min(mocker_mapes), max(mocker_mapes)
-    aic_lo,    aic_hi    = min(aic_mapes),    max(aic_mapes)
+    aic_lo, aic_hi = min(aic_mapes), max(aic_mapes)
 
     # All series solid -- color (white/green/blue) carries the distinction.
     # Lines are thin so markers carry the data and the line just traces order.
     SOURCE_STYLE = {
-        "hardware": dict(name="Hardware",
-                         color=text_primary,           dash="solid", symbol="circle",  width=1.6),
-        "mocker":   dict(name=f"DynoSim · MAPE {mocker_lo:.0f}–{mocker_hi:.0f}%",
-                         color=accent["dynamo_green"], dash="solid", symbol="diamond", width=1.4),
-        "aic":      dict(name=f"AIC · MAPE {aic_lo:.0f}–{aic_hi:.0f}%",
-                         color=accent["cpu_blue"],     dash="solid", symbol="square",  width=1.4),
+        "hardware": dict(
+            name="Hardware",
+            color=text_primary,
+            dash="solid",
+            symbol="circle",
+            width=1.6,
+        ),
+        "mocker": dict(
+            name=f"DynoSim · MAPE {mocker_lo:.0f}–{mocker_hi:.0f}%",
+            color=accent["dynamo_green"],
+            dash="solid",
+            symbol="diamond",
+            width=1.4,
+        ),
+        "aic": dict(
+            name=f"AIC · MAPE {aic_lo:.0f}–{aic_hi:.0f}%",
+            color=accent["cpu_blue"],
+            dash="solid",
+            symbol="square",
+            width=1.4,
+        ),
     }
     SOURCE_ORDER = ["hardware", "mocker", "aic"]
 
     PANELS = [
-        ("tps_gpu",  "Output TPS / GPU"),
+        ("tps_gpu", "Output TPS / GPU"),
         ("tps_user", "Output TPS / User"),
-        ("tpot_ms",  "Mean TPOT (ms)"),
-        ("ttft_ms",  "Mean TTFT (ms)"),
+        ("tpot_ms", "Mean TPOT (ms)"),
+        ("ttft_ms", "Mean TTFT (ms)"),
     ]
     # Y-axis ranges chosen so 0 is always on the grid and tick spacing
     # yields a clean evenly-divided grid for each panel.
     YAXIS = {
-        (1, 1): dict(range=[0,  800], dtick=200),
-        (1, 2): dict(range=[0,  100], dtick=25),
-        (2, 1): dict(range=[0,   25], dtick=5),
-        (2, 2): dict(range=[0,  250], dtick=50),
+        (1, 1): dict(range=[0, 800], dtick=200),
+        (1, 2): dict(range=[0, 100], dtick=25),
+        (2, 1): dict(range=[0, 25], dtick=5),
+        (2, 2): dict(range=[0, 250], dtick=50),
     }
 
     fig = make_subplots(
-        rows=2, cols=2,
+        rows=2,
+        cols=2,
         horizontal_spacing=0.10,
         vertical_spacing=0.14,
     )
@@ -119,18 +146,23 @@ def main() -> None:
             ys = [data[src][c][metric] for c in concs]
             fig.add_trace(
                 go.Scatter(
-                    x=concs, y=ys,
+                    x=concs,
+                    y=ys,
                     mode="lines+markers",
                     name=s["name"],
                     legendgroup=src,
                     showlegend=(i == 0),
                     line=dict(color=s["color"], dash=s["dash"], width=s["width"]),
-                    marker=dict(symbol=s["symbol"], size=8,
-                                color=s["color"],
-                                line=dict(color=colors["background"]["primary"], width=1.0)),
+                    marker=dict(
+                        symbol=s["symbol"],
+                        size=8,
+                        color=s["color"],
+                        line=dict(color=colors["background"]["primary"], width=1.0),
+                    ),
                     hovertemplate=f"<b>{src.title()}</b><br>c=%{{x}}<br>%{{y:.2f}}<extra></extra>",
                 ),
-                row=row, col=col,
+                row=row,
+                col=col,
             )
 
     # Inline panel label, top-left of each panel — small, muted, regular weight.
@@ -139,9 +171,12 @@ def main() -> None:
     for i, (_metric, label) in enumerate(PANELS):
         idx = "" if i == 0 else str(i + 1)
         fig.add_annotation(
-            x=0.0, y=1.04,
-            xref=f"x{idx} domain", yref=f"y{idx} domain",
-            xanchor="left", yanchor="bottom",
+            x=0.0,
+            y=1.04,
+            xref=f"x{idx} domain",
+            yref=f"y{idx} domain",
+            xanchor="left",
+            yanchor="bottom",
             text=label,
             showarrow=False,
             font=dict(family=typo["font_family"], size=11, color=text_muted),
@@ -152,24 +187,31 @@ def main() -> None:
         template=dynamo_template,
         title=dict(
             text="Concurrency Sweep: DynoSim, AIC, Hardware",
-            x=0.02, xanchor="left",
-            y=0.96, yanchor="top",
+            x=0.02,
+            xanchor="left",
+            y=0.96,
+            yanchor="top",
             font=dict(
                 family="Helvetica Neue, HelveticaNeue, sans-serif",
-                size=42, color=text_primary, weight=300,
+                size=42,
+                color=text_primary,
+                weight=300,
             ),
         ),
         legend=dict(
             orientation="h",
-            x=1.0, xanchor="right",
-            y=-0.14, yanchor="top",
+            x=1.0,
+            xanchor="right",
+            y=-0.14,
+            yanchor="top",
             bgcolor="rgba(0,0,0,0)",
             font=dict(family=typo["font_family"], size=12, color=text_secondary),
             itemsizing="constant",
             tracegroupgap=18,
         ),
         margin=dict(l=80, r=40, t=130, b=70),
-        width=1240, height=620,
+        width=1240,
+        height=620,
         shapes=[],
     )
 
@@ -183,14 +225,19 @@ def main() -> None:
     #   paper_y      = 1 + (130 - 68.8) / 420 = 1.146
     #   paper_x = (title_x*W - margin_l)/plot_w = (0.02*1240 - 80)/1120 = -0.049
     fig.add_annotation(
-        x=-0.049, y=1.146,
-        xref="paper", yref="paper",
-        xanchor="left", yanchor="top",
+        x=-0.049,
+        y=1.146,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
         text="B200 / MiniMax-M2.5 / TP=4 / ISL/OSL 1K/1K — DynoSim closes the AIC–hardware gap to ~50 ms on TTFT.",
         showarrow=False,
         font=dict(
             family="Helvetica Neue, HelveticaNeue, sans-serif",
-            size=22, color=text_muted, weight=300,
+            size=22,
+            color=text_muted,
+            weight=300,
         ),
     )
 
@@ -217,7 +264,8 @@ def main() -> None:
                 showgrid=True,
                 gridcolor=colors["border"]["subtle"],
                 gridwidth=0.5,
-                row=r, col=c,
+                row=r,
+                col=c,
             )
             yaxis_cfg = YAXIS[(r, c)]
             fig.update_yaxes(
@@ -232,7 +280,8 @@ def main() -> None:
                 showgrid=True,
                 gridcolor=colors["border"]["subtle"],
                 gridwidth=0.5,
-                row=r, col=c,
+                row=r,
+                col=c,
             )
 
     # Scheduler-simulation callout, parked in the bottom-right corner of
@@ -250,20 +299,24 @@ def main() -> None:
     # overlay and the x-axis tick set stays at concs=[8,16,32,64]. Shape
     # coords are RAW data values; Plotly applies the log10 transform
     # automatically when xref binds to a log axis.
-    BRACKET_X_SPINE = 68    # just right of the c=64 data markers
-    BRACKET_X_FOOT  = 66    # ~5px to the left of the spine on the log axis
-    AIC_Y           = 167.8
-    HW_Y            = 220.4
+    BRACKET_X_SPINE = 68  # just right of the c=64 data markers
+    BRACKET_X_FOOT = 66  # ~5px to the left of the spine on the log axis
+    AIC_Y = 167.8
+    HW_Y = 220.4
     bracket_line = dict(color="rgba(255,255,255,0.85)", width=2.0)
     for x0, y0, x1, y1 in (
-        (BRACKET_X_SPINE, HW_Y,  BRACKET_X_FOOT,  HW_Y),   # top foot, opens left
-        (BRACKET_X_SPINE, HW_Y,  BRACKET_X_SPINE, AIC_Y),  # spine on the right
-        (BRACKET_X_SPINE, AIC_Y, BRACKET_X_FOOT,  AIC_Y),  # bottom foot, opens left
+        (BRACKET_X_SPINE, HW_Y, BRACKET_X_FOOT, HW_Y),  # top foot, opens left
+        (BRACKET_X_SPINE, HW_Y, BRACKET_X_SPINE, AIC_Y),  # spine on the right
+        (BRACKET_X_SPINE, AIC_Y, BRACKET_X_FOOT, AIC_Y),  # bottom foot, opens left
     ):
         fig.add_shape(
             type="line",
-            xref="x4", yref="y4",
-            x0=x0, y0=y0, x1=x1, y1=y1,
+            xref="x4",
+            yref="y4",
+            x0=x0,
+            y0=y0,
+            x1=x1,
+            y1=y1,
             line=bracket_line,
             layer="above",
         )
@@ -271,19 +324,24 @@ def main() -> None:
     # Log range covers concs=[8..64] plus a tiny pad on the right for the
     # bracket spine at x=68.
     import math
+
     fig.update_xaxes(
         range=[math.log10(7.2), math.log10(74)],
-        row=2, col=2,
+        row=2,
+        col=2,
     )
 
     fig.add_annotation(
-        xref="x4 domain", yref="y4 domain",
-        x=0.98, y=0.04,
-        xanchor="right", yanchor="bottom",
+        xref="x4 domain",
+        yref="y4 domain",
+        x=0.98,
+        y=0.04,
+        xanchor="right",
+        yanchor="bottom",
         align="left",
         text="<b>Scheduler Simulation</b><br>"
-             "DynoSim's scheduler effects close<br>"
-             "the gap between AIC and hardware",
+        "DynoSim's scheduler effects close<br>"
+        "the gap between AIC and hardware",
         showarrow=False,
         bgcolor="rgba(20,20,20,0.65)",
         bordercolor="rgba(255,255,255,0.18)",
@@ -291,7 +349,9 @@ def main() -> None:
         borderpad=10,
         font=dict(
             family="Helvetica Neue, HelveticaNeue, sans-serif",
-            size=12, color=text_primary, weight=300,
+            size=12,
+            color=text_primary,
+            weight=300,
         ),
     )
 
@@ -306,7 +366,7 @@ def main() -> None:
     for metric, label in PANELS:
         truth = [data["hardware"][c][metric] for c in concs]
         m_m = mape([data["mocker"][c][metric] for c in concs], truth)
-        m_a = mape([data["aic"][c][metric]    for c in concs], truth)
+        m_a = mape([data["aic"][c][metric] for c in concs], truth)
         print(f"{label:<18} {m_m:>12.2f}% {m_a:>11.2f}%")
 
 
