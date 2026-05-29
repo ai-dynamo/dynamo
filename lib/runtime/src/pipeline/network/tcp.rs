@@ -217,7 +217,8 @@ mod tests {
 
         // [client] Assume to receive the connection info from the server via the request plane,
         // create the request stream and dial in to the server
-        let context_downstream = Context::with_id((), context_upstream.id().to_string());
+        let context_downstream =
+            Context::with_id_and_metadata((), context_upstream.id().to_string(), Default::default());
 
         let mut recv_stream = client::TcpClient::create_request_stream(
             context_downstream.context(),
