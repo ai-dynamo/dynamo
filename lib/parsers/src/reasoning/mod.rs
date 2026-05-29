@@ -39,6 +39,11 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("basic", ReasoningParserType::Basic);
         map.insert("gpt_oss", ReasoningParserType::GptOss);
         map.insert("qwen3", ReasoningParserType::Qwen);
+        // Poolside Laguna XS.2 uses `<think>...</think>`. Unlike vLLM's
+        // Poolside parser, Dynamo does not scan the whole prompt for
+        // `</think>`; prompt-injected `<think>` is handled by
+        // `ReasoningParser::set_in_reasoning(true)`.
+        map.insert("poolside_v1", ReasoningParserType::PoolsideV1);
         // DeepSeek-V4 uses the same `<think>` / `</think>` delimiters as Qwen
         // (confirmed against deepseek-ai/DeepSeek-V4-Pro's encoding_dsv4.py)
         // so it delegates to the same `BasicReasoningParser` config today. We
@@ -153,6 +158,10 @@ pub enum ReasoningParserType {
     Basic,
     GptOss,
     Qwen,
+    /// Poolside Laguna XS.2. Same `<think>` / `</think>` delimiters as Qwen,
+    /// no force-reasoning. Kept as a dedicated variant so Poolside-specific
+    /// behavior can diverge without changing Qwen.
+    PoolsideV1,
     /// DeepSeek-V4-Pro / V4-Flash. Currently uses the same `<think>` /
     /// `</think>` `BasicReasoningParser` config as Qwen (V4 never appends
     /// `<think>` in the completion — the chat template always pre-injects it,
@@ -217,6 +226,9 @@ impl ReasoningParserType {
                 parser: Box::new(basic_parser),
             },
             ReasoningParserType::Qwen => ReasoningParserWrapper {
+                parser: Box::new(basic_parser),
+            },
+            ReasoningParserType::PoolsideV1 => ReasoningParserWrapper {
                 parser: Box::new(basic_parser),
             },
             // Same `<think>` / `</think>` config as Qwen today; kept as a
@@ -316,6 +328,7 @@ mod tests {
             "basic",
             "gpt_oss",
             "qwen3",
+            "poolside_v1",
             "deepseek_v4",
             "deepseek-v4",
             "deepseekv4",
@@ -683,5 +696,32 @@ mod tests {
         }
         assert_eq!(all_reasoning, "Weighing options.");
         assert_eq!(all_content, "Beijing is sunny.");
+    }
+
+    #[test]
+    fn test_poolside_v1_detect_and_parse() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("poolside_v1");
+        let result = parser.detect_and_parse_reasoning("<think>checking</think>answer", &[]);
+
+        assert_eq!(result.reasoning_text, "checking");
+        assert_eq!(result.normal_text, "answer");
+    }
+
+    #[test]
+    fn test_poolside_v1_streaming_with_set_in_reasoning() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("poolside_v1");
+        parser.set_in_reasoning(true);
+
+        let tokens = &["chec", "king", "</think>", "answer"];
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        for token in tokens {
+            let r = parser.parse_reasoning_streaming_incremental(token, &[]);
+            all_reasoning.push_str(&r.reasoning_text);
+            all_content.push_str(&r.normal_text);
+        }
+
+        assert_eq!(all_reasoning, "checking");
+        assert_eq!(all_content, "answer");
     }
 }

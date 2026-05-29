@@ -2207,13 +2207,15 @@ impl OpenAIPreprocessor {
                         builder = builder.tool_call_parser(parser);
                     }
                 }
-                Some(ChatCompletionToolChoiceOption::Auto)
-                | Some(ChatCompletionToolChoiceOption::None)
-                | None => {
-                    // Traditional marker-based jail for auto/none/unspecified
+                Some(ChatCompletionToolChoiceOption::Auto) | None => {
+                    // Traditional marker-based jail for auto/unspecified.
                     if let Some(parser) = tool_call_parser {
                         builder = builder.tool_call_parser(parser);
                     }
+                }
+                Some(ChatCompletionToolChoiceOption::None) => {
+                    // vLLM-style tool parsers are disabled when the request
+                    // explicitly says tool_choice="none".
                 }
             }
         }

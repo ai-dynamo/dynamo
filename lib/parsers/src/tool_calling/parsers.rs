@@ -53,6 +53,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("jamba", ToolCallConfig::jamba());
         map.insert("minimax_m2", ToolCallConfig::minimax_m2());
         map.insert("glm47", ToolCallConfig::glm47());
+        map.insert("poolside_v1", ToolCallConfig::poolside_v1());
         map.insert("kimi_k2", ToolCallConfig::kimi_k2());
         map.insert("gemma4", ToolCallConfig::gemma4());
         map.insert("gemma-4", ToolCallConfig::gemma4());
@@ -341,6 +342,7 @@ mod tests {
             "nemotron_nano",
             "minimax_m2",
             "glm47",
+            "poolside_v1",
             "kimi_k2",
             "gemma4",
             "gemma-4",
@@ -3536,5 +3538,161 @@ weather forecasting
         assert_eq!(name, "batch_process");
         assert!(args["items"].is_array());
         assert_eq!(args["items"], serde_json::json!([1, 2, 3, 4, 5]));
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_simple_tool_call() {
+        let input = r#"<tool_call>search
+<arg_key>query</arg_key><arg_value>laguna xs.2</arg_value></tool_call>"#;
+
+        let (result, content) = detect_and_parse_tool_call(input, Some("poolside_v1"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(content, None);
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "search");
+        assert_eq!(args["query"], "laguna xs.2");
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_preserves_json_looking_string_args() {
+        let input = r#"<tool_call>write_file
+<arg_key>content</arg_key><arg_value>{"literal": true, "count": 3}</arg_value></tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "write_file".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"}
+                }
+            })),
+            strict: None,
+        }];
+
+        let (result, _) = detect_and_parse_tool_call(input, Some("poolside_v1"), Some(&tools))
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "write_file");
+        assert_eq!(args["content"], r#"{"literal": true, "count": 3}"#);
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_deserializes_non_string_json_args() {
+        let input = r#"<tool_call>search
+<arg_key>filters</arg_key><arg_value>{"category": "books", "limit": 2}</arg_value></tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "search".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filters": {"type": "object"}
+                }
+            })),
+            strict: None,
+        }];
+
+        let (result, _) = detect_and_parse_tool_call(input, Some("poolside_v1"), Some(&tools))
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(
+            args["filters"],
+            serde_json::json!({"category": "books", "limit": 2})
+        );
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_deserializes_non_string_scalar_args() {
+        let input = r#"<tool_call>configure
+<arg_key>limit</arg_key><arg_value>10</arg_value><arg_key>ratio</arg_key><arg_value>0.75</arg_value><arg_key>dry_run</arg_key><arg_value>true</arg_value><arg_key>paths</arg_key><arg_value>["a.py","b.py"]</arg_value><arg_key>meta</arg_key><arg_value>{"x":1}</arg_value><arg_key>optional</arg_key><arg_value>null</arg_value></tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "configure".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer"},
+                    "ratio": {"type": "number"},
+                    "dry_run": {"type": "boolean"},
+                    "paths": {"type": "array"},
+                    "meta": {"type": "object"},
+                    "optional": {"type": "null"}
+                }
+            })),
+            strict: None,
+        }];
+
+        let (result, content) =
+            detect_and_parse_tool_call(input, Some("poolside_v1"), Some(&tools))
+                .await
+                .unwrap();
+
+        assert_eq!(content, None);
+        assert_eq!(result.len(), 1);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(args["limit"], 10);
+        assert_eq!(args["ratio"], 0.75);
+        assert_eq!(args["dry_run"], true);
+        assert_eq!(args["paths"], serde_json::json!(["a.py", "b.py"]));
+        assert_eq!(args["meta"], serde_json::json!({"x": 1}));
+        assert!(args["optional"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_preserves_long_string_args() {
+        let payload = format!(
+            "line 1\nline 2 with \"quotes\" and \\ backslash\n{}&lt;xml-looking&gt;\n{{\"json\":\"looking but string\"}}",
+            "0123456789abcdef\n".repeat(256)
+        );
+        let input = format!(
+            "<tool_call>write_file\n<arg_key>content</arg_key><arg_value>{payload}</arg_value></tool_call>"
+        );
+        let tools = vec![ToolDefinition {
+            name: "write_file".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"}
+                }
+            })),
+            strict: None,
+        }];
+
+        let (result, content) =
+            detect_and_parse_tool_call(&input, Some("poolside_v1"), Some(&tools))
+                .await
+                .unwrap();
+
+        assert_eq!(content, None);
+        assert_eq!(result.len(), 1);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        let expected = payload.replace("&lt;", "<").replace("&gt;", ">");
+        assert_eq!(args["content"], expected);
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_parallel_tool_calls() {
+        let input = r#"<tool_call>get_weather
+<arg_key>location</arg_key><arg_value>SF</arg_value></tool_call><tool_call>get_time
+<arg_key>timezone</arg_key><arg_value>America/Los_Angeles</arg_value></tool_call>"#;
+
+        let (result, content) = detect_and_parse_tool_call(input, Some("poolside_v1"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(content, None);
+        assert_eq!(result.len(), 2);
+        let (first_name, first_args) = extract_name_and_args(result[0].clone());
+        let (second_name, second_args) = extract_name_and_args(result[1].clone());
+        assert_eq!(first_name, "get_weather");
+        assert_eq!(first_args["location"], "SF");
+        assert_eq!(second_name, "get_time");
+        assert_eq!(second_args["timezone"], "America/Los_Angeles");
     }
 }

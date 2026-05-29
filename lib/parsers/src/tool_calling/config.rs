@@ -201,6 +201,17 @@ pub struct Glm47ParserConfig {
     /// leave this `false`.
     #[serde(default)]
     pub allow_eof_recovery: bool,
+
+    /// Preserve schema-declared string values as strings even when the value
+    /// text looks like JSON. Poolside/Laguna's vLLM `poolside_v1` parser does
+    /// this so long string/tool payloads are not coerced into objects.
+    #[serde(default)]
+    pub preserve_string_schema_values: bool,
+
+    /// Normalize empty or whitespace-only content before the first tool call
+    /// to `None`. Poolside/vLLM emits null content for tool-only messages.
+    #[serde(default)]
+    pub empty_tool_content_as_none: bool,
 }
 
 impl Default for Glm47ParserConfig {
@@ -213,6 +224,8 @@ impl Default for Glm47ParserConfig {
             arg_value_start: "<arg_value>".to_string(),
             arg_value_end: "</arg_value>".to_string(),
             allow_eof_recovery: false,
+            preserve_string_schema_values: false,
+            empty_tool_content_as_none: false,
         }
     }
 }
@@ -605,6 +618,23 @@ impl ToolCallConfig {
         // Reference: https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja
         Self {
             parser_config: ParserConfig::Glm47(Glm47ParserConfig::default()),
+            structural_tag_builder: None,
+        }
+    }
+
+    pub fn poolside_v1() -> Self {
+        // Poolside Laguna XS.2 format:
+        // <tool_call>function_name
+        // <arg_key>param1</arg_key><arg_value>value1</arg_value></tool_call>
+        //
+        // This is GLM-style XML with Poolside/vLLM semantics for schema string
+        // args: string-typed values remain strings even if they look like JSON.
+        Self {
+            parser_config: ParserConfig::Glm47(Glm47ParserConfig {
+                preserve_string_schema_values: true,
+                empty_tool_content_as_none: true,
+                ..Default::default()
+            }),
             structural_tag_builder: None,
         }
     }

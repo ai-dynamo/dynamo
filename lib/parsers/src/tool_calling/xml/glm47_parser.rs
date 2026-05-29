@@ -103,7 +103,12 @@ pub fn try_tool_call_parse_glm47(
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let (normal_text, tool_calls) = extract_tool_calls(message, config, tools)?;
 
-    let normal_content = if normal_text.is_empty() {
+    let normal_content = if !tool_calls.is_empty()
+        && config.empty_tool_content_as_none
+        && normal_text.trim().is_empty()
+    {
+        None
+    } else if normal_text.is_empty() {
         Some("".to_string())
     } else {
         Some(normal_text)
@@ -244,8 +249,16 @@ fn decode_xml_entities(s: &str) -> String {
 
 /// Coerce a raw string value to a JSON Value using the tool's parameter schema.
 /// Falls back to string if no schema is available or the type is unrecognized.
-fn coerce_value(raw: &str, schema_type: Option<&str>) -> Value {
+fn coerce_value(
+    raw: &str,
+    schema_type: Option<&str>,
+    preserve_string_schema_values: bool,
+) -> Value {
     let trimmed = raw.trim();
+
+    if preserve_string_schema_values && matches!(schema_type, Some("string")) {
+        return Value::String(trimmed.to_string());
+    }
 
     // If the value already looks like JSON (object, array, or quoted string), parse it directly
     if (trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"'))
@@ -373,7 +386,8 @@ fn parse_tool_call_block(
 
             // Look up the expected type from the tool's parameter schema
             let schema_type = get_param_schema_type(tools, &function_name, key);
-            let json_value = coerce_value(&decoded, schema_type);
+            let json_value =
+                coerce_value(&decoded, schema_type, config.preserve_string_schema_values);
 
             arguments.insert(key.to_string(), json_value);
         }

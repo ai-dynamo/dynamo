@@ -16,7 +16,7 @@ use dynamo_parsers::tool_calling::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::utils::{MarkerMatcher, MatchResult};
@@ -102,6 +102,451 @@ pub enum ToolChoiceFormat {
     ArrayOfTools,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PoolsideV1StreamDelta {
+    content: Option<String>,
+    tool_calls: Vec<ChatCompletionMessageToolCallChunk>,
+}
+
+#[derive(Debug, Clone)]
+struct PoolsideV1StreamState {
+    buffer: String,
+    in_tool_call: bool,
+    current_tool_name_sent: bool,
+    current_tool_id: i32,
+    current_tool_name: Option<String>,
+    pending_key: Option<String>,
+    streaming_string_value: bool,
+    tool_call_ids: Vec<String>,
+    streamed_args_for_tool: Vec<String>,
+    args_started: Vec<bool>,
+    args_closed: Vec<bool>,
+    seen_keys: Vec<HashSet<String>>,
+}
+
+impl Default for PoolsideV1StreamState {
+    fn default() -> Self {
+        Self {
+            buffer: String::new(),
+            in_tool_call: false,
+            current_tool_name_sent: false,
+            current_tool_id: -1,
+            current_tool_name: None,
+            pending_key: None,
+            streaming_string_value: false,
+            tool_call_ids: Vec::new(),
+            streamed_args_for_tool: Vec::new(),
+            args_started: Vec::new(),
+            args_closed: Vec::new(),
+            seen_keys: Vec::new(),
+        }
+    }
+}
+
+impl PoolsideV1StreamState {
+    const TOOL_CALL_START: &'static str = "<tool_call>";
+    const TOOL_CALL_END: &'static str = "</tool_call>";
+    const ARG_KEY_START: &'static str = "<arg_key>";
+    const ARG_KEY_END: &'static str = "</arg_key>";
+    const ARG_VALUE_START: &'static str = "<arg_value>";
+    const ARG_VALUE_END: &'static str = "</arg_value>";
+
+    fn process_delta(
+        &mut self,
+        delta_text: &str,
+        tools: Option<&[dynamo_parsers::tool_calling::ToolDefinition]>,
+    ) -> PoolsideV1StreamDelta {
+        self.buffer.push_str(delta_text);
+
+        let mut pending_deltas: BTreeMap<u32, ChatCompletionMessageToolCallChunk> = BTreeMap::new();
+        let mut content: Option<String> = None;
+
+        loop {
+            if !self.in_tool_call {
+                let Some(start_idx) = self.buffer.find(Self::TOOL_CALL_START) else {
+                    let safe_len = self.safe_len_before_partial_start();
+                    if safe_len > 0 {
+                        let out = self.buffer[..safe_len].to_string();
+                        self.buffer.drain(..safe_len);
+                        append_optional(&mut content, out);
+                    }
+                    break;
+                };
+
+                if start_idx > 0 {
+                    let out = self.buffer[..start_idx].to_string();
+                    append_optional(&mut content, out);
+                    self.buffer.drain(..start_idx);
+                }
+
+                self.buffer.drain(..Self::TOOL_CALL_START.len());
+                self.begin_tool_call();
+                continue;
+            }
+
+            if !self.current_tool_name_sent {
+                let newline = self.buffer.find('\n');
+                let arg_key = self.buffer.find(Self::ARG_KEY_START);
+                let end = self.buffer.find(Self::TOOL_CALL_END);
+                let Some(cut) = [newline, arg_key, end].into_iter().flatten().min() else {
+                    break;
+                };
+
+                let tool_name = self.buffer[..cut].trim().to_string();
+                if tool_name.is_empty() && end == Some(cut) {
+                    self.buffer.drain(..cut + Self::TOOL_CALL_END.len());
+                    self.finish_tool_call();
+                    self.revert_last_tool_call_state();
+                    continue;
+                }
+
+                if newline == Some(cut) {
+                    self.buffer.drain(..cut + 1);
+                } else {
+                    self.buffer.drain(..cut);
+                }
+
+                self.current_tool_name = Some(tool_name.clone());
+                self.current_tool_name_sent = true;
+                self.update_tool_name(&mut pending_deltas, tool_name);
+                continue;
+            }
+
+            if self.streaming_string_value {
+                if let Some(value_end) = self.buffer.find(Self::ARG_VALUE_END) {
+                    let raw_content = self.buffer[..value_end].to_string();
+                    self.buffer.drain(..value_end + Self::ARG_VALUE_END.len());
+                    self.streaming_string_value = false;
+                    self.pending_key = None;
+
+                    let fragment = format!("{}\"", json_escape_string_content(&raw_content));
+                    self.append_current_args_fragment(&fragment);
+                    self.update_tool_args(&mut pending_deltas, &fragment);
+                    continue;
+                }
+
+                let safe_len = safe_len_before_partial_suffix(&self.buffer, Self::ARG_VALUE_END);
+                if safe_len > 0 {
+                    let to_emit = self.buffer[..safe_len].to_string();
+                    self.buffer.drain(..safe_len);
+                    let escaped = json_escape_string_content(&to_emit);
+                    if !escaped.is_empty() {
+                        self.append_current_args_fragment(&escaped);
+                        self.update_tool_args(&mut pending_deltas, &escaped);
+                    }
+                }
+                break;
+            }
+
+            if let Some(key) = self.pending_key.clone() {
+                let Some(value_start) = self.buffer.find(Self::ARG_VALUE_START) else {
+                    break;
+                };
+                if value_start > 0 {
+                    self.buffer.drain(..value_start);
+                }
+
+                let key = key.trim().to_string();
+                let tool_name = self.current_tool_name.as_deref().unwrap_or_default();
+                let is_string = is_poolside_string_type(tool_name, &key, tools);
+
+                if is_string {
+                    self.buffer.drain(..Self::ARG_VALUE_START.len());
+
+                    let index = self.current_index();
+                    if self.seen_keys[index].contains(&key) {
+                        self.pending_key = None;
+                        continue;
+                    }
+
+                    self.seen_keys[index].insert(key.clone());
+                    let key_json = serde_json::to_string(&key).unwrap_or_else(|_| "\"\"".into());
+                    let fragment = if !self.args_started[index] {
+                        self.args_started[index] = true;
+                        format!("{{{key_json}:\"")
+                    } else {
+                        format!(",{key_json}:\"")
+                    };
+
+                    self.append_current_args_fragment(&fragment);
+                    self.streaming_string_value = true;
+                    self.update_tool_args(&mut pending_deltas, &fragment);
+                    continue;
+                }
+
+                let Some(value_end) = self.buffer.find(Self::ARG_VALUE_END) else {
+                    break;
+                };
+
+                let raw_value = self.buffer[Self::ARG_VALUE_START.len()..value_end]
+                    .trim()
+                    .to_string();
+                self.buffer.drain(..value_end + Self::ARG_VALUE_END.len());
+                self.pending_key = None;
+
+                if let Some(fragment) = self.append_arg_fragment(&key, &raw_value) {
+                    self.update_tool_args(&mut pending_deltas, &fragment);
+                }
+                continue;
+            }
+
+            let end_pos = self.buffer.find(Self::TOOL_CALL_END);
+            let key_pos = self.buffer.find(Self::ARG_KEY_START);
+            if let Some(end_pos) = end_pos
+                && (key_pos.is_none() || end_pos < key_pos.unwrap())
+            {
+                self.buffer.drain(..end_pos + Self::TOOL_CALL_END.len());
+                let fragment = self.close_args_if_needed();
+                self.finish_tool_call();
+                if let Some(fragment) = fragment {
+                    self.update_tool_args(&mut pending_deltas, &fragment);
+                }
+                continue;
+            }
+
+            let Some(key_pos) = key_pos else {
+                break;
+            };
+            if key_pos > 0 {
+                self.buffer.drain(..key_pos);
+            }
+            let Some(key_end) = self.buffer.find(Self::ARG_KEY_END) else {
+                break;
+            };
+            let key = self.buffer[Self::ARG_KEY_START.len()..key_end].to_string();
+            self.buffer.drain(..key_end + Self::ARG_KEY_END.len());
+            self.pending_key = Some(key);
+        }
+
+        PoolsideV1StreamDelta {
+            content,
+            tool_calls: pending_deltas.into_values().collect(),
+        }
+    }
+
+    fn finalize_content(&mut self) -> Option<String> {
+        if self.in_tool_call {
+            self.buffer.clear();
+            self.finish_tool_call();
+            return None;
+        }
+
+        if self.buffer.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.buffer))
+        }
+    }
+
+    fn safe_len_before_partial_start(&self) -> usize {
+        safe_len_before_partial_suffix(&self.buffer, Self::TOOL_CALL_START)
+    }
+
+    fn begin_tool_call(&mut self) {
+        self.current_tool_id += 1;
+        self.ensure_tool_state();
+        self.current_tool_name_sent = false;
+        self.current_tool_name = None;
+        self.pending_key = None;
+        self.streaming_string_value = false;
+        self.in_tool_call = true;
+    }
+
+    fn finish_tool_call(&mut self) {
+        self.in_tool_call = false;
+        self.current_tool_name = None;
+        self.pending_key = None;
+        self.streaming_string_value = false;
+    }
+
+    fn revert_last_tool_call_state(&mut self) {
+        if self.current_tool_id < 0 {
+            return;
+        }
+        self.tool_call_ids.pop();
+        self.streamed_args_for_tool.pop();
+        self.args_started.pop();
+        self.args_closed.pop();
+        self.seen_keys.pop();
+        self.current_tool_id -= 1;
+    }
+
+    fn ensure_tool_state(&mut self) {
+        while self.tool_call_ids.len() <= self.current_index() {
+            self.tool_call_ids.push(Uuid::new_v4().to_string());
+        }
+        while self.streamed_args_for_tool.len() <= self.current_index() {
+            self.streamed_args_for_tool.push(String::new());
+        }
+        while self.args_started.len() <= self.current_index() {
+            self.args_started.push(false);
+        }
+        while self.args_closed.len() <= self.current_index() {
+            self.args_closed.push(false);
+        }
+        while self.seen_keys.len() <= self.current_index() {
+            self.seen_keys.push(HashSet::new());
+        }
+    }
+
+    fn current_index(&self) -> usize {
+        self.current_tool_id.max(0) as usize
+    }
+
+    fn get_or_create_delta<'a>(
+        &self,
+        pending: &'a mut BTreeMap<u32, ChatCompletionMessageToolCallChunk>,
+    ) -> &'a mut ChatCompletionMessageToolCallChunk {
+        let index = self.current_index() as u32;
+        pending
+            .entry(index)
+            .or_insert_with(|| ChatCompletionMessageToolCallChunk {
+                index,
+                id: None,
+                r#type: None,
+                function: Some(FunctionCallStream {
+                    name: None,
+                    arguments: None,
+                }),
+            })
+    }
+
+    fn update_tool_name(
+        &mut self,
+        pending: &mut BTreeMap<u32, ChatCompletionMessageToolCallChunk>,
+        tool_name: String,
+    ) {
+        let index = self.current_index();
+        let id = self.tool_call_ids[index].clone();
+        let delta = self.get_or_create_delta(pending);
+        delta.id = Some(id);
+        delta.r#type = Some(FunctionType::Function);
+        let function = delta.function.get_or_insert(FunctionCallStream {
+            name: None,
+            arguments: None,
+        });
+        function.name = Some(tool_name);
+        function.arguments.get_or_insert_with(String::new);
+    }
+
+    fn update_tool_args(
+        &self,
+        pending: &mut BTreeMap<u32, ChatCompletionMessageToolCallChunk>,
+        fragment: &str,
+    ) {
+        let delta = self.get_or_create_delta(pending);
+        let function = delta.function.get_or_insert(FunctionCallStream {
+            name: None,
+            arguments: None,
+        });
+        function
+            .arguments
+            .get_or_insert_with(String::new)
+            .push_str(fragment);
+    }
+
+    fn append_current_args_fragment(&mut self, fragment: &str) {
+        let index = self.current_index();
+        self.streamed_args_for_tool[index].push_str(fragment);
+    }
+
+    fn append_arg_fragment(&mut self, key: &str, raw_value: &str) -> Option<String> {
+        if key.is_empty() || self.seen_keys[self.current_index()].contains(key) {
+            return None;
+        }
+
+        let value = poolside_deserialize(raw_value);
+        let key_json = serde_json::to_string(key).ok()?;
+        let value_json = serde_json::to_string(&value).ok()?;
+        let index = self.current_index();
+        let fragment = if !self.args_started[index] {
+            self.args_started[index] = true;
+            format!("{{{key_json}:{value_json}")
+        } else {
+            format!(",{key_json}:{value_json}")
+        };
+
+        self.seen_keys[index].insert(key.to_string());
+        self.streamed_args_for_tool[index].push_str(&fragment);
+        Some(fragment)
+    }
+
+    fn close_args_if_needed(&mut self) -> Option<String> {
+        let index = self.current_index();
+        if self.args_closed[index] {
+            return None;
+        }
+        self.args_closed[index] = true;
+        let fragment = if !self.args_started[index] {
+            self.streamed_args_for_tool[index] = "{}".to_string();
+            "{}".to_string()
+        } else {
+            self.streamed_args_for_tool[index].push('}');
+            "}".to_string()
+        };
+        Some(fragment)
+    }
+}
+
+fn append_optional(target: &mut Option<String>, fragment: String) {
+    if fragment.is_empty() {
+        return;
+    }
+    target.get_or_insert_with(String::new).push_str(&fragment);
+}
+
+fn safe_len_before_partial_suffix(buffer: &str, marker: &str) -> usize {
+    for i in (1..marker.len()).rev() {
+        if buffer.ends_with(&marker[..i]) {
+            return buffer.len() - i;
+        }
+    }
+    buffer.len()
+}
+
+fn json_escape_string_content(value: &str) -> String {
+    serde_json::to_string(value)
+        .ok()
+        .and_then(|encoded| {
+            encoded
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_default()
+}
+
+fn poolside_deserialize(raw_value: &str) -> serde_json::Value {
+    let trimmed = raw_value.trim();
+    if let Ok(value) = serde_json::from_str(trimmed) {
+        return value;
+    }
+    match trimmed {
+        "True" => serde_json::Value::Bool(true),
+        "False" => serde_json::Value::Bool(false),
+        "None" => serde_json::Value::Null,
+        _ => serde_json::Value::String(trimmed.to_string()),
+    }
+}
+
+fn is_poolside_string_type(
+    tool_name: &str,
+    arg_name: &str,
+    tools: Option<&[dynamo_parsers::tool_calling::ToolDefinition]>,
+) -> bool {
+    let Some(tool) = tools.and_then(|tools| tools.iter().find(|tool| tool.name == tool_name))
+    else {
+        return false;
+    };
+    tool.parameters
+        .as_ref()
+        .and_then(|schema| schema.get("properties"))
+        .and_then(|properties| properties.get(arg_name))
+        .and_then(|arg_schema| arg_schema.get("type"))
+        .and_then(|arg_type| arg_type.as_str())
+        == Some("string")
+}
+
 /// State tracking for an individual choice during jail processing
 #[derive(Debug, Clone)]
 struct ChoiceJailState {
@@ -123,6 +568,9 @@ struct ChoiceJailState {
     emitted_tool_calls_count: usize,
     /// Reasoning content collected while waiting for a suitable emission.
     pending_reasoning_content: Option<String>,
+    /// Poolside/vLLM streams schema-declared string args incrementally instead
+    /// of buffering until `</tool_call>`.
+    poolside_v1_state: PoolsideV1StreamState,
 }
 
 fn create_choice_stream(
@@ -151,6 +599,30 @@ fn create_choice_stream(
     }
 }
 
+fn create_choice_stream_optional_content(
+    index: u32,
+    role: Option<Role>,
+    content: Option<String>,
+    tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
+    finish_reason: Option<FinishReason>,
+    logprobs: Option<ChatChoiceLogprobs>,
+) -> ChatChoiceStream {
+    #[allow(deprecated)]
+    ChatChoiceStream {
+        index,
+        delta: ChatCompletionStreamResponseDelta {
+            role,
+            content: content.map(dynamo_protocols::types::ChatCompletionMessageContent::Text),
+            tool_calls,
+            function_call: None,
+            refusal: None,
+            reasoning_content: None,
+        },
+        finish_reason,
+        logprobs,
+    }
+}
+
 impl ChoiceJailState {
     /// Create a new jail state for a choice
     fn new(index: u32, starts_jailed: bool) -> Self {
@@ -163,6 +635,7 @@ impl ChoiceJailState {
             stream_finish_reason: None,
             emitted_tool_calls_count: 0,
             pending_reasoning_content: None,
+            poolside_v1_state: PoolsideV1StreamState::default(),
         }
     }
 
@@ -211,6 +684,10 @@ impl ChoiceJailState {
         content: &str,
         jail_stream: &JailedStream,
     ) -> Vec<ChoiceEmission> {
+        if jail_stream.is_poolside_v1_parser() {
+            return self.process_poolside_v1_content(choice, content, jail_stream);
+        }
+
         let mut emissions = Vec::new();
         if !self.is_jailed {
             // Use the marker matcher to detect complete/partial markers
@@ -446,8 +923,63 @@ impl ChoiceJailState {
         emissions
     }
 
+    fn process_poolside_v1_content(
+        &mut self,
+        choice: &ChatChoiceStream,
+        content: &str,
+        jail_stream: &JailedStream,
+    ) -> Vec<ChoiceEmission> {
+        if !jail_stream.poolside_v1_tools_enabled() {
+            return vec![ChoiceEmission::PassThrough(create_choice_stream(
+                choice.index,
+                choice.delta.role,
+                content,
+                None,
+                choice.finish_reason,
+                choice.logprobs.clone(),
+            ))];
+        }
+
+        let parsed = self
+            .poolside_v1_state
+            .process_delta(content, jail_stream.tool_definitions.as_deref());
+
+        if parsed.content.is_none() && parsed.tool_calls.is_empty() {
+            return Vec::new();
+        }
+
+        let has_tool_calls = !parsed.tool_calls.is_empty();
+        let choice = create_choice_stream_optional_content(
+            choice.index,
+            choice.delta.role.or(Some(Role::Assistant)),
+            parsed.content,
+            has_tool_calls.then_some(parsed.tool_calls),
+            choice.finish_reason,
+            choice.logprobs.clone(),
+        );
+
+        if has_tool_calls {
+            vec![ChoiceEmission::ToolCall(choice)]
+        } else {
+            vec![ChoiceEmission::PassThrough(choice)]
+        }
+    }
+
     /// Finalize any remaining content when stream ends
     async fn finalize(&mut self, jail_stream: &JailedStream) -> Option<ChoiceEmission> {
+        if jail_stream.is_poolside_v1_parser() {
+            let content = self.poolside_v1_state.finalize_content()?;
+            let final_choice = create_choice_stream_optional_content(
+                self.index,
+                Some(Role::Assistant),
+                Some(content),
+                None,
+                self.stream_finish_reason,
+                self.accumulated_logprobs.clone(),
+            );
+            return Some(ChoiceEmission::Content(final_choice));
+        }
+
         if self.is_jailed && !self.accumulated_content.is_empty() {
             // Create a dummy choice for the method call
             #[allow(deprecated)]
@@ -566,6 +1098,17 @@ impl JailedStream {
     /// Whether the jail starts already-jailed (tool_choice=required/named path).
     fn is_immediate(&self) -> bool {
         matches!(self.jail_mode, JailMode::Immediate { .. })
+    }
+
+    fn is_poolside_v1_parser(&self) -> bool {
+        self.tool_call_parser.as_deref() == Some("poolside_v1")
+            && matches!(self.jail_mode, JailMode::MarkerBased)
+    }
+
+    fn poolside_v1_tools_enabled(&self) -> bool {
+        self.tool_definitions
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty())
     }
 
     /// Apply jail stream transformation with finish_reason fix

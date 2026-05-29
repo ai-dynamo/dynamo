@@ -3875,4 +3875,282 @@ fahrenheit
             "wrong-tool JSON leaked to content: {emitted_text:?}"
         );
     }
+
+    fn poolside_write_file_tool_defs() -> Vec<dynamo_parsers::tool_calling::ToolDefinition> {
+        vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "write_file".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                    "meta": {"type": "object"}
+                }
+            })),
+            strict: None,
+        }]
+    }
+
+    fn collect_tool_arg_fragments(
+        results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        index: u32,
+    ) -> Vec<String> {
+        results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            .filter(|tc| tc.index == index)
+            .filter_map(|tc| tc.function.as_ref())
+            .filter_map(|f| f.arguments.clone())
+            .collect()
+    }
+
+    fn collect_tool_names(
+        results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Vec<String> {
+        results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            .filter_map(|tc| tc.function.as_ref())
+            .filter_map(|f| f.name.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_streams_string_args_incrementally() {
+        let expected_content =
+            "line 1\nline 2 with \"quotes\" and \\ backslash\n{\"json\":\"looking\"}";
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk("I will call it.\n<too".to_string(), 0),
+            test_utils::create_mock_response_chunk("l_call>write_file\n<arg_".to_string(), 0),
+            test_utils::create_mock_response_chunk(
+                "key>content</arg_key><arg_value>line 1\n".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "line 2 with \"quotes\" and \\ backslash\n".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk("{\"json\":\"looking\"}</arg_".to_string(), 0),
+            test_utils::create_mock_response_chunk("value></tool".to_string(), 0),
+            test_utils::create_mock_response_chunk("_call>".to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("poolside_v1".to_string()),
+            None,
+            Some(poolside_write_file_tool_defs()),
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        assert_eq!(
+            test_utils::reconstruct_content(&results),
+            "I will call it.\n"
+        );
+        assert_eq!(collect_tool_names(&results), vec!["write_file".to_string()]);
+
+        let fragments = collect_tool_arg_fragments(&results, 0);
+        assert!(
+            fragments.len() >= 4,
+            "string args should stream in multiple fragments, got {fragments:?}"
+        );
+        assert!(
+            fragments.iter().any(|fragment| {
+                fragment.contains("line 2 with")
+                    && !fragment.contains("</arg_value>")
+                    && !fragment.ends_with('}')
+            }),
+            "long string body was not emitted before the closing arg tag: {fragments:?}"
+        );
+
+        let arguments = fragments.join("");
+        let parsed: serde_json::Value = serde_json::from_str(&arguments).unwrap();
+        assert_eq!(parsed["content"], expected_content);
+        assert!(
+            !arguments.contains("</arg_")
+                && !test_utils::reconstruct_content(&results).contains("<too"),
+            "Poolside protocol tags leaked into output"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_waits_for_complete_non_string_args() {
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "<tool_call>write_file\n<arg_key>meta</arg_key><arg_value>{\"x\":".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk("1".to_string(), 0),
+            test_utils::create_mock_response_chunk("}</arg_value></tool_call>".to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("poolside_v1".to_string()),
+            None,
+            Some(poolside_write_file_tool_defs()),
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let fragments = collect_tool_arg_fragments(&results, 0);
+        assert_eq!(
+            fragments
+                .iter()
+                .filter(|fragment| fragment.contains("\"meta\""))
+                .count(),
+            1,
+            "object arg should be emitted once after </arg_value>, got {fragments:?}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&fragments.join("")).unwrap();
+        assert_eq!(parsed["meta"], serde_json::json!({"x": 1}));
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_tool_only_stream_omits_empty_content() {
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "<tool_call>write_file\n<arg_key>content</arg_key><arg_value>x</arg_value></tool_call>"
+                    .to_string(),
+                0,
+            ),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("poolside_v1".to_string()),
+            None,
+            Some(poolside_write_file_tool_defs()),
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        assert_eq!(test_utils::reconstruct_content(&results), "");
+        for choice in results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter(|choice| choice.delta.tool_calls.is_some())
+        {
+            assert!(
+                choice.delta.content.is_none(),
+                "tool-only Poolside deltas should not serialize content as an empty string"
+            );
+        }
+
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter_map(|choice| choice.finish_reason)
+            .collect();
+        assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_no_tools_and_tool_choice_none_do_not_parse() {
+        let raw =
+            "<tool_call>write_file\n<arg_key>content</arg_key><arg_value>x</arg_value></tool_call>";
+
+        let no_tools_results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("poolside_v1".to_string()),
+            None,
+            None,
+            false,
+            stream::iter(vec![test_utils::create_mock_response_chunk(
+                raw.to_string(),
+                0,
+            )]),
+        )
+        .collect()
+        .await;
+        assert_eq!(test_utils::reconstruct_content(&no_tools_results), raw);
+        assert!(collect_tool_arg_fragments(&no_tools_results, 0).is_empty());
+
+        let tool_choice_none_results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("poolside_v1".to_string()),
+            Some(ChatCompletionToolChoiceOption::None),
+            Some(poolside_write_file_tool_defs()),
+            false,
+            stream::iter(vec![test_utils::create_mock_response_chunk(
+                raw.to_string(),
+                0,
+            )]),
+        )
+        .collect()
+        .await;
+        assert_eq!(
+            test_utils::reconstruct_content(&tool_choice_none_results),
+            raw
+        );
+        assert!(collect_tool_arg_fragments(&tool_choice_none_results, 0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_reasoning_content_tool_boundary_crossing() {
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk("<think>need ".to_string(), 0),
+            test_utils::create_mock_response_chunk("tool</thi".to_string(), 0),
+            test_utils::create_mock_response_chunk("nk>\nI will call it.\n<too".to_string(), 0),
+            test_utils::create_mock_response_chunk("l_call>write_file\n<arg_".to_string(), 0),
+            test_utils::create_mock_response_chunk(
+                "key>content</arg_key><arg_value>echo hi</arg_".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk("value></tool".to_string(), 0),
+            test_utils::create_mock_response_chunk("_call>".to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            stream::iter(input_chunks),
+            "poolside_v1".to_string(),
+            false,
+        );
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("poolside_v1".to_string()),
+            None,
+            Some(poolside_write_file_tool_defs()),
+            false,
+            reasoning_parsed_stream,
+        )
+        .collect()
+        .await;
+
+        let reasoning: String = results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter_map(|c| c.delta.reasoning_content.as_deref())
+            .collect();
+        assert_eq!(reasoning, "need tool");
+        assert_eq!(
+            test_utils::reconstruct_content(&results),
+            "\nI will call it.\n"
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&collect_tool_arg_fragments(&results, 0).join("")).unwrap();
+        assert_eq!(parsed["content"], "echo hi");
+
+        let visible_output = format!("{}{}", reasoning, test_utils::reconstruct_content(&results));
+        assert!(
+            !visible_output.contains("<think>")
+                && !visible_output.contains("</thi")
+                && !visible_output.contains("<too")
+                && !visible_output.contains("<arg_"),
+            "protocol boundary fragments leaked: {visible_output:?}"
+        );
+    }
 }
