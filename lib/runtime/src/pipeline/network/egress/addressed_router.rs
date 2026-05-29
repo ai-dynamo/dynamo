@@ -43,11 +43,11 @@ use std::task::{Context, Poll};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
-/// Wrap a response-stream `mpsc::Receiver<Bytes>` into the fully-shaped
-/// `ManyOut<U>`: deserialize each frame, emit TTFT and transport-roundtrip
-/// metrics on first response, and hand off the `InflightGuard` to a
-/// stream-lifetime `InflightDecStream` so the inflight gauge stays accurate
-/// for the whole response lifetime.
+/// Stream transformation helper that:
+/// - decodes a response byte stream from network into the fully-shaped `ManyOut<U>`
+/// - emits TTFT and transport-roundtrip metrics on first response
+/// - hands off the `InflightGuard` to a stream-lifetime `InflightDecStream` so
+///   the inflight gauge stays accurate for the whole response lifetime.
 fn decode_response_stream<U>(
     response_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
@@ -130,16 +130,12 @@ fn serialize_control_message(control_message: &RequestControlMessage) -> Result<
     Ok(ctrl)
 }
 
-/// Build the request control envelope, optionally serialize the unary
-/// data payload, and encode the whole thing into a wire buffer.
+/// Build the request control message, and serialize for transfer.
 ///
-/// Wire shape is inferred from the inputs:
-///   - `send_conn_info = Some(_)` + `request = None` → header-only
-///     envelope, `RequestType::ManyIn`. The worker dials back via the
-///     attached connection info for inbound frames.
-///   - `send_conn_info = None` + `request = Some(_)` → two-part
-///     `[ctrl, data]` envelope, `RequestType::SingleIn`. The payload
-///     travels in the data part.
+/// `request` provides the optional unary request payload. Should set for
+/// SingleIn generation.
+/// `send_conn_info` provides the connection info for the request stream.
+/// Should set for ManyIn generation.
 fn build_request_envelope<T>(
     context: &context::Context<()>,
     recv_conn_info: ConnectionInfo,
@@ -196,16 +192,10 @@ where
     Ok(buffer)
 }
 
-/// Await the optional bidirectional request-stream dial-back and, on
-/// success, spawn a detached task that pumps every `T` from `input_stream`
-/// onto the worker's request-stream send half. `request_stream_provider`
-/// being `None` is a no-op — the caller didn't ask for a request stream
-/// (unary dispatch path).
-///
-/// The spawned forwarder exits on stream end, context kill/stop, send
-/// error (worker dropped its receiver), or local serialize failure.
-/// Dropping `request_sender` on exit closes the upstream mpsc → server-
-/// side handler sends `Sentinel` → wire closes cleanly.
+/// Await the request-stream dial-in (if `request_stream_provider` is `Some`)
+/// and spawn a detached task that forwards every item from `input_stream` onto
+/// the request stream. `None` is the unary no-op. Returns once the forwarder is
+/// spawned; `Err` if the worker never dialed in.
 async fn spawn_request_stream_forwarder<T>(
     request_stream_provider: Option<StreamProvider<StreamSender>>,
     mut input_stream: crate::engine::DataStream<T>,
@@ -238,6 +228,11 @@ where
         }
     };
 
+    // The task exits on stream end, context kill/stop, send error (worker
+    // dropped its receiver), or local serialize failure. On any exit
+    // `request_sender` drops → upstream mpsc closes → server-side handler emits
+    // `Sentinel` → worker's reader ends cleanly, so no explicit end-of-stream
+    // signal is needed on any path.
     tokio::spawn(async move {
         loop {
             let item = tokio::select! {
