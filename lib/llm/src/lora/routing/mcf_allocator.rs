@@ -92,10 +92,17 @@ impl McfPlacementSolver {
     ///
     /// # Arguments
     /// * `workers` - Available workers with their capacities.
-    /// * `loras` - LoRAs with their replica requirements.
+    /// * `loras` - LoRAs with their replica requirements. To remove a LoRA
+    ///   cleanly, pass it with `replicas = 0`; the solver will emit the
+    ///   necessary unloads and produce no assignment for it. LoRAs omitted
+    ///   entirely also produce unloads (belt-and-suspenders), but the
+    ///   `replicas = 0` path is the preferred contract.
     /// * `prev_assignment` - Previous tick's assignment (for churn minimization).
     /// * `changed_loras` - LoRAs whose demand changed (None = treat all as changed).
-    /// * `changed_workers` - Workers that joined or left (None = treat none as changed).
+    /// * `changed_workers` - Workers that joined or left (None = treat none as
+    ///   changed). Pass a worker here when its capacity changes so frozen
+    ///   assignments are re-evaluated; the solver detects over-committed workers
+    ///   defensively but callers should still mark them explicitly.
     pub fn solve(
         &self,
         workers: &[WorkerInput],
@@ -104,12 +111,24 @@ impl McfPlacementSolver {
         changed_loras: Option<&HashSet<String>>,
         changed_workers: Option<&HashSet<WorkerWithDpRank>>,
     ) -> Result<McfPlacementResult, String> {
-        // Trivial: no LoRAs to place.
+        // No LoRAs desired. Compute unloads for any prior placements that
+        // are still on live workers (workers that have since left handle
+        // their own cleanup via handle_worker_removal / changed_workers).
         if loras.is_empty() {
+            let live_workers: HashSet<WorkerWithDpRank> =
+                workers.iter().map(|w| w.worker).collect();
+            let mut unloads: HashMap<WorkerWithDpRank, HashSet<String>> = HashMap::new();
+            for (lora_name, prev_workers) in prev_assignment {
+                for w in prev_workers {
+                    if live_workers.contains(w) {
+                        unloads.entry(*w).or_default().insert(lora_name.clone());
+                    }
+                }
+            }
             return Ok(McfPlacementResult {
                 assignment: HashMap::new(),
                 loads: HashMap::new(),
-                unloads: HashMap::new(),
+                unloads,
                 overflow_count: 0,
             });
         }
@@ -178,6 +197,37 @@ impl McfPlacementSolver {
                     *used_slots.entry(*w).or_insert(0) += 1;
                 }
                 frozen_hosts.insert(lora.name.clone(), keep);
+            }
+        }
+
+        // Belt-and-suspenders guard: if a worker's capacity shrank since
+        // the last tick and frozen assignments now exceed that capacity,
+        // saturating_sub would silently hide the violation. Detect every
+        // over-committed worker and unfreeze all LoRAs touching it so the
+        // MCF solver re-places them within the new capacity bounds.
+        // Callers should already pass changed_workers for such workers,
+        // which adds their LoRAs to `impacted` before the freeze step; this
+        // handles any cases that slip through that path.
+        let over_committed: HashSet<WorkerWithDpRank> = workers
+            .iter()
+            .filter(|w| used_slots.get(&w.worker).copied().unwrap_or(0) > w.capacity)
+            .map(|w| w.worker)
+            .collect();
+
+        if !over_committed.is_empty() {
+            let names_to_unfreeze: Vec<String> = frozen_hosts
+                .iter()
+                .filter(|(_, hosts)| hosts.iter().any(|w| over_committed.contains(w)))
+                .map(|(name, _)| name.clone())
+                .collect();
+            for name in names_to_unfreeze {
+                if let Some(hosts) = frozen_hosts.remove(&name) {
+                    for w in &hosts {
+                        if let Some(c) = used_slots.get_mut(w) {
+                            *c = c.saturating_sub(1);
+                        }
+                    }
+                }
             }
         }
 
@@ -438,6 +488,9 @@ impl McfPlacementSolver {
         let mut loads: HashMap<WorkerWithDpRank, HashSet<String>> = HashMap::new();
         let mut unloads: HashMap<WorkerWithDpRank, HashSet<String>> = HashMap::new();
 
+        // LoRAs present in the current desired set.
+        let lora_names_in_input: HashSet<&str> = loras.iter().map(|l| l.name.as_str()).collect();
+
         for l in loras {
             let prev = prev_assignment.get(&l.name).cloned().unwrap_or_default();
             let now = assignment.get(&l.name).cloned().unwrap_or_default();
@@ -448,6 +501,21 @@ impl McfPlacementSolver {
             for w in prev.difference(&now) {
                 if worker_map.contains_key(w) {
                     unloads.entry(*w).or_default().insert(l.name.clone());
+                }
+            }
+        }
+
+        // LoRAs that existed in prev_assignment but were omitted from the
+        // desired `loras` slice entirely. Callers should pass replicas=0
+        // entries for clean removal, but as a correctness guarantee we also
+        // emit unloads here for any prior placements on live workers.
+        for (lora_name, prev_workers) in prev_assignment {
+            if lora_names_in_input.contains(lora_name.as_str()) {
+                continue;
+            }
+            for w in prev_workers {
+                if worker_map.contains_key(w) {
+                    unloads.entry(*w).or_default().insert(lora_name.clone());
                 }
             }
         }
@@ -783,6 +851,122 @@ mod tests {
             result.is_err(),
             "with allow_overflow=false, missing workers must surface as an error"
         );
+    }
+
+    #[test]
+    fn test_empty_loras_produces_unloads() {
+        // Regression: loras=[] with a non-empty prev_assignment used to return
+        // empty unloads. Now it must emit unloads for every live prior placement.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let workers = make_workers(2, 4);
+        let w0 = WorkerWithDpRank::new(0, 0);
+        let w1 = WorkerWithDpRank::new(1, 0);
+
+        let mut prev = HashMap::new();
+        prev.insert("A".to_string(), HashSet::from([w0]));
+        prev.insert("B".to_string(), HashSet::from([w1]));
+
+        let result = solver
+            .solve(&workers, &[], &prev, None, None)
+            .expect("empty loras should succeed");
+
+        assert!(result.assignment.is_empty());
+        assert_eq!(result.overflow_count, 0);
+        // Both prior placements must surface as unloads.
+        assert!(
+            result
+                .unloads
+                .get(&w0)
+                .map(|s| s.contains("A"))
+                .unwrap_or(false),
+            "A should be unloaded from w0"
+        );
+        assert!(
+            result
+                .unloads
+                .get(&w1)
+                .map(|s| s.contains("B"))
+                .unwrap_or(false),
+            "B should be unloaded from w1"
+        );
+    }
+
+    #[test]
+    fn test_omitted_lora_produces_unload() {
+        // A LoRA present in prev_assignment but absent from the loras input
+        // must still generate an unload for every live worker it was on.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let workers = make_workers(2, 4);
+        let w0 = WorkerWithDpRank::new(0, 0);
+
+        let mut prev = HashMap::new();
+        prev.insert("A".to_string(), HashSet::from([w0]));
+        prev.insert("B".to_string(), HashSet::from([w0]));
+
+        // Only pass LoRA A; B is omitted entirely (simulates a stale removal).
+        let loras = vec![make_lora("A", 1)];
+        let result = solver
+            .solve(&workers, &loras, &prev, None, None)
+            .expect("solve should succeed");
+
+        assert!(
+            result
+                .unloads
+                .get(&w0)
+                .map(|s| s.contains("B"))
+                .unwrap_or(false),
+            "omitted LoRA B must be unloaded from w0"
+        );
+        assert!(
+            !result
+                .unloads
+                .get(&w0)
+                .map(|s| s.contains("A"))
+                .unwrap_or(false),
+            "LoRA A should not be unloaded (it is still desired)"
+        );
+    }
+
+    #[test]
+    fn test_frozen_over_capacity_worker_gets_rebalanced() {
+        // Regression: if a worker's capacity shrinks between ticks and frozen
+        // assignments exceed the new capacity, saturating_sub used to hide the
+        // violation. Now the over-committed LoRAs are unfrozen and re-solved.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+
+        // First tick: 1 worker with capacity 2, two LoRAs placed on it.
+        let workers_v1 = make_workers(1, 2);
+        let loras = vec![make_lora("A", 1), make_lora("B", 1)];
+        let r1 = solver
+            .solve(&workers_v1, &loras, &HashMap::new(), None, None)
+            .unwrap();
+        assert_eq!(r1.overflow_count, 0);
+
+        // Second tick: same worker, capacity reduced to 1.
+        // Neither LoRA is in changed_loras, but the worker capacity dropped.
+        let workers_v2 = vec![WorkerInput {
+            worker: WorkerWithDpRank::new(0, 0),
+            capacity: 1,
+        }];
+        let r2 = solver
+            .solve(&workers_v2, &loras, &r1.assignment, None, None)
+            .unwrap();
+
+        // Worker can hold at most 1 LoRA; any excess must overflow.
+        let placed: usize = r2.assignment.values().map(|s| s.len()).sum();
+        assert_eq!(
+            placed + r2.overflow_count,
+            2,
+            "placed + overflow must equal total demand"
+        );
+        // Worker must not be over-assigned.
+        let w0 = WorkerWithDpRank::new(0, 0);
+        let on_w0 = r2
+            .assignment
+            .values()
+            .filter(|hosts| hosts.contains(&w0))
+            .count();
+        assert!(on_w0 <= 1, "worker capacity=1 must not be exceeded");
     }
 
     #[test]
