@@ -251,87 +251,14 @@ where
         )
         .await?;
 
-        // Create a channel to communicate between the Python thread and the Rust async context
-        let (tx, rx) = mpsc::channel::<Annotated<Resp>>(128);
+        // Drain the Python response stream on a dedicated task, mapping any
+        // generator error to a typed annotated error frame.
+        let rx = spawn_response_forwarder::<Resp>(stream, ctx, id);
 
-        // process the stream
-        // any error thrown in the stream will be caught and complete the processing task
-        // errors are captured by a task that is watching the processing task
-        // the error will be emitted as an annotated error
-        let request_id = id.clone();
-
-        tokio::spawn(async move {
-            tracing::debug!(
-                request_id,
-                "starting task to process python async generator stream"
-            );
-
-            let mut stream = stream;
-            let mut count = 0;
-
-            while let Some(item) = stream.next().await {
-                count += 1;
-                tracing::trace!(
-                    request_id,
-                    "processing the {}th item from python async generator",
-                    count
-                );
-
-                let mut done = false;
-
-                let response = match process_item::<Resp>(item).await {
-                    Ok(response) => response,
-                    Err(e) => {
-                        done = true;
-
-                        match e {
-                            ResponseProcessingError::Deserialize(e) => {
-                                // tell the python async generator to stop generating
-                                // right now, this is impossible as we are not passing the context to the python async generator
-                                // todo: add task-local context to the python async generator
-                                ctx.stop_generating();
-                                Annotated::from_error(format!(
-                                    "critical error: invalid response object from python async generator; application-logic-mismatch: {}",
-                                    e
-                                ))
-                            }
-                            ResponseProcessingError::Dynamo(dynamo_err) => {
-                                Annotated::from_err(dynamo_err)
-                            }
-                            ResponseProcessingError::Offload(e) => Annotated::from_error(format!(
-                                "critical error: failed to offload the python async generator to a new thread: {}",
-                                e
-                            )),
-                        }
-                    }
-                };
-
-                if tx.send(response).await.is_err() {
-                    tracing::trace!(
-                        request_id,
-                        "error forwarding annotated response to channel; channel is closed"
-                    );
-                    break;
-                }
-
-                if done {
-                    tracing::debug!(
-                        request_id,
-                        "early termination of python async generator stream task"
-                    );
-                    break;
-                }
-            }
-
-            tracing::debug!(
-                request_id,
-                "finished processing python async generator stream"
-            );
-        });
-
-        let stream = ReceiverStream::new(rx);
-
-        Ok(ResponseStream::new(Box::pin(stream), context.context()))
+        Ok(ResponseStream::new(
+            Box::pin(ReceiverStream::new(rx)),
+            context.context(),
+        ))
     }
 }
 
@@ -407,6 +334,102 @@ where
     let response = Annotated::from_data(response);
 
     Ok(response)
+}
+
+/// Channel depth between the response-forwarding task and the consumer of
+/// the engine's output stream.
+const RESPONSE_CHANNEL_DEPTH: usize = 128;
+
+/// Drain the Python response stream on a spawned task, deserialize each item
+/// into `Resp` via [`process_item`], and forward it as an [`Annotated`] frame
+/// over an mpsc channel. Returns the receiver, to be wrapped in a
+/// [`ResponseStream`].
+///
+/// Shared by both engines. Errors raised by the Python generator are mapped
+/// to typed backend errors and emitted as annotated error frames, so a
+/// failing generator surfaces a structured error to the client rather than a
+/// silently truncated stream. On a deserialize mismatch the request context
+/// is told to stop generating.
+fn spawn_response_forwarder<Resp>(
+    stream: PyItemStream,
+    ctx: Arc<dyn AsyncEngineContext>,
+    request_id: String,
+) -> mpsc::Receiver<Annotated<Resp>>
+where
+    Resp: Data + for<'de> Deserialize<'de>,
+{
+    let (tx, rx) = mpsc::channel::<Annotated<Resp>>(RESPONSE_CHANNEL_DEPTH);
+
+    // any error thrown in the stream will be caught and complete the
+    // processing task; the error is emitted as an annotated error frame
+    tokio::spawn(async move {
+        tracing::debug!(
+            request_id,
+            "starting task to process python async generator stream"
+        );
+
+        let mut stream = stream;
+        let mut count = 0;
+
+        while let Some(item) = stream.next().await {
+            count += 1;
+            tracing::trace!(
+                request_id,
+                "processing the {}th item from python async generator",
+                count
+            );
+
+            let mut done = false;
+
+            let response = match process_item::<Resp>(item).await {
+                Ok(response) => response,
+                Err(e) => {
+                    done = true;
+
+                    match e {
+                        ResponseProcessingError::Deserialize(e) => {
+                            // tell the python async generator to stop generating
+                            ctx.stop_generating();
+                            Annotated::from_error(format!(
+                                "critical error: invalid response object from python async generator; application-logic-mismatch: {}",
+                                e
+                            ))
+                        }
+                        ResponseProcessingError::Dynamo(dynamo_err) => {
+                            Annotated::from_err(dynamo_err)
+                        }
+                        ResponseProcessingError::Offload(e) => Annotated::from_error(format!(
+                            "critical error: failed to offload the python async generator to a new thread: {}",
+                            e
+                        )),
+                    }
+                }
+            };
+
+            if tx.send(response).await.is_err() {
+                tracing::trace!(
+                    request_id,
+                    "error forwarding annotated response to channel; channel is closed"
+                );
+                break;
+            }
+
+            if done {
+                tracing::debug!(
+                    request_id,
+                    "early termination of python async generator stream task"
+                );
+                break;
+            }
+        }
+
+        tracing::debug!(
+            request_id,
+            "finished processing python async generator stream"
+        );
+    });
+
+    rx
 }
 
 /// Channel depth between the inbound forwarder and the Python iterator.
@@ -536,72 +559,13 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
         )
         .await?;
 
-        let (resp_tx, resp_rx) = mpsc::channel::<Annotated<serde_json::Value>>(128);
-        let response_request_id = request_id.clone();
-        let response_ctx = ctx.clone();
-        tokio::spawn(async move {
-            tracing::debug!(
-                request_id = %response_request_id,
-                "starting bidirectional python response stream task"
-            );
-            let mut stream = stream;
-            while let Some(item) = stream.next().await {
-                let item = match item {
-                    Ok(item) => item,
-                    Err(e) => {
-                        tracing::error!(
-                            request_id = %response_request_id,
-                            error = %e,
-                            "python bidirectional generator yielded an error; \
-                             ending response stream"
-                        );
-                        break;
-                    }
-                };
+        // Drain the Python response stream on a dedicated task. Sharing
+        // `spawn_response_forwarder` gives the bidirectional engine the same
+        // typed error mapping as the unary engine: a generator that raises now
+        // yields a structured annotated error frame instead of a silently
+        // truncated stream.
+        let rx = spawn_response_forwarder::<serde_json::Value>(stream, ctx.clone(), request_id);
 
-                let value = match tokio::task::spawn_blocking(move || {
-                    Python::with_gil(|py| depythonize::<serde_json::Value>(&item.into_bound(py)))
-                })
-                .await
-                {
-                    Ok(Ok(value)) => value,
-                    Ok(Err(e)) => {
-                        tracing::error!(
-                            request_id = %response_request_id,
-                            error = %e,
-                            "failed to depythonize bidirectional response frame; \
-                             stopping generator"
-                        );
-                        response_ctx.stop_generating();
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            request_id = %response_request_id,
-                            error = %e,
-                            "failed to offload depythonize to blocking task"
-                        );
-                        break;
-                    }
-                };
-
-                if resp_tx.send(Annotated::from_data(value)).await.is_err() {
-                    tracing::debug!(
-                        request_id = %response_request_id,
-                        "bidirectional response channel closed; exiting response task"
-                    );
-                    break;
-                }
-            }
-            tracing::debug!(
-                request_id = %response_request_id,
-                "finished bidirectional python response stream task"
-            );
-        });
-
-        Ok(ResponseStream::new(
-            Box::pin(ReceiverStream::new(resp_rx)),
-            ctx,
-        ))
+        Ok(ResponseStream::new(Box::pin(ReceiverStream::new(rx)), ctx))
     }
 }
