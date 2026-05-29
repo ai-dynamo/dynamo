@@ -133,7 +133,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=16384, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=16384, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_abort_timeout_ms=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -161,6 +161,7 @@ impl MockEngineArgs {
         bootstrap_port: Option<u16>,
         kv_bytes_per_token: Option<usize>,
         kv_transfer_bandwidth: Option<f64>,
+        kv_transfer_abort_timeout_ms: Option<u64>,
         reasoning: Option<ReasoningConfig>,
         zmq_kv_events_port: Option<u16>,
         zmq_replay_port: Option<u16>,
@@ -205,6 +206,7 @@ impl MockEngineArgs {
             .bootstrap_port(bootstrap_port)
             .kv_bytes_per_token(kv_bytes_per_token)
             .kv_transfer_bandwidth(kv_transfer_bandwidth)
+            .kv_transfer_abort_timeout_ms(kv_transfer_abort_timeout_ms)
             .reasoning(reasoning.map(|config| config.inner()))
             .zmq_kv_events_port(zmq_kv_events_port)
             .zmq_replay_port(zmq_replay_port)
@@ -285,6 +287,7 @@ impl MockEngineArgs {
             "bootstrap_port": self.inner.bootstrap_port,
             "kv_bytes_per_token": self.inner.kv_bytes_per_token,
             "kv_transfer_bandwidth": self.inner.kv_transfer_bandwidth,
+            "kv_transfer_abort_timeout_ms": self.inner.kv_transfer_abort_timeout_ms,
             "reasoning": self.inner.reasoning,
             "zmq_kv_events_port": self.inner.zmq_kv_events_port,
             "zmq_replay_port": self.inner.zmq_replay_port,
