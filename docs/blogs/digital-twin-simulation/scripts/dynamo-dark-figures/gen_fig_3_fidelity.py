@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 """Generate the 4-panel B200 MiniMax-M2.5 fidelity figure for the digital-twin blog.
@@ -26,7 +27,6 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
