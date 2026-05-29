@@ -98,6 +98,7 @@ cases:
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
+        reason: vLLM preserves the unterminated DeepSeek V3.2 DSML function_calls block in normal_text on the recovery path.
         calls: []
         normal_text: |-
           I'll start by fetching the weather for both Boston and New York at the same time!
@@ -109,6 +110,7 @@ cases:
           <｜DSML｜parameter name="location" string="true">New York</｜DSML｜parameter>
           </｜DSML｜invoke>
       sglang:
+        reason: SGLang drops the unterminated DeepSeek V3.2 DSML block and trims the trailing newline from preserved narration.
         calls: []
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
   TOOLCALLING.batch.5.e:
@@ -130,6 +132,7 @@ cases:
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
+        reason: vLLM preserves the truncated DeepSeek V3.2 DSML function_calls block in normal_text on the recovery path.
         calls: []
         normal_text: |-
           I'll start by fetching the weather for both Boston and New York at the same time!
@@ -140,5 +143,6 @@ cases:
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">New York
       sglang:
+        reason: SGLang drops the truncated DeepSeek V3.2 DSML block and trims the trailing newline from preserved narration.
         calls: []
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!

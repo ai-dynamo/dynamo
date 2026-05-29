@@ -49,7 +49,7 @@ Backend workers register themselves using the `register_model` API. For accurate
 
 For all available options: `python -m dynamo.frontend --help`
 
-For detailed configuration options and tuning parameters, see [Configuration and Tuning](router-configuration.md). For how the router models prefill and decode load in the cost function, see [Routing Concepts](router-concepts.md#active-load-modeling).
+For detailed configuration options and tuning parameters, see [Configuration and Tuning](router-configuration.md). For candidate eligibility rules, see [Router Filtering](router-filtering.md). For how the router models prefill and decode load in the cost function, see [Routing Concepts](router-concepts.md#active-load-modeling).
 
 ### Kubernetes Deployment
 
