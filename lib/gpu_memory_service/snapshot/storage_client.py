@@ -30,6 +30,7 @@ from gpu_memory_service.snapshot.transfer import (
     StreamingTransferSession,
     TransferBackendKind,
     build_file_transfer_sources,
+    build_remote_transfer_sources,
     create_transfer_backend,
 )
 
@@ -300,7 +301,29 @@ class GMSStorageClient:
 
         try:
             manifest, saved_metadata = load_manifest_and_metadata(input_dir)
-            sources = build_file_transfer_sources(input_dir, manifest.allocations)
+            if backend_name == TransferBackendKind.NIXL_UCX.value:
+                from gpu_memory_service.snapshot.backends.nixl_ucx import (
+                    NIXL_UCX_REMOTE_METADATA_CONFIG_KEY,
+                    load_remote_peer_metadata,
+                )
+
+                peer_metadata = load_remote_peer_metadata({})
+                if peer_metadata.get("sources") is None:
+                    raise RuntimeError(
+                        f"{TransferBackendKind.NIXL_UCX.value} requires remote peer "
+                        "sources"
+                    )
+                remote_agent = peer_metadata.get("agent_name") or ""
+                backend_config[NIXL_UCX_REMOTE_METADATA_CONFIG_KEY] = peer_metadata[
+                    "metadata"
+                ]
+                sources = build_remote_transfer_sources(
+                    manifest.allocations,
+                    peer_metadata["sources"],
+                    remote_agent=remote_agent,
+                )
+            else:
+                sources = build_file_transfer_sources(input_dir, manifest.allocations)
 
             backend = create_transfer_backend(
                 backend_name,
