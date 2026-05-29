@@ -1803,6 +1803,14 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    if let Err(err) = chat_request.normalize_reasoning_template_args() {
+        let err_response = ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &err.to_string(),
+        });
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     // Always use internal streaming for aggregation.
     // Set stream_options.include_usage so the backend sends token counts in the final chunk.
