@@ -10,8 +10,8 @@ live `BaseLogitsProcessor` → `TrtllmDynamoLogitsAdapter`), the
 adapter's shape and CUDA-stream behavior, and the realizer's
 no-op-on-empty contract.
 
-Shared-layer policy itself (PREFILL skip, spec entry composition,
-env-gated spec resolver) is tested in
+Shared-layer policy itself (generation-stage gating, spec entry
+composition, env-gated spec resolver) is tested in
 `dynamo.common.backend.tests.test_engine` without GPU or tensorrt_llm.
 These tests exercise the same policy through the unified TRT-LLM
 engine to confirm the wiring."""
@@ -26,7 +26,7 @@ import torch
 
 if not torch.cuda.is_available():
     pytest.skip(
-        "Skipping to avoid errors during collection with '-m gpu_0'. "
+        "Skipping to avoid errors during collection with '-m gpu_1'. "
         "tensorrt_llm import requires CUDA/GPU.",
         allow_module_level=True,
     )
@@ -57,7 +57,7 @@ def _set_env(monkeypatch, value):
 
 
 class _MockTokenizer:
-    """Minimal stand-in that satisfies HelloWorldLogitsProcessor."""
+    """Minimal stand-in that satisfies `resolve_test_logits_processor_spec`."""
 
     eos_token_id = 2
 
@@ -91,6 +91,30 @@ def test_unified_from_args_forces_tokenizer_init(override_skip, monkeypatch):
         argv += ["--override-engine-args", '{"skip_tokenizer_init": true}']
     engine, _ = asyncio.run(TrtllmLLMEngine.from_args(argv))
     assert engine.engine_args["skip_tokenizer_init"] is False
+
+
+def test_unified_from_args_does_not_force_tokenizer_init_for_prefill(monkeypatch):
+    """A PREFILL worker never attaches the hook (generate() gates it out),
+    so the env flip must NOT override an explicit `skip_tokenizer_init=True`
+    the way it does for generation roles — the prefill worker keeps the
+    tokenizer it was told to skip."""
+    _set_env(monkeypatch, "1")
+    argv = [
+        "--model-path",
+        "Qwen/Qwen3-0.6B",
+        "--free-gpu-memory-fraction",
+        "0.3",
+        "--max-seq-len",
+        "1024",
+        "--max-batch-size",
+        "2",
+        "--disaggregation-mode",
+        "prefill",
+        "--override-engine-args",
+        '{"skip_tokenizer_init": true}',
+    ]
+    engine, _ = asyncio.run(TrtllmLLMEngine.from_args(argv))
+    assert engine.engine_args["skip_tokenizer_init"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +189,21 @@ async def _resolve_plan_like_start(engine: TrtllmLLMEngine) -> None:
     await the engine's `logits_processor_spec()` override and cache the
     result on the instance.
 
-    Production calls this without an env guard. The override passes a
-    lambda to `resolve_test_logits_processor_spec` so the tokenizer is dereferenced
-    only after the env check; `_NoTokenizerLLM` in the env-off rows
-    therefore never has its `.tokenizer` property invoked."""
+    Production calls this without an env guard. The override only touches
+    the tokenizer for generation roles with the env on, so `_NoTokenizerLLM`
+    (env-off, or any role gated out) never has its `.tokenizer` invoked."""
     engine._logits_processor_spec = await engine.logits_processor_spec()
+
+
+def test_unified_prefill_resolves_no_spec_without_tokenizer(monkeypatch):
+    """PREFILL with the env on resolves no spec and never touches the
+    tokenizer: the role is gated out before resolution, so a prefill worker
+    started without a tokenizer does not pay for one. `_NoTokenizerLLM`
+    raises if `.tokenizer` is read."""
+    _set_env(monkeypatch, "1")
+    engine = _make_engine(DisaggregationMode.PREFILL, _NoTokenizerLLM())
+    asyncio.run(_resolve_plan_like_start(engine))
+    assert engine._logits_processor_spec is None
 
 
 @pytest.mark.parametrize(
@@ -178,7 +212,7 @@ async def _resolve_plan_like_start(engine: TrtllmLLMEngine) -> None:
         (DisaggregationMode.AGGREGATED, None, _NoTokenizerLLM, False),
         (DisaggregationMode.AGGREGATED, "1", _OKLLM, True),
         (DisaggregationMode.DECODE, "1", _OKLLM, True),
-        (DisaggregationMode.PREFILL, "1", _OKLLM, False),
+        (DisaggregationMode.PREFILL, "1", _NoTokenizerLLM, False),
     ],
 )
 def test_unified_generate_attachment_matrix(
@@ -193,10 +227,10 @@ def test_unified_generate_attachment_matrix(
       `logits_processors_for_request` returns the spec's entries; the
       TRT-LLM realizer instantiates a `ForcedSequenceLogitsProcessor`
       from each and wraps it in `TrtllmDynamoLogitsAdapter`.
-    * PREFILL+env-on: skip. `logits_processors_for_request` returns [] in
-      PREFILL (spec has `skip_prefill=True`), and
-      `attach_logits_processors` no-ops on an empty list, so
-      `sampling_params.logits_processor` stays None."""
+    * PREFILL+env-on: skip, with NO tokenizer access. The role is gated
+      out before spec resolution, so `logits_processor_spec()` returns
+      None (the `_NoTokenizerLLM` would raise if `.tokenizer` were read)
+      and `sampling_params.logits_processor` stays None."""
     _set_env(monkeypatch, env)
     request: dict[str, Any] = {"token_ids": [1, 2, 3]}
 

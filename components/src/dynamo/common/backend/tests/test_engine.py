@@ -8,9 +8,9 @@ Only tests that exercise actual logic: the ABC's abstract-method enforcement
 and the concrete default implementation of ``abort()``.  Pure dataclass /
 TypedDict mechanics are not tested — those are Python-language guarantees.
 
-The shared logits-processor layer (spec entry model, PREFILL skip,
-env-gated smoke resolver, lazy-tokenizer regression) is tested below
-without any backend imports."""
+The shared logits-processor layer (spec entry model, generation-stage
+gating, env-gated smoke resolver, lazy-tokenizer regression) is tested
+below without any backend imports."""
 
 from typing import Any
 from unittest.mock import MagicMock
@@ -31,12 +31,16 @@ from dynamo.common.backend.engine import (  # noqa: E402
     LLMEngine,
     LogitsProcessorSpec,
     PythonProcessorSpec,
+    is_generation_stage,
     logits_processors_for_request,
     resolve_test_logits_processor_spec,
 )
-from dynamo.logits_processing.examples import (  # noqa: E402
-    ForcedSequenceLogitsProcessor,
-)
+from dynamo.common.constants import DisaggregationMode  # noqa: E402
+
+# NOTE: `dynamo.logits_processing.examples` pulls in torch, which is not a
+# base/common dependency, so it is imported lazily inside the one test that
+# needs it (guarded by importorskip) to keep this module collectable in a
+# non-framework env.
 
 # Framework-agnostic: routed to sample-unified-test via
 # `pre_merge and gpu_0 and unified` (see test_engine.py module docstring).
@@ -118,32 +122,73 @@ def _logits_processor_set_env(monkeypatch, value):
         monkeypatch.setenv(TEST_LOGITS_PROCESSOR_ENV, value)
 
 
+def test_is_generation_stage():
+    """AGGREGATED/DECODE emit the visible stream; PREFILL/ENCODE do not.
+    Backends use this to skip engine-level setup on non-generation roles."""
+    assert is_generation_stage(DisaggregationMode.AGGREGATED)
+    assert is_generation_stage(DisaggregationMode.DECODE)
+    assert not is_generation_stage(DisaggregationMode.PREFILL)
+    assert not is_generation_stage(DisaggregationMode.ENCODE)
+
+
 def test_build_returns_empty_when_plan_none():
-    assert logits_processors_for_request(None, is_prefill=False) == []
-    assert logits_processors_for_request(None, is_prefill=True) == []
+    assert (
+        logits_processors_for_request(
+            None, disaggregation_mode=DisaggregationMode.DECODE
+        )
+        == []
+    )
+    assert (
+        logits_processors_for_request(
+            None, disaggregation_mode=DisaggregationMode.PREFILL
+        )
+        == []
+    )
 
 
-def test_build_returns_empty_in_prefill_when_skip_prefill():
-    """PREFILL skip is the disaggregated policy: prefill emits a
-    visible token before decode resumes, and a fresh stateful processor
-    on each side would corrupt the leading characters."""
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE]
+)
+def test_build_returns_entries_on_generation_stages(mode):
+    """AGGREGATED and DECODE produce the visible output stream, so a
+    generation-only spec activates there."""
     spec = LogitsProcessorSpec(
         entries=(ForcedTokenSequenceSpec(token_ids=(1, 2), eos_token_id=0),),
-        skip_prefill=True,
+        generation_only=True,
     )
-    assert logits_processors_for_request(spec, is_prefill=True) == []
-    assert logits_processors_for_request(spec, is_prefill=False) == list(spec.entries)
+    assert logits_processors_for_request(spec, disaggregation_mode=mode) == list(
+        spec.entries
+    )
 
 
-def test_build_returns_entries_in_prefill_when_skip_prefill_false():
-    """A spec with `skip_prefill=False` (e.g. a stateless future spec entry)
-    flows through PREFILL too. Pins that the skip is spec-driven, not
-    hard-coded to PREFILL."""
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.PREFILL, DisaggregationMode.ENCODE]
+)
+def test_build_skips_non_generation_stages(mode):
+    """PREFILL/ENCODE workers don't emit the visible output stream; a
+    fresh stateful processor there would corrupt or waste leading state,
+    so a generation-only spec is skipped."""
     spec = LogitsProcessorSpec(
         entries=(ForcedTokenSequenceSpec(token_ids=(1, 2), eos_token_id=0),),
-        skip_prefill=False,
+        generation_only=True,
     )
-    assert logits_processors_for_request(spec, is_prefill=True) == list(spec.entries)
+    assert logits_processors_for_request(spec, disaggregation_mode=mode) == []
+
+
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.PREFILL, DisaggregationMode.ENCODE]
+)
+def test_build_returns_entries_when_not_generation_only(mode):
+    """A spec with `generation_only=False` (e.g. a stateless future spec
+    entry) flows through non-generation stages too. Pins that the gating
+    is spec-driven, not hard-coded to the stage."""
+    spec = LogitsProcessorSpec(
+        entries=(ForcedTokenSequenceSpec(token_ids=(1, 2), eos_token_id=0),),
+        generation_only=False,
+    )
+    assert logits_processors_for_request(spec, disaggregation_mode=mode) == list(
+        spec.entries
+    )
 
 
 def test_build_entries_are_same_objects_across_calls():
@@ -152,8 +197,12 @@ def test_build_entries_are_same_objects_across_calls():
     job (each realizer constructs fresh processors per call)."""
     desc = ForcedTokenSequenceSpec(token_ids=(1, 2), eos_token_id=0)
     spec = LogitsProcessorSpec(entries=(desc,))
-    first = logits_processors_for_request(spec, is_prefill=False)
-    second = logits_processors_for_request(spec, is_prefill=False)
+    first = logits_processors_for_request(
+        spec, disaggregation_mode=DisaggregationMode.DECODE
+    )
+    second = logits_processors_for_request(
+        spec, disaggregation_mode=DisaggregationMode.DECODE
+    )
     assert first == [desc]
     assert second == [desc]
     assert first[0] is second[0]  # same spec entry object, by design
@@ -202,8 +251,7 @@ def test_resolve_test_logits_processor_spec_resolves_token_ids_at_startup(monkey
 
     spec = resolve_test_logits_processor_spec(_OneShotTokenizer)
     assert spec is not None
-    assert spec.needs_tokenizer is True
-    assert spec.skip_prefill is True
+    assert spec.generation_only is True
     assert len(spec.entries) == 1
     desc = spec.entries[0]
     assert isinstance(desc, ForcedTokenSequenceSpec)
@@ -230,25 +278,41 @@ def test_resolve_test_logits_processor_spec_raises_when_eos_missing(monkeypatch)
 
 def test_forced_sequence_processor_advances_through_sequence():
     """Pins the realizer-target contract: per-request state isolation
-    via fresh instances, plus the forced-sequence behaviour itself.
+    via fresh instances, plus the forced-sequence behaviour itself
+    (each token in turn, then EOS once the sequence is exhausted).
     Backend realizers (TRT-LLM today; vLLM/SGLang later) all rely on
     this class for the actual mask logic."""
-    import torch
+    torch = pytest.importorskip("torch")
+
+    from dynamo.logits_processing.examples import ForcedSequenceLogitsProcessor
+
+    def only_finite(scores):
+        return (scores > float("-inf")).nonzero().flatten().tolist()
 
     a = ForcedSequenceLogitsProcessor(token_ids=(5, 7), eos_token_id=2)
     b = ForcedSequenceLogitsProcessor(token_ids=(5, 7), eos_token_id=2)
     assert a is not b
     assert a.state == 0 and b.state == 0
 
+    # Step 0 forces token_ids[0]=5; every other position is masked to -inf.
     scores = torch.zeros(16)
     a([1], scores)
-    # After the call, all positions except token_ids[0]=5 are -inf.
     assert scores[5].item() == 0.0
-    finite = (scores > float("-inf")).nonzero().flatten().tolist()
-    assert finite == [5]
+    assert only_finite(scores) == [5]
     assert a.state == 1
-    # b is unaffected.
-    assert b.state == 0
+    assert b.state == 0  # b is unaffected.
+
+    # Step 1 forces token_ids[1]=7.
+    scores = torch.zeros(16)
+    a([1, 5], scores)
+    assert only_finite(scores) == [7]
+    assert a.state == 2
+
+    # Sequence exhausted -> forces EOS (2) thereafter.
+    scores = torch.zeros(16)
+    a([1, 5, 7], scores)
+    assert only_finite(scores) == [2]
+    assert a.state == 3
 
 
 def test_engine_usage_pattern(monkeypatch):
@@ -278,12 +342,16 @@ def test_engine_usage_pattern(monkeypatch):
     assert spec is not None
 
     # Step 3a: aggregated / decode request activates.
-    entries = logits_processors_for_request(spec, is_prefill=False)
+    entries = logits_processors_for_request(
+        spec, disaggregation_mode=DisaggregationMode.DECODE
+    )
     assert len(entries) == 1
     assert isinstance(entries[0], ForcedTokenSequenceSpec)
 
     # Step 3b: prefill request skips.
-    entries_pf = logits_processors_for_request(spec, is_prefill=True)
+    entries_pf = logits_processors_for_request(
+        spec, disaggregation_mode=DisaggregationMode.PREFILL
+    )
     assert entries_pf == []
 
     # The backend-specific realizer is duck-typed; verify the
@@ -305,5 +373,7 @@ def test_python_processor_spec_is_carried_through():
 
     desc = PythonProcessorSpec(factory=_factory)
     spec = LogitsProcessorSpec(entries=(desc,))
-    activation = logits_processors_for_request(spec, is_prefill=False)
+    activation = logits_processors_for_request(
+        spec, disaggregation_mode=DisaggregationMode.DECODE
+    )
     assert activation == [desc]

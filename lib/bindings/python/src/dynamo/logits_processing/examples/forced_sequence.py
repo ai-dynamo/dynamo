@@ -3,14 +3,10 @@
 
 """Forced-sequence logits processor.
 
-Forces the model to emit a specific sequence of token IDs, followed by
-EOS. Unlike :class:`HelloWorldLogitsProcessor`, this takes the resolved
-token IDs directly (no tokenizer dependency at construction time),
-which makes it the natural target for backend-neutral entry-based
-activation: token IDs get resolved once at engine startup and then
-flow through any serialization boundary (e.g. SGLang's
-``custom_logit_processor``, vLLM's per-request ``extra_args``)
-without requiring tokenizer access on the worker side.
+Forces the model to emit a fixed sequence of token IDs, then EOS. Takes
+the resolved token IDs directly (no tokenizer at construction time), so
+it works behind any serialization boundary and is the target for
+backend-neutral entry-based activation.
 """
 
 from typing import Sequence

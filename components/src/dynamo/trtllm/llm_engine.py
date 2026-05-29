@@ -43,6 +43,7 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
     LogitsProcessorSpec,
+    is_generation_stage,
     logits_processors_for_request,
     resolve_test_logits_processor_spec,
 )
@@ -155,9 +156,7 @@ class TrtllmLLMEngine(LLMEngine):
         self._log_request_metrics: Optional[Callable[[dict], None]] = None
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
-        # Resolved once in `start()` from the env-gated smoke hook. None
-        # when the env var is off; eventually the public loader will
-        # populate this from CLI/config instead.
+        # Resolved once in `start()`; None when the smoke hook is off.
         self._logits_processor_spec: LogitsProcessorSpec | None = None
         # Per-request GenerationResult handles for `abort()` lookup. TRT-LLM's
         # abort API is `GenerationResult.abort()` (not by request-id), so we
@@ -267,15 +266,13 @@ class TrtllmLLMEngine(LLMEngine):
                 kv_cfg["event_buffer_max_size"] = _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
             engine_args["kv_cache_config"] = kv_cfg
 
-        # Force tokenizer init for the env-gated smoke hook: must run
-        # after all overrides so an explicit `skip_tokenizer_init=True`
-        # from user YAML/JSON cannot starve the processor of the
-        # tokenizer it needs. Inline (not a shared helper) because
-        # `engine_args` is TRT-LLM-shaped — SGLang's `ServerArgs` and
-        # vLLM's `EngineArgs` would each apply this differently in
-        # their own `from_args`, using the same `TEST_LOGITS_PROCESSOR_ENV`
-        # constant.
-        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1":
+        # Force tokenizer init for the smoke hook, after all overrides so an
+        # explicit user `skip_tokenizer_init=True` can't starve the processor.
+        # Gated to generation roles for the same reason as the spec resolution
+        # below. The flag is TRT-LLM-shaped; each backend sets its own.
+        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
+            _TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode]
+        ):
             engine_args["skip_tokenizer_init"] = False
 
         # Use post-override engine_args so EngineConfig matches what the
@@ -315,11 +312,8 @@ class TrtllmLLMEngine(LLMEngine):
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
 
-        # Resolve the engine-declared logits-processor spec now that
-        # the tokenizer is available. Override `logits_processor_spec()`
-        # to customize; default behaviour returns the env-hook smoke
-        # resolver result (None when DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR
-        # is off).
+        # Resolve the engine-declared spec now the engine (and its tokenizer)
+        # is initialized; see `logits_processor_spec()`.
         self._logits_processor_spec = await self.logits_processor_spec()
 
         from tensorrt_llm.metrics import MetricsCollector
@@ -388,14 +382,15 @@ class TrtllmLLMEngine(LLMEngine):
         ]
 
     async def logits_processor_spec(self) -> LogitsProcessorSpec | None:
-        # Resolve the env-gated `DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1`
-        # smoke hook into a spec bound to TRT-LLM's tokenizer. Returns
-        # None when the env var is off. The lambda is invoked lazily by
-        # `resolve_test_logits_processor_spec` only after the env check, so an
-        # env-off engine started with `skip_tokenizer_init=True` is
-        # safe (the tokenizer is never dereferenced).
+        # Only generation roles ever attach (PREFILL/ENCODE gate out per
+        # request), so skip spec resolution — and the tokenizer it needs —
+        # entirely for the other roles.
+        if not is_generation_stage(_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode]):
+            return None
+        # Bind the env-gated smoke hook to TRT-LLM's tokenizer; the lambda is
+        # dereferenced lazily, only when the hook is on (see the resolver).
         assert self._engine is not None
-        engine = self._engine
+        engine = self._engine  # narrow for the closure
         return resolve_test_logits_processor_spec(lambda: engine.llm.tokenizer)
 
     def component_metrics_dp_ranks(self) -> list[int]:
@@ -649,15 +644,9 @@ class TrtllmLLMEngine(LLMEngine):
             else None
         )
 
-        # Build the per-request spec entry list from the engine's cached spec
-        # (None when `logits_processor_spec()` returned None, e.g. the
-        # env hook is off). The shared helper enforces the PREFILL skip
-        # policy. `attach_logits_processors` realizes each spec entry
-        # into a fresh live `BaseLogitsProcessor` for per-request state
-        # isolation, then wraps in TRT-LLM adapters. No-op on empty so
-        # this is zero-cost when the engine has nothing to attach.
         entries = logits_processors_for_request(
-            self._logits_processor_spec, is_prefill=is_prefill
+            self._logits_processor_spec,
+            disaggregation_mode=_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode],
         )
         attach_logits_processors(sampling_params, entries)
 

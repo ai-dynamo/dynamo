@@ -7,7 +7,9 @@ from typing import Any, List, Optional, Sequence
 import torch
 from tensorrt_llm.sampling_params import LogitsProcessor
 
+from dynamo.common.backend.engine import ForcedTokenSequenceSpec, PythonProcessorSpec
 from dynamo.logits_processing import BaseLogitsProcessor
+from dynamo.logits_processing.examples import ForcedSequenceLogitsProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -94,29 +96,13 @@ def attach_logits_processors(
 ) -> None:
     """TRT-LLM realizer for the shared `LogitsProcessorEntry` contract.
 
-    Translates each spec entry into a live `BaseLogitsProcessor`, wraps
-    the result in `TrtllmDynamoLogitsAdapter`, and writes onto
-    ``sampling_params.logits_processor``. Per-request state isolation
-    is achieved here: a fresh processor instance is constructed for
-    every call, so concurrent requests see independent state counters.
-
-    No-op on empty input so the unified engine can call this
-    unconditionally. ``entries`` items must be
-    :class:`ForcedTokenSequenceSpec` or :class:`PythonProcessorSpec`
-    (both defined in ``dynamo.common.backend.engine``). Unknown
-    spec entry types raise ``TypeError``: better to fail loudly than
-    silently no-op when the engine adds new spec entry kinds.
+    Builds a fresh processor per call (independent per-request state),
+    wraps each in `TrtllmDynamoLogitsAdapter`, and assigns onto
+    ``sampling_params.logits_processor``. No-op on empty input; unknown
+    entry types raise ``TypeError``.
     """
     if not entries:
         return
-    # Imported here to avoid a cycle: adapter.py is imported during
-    # `dynamo.common.backend.engine`'s downstream consumers.
-    from dynamo.common.backend.engine import (
-        ForcedTokenSequenceSpec,
-        PythonProcessorSpec,
-    )
-    from dynamo.logits_processing.examples import ForcedSequenceLogitsProcessor
-
     processors: list[BaseLogitsProcessor] = []
     for d in entries:
         if isinstance(d, ForcedTokenSequenceSpec):
