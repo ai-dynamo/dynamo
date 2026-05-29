@@ -601,6 +601,67 @@ def _dynamo_tool_call_leak(dyn: dict) -> str | None:
     return str(dyn["reason"])
 
 
+def _block_tool_call_leaks(block: dict) -> bool:
+    normal_text = block.get("normal_text")
+    return isinstance(normal_text, str) and bool(
+        _TOOL_CALL_MARKUP_RE.search(normal_text)
+    )
+
+
+def _overview_status(case: dict | None, impl: str) -> str:
+    if case is None or "expected" not in case:
+        return "na"
+    block = case.get("expected", {}).get(impl)
+    if not isinstance(block, dict) or "unavailable" in block:
+        return "na"
+    if "error" in block or _block_tool_call_leaks(block):
+        return "problem"
+    return "ok"
+
+
+def _overview_status_attrs(case: dict | None) -> str:
+    return " ".join(
+        f'data-status-{impl}="{_overview_status(case, impl)}"'
+        for impl in ("dynamo", "vllm", "sglang")
+    )
+
+
+def _parser_marker(case: dict | None, impl: str) -> str:
+    if case is None:
+        return "—"
+    if "expected" not in case:
+        return "n/a"
+    expected = case.get("expected", {})
+    block = expected.get(impl)
+    if not isinstance(block, dict) or "unavailable" in block:
+        return "n/a"
+    if "error" in block:
+        return "!"
+    if _block_tool_call_leaks(block):
+        return "↯"
+    if impl == "dynamo":
+        return cell_for(case).replace("↯", "") or "="
+
+    dyn = expected.get("dynamo")
+    if not isinstance(dyn, dict):
+        return "n/a"
+    kind, unknown = peer_status(case, dyn, impl)
+    if kind == "div":
+        return ("V" if impl == "vllm" else "S") + ("?" if unknown else "")
+    if kind == "err":
+        return "!"
+    if kind in {"na", "unavail"}:
+        return "n/a"
+    return "="
+
+
+def _parser_marker_attrs(case: dict | None) -> str:
+    return " ".join(
+        f'data-marker-{impl}="{html_lib.escape(_parser_marker(case, impl))}"'
+        for impl in ("dynamo", "vllm", "sglang")
+    )
+
+
 def cell_for(case: dict | None) -> str:
     if case is None:
         return "—"
@@ -881,7 +942,12 @@ def render_cell_html(case: dict | None, mode: str, family: str, sub: str) -> str
     cls = parity_cell_class(text)
     band_cls = _subcase_band_class(mode, sub)
     col_group = html_lib.escape(_subcase_group_key(mode, sub))
-    td_open = f'<td class="cell {cls} {band_cls}" data-col-hide-group="{col_group}">'
+    status_attrs = _overview_status_attrs(case)
+    marker_attrs = _parser_marker_attrs(case)
+    td_open = (
+        f'<td class="cell {cls} {band_cls}" data-col-hide-group="{col_group}" '
+        f"{status_attrs} {marker_attrs}>"
+    )
     if case is None:
         ttip = _build_missing_tooltip_html(mode, family, sub)
         return f"{td_open}{text}{ttip}</td>"

@@ -54,6 +54,18 @@ def test_generate_parser_parity_table_html() -> None:
         r'data-col-toggle="model"[^>]+data-default-visible="true"[^>]+aria-pressed="true"',
         html,
     )
+    assert '<body class="view-overview parser-dynamo">' in html
+    assert 'value="overview" data-view-toggle checked> Overview' in html
+    assert 'value="details" data-view-toggle> Details' in html
+    assert 'value="dynamo" data-parser-toggle checked> Dynamo Rust parser' in html
+    assert 'value="vllm" data-parser-toggle> vLLM Python parser' in html
+    assert 'value="sglang" data-parser-toggle> SGLang Python parser' in html
+    assert "green = selected implementation output is clean" in html
+    assert "red = selected implementation leaks parser markup" in html
+    assert "get('view')" in html
+    assert "get('parser')" in html
+    assert "url.searchParams.set('view', view)" in html
+    assert "url.searchParams.set('parser', parser)" in html
     assert "Tool calling family" in html
     assert "generate_parity_table.py toolcalling --html" in html
     assert "TOOLCALLING.batch.*" in html
@@ -62,6 +74,13 @@ def test_generate_parser_parity_table_html() -> None:
     assert 'id="case-descriptions-stream"' in html
     assert "TOOLCALLING.batch.1</td><td>Single tool call" in html
     assert "TOOLCALLING.stream.1.a</td><td>Single complete tool-call payload" in html
+    assert (
+        'data-status-dynamo="ok" data-status-vllm="problem" data-status-sglang="na" '
+        'data-marker-dynamo="V" data-marker-vllm="↯" data-marker-sglang="n/a">'
+        '<a href="fixtures/deepseek_v4/TOOLCALLING.batch.4.yaml">V</a>'
+        '<div class="ttip"><div class="ttip-head">TOOLCALLING.batch.4.a — deepseek_v4'
+        in html
+    )
     assert fixture_links
     assert len(fixture_families) > 10
     assert "deepseek_v3" in fixture_families

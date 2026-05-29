@@ -460,23 +460,29 @@ def _is_gpt_oss_tool_handoff(family: str | None, field: str, value: str) -> bool
     )
 
 
-def _dynamo_leak_reason(expected: dict[str, Any], family: str | None) -> str | None:
-    dynamo = expected.get("dynamo", {})
-    if not isinstance(dynamo, dict):
+def _block_leak_reason(block: dict[str, Any], family: str | None) -> str | None:
+    if not isinstance(block, dict):
         return None
     marker_re = _reasoning_markup_re(family)
     for field in ("reasoning_text", "normal_text"):
-        value = dynamo.get(field)
+        value = block.get(field)
         if (
             isinstance(value, str)
             and marker_re.search(value)
             and not _is_gpt_oss_tool_handoff(family, field, value)
         ):
             return str(
-                dynamo.get("reason")
+                block.get("reason")
                 or "Dynamo leaks reasoning markup or final-answer text."
             )
     return None
+
+
+def _dynamo_leak_reason(expected: dict[str, Any], family: str | None) -> str | None:
+    dynamo = expected.get("dynamo", {})
+    if not isinstance(dynamo, dict):
+        return None
+    return _block_leak_reason(dynamo, family)
 
 
 def _has_dynamo_leak(case: dict[str, Any], family: str | None) -> bool:
@@ -485,6 +491,56 @@ def _has_dynamo_leak(case: dict[str, Any], family: str | None) -> bool:
     expected = case.get("expected")
     return (
         isinstance(expected, dict) and _dynamo_leak_reason(expected, family) is not None
+    )
+
+
+def _overview_status(case: dict[str, Any] | None, family: str | None, impl: str) -> str:
+    if case is None or "expected" not in case:
+        return "na"
+    block = case.get("expected", {}).get(impl)
+    if not isinstance(block, dict) or "unavailable" in block:
+        return "na"
+    if "error" in block or _block_leak_reason(block, family):
+        return "problem"
+    return "ok"
+
+
+def _overview_status_attrs(case: dict[str, Any] | None, family: str | None) -> str:
+    return " ".join(
+        f'data-status-{impl}="{_overview_status(case, family, impl)}"'
+        for impl in ("dynamo", "vllm", "sglang")
+    )
+
+
+def _parser_marker(case: dict[str, Any] | None, family: str | None, impl: str) -> str:
+    if case is None:
+        return "—"
+    if "expected" not in case:
+        return "n/a"
+    expected = case.get("expected", {})
+    block = expected.get(impl)
+    if not isinstance(block, dict) or "unavailable" in block:
+        return "n/a"
+    if "error" in block:
+        return "!"
+    if _block_leak_reason(block, family):
+        return "↯"
+    if impl == "dynamo":
+        return _cell(case, family)[0].replace("↯", "") or "="
+
+    dyn = expected.get("dynamo")
+    if not isinstance(dyn, dict):
+        return "n/a"
+    if _canonical(block) == _canonical(dyn):
+        return "="
+    suffix = "?" if "reason" not in block else ""
+    return ("V" if impl == "vllm" else "S") + suffix
+
+
+def _parser_marker_attrs(case: dict[str, Any] | None, family: str | None) -> str:
+    return " ".join(
+        f'data-marker-{impl}="{html_lib.escape(_parser_marker(case, family, impl))}"'
+        for impl in ("dynamo", "vllm", "sglang")
     )
 
 
@@ -1564,6 +1620,8 @@ def _render_cell_html(
         )
 
     classes = f"cell {parity_cell_class(marker)} {_case_band_class(case_id)}"
+    status_attrs = _overview_status_attrs(case, family)
+    marker_attrs = _parser_marker_attrs(case, family)
     group_key = html_lib.escape(_case_group_key(case_id))
     label = html_lib.escape(marker)
     if href:
@@ -1571,7 +1629,8 @@ def _render_cell_html(
     else:
         body = label
     return (
-        f'<td class="{classes}" data-col-hide-group="{group_key}">'
+        f'<td class="{classes}" data-col-hide-group="{group_key}" '
+        f"{status_attrs} {marker_attrs}>"
         f"{body}{tooltip}</td>"
     )
 
@@ -1581,7 +1640,10 @@ def _render_no_reasoning_cell_html(tool_family: str, case_id: str) -> str:
     group_key = html_lib.escape(_case_group_key(case_id))
     tooltip = _no_reasoning_tooltip_html(case_id, tool_family)
     return (
-        f'<td class="{classes}" data-col-hide-group="{group_key}">' f"n/a{tooltip}</td>"
+        f'<td class="{classes}" data-col-hide-group="{group_key}" '
+        'data-status-dynamo="na" data-status-vllm="na" data-status-sglang="na" '
+        'data-marker-dynamo="n/a" data-marker-vllm="n/a" data-marker-sglang="n/a">'
+        f"n/a{tooltip}</td>"
     )
 
 
