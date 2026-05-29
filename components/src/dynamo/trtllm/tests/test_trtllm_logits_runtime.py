@@ -1,9 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the unified TRT-LLM backend's inline
-DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR hook plus the existing
-TrtllmDynamoLogitsAdapter."""
+"""Unit tests for the TRT-LLM slice of the
+DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR hook: the unified `from_args`
+tokenizer-init flip, the unified `generate` attach/skip matrix
+threaded through the shared spec entry layer in
+`dynamo.common.backend.engine`, the TRT-LLM realizer (spec entry →
+live `BaseLogitsProcessor` → `TrtllmDynamoLogitsAdapter`), the
+adapter's shape and CUDA-stream behavior, and the realizer's
+no-op-on-empty contract.
+
+Shared-layer policy itself (PREFILL skip, spec entry composition,
+env-gated spec resolver) is tested in
+`dynamo.common.backend.tests.test_engine` without GPU or tensorrt_llm.
+These tests exercise the same policy through the unified TRT-LLM
+engine to confirm the wiring."""
 
 from __future__ import annotations
 
@@ -22,7 +33,10 @@ if not torch.cuda.is_available():
 
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.llm_engine import TrtllmLLMEngine
-from dynamo.trtllm.logits_processing.adapter import TrtllmDynamoLogitsAdapter
+from dynamo.trtllm.logits_processing.adapter import (
+    TrtllmDynamoLogitsAdapter,
+    attach_logits_processors,
+)
 
 ENV = "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR"
 
@@ -134,6 +148,9 @@ class _FakeEngine:
 
 
 def _make_engine(mode: DisaggregationMode, llm) -> TrtllmLLMEngine:
+    """Construct an engine and stub `_engine` to a fake. Spec resolution
+    is deferred to `_resolve_spec_like_start` below so the test driver
+    can `await` the override the same way `start()` does."""
     engine = TrtllmLLMEngine(
         engine_args={},
         model_name="test/model",
@@ -141,6 +158,18 @@ def _make_engine(mode: DisaggregationMode, llm) -> TrtllmLLMEngine:
     )
     engine._engine = _FakeEngine(llm)  # type: ignore[assignment]
     return engine
+
+
+async def _resolve_plan_like_start(engine: TrtllmLLMEngine) -> None:
+    """Mirror what `start()` does after engine init: unconditionally
+    await the engine's `logits_processor_spec()` override and cache the
+    result on the instance.
+
+    Production calls this without an env guard. The override passes a
+    lambda to `resolve_test_logits_processor_spec` so the tokenizer is dereferenced
+    only after the env check; `_NoTokenizerLLM` in the env-off rows
+    therefore never has its `.tokenizer` property invoked."""
+    engine._logits_processor_spec = await engine.logits_processor_spec()
 
 
 @pytest.mark.parametrize(
@@ -155,9 +184,19 @@ def _make_engine(mode: DisaggregationMode, llm) -> TrtllmLLMEngine:
 def test_unified_generate_attachment_matrix(
     mode, env, llm_factory, expect_attached, monkeypatch
 ):
-    """AGG+env-off: no attach, no tokenizer access (`_NoTokenizerLLM`
-    raises if `.tokenizer` is read). AGG+env-on and DECODE+env-on: attach.
-    PREFILL+env-on: skip (the disaggregated-mode policy)."""
+    """End-to-end pin through the shared spec entry layer:
+
+    * AGG+env-off: no attach, no tokenizer access. `_NoTokenizerLLM`
+      raises if `.tokenizer` is read; `resolve_test_logits_processor_spec` returns
+      None without invoking the lazy tokenizer factory.
+    * AGG+env-on, DECODE+env-on: attach. The shared
+      `logits_processors_for_request` returns the spec's entries; the
+      TRT-LLM realizer instantiates a `ForcedSequenceLogitsProcessor`
+      from each and wraps it in `TrtllmDynamoLogitsAdapter`.
+    * PREFILL+env-on: skip. `logits_processors_for_request` returns [] in
+      PREFILL (spec has `skip_prefill=True`), and
+      `attach_logits_processors` no-ops on an empty list, so
+      `sampling_params.logits_processor` stays None."""
     _set_env(monkeypatch, env)
     request: dict[str, Any] = {"token_ids": [1, 2, 3]}
 
@@ -188,6 +227,7 @@ def test_unified_generate_attachment_matrix(
     engine = _make_engine(mode, llm)
 
     async def _drive():
+        await _resolve_plan_like_start(engine)
         async for _ in engine.generate(request, _FakeContext()):
             pass
 
@@ -200,6 +240,70 @@ def test_unified_generate_attachment_matrix(
         assert len(sp.logits_processor) == 1
     else:
         assert sp.logits_processor is None
+
+
+# ---------------------------------------------------------------------------
+# TRT-LLM attach_logits_processors contract
+# ---------------------------------------------------------------------------
+
+
+def test_attach_logits_processors_no_op_on_empty():
+    """The unified engine calls `attach_logits_processors` unconditionally
+    once `logits_processors_for_request` returns its (possibly empty) list of
+    entries. Empty input must not touch
+    `sampling_params.logits_processor`."""
+    from unittest.mock import MagicMock
+
+    sampling_params = MagicMock()
+    sampling_params.logits_processor = None
+    attach_logits_processors(sampling_params, [])
+    assert sampling_params.logits_processor is None
+
+
+def test_attach_logits_processors_realizes_forced_token_sequence_spec():
+    """A `ForcedTokenSequenceSpec` realizes into a
+    `ForcedSequenceLogitsProcessor` wrapped in
+    `TrtllmDynamoLogitsAdapter`. Pins the spec entry-to-live-processor
+    realization that the TRT-LLM realizer owns."""
+    from unittest.mock import MagicMock
+
+    from dynamo.common.backend.engine import ForcedTokenSequenceSpec
+
+    sampling_params = MagicMock()
+    entries = [ForcedTokenSequenceSpec(token_ids=(1, 2, 3), eos_token_id=2)]
+    attach_logits_processors(sampling_params, entries)
+    assert isinstance(sampling_params.logits_processor, list)
+    assert len(sampling_params.logits_processor) == 1
+    assert isinstance(sampling_params.logits_processor[0], TrtllmDynamoLogitsAdapter)
+
+
+def test_attach_logits_processors_realizes_python_processor_spec():
+    """A `PythonProcessorSpec` realizes by calling its factory
+    fresh and wrapping the result. The TRT-LLM escape hatch for
+    arbitrary `BaseLogitsProcessor` callables that don't fit a
+    serializable spec entry."""
+    from unittest.mock import MagicMock
+
+    from dynamo.common.backend.engine import PythonProcessorSpec
+
+    sampling_params = MagicMock()
+
+    class _MinimalProcessor:
+        def __call__(self, input_ids, scores):
+            return None
+
+    factory_calls = []
+
+    def _factory():
+        factory_calls.append("invoked")
+        return _MinimalProcessor()
+
+    entries = [PythonProcessorSpec(factory=_factory)]
+    attach_logits_processors(sampling_params, entries)
+    assert factory_calls == ["invoked"]
+    assert isinstance(sampling_params.logits_processor, list)
+    assert len(sampling_params.logits_processor) == 1
+    assert isinstance(sampling_params.logits_processor[0], TrtllmDynamoLogitsAdapter)
 
 
 # ---------------------------------------------------------------------------
