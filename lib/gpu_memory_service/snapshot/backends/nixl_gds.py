@@ -30,6 +30,7 @@ from gpu_memory_service.snapshot.transfer import (
     FileTransferSource,
     GMSSnapshotConfig,
     GMSTransferTarget,
+    StreamingRestoreCoordinator,
     TransferBackendKind,
     TransferSession,
     group_sources_by_path,
@@ -87,52 +88,34 @@ class _NixlGDSTransferSession:
         self._device = device
         self._max_workers = max(1, int(max_workers))
         self._sources = list(sources)
-        self._sources_by_id = {source.allocation_id: source for source in self._sources}
         self._file_groups = list(group_sources_by_path(self._sources).items())
         self._total_bytes = sum(source.byte_count for source in self._sources)
-        self._condition = threading.Condition()
-        self._targets: dict[str, GMSTransferTarget] = {}
-        self._submitted_done = False
+        self._coordinator = StreamingRestoreCoordinator(
+            backend_name="NIXL GDS",
+            device=self._device,
+            sources=self._sources,
+        )
         self._pending_group_indices = set(range(len(self._file_groups)))
         self._scheduler_thread: Optional[threading.Thread] = None
-        self._cancel_event = threading.Event()
-        self._error: Optional[BaseException] = None
         self._stream_started_at: Optional[float] = None
         self._first_transfer_at: Optional[float] = None
 
     def submit_targets(self, targets: Mapping[str, GMSTransferTarget]) -> None:
         if not targets:
             return
-        self._validate_submitted_targets(targets)
+        self._coordinator.submit_targets(targets)
         self._ensure_streaming_started()
-
-        with self._condition:
-            self._raise_error_locked()
-            if self._submitted_done or self._cancel_event.is_set():
-                raise RuntimeError("NIXL GDS restore session is closed")
-            for allocation_id, target in targets.items():
-                previous = self._targets.get(allocation_id)
-                if previous is not None and previous != target:
-                    raise RuntimeError(
-                        f"NIXL GDS got duplicate target for allocation {allocation_id}"
-                    )
-                self._targets[allocation_id] = target
-            self._condition.notify_all()
 
     def finish_restore(self) -> None:
         if not self._file_groups:
-            with self._condition:
-                self._submitted_done = True
-                self._condition.notify_all()
+            self._coordinator.finish_submission()
             return
         self._ensure_streaming_started()
-        with self._condition:
-            self._submitted_done = True
-            self._condition.notify_all()
+        self._coordinator.finish_submission()
 
         assert self._scheduler_thread is not None
         self._scheduler_thread.join()
-        self._raise_error()
+        self._coordinator.raise_if_failed()
 
         now = time.monotonic()
         first_transfer_at = self._first_transfer_at or now
@@ -191,37 +174,13 @@ class _NixlGDSTransferSession:
         )
 
     def close(self) -> None:
-        self._cancel_event.set()
-        with self._condition:
-            self._submitted_done = True
-            self._condition.notify_all()
+        self._coordinator.cancel()
         if (
             self._scheduler_thread is not None
             and self._scheduler_thread.is_alive()
             and threading.current_thread() is not self._scheduler_thread
         ):
             self._scheduler_thread.join()
-
-    def _validate_submitted_targets(
-        self,
-        targets: Mapping[str, GMSTransferTarget],
-    ) -> None:
-        for allocation_id, target in targets.items():
-            source = self._sources_by_id.get(allocation_id)
-            if source is None:
-                raise RuntimeError(
-                    f"NIXL GDS got target for unknown allocation {allocation_id}"
-                )
-            if target.byte_count != source.byte_count:
-                raise RuntimeError(
-                    f"NIXL GDS target size mismatch for allocation {allocation_id}: "
-                    f"source={source.byte_count} target={target.byte_count}"
-                )
-            if target.device != self._device:
-                raise RuntimeError(
-                    f"NIXL GDS target device mismatch for allocation {allocation_id}: "
-                    f"backend={self._device} target={target.device}"
-                )
 
     def _ensure_streaming_started(self) -> None:
         if not self._file_groups:
@@ -243,16 +202,12 @@ class _NixlGDSTransferSession:
         )
         self._scheduler_thread.start()
 
-    def _missing_group_targets(
+    def _file_group_allocation_ids(
         self,
         file_group: Tuple[str, Sequence[FileTransferSource]],
     ) -> list[str]:
         _file_path, sources = file_group
-        return [
-            source.allocation_id
-            for source in sources
-            if source.allocation_id not in self._targets
-        ]
+        return [source.allocation_id for source in sources]
 
     def _pop_ready_group_locked(
         self,
@@ -262,17 +217,16 @@ class _NixlGDSTransferSession:
         ready_indices = [
             group_index
             for group_index in sorted(self._pending_group_indices)
-            if not self._missing_group_targets(self._file_groups[group_index])
+            if self._coordinator.has_targets_locked(
+                self._file_group_allocation_ids(self._file_groups[group_index])
+            )
         ]
         if not ready_indices:
             return None
         group_index = ready_indices[0]
         file_group = self._file_groups[group_index]
-        _file_path, sources = file_group
-        group_targets = {
-            source.allocation_id: self._targets[source.allocation_id]
-            for source in sources
-        }
+        allocation_ids = self._file_group_allocation_ids(file_group)
+        group_targets = self._coordinator.targets_for_locked(allocation_ids)
         self._pending_group_indices.remove(group_index)
         return file_group, group_targets
 
@@ -281,9 +235,9 @@ class _NixlGDSTransferSession:
         try:
             cuda_utils.cuda_runtime_set_device(self._device)
             while True:
-                self._raise_error()
+                self._coordinator.raise_if_failed()
                 while len(inflight) < self._max_workers:
-                    with self._condition:
+                    with self._coordinator.condition:
                         ready = self._pop_ready_group_locked()
                     if ready is None:
                         break
@@ -294,23 +248,34 @@ class _NixlGDSTransferSession:
 
                 self._poll_completed_transfers(inflight)
 
-                with self._condition:
+                with self._coordinator.condition:
                     if not self._pending_group_indices and not inflight:
                         return
                     ready_exists = any(
-                        not self._missing_group_targets(self._file_groups[group_index])
+                        self._coordinator.has_targets_locked(
+                            self._file_group_allocation_ids(
+                                self._file_groups[group_index]
+                            )
+                        )
                         for group_index in self._pending_group_indices
                     )
                     if ready_exists and len(inflight) < self._max_workers:
                         continue
-                    if self._submitted_done and self._pending_group_indices:
+                    if (
+                        self._coordinator.submission_finished_locked
+                        and self._pending_group_indices
+                    ):
                         if not ready_exists:
                             missing = sorted(
                                 {
                                     allocation_id
                                     for group_index in self._pending_group_indices
-                                    for allocation_id in self._missing_group_targets(
-                                        self._file_groups[group_index]
+                                    for allocation_id in (
+                                        self._coordinator.missing_targets_locked(
+                                            self._file_group_allocation_ids(
+                                                self._file_groups[group_index]
+                                            )
+                                        )
                                     )
                                 }
                             )
@@ -318,14 +283,13 @@ class _NixlGDSTransferSession:
                                 f"NIXL GDS missing {len(missing)} restore "
                                 "target(s) before finish_restore"
                             )
-                    if self._cancel_event.is_set():
+                    if self._coordinator.cancelled_locked:
                         raise RuntimeError("NIXL GDS restore session was cancelled")
-                    self._condition.wait(timeout=0.001 if inflight else None)
+                    self._coordinator.condition.wait(
+                        timeout=0.001 if inflight else None
+                    )
         except BaseException as exc:
-            with self._condition:
-                if self._error is None:
-                    self._error = exc
-                self._condition.notify_all()
+            self._coordinator.set_error(exc)
         finally:
             self._drain_inflight_transfers(inflight)
 
@@ -404,14 +368,6 @@ class _NixlGDSTransferSession:
                 )
             finally:
                 release_nixl_transfer_resources(self._agent, transfer)
-
-    def _raise_error(self) -> None:
-        with self._condition:
-            self._raise_error_locked()
-
-    def _raise_error_locked(self) -> None:
-        if self._error is not None:
-            raise self._error
 
     def _prepare_file_transfer(
         self,

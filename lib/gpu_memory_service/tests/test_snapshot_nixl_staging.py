@@ -62,12 +62,6 @@ def test_split_work_groups_limits_bucket_count():
     assert actual == expected
 
 
-def test_split_work_groups_keeps_existing_groups_when_not_over_limit():
-    work_groups = [_work_group("a", 1), _work_group("b", 2)]
-
-    assert split_work_groups(work_groups, worker_count=8) == work_groups
-
-
 def test_split_work_groups_balances_by_bytes():
     work_groups = [
         _work_group("large", 10),

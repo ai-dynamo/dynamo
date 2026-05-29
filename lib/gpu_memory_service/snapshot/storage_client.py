@@ -13,7 +13,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.common.locks import RequestedLockType
@@ -34,14 +34,6 @@ from gpu_memory_service.snapshot.transfer import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _is_streaming_transfer_session(
-    session: Any,
-) -> bool:
-    return callable(getattr(session, "submit_targets", None)) and callable(
-        getattr(session, "finish_restore", None)
-    )
 
 
 class GMSStorageClient:
@@ -220,39 +212,17 @@ class GMSStorageClient:
         self,
         mm: Any,
         manifest: SaveManifest,
+        *,
+        submit_target: Optional[
+            Callable[[Mapping[str, GMSTransferTarget]], None]
+        ] = None,
     ) -> Tuple[Dict[str, str], Dict[str, GMSTransferTarget]]:
-        t0 = time.monotonic()
-        id_map: Dict[str, str] = {}
-        targets: Dict[str, GMSTransferTarget] = {}
-        for entry in manifest.allocations:
-            old_id = entry.allocation_id
-            va = mm.create_mapping(size=entry.size, tag=entry.tag)
-            id_map[old_id] = mm.mappings[va].allocation_id
-            targets[old_id] = GMSTransferTarget(
-                allocation_id=old_id,
-                va=va,
-                device=self.device,
-                byte_count=entry.aligned_size,
-            )
-        logger.info(
-            "Allocated %d restore target GMS VAs in %.3fs",
-            len(targets),
-            time.monotonic() - t0,
-        )
-        return id_map, targets
+        """Create and map restore target allocations in manifest order.
 
-    def _allocate_and_submit_restore_targets(
-        self,
-        mm: Any,
-        manifest: SaveManifest,
-        session: StreamingTransferSession,
-    ) -> Tuple[Dict[str, str], Dict[str, GMSTransferTarget]]:
-        """Allocate restore targets and publish each target immediately.
-
-        The allocation loop intentionally preserves manifest order because the
-        committed GMS layout/remap hash depends on allocation rank.  Streaming
-        only changes when the transfer backend learns about a target, not the
-        resulting committed layout.
+        If *submit_target* is provided, each target is published immediately
+        after GMS creates and maps the allocation.  That lets streaming backends
+        start any now-complete transfer group while later target allocations are
+        still being created.
         """
         t0 = time.monotonic()
         id_map: Dict[str, str] = {}
@@ -260,23 +230,22 @@ class GMSStorageClient:
         for entry in manifest.allocations:
             old_id = entry.allocation_id
             va = mm.create_mapping(size=entry.size, tag=entry.tag)
-            new_target = GMSTransferTarget(
+            target = GMSTransferTarget(
                 allocation_id=old_id,
                 va=va,
                 device=self.device,
                 byte_count=entry.aligned_size,
             )
             id_map[old_id] = mm.mappings[va].allocation_id
-            targets[old_id] = new_target
-            session.submit_targets({old_id: new_target})
-
-        elapsed = time.monotonic() - t0
+            targets[old_id] = target
+            if submit_target is not None:
+                submit_target({old_id: target})
         logger.info(
-            "Allocated and submitted %d restore target GMS VAs in %.3fs",
+            "Created and mapped%s %d restore target allocation(s) in %.3fs",
+            " and submitted" if submit_target is not None else "",
             len(targets),
-            elapsed,
+            time.monotonic() - t0,
         )
-        session.finish_restore()
         return id_map, targets
 
     def load_to_gms(
@@ -316,18 +285,20 @@ class GMSStorageClient:
                 if clear_existing:
                     logger.info("RW connect cleared any previously committed GMS state")
 
-                if self._overlap_restore_transfers and _is_streaming_transfer_session(
-                    session
+                if self._overlap_restore_transfers and isinstance(
+                    session,
+                    StreamingTransferSession,
                 ):
                     logger.info(
                         "Using streaming restore target submission for %s",
                         backend_name,
                     )
-                    id_map, targets = self._allocate_and_submit_restore_targets(
+                    id_map, targets = self._allocate_restore_targets(
                         mm,
                         manifest,
-                        session,
+                        submit_target=session.submit_targets,
                     )
+                    session.finish_restore()
                 else:
                     id_map, targets = self._allocate_restore_targets(mm, manifest)
                     session.restore(targets)

@@ -38,6 +38,7 @@ from gpu_memory_service.snapshot.transfer import (
     FileTransferSource,
     GMSSnapshotConfig,
     GMSTransferTarget,
+    StreamingRestoreCoordinator,
     TransferSession,
     validate_transfer_targets,
 )
@@ -159,7 +160,6 @@ class _NixlPosixStagingTransferSession:
         self._agent_name_base = (
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
         )
-        self._sources_by_id = {source.allocation_id: source for source in self._sources}
         self._cancel_event = threading.Event()
         self._prep_started_at = time.monotonic()
         grouped = group_sources(self._sources)
@@ -181,13 +181,14 @@ class _NixlPosixStagingTransferSession:
         self._total_bytes = sum(source.byte_count for source in self._sources)
         self._prep_pool: Optional[ThreadPoolExecutor] = None
         self._prep_futures: dict[Future[_PreparedNixlGroup], str] = {}
-        self._stream_condition = threading.Condition()
+        self._coordinator = StreamingRestoreCoordinator(
+            backend_name=self._backend_name,
+            device=self._device,
+            sources=self._sources,
+        )
         self._stream_transfer_pool: Optional[ThreadPoolExecutor] = None
         self._stream_scheduler_thread: Optional[threading.Thread] = None
         self._stream_transfer_futures: dict[Future[None], str] = {}
-        self._stream_targets: dict[str, GMSTransferTarget] = {}
-        self._stream_done = False
-        self._stream_error: Optional[BaseException] = None
         self._stream_started_at: Optional[float] = None
         self._stream_first_transfer_at: Optional[float] = None
         if self._work_groups:
@@ -217,41 +218,23 @@ class _NixlPosixStagingTransferSession:
     def submit_targets(self, targets: Mapping[str, GMSTransferTarget]) -> None:
         if not targets:
             return
-        self._validate_submitted_targets(targets)
+        self._coordinator.submit_targets(targets)
         self._ensure_streaming_started()
-
-        with self._stream_condition:
-            self._raise_stream_error_locked()
-            if self._stream_done or self._cancel_event.is_set():
-                raise RuntimeError(f"{self._backend_name} restore session is closed")
-            for allocation_id, target in targets.items():
-                previous = self._stream_targets.get(allocation_id)
-                if previous is not None and previous != target:
-                    raise RuntimeError(
-                        f"{self._backend_name} got duplicate target for "
-                        f"allocation {allocation_id}"
-                    )
-                self._stream_targets[allocation_id] = target
-            self._stream_condition.notify_all()
 
     def finish_restore(self) -> None:
         if not self._work_groups:
-            with self._stream_condition:
-                self._stream_done = True
-                self._stream_condition.notify_all()
+            self._coordinator.finish_submission()
             return
 
         self._ensure_streaming_started()
         assert self._stream_scheduler_thread is not None
-        with self._stream_condition:
-            self._stream_done = True
-            self._stream_condition.notify_all()
+        self._coordinator.finish_submission()
 
         try:
             self._stream_scheduler_thread.join()
-            self._raise_stream_error()
+            self._coordinator.raise_if_failed()
             self._wait_for_streaming_transfers()
-            self._raise_stream_error()
+            self._coordinator.raise_if_failed()
         finally:
             if self._stream_transfer_pool is not None:
                 self._stream_transfer_pool.shutdown(wait=True, cancel_futures=True)
@@ -350,9 +333,7 @@ class _NixlPosixStagingTransferSession:
 
     def close(self) -> None:
         self._cancel_event.set()
-        with self._stream_condition:
-            self._stream_done = True
-            self._stream_condition.notify_all()
+        self._coordinator.cancel()
         if (
             self._stream_scheduler_thread is not None
             and self._stream_scheduler_thread.is_alive()
@@ -372,29 +353,6 @@ class _NixlPosixStagingTransferSession:
                 continue
             self._close_prepared_group(prepared)
         self._prep_futures.clear()
-
-    def _validate_submitted_targets(
-        self,
-        targets: Mapping[str, GMSTransferTarget],
-    ) -> None:
-        for allocation_id, target in targets.items():
-            source = self._sources_by_id.get(allocation_id)
-            if source is None:
-                raise RuntimeError(
-                    f"{self._backend_name} got target for unknown allocation "
-                    f"{allocation_id}"
-                )
-            if target.byte_count != source.byte_count:
-                raise RuntimeError(
-                    f"{self._backend_name} target size mismatch for allocation "
-                    f"{allocation_id}: source={source.byte_count} "
-                    f"target={target.byte_count}"
-                )
-            if target.device != self._device:
-                raise RuntimeError(
-                    f"{self._backend_name} target device mismatch for allocation "
-                    f"{allocation_id}: backend={self._device} target={target.device}"
-                )
 
     def _ensure_streaming_started(self) -> None:
         if not self._work_groups:
@@ -434,54 +392,35 @@ class _NixlPosixStagingTransferSession:
                     ) from exc
 
                 try:
-                    with self._stream_condition:
+                    with self._coordinator.condition:
                         self._stream_transfer_futures[
                             self._stream_transfer_pool.submit(
                                 self._restore_prepared_group_when_targets_ready,
                                 prepared,
                             )
                         ] = group_name
-                        self._stream_condition.notify_all()
+                        self._coordinator.condition.notify_all()
                 except Exception:
                     self._close_prepared_group(prepared)
                     raise
         except BaseException as exc:
             self._cancel_event.set()
-            with self._stream_condition:
-                if self._stream_error is None:
-                    self._stream_error = exc
-                self._stream_condition.notify_all()
+            self._coordinator.set_error(exc)
 
     def _wait_for_group_targets(
         self,
         prepared: _PreparedNixlGroup,
     ) -> dict[str, GMSTransferTarget]:
         allocation_ids = _file_groups_allocation_ids(prepared.file_groups)
-        with self._stream_condition:
-            while True:
-                self._raise_stream_error_locked()
-                if self._cancel_event.is_set():
-                    raise CancelledError(f"{self._backend_name} cancelled")
-                missing = [
-                    allocation_id
-                    for allocation_id in allocation_ids
-                    if allocation_id not in self._stream_targets
-                ]
-                if not missing:
-                    return {
-                        allocation_id: self._stream_targets[allocation_id]
-                        for allocation_id in allocation_ids
-                    }
-                if self._stream_done:
-                    raise RuntimeError(
-                        f"{self._backend_name} missing {len(missing)} restore "
-                        f"target(s) for {self._group_kind} group "
-                        f"{prepared.group_name}"
-                    )
-                self._stream_condition.wait(timeout=0.01)
+        if self._cancel_event.is_set():
+            raise CancelledError(f"{self._backend_name} cancelled")
+        return self._coordinator.wait_for_targets(
+            allocation_ids,
+            missing_context=f"{self._group_kind} group {prepared.group_name}",
+        )
 
     def _wait_for_streaming_transfers(self) -> None:
-        with self._stream_condition:
+        with self._coordinator.condition:
             transfer_futures = dict(self._stream_transfer_futures)
         for transfer_future in as_completed(transfer_futures):
             group_name = transfer_futures[transfer_future]
@@ -494,16 +433,8 @@ class _NixlPosixStagingTransferSession:
                     f"{self._group_kind} group {group_name}: {exc}"
                 ) from exc
 
-    def _raise_stream_error(self) -> None:
-        with self._stream_condition:
-            self._raise_stream_error_locked()
-
-    def _raise_stream_error_locked(self) -> None:
-        if self._stream_error is not None:
-            raise self._stream_error
-
     def _mark_first_streaming_transfer_started(self) -> None:
-        with self._stream_condition:
+        with self._coordinator.condition:
             if self._stream_first_transfer_at is not None:
                 return
             self._stream_first_transfer_at = time.monotonic()
