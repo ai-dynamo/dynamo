@@ -16,8 +16,7 @@ cases:
         reasoning_text: plain answer
         normal_text: ''
       vllm: *d_0
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+      sglang: *d_0
   REASONING.batch.2.a:
     description: Force-reasoning parser with explicit think tags
     ref: *upstream_ref
@@ -27,8 +26,7 @@ cases:
         reasoning_text: thinking
         normal_text: answer
       vllm: *d_1
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+      sglang: *d_1
   REASONING.batch.3.a:
     description: Reasoning followed by downstream tool-call text
     ref: *upstream_ref
@@ -38,8 +36,7 @@ cases:
         reasoning_text: choose tool
         normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
       vllm: *d_2
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+      sglang: *d_2
   REASONING.batch.3.b:
     description: Open reasoning interrupted by downstream tool-call text is not configured for DeepSeek R1-family parsing
     ref: *upstream_ref
@@ -53,8 +50,7 @@ cases:
         reasoning_text: compute
         normal_text: answer
       vllm: *d_3
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+      sglang: *d_3
   REASONING.batch.2.d:
     description: Normal text around reasoning is not applicable in force-reasoning mode
     reason: Force-reasoning parser families start inside reasoning; marker-free prefix text is not a normal-text prefix.
@@ -67,8 +63,7 @@ cases:
         reasoning_text: normal
         normal_text: answer
       vllm: *d_4
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+      sglang: *d_4
   REASONING.batch.5:
     description: Missing end marker keeps the remaining text as reasoning
     ref: *upstream_ref
@@ -78,8 +73,7 @@ cases:
         reasoning_text: partial
         normal_text: ''
       vllm: *d_5
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+      sglang: *d_5
   REASONING.batch.2.e:
     description: Empty reasoning block
     ref: *upstream_ref
@@ -89,8 +83,7 @@ cases:
         reasoning_text: ''
         normal_text: answer
       vllm: *d_6
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+      sglang: *d_6
   REASONING.batch.2.f:
     description: Complex reasoning content with Unicode and newlines
     ref: *upstream_ref
@@ -106,8 +99,7 @@ cases:
           JSON-ish: {"x": [1, true]}
         normal_text: Done.
       vllm: *d_7
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+      sglang: *d_7
   REASONING.batch.1.a:
     description: Empty input
     ref: *upstream_ref
@@ -117,12 +109,11 @@ cases:
         reasoning_text: ''
         normal_text: ''
       vllm: *d_8
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+      sglang: *d_8
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated by Dynamo
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
+    spec_ref: lib/parsers/REASONING_CASES.md; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     model_text: <think>first</think> middle <think>second</think> done
     expected:
       dynamo:
@@ -133,4 +124,5 @@ cases:
         normal_text: ' middle <think>second</think> done'
         reason: Dynamo extracts each complete reasoning span; vLLM leaves the later complete span in normal_text.
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+        reasoning_text: first
+        normal_text: ' middle <think>second</think> done'
