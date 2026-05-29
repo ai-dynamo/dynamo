@@ -81,8 +81,8 @@ def test_generate_parser_parity_table_html() -> None:
     assert 'data-marker-parity-dynamo="VS"' in html
     assert 'data-marker-parity-vllm="DS"' in html
     assert 'data-marker-parity-sglang="DV"' in html
-    assert 'data-marker-parity-dynamo="=↯"' in html
-    assert 'data-marker-parity-dynamo="VS↯"' in html
+    assert 'data-marker-parity-dynamo="↯="' in html
+    assert 'data-marker-parity-dynamo="↯VS"' in html
     assert 'data-marker-dynamo="D!"' not in html
     assert ".view-details.parity-mode .parity-explainer { display: block; }" in html
     assert "<strong>Parity:</strong>" in html

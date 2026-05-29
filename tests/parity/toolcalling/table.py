@@ -674,7 +674,7 @@ def _parity_marker(case: dict | None, impl: str) -> str:
     marker = _selected_parity_marker(case, impl)
     if marker is None:
         return _parser_marker(case, impl)
-    return marker + _selected_parity_suffix(case, impl)
+    return _selected_parity_suffix(case, impl) + marker
 
 
 def _parser_marker(case: dict | None, impl: str) -> str:
