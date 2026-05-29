@@ -164,6 +164,20 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
 
+# Copy the in-tree LGPL ffmpeg from wheel_builder. The TRT-LLM diffusion handler
+# always encodes video (video_handler.py:263 → encode_to_video_bytes), so the
+# CLI and its libav* / libvpx runtime libs need to be present in this image and
+# imageio must be pointed at it via IMAGEIO_FFMPEG_EXE. Ungated by
+# enable_media_ffmpeg because TRT-LLM unconditionally needs the encoder.
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    cp -nL /tmp/usr/local/lib/libav*.so* /usr/local/lib/ 2>/dev/null || true && \
+    cp -nL /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ 2>/dev/null || true && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
+    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
+ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
+
 # Copy TensorRT and libgomp from framework image (arch-dependent path, needs root)
 COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
 RUN --mount=type=bind,from=framework,source=/usr/lib,target=/mnt/usr_lib \
