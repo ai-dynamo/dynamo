@@ -107,18 +107,23 @@ impl MinCostFlowGraph {
         max_flow: i64,
     ) -> Result<(i64, i64), McfError> {
         let n = self.n;
-        let mut pot = vec![0i64; n];
+        // Cost-domain accumulators use i128. Potentials and per-augmentation
+        // cost can each reach `max_flow * max_edge_cost`, which overflows i64
+        // for large flows or large overflow penalties; i128 keeps the solver
+        // panic-free regardless of edge magnitudes. Capacities/flow stay i64.
+        let inf: i128 = INF_COST as i128;
+        let mut pot = vec![0i128; n];
         let mut prevv = vec![0usize; n];
         let mut preve = vec![0usize; n];
 
         let mut flow: i64 = 0;
-        let mut cost: i64 = 0;
+        let mut cost: i128 = 0;
 
         while flow < max_flow {
             // Dijkstra on reduced costs
-            let mut dist = vec![INF_COST; n];
+            let mut dist = vec![inf; n];
             dist[s] = 0;
-            let mut pq: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
+            let mut pq: BinaryHeap<Reverse<(i128, usize)>> = BinaryHeap::new();
             pq.push(Reverse((0, s)));
 
             while let Some(Reverse((d, v))) = pq.pop() {
@@ -129,7 +134,7 @@ impl MinCostFlowGraph {
                     if e.cap <= 0 {
                         continue;
                     }
-                    let nd = d + e.cost + pot[v] - pot[e.to];
+                    let nd = d + e.cost as i128 + pot[v] - pot[e.to];
                     if nd < dist[e.to] {
                         dist[e.to] = nd;
                         prevv[e.to] = v;
@@ -139,13 +144,13 @@ impl MinCostFlowGraph {
                 }
             }
 
-            if dist[t] >= INF_COST {
+            if dist[t] >= inf {
                 break; // No augmenting path
             }
 
             // Update potentials
             for v in 0..n {
-                if dist[v] < INF_COST {
+                if dist[v] < inf {
                     pot[v] += dist[v];
                 }
             }
@@ -171,7 +176,7 @@ impl MinCostFlowGraph {
             }
 
             flow += add_flow;
-            cost += add_flow * pot[t];
+            cost += add_flow as i128 * pot[t];
         }
 
         if flow < max_flow {
@@ -180,7 +185,9 @@ impl MinCostFlowGraph {
                 requested: max_flow,
             })
         } else {
-            Ok((flow, cost))
+            // Saturate the (informational) cost back into i64 for the public API.
+            let cost_i64 = cost.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+            Ok((flow, cost_i64))
         }
     }
 

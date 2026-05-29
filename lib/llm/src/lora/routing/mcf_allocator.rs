@@ -710,20 +710,23 @@ impl McfPlacementSolver {
     ///
     /// `cost = α·rank + γ·w_l` if new, or `α·rank − β·w_l` if keeping.
     ///
-    /// All arithmetic is saturating and `churn_weight` is floored at 0 (a
-    /// negative weight would invert the keep/load incentive). The result is
-    /// clamped strictly below `overflow_cost` so that placing on any real
-    /// worker — even a far-down-HRW fallback worker in a dense solve — is always
-    /// cheaper than overflowing.
+    /// `churn_weight` is floored at 0 (a negative weight would invert the
+    /// keep/load incentive) and intermediate arithmetic uses `i128` to avoid
+    /// overflow. The result is clamped to `(-overflow_cost, overflow_cost)`:
+    /// - the upper bound keeps any real placement — even a far-down-HRW
+    ///   fallback worker in a dense solve — cheaper than overflowing;
+    /// - the lower bound keeps a large keep reward (`-β·w_l`) from running away
+    ///   toward `i64::MIN`, preserving the solver's `INF_COST` headroom.
     fn build_edge_cost(&self, churn_weight: i64, rank_index: usize, is_keep: bool) -> i64 {
-        let w = churn_weight.max(0);
-        let rank_term = self.params.alpha_pref.saturating_mul(rank_index as i64);
-        let c = if is_keep {
-            rank_term.saturating_sub(self.params.beta_keep.saturating_mul(w))
+        let w = churn_weight.max(0) as i128;
+        let rank_term = self.params.alpha_pref as i128 * rank_index as i128;
+        let c: i128 = if is_keep {
+            rank_term - self.params.beta_keep as i128 * w
         } else {
-            rank_term.saturating_add(self.params.gamma_load.saturating_mul(w))
+            rank_term + self.params.gamma_load as i128 * w
         };
-        c.min(self.params.overflow_cost.saturating_sub(1))
+        let bound = (self.params.overflow_cost - 1) as i128;
+        c.clamp(-bound, bound) as i64
     }
 
     pub fn params(&self) -> &McfSolveParams {
@@ -1060,6 +1063,37 @@ mod tests {
             "a free real worker must always beat overflow regardless of churn_weight"
         );
         assert_eq!(result.assignment["A"].len(), 1);
+    }
+
+    #[test]
+    fn test_extreme_keep_weight_does_not_overflow_solver() {
+        // The keep branch (α·rank − β·w_l) with an extreme churn_weight could
+        // drive the edge cost toward i64::MIN, blowing the solver's INF_COST
+        // headroom and overflowing its cost accumulation. build_edge_cost's
+        // two-sided clamp + the solver's i128 accumulators must keep it sound.
+        // Re-solving a stable assignment exercises keep edges on prior hosts.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let workers = make_workers(3, 4);
+        let mk = |n: &str| LoraInput {
+            name: n.to_string(),
+            replicas: 2,
+            churn_weight: i64::MAX,
+        };
+        let loras = vec![mk("A"), mk("B")];
+
+        let r1 = solver
+            .solve(&workers, &loras, &HashMap::new(), None, None)
+            .expect("first solve must not panic on extreme keep weight");
+        assert_eq!(r1.overflow_count, 0);
+
+        // Second solve with r1 as prev: every placement is now a keep edge with
+        // the extreme reward weight.
+        let r2 = solver
+            .solve(&workers, &loras, &r1.assignment, None, None)
+            .expect("keep-edge solve must not panic or overflow");
+        assert_eq!(r2.overflow_count, 0);
+        assert_eq!(r2.assignment["A"].len(), 2);
+        assert_eq!(r2.assignment["B"].len(), 2);
     }
 
     #[test]
