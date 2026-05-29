@@ -7,21 +7,15 @@ subtitle: Keep disaggregated prefill and decode KV-cache transfers within a sele
 
 # Topology-Aware KV Transfer
 
-Topology-aware KV transfer lets a disaggregated Dynamo deployment route decode
-requests toward workers that share the selected prefill worker's topology
-domain, such as zone or rack. This reduces slow cross-domain KV-cache transfers
-when prefill and decode workers exchange KV data over NIXL.
+Topology-aware KV transfer lets a disaggregated Dynamo deployment route decode requests toward workers that share the selected prefill worker's topology domain, such as zone or rack. This reduces slow cross-domain KV-cache transfers when prefill and decode workers exchange KV data over NIXL.
 
 Use this feature when:
 
 - Your deployment uses separate prefill and decode workers.
-- Your cluster exposes useful node labels, such as `topology.kubernetes.io/zone`
-  or a rack/block label.
-- Same-domain KV transfer is required for correctness or strongly preferred for
-  latency and bandwidth.
+- Your cluster exposes useful node labels, such as `topology.kubernetes.io/zone` or a rack/block label.
+- Same-domain KV transfer is required for correctness or strongly preferred for latency and bandwidth.
 
-This page covers the Kubernetes operator path. For router and runtime behavior,
-see [Router Topology-Aware KV Transfer](../components/router/topology-aware-kv-transfer.md).
+This page covers the Kubernetes operator path. For router and runtime behavior, see [Router Topology-Aware KV Transfer](../components/router/topology-aware-kv-transfer.md).
 For RDMA/NIXL transport setup, see [Disagg Communication](disagg-communication-guide.md).
 
 ## How It Works
@@ -37,20 +31,14 @@ flowchart LR
     Prefill --> Decode["Decode router selects same or preferred topology"]
 ```
 
-The operator configures worker pods from
-`spec.experimental.kvTransferPolicy`:
+The operator configures worker pods from `spec.experimental.kvTransferPolicy`:
 
 - Adds a `nvidia.com/topology-label-key` annotation to worker pods.
-- Runs a topology-label controller that copies the configured node label onto
-  the worker pod after scheduling.
-- Projects that pod label into `/etc/dynamo/topology/<domain>` with a Downward
-  API volume.
-- Injects worker environment variables that tell the backend runtime which
-  topology domain and enforcement policy to publish.
+- Runs a topology-label controller that copies the configured node label onto the worker pod after scheduling.
+- Projects that pod label into `/etc/dynamo/topology/<domain>` with a Downward API volume.
+- Injects worker environment variables that tell the backend runtime which topology domain and enforcement policy to publish.
 
-The frontend does not read this policy from its own environment. Workers publish
-the topology metadata in their `ModelRuntimeConfig`; the router reads it from
-runtime discovery.
+The frontend does not read this policy from its own environment. Workers publish the topology metadata in their `ModelRuntimeConfig`; the router reads it from runtime discovery.
 
 ## Prerequisites
 
@@ -70,10 +58,7 @@ kubectl get nodes -L topology.kubernetes.io/zone
 
 ## Required Same-Domain Routing
 
-`enforcement: required` constrains decode worker selection to workers whose
-topology value matches the selected prefill worker for the configured domain.
-If no decode worker satisfies the generated constraint, the router fails the
-request instead of silently crossing the domain.
+`enforcement: required` constrains decode worker selection to workers whose topology value matches the selected prefill worker for the configured domain. If no decode worker satisfies the generated constraint, the router fails the request instead of silently crossing the domain.
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -125,8 +110,7 @@ spec:
 
 ## Preferred Same-Domain Routing
 
-`enforcement: preferred` keeps all decode workers eligible but biases worker
-selection toward the same topology domain.
+`enforcement: preferred` keeps all decode workers eligible but biases worker selection toward the same topology domain.
 
 ```yaml
 spec:
@@ -138,36 +122,7 @@ spec:
       preferredWeight: 0.85
 ```
 
-`preferredWeight` is required with `enforcement: preferred`. It must be between
-`0` and `1`. A higher value creates a stronger same-domain preference, but it is
-not a probability and does not guarantee same-domain selection.
-
-## DGDR Override Example
-
-If you deploy through `DynamoGraphDeploymentRequest`, add the policy through
-`spec.overrides.dgd` so it is applied to the generated
-`DynamoGraphDeployment`:
-
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: qwen3-disagg-zone
-spec:
-  model: Qwen/Qwen3-0.6B
-  backend: vllm
-  image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1
-  overrides:
-    dgd:
-      apiVersion: nvidia.com/v1beta1
-      kind: DynamoGraphDeployment
-      spec:
-        experimental:
-          kvTransferPolicy:
-            labelKey: topology.kubernetes.io/zone
-            domain: zone
-            enforcement: required
-```
+`preferredWeight` is required with `enforcement: preferred`. It must be between `0` and `1`. A higher value creates a stronger same-domain preference, but it is not a probability and does not guarantee same-domain selection.
 
 ## Field Reference
 
@@ -178,9 +133,7 @@ spec:
 | `enforcement` | No | `required` or `preferred`. Defaults to `required`. |
 | `preferredWeight` | Only with `preferred` | Bias weight from `0` to `1`; only valid with `enforcement: preferred`. |
 
-The runtime uses `domain`, not the Kubernetes label key, when creating routing
-constraints. For example, `labelKey: topology.kubernetes.io/zone` and
-`domain: zone` produce worker topology metadata like:
+The runtime uses `domain`, not the Kubernetes label key, when creating routing constraints. For example, `labelKey: topology.kubernetes.io/zone` and `domain: zone` produce worker topology metadata like:
 
 ```json
 {
@@ -194,8 +147,7 @@ constraints. For example, `labelKey: topology.kubernetes.io/zone` and
 
 ## Verify the Deployment
 
-After the DGD creates worker pods, verify the operator pipeline from node label
-to runtime topology file.
+After the DGD creates worker pods, verify the operator pipeline from node label to runtime topology file.
 
 ```bash
 export NAMESPACE=<namespace>
@@ -234,9 +186,7 @@ NODE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.spec.nodeName}')
 kubectl get node "$NODE" -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}{"\n"}'
 ```
 
-If the label is missing, the topology-label controller emits a warning event
-with reason `TopologyLabelMissing` and leaves topology metadata unavailable for
-that worker.
+If the label is missing, the topology-label controller emits a warning event with reason `TopologyLabelMissing` and leaves topology metadata unavailable for that worker.
 
 ```bash
 kubectl get events -n "$NAMESPACE" \
@@ -245,8 +195,7 @@ kubectl get events -n "$NAMESPACE" \
 
 ### Worker Exits While Waiting for Topology
 
-When topology is enabled, the worker waits for the transfer-domain file to
-appear and contain data. If it stays empty, check:
+When topology is enabled, the worker waits for the transfer-domain file to appear and contain data. If it stays empty, check:
 
 - `spec.experimental.kvTransferPolicy.domain` matches the projected file name.
 - `spec.experimental.kvTransferPolicy.labelKey` exists on the worker's node.
@@ -255,23 +204,15 @@ appear and contain data. If it stays empty, check:
 
 ### Required Policy Fails Requests
 
-With `enforcement: required`, decode routing fails if no decode worker has the
-same generated topology taint as the selected prefill worker. Verify both
-prefill and decode workers publish the same `domain` and that at least one
-decode worker exists in each domain where prefill workers can be selected.
+With `enforcement: required`, decode routing fails if no decode worker has the same generated topology taint as the selected prefill worker. Verify both prefill and decode workers publish the same `domain` and that at least one decode worker exists in each domain where prefill workers can be selected.
 
-Use `preferred` while validating a heterogeneous rollout if cross-domain routing
-is acceptable during partial capacity.
+Use `preferred` while validating a heterogeneous rollout if cross-domain routing is acceptable during partial capacity.
 
 ## Relationship to Topology Aware Scheduling
 
-[Topology Aware Scheduling](topology-aware-scheduling.md) controls where
-Kubernetes places pods. Topology-aware KV transfer controls how Dynamo routes
-between already-running prefill and decode workers.
+[Topology Aware Scheduling](topology-aware-scheduling.md) controls where Kubernetes places pods. Topology-aware KV transfer controls how Dynamo routes between already-running prefill and decode workers.
 
 Use them together when possible:
 
-- Topology Aware Scheduling keeps workers placed inside useful topology
-  boundaries.
-- Topology-aware KV transfer prevents the router from choosing a decode worker
-  outside the selected prefill worker's transfer domain.
+- Topology Aware Scheduling keeps workers placed inside useful topology boundaries.
+- Topology-aware KV transfer prevents the router from choosing a decode worker outside the selected prefill worker's transfer domain.
