@@ -15,6 +15,7 @@ from dynamo.sglang.publisher import (
     get_local_dp_rank_range,
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
+    setup_sgl_metrics,
 )
 
 pytestmark = [
@@ -476,3 +477,167 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
 
     assert calls[0]["worker_id"] == 0
     publisher.cleanup()
+
+
+# ---- per-worker metric gating (embedding vs chat) ----
+
+
+@pytest.mark.asyncio
+async def test_setup_sgl_metrics_skips_chat_pipeline_for_embedding_worker(monkeypatch):
+    """``setup_sgl_metrics`` short-circuits for embedding workers.
+
+    Chat-shaped collectors (``sglang:*`` multiproc metrics, the Dynamo
+    ``LLMBackendMetrics`` gauges, ``DynamoSglangPublisher`` itself with
+    its KV-events / FPM relay wiring) emit zeros forever on a pooling
+    engine. Verify they are not constructed when
+    ``config.dynamo_args.embedding_worker`` is True, while preserving
+    the ``(publisher, task, metrics_labels)`` return shape so the
+    embedding init path can keep its uniform cleanup.
+    """
+    calls: dict[str, int] = {}
+
+    def _track(name):
+        def _wrapped(*_a, **_kw):
+            calls[name] = calls.get(name, 0) + 1
+            raise AssertionError(
+                f"setup_sgl_metrics should not call {name} on the embedding-worker path"
+            )
+
+        return _wrapped
+
+    monkeypatch.setattr(
+        publisher_mod, "setup_prometheus_registry", _track("setup_prometheus_registry")
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "register_engine_metrics_callback",
+        _track("register_engine_metrics_callback"),
+    )
+    monkeypatch.setattr(publisher_mod, "LLMBackendMetrics", _track("LLMBackendMetrics"))
+    monkeypatch.setattr(
+        publisher_mod, "DynamoSglangPublisher", _track("DynamoSglangPublisher")
+    )
+
+    engine = SimpleNamespace(
+        server_args=SimpleNamespace(
+            served_model_name="Qwen/Qwen3-Embedding-4B",
+            enable_metrics=True,  # would normally enable chat-shaped sglang:* metrics
+            node_rank=0,
+        )
+    )
+    config = SimpleNamespace(
+        dynamo_args=SimpleNamespace(embedding_worker=True),
+        server_args=engine.server_args,
+    )
+    generate_endpoint = SimpleNamespace()
+
+    publisher, task, metrics_labels = await setup_sgl_metrics(
+        engine, config, generate_endpoint
+    )
+
+    try:
+        assert publisher is None
+        assert metrics_labels == [("model", "Qwen/Qwen3-Embedding-4B")]
+        assert isinstance(task, asyncio.Task)
+        # Task is intentionally a never-completing waiter so callers can
+        # ``cancel()`` + ``await`` uniformly in their finally blocks.
+        assert not task.done()
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    # Hard assertion: NONE of the chat-shaped constructors fired.
+    assert calls == {}
+
+
+@pytest.mark.asyncio
+async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
+    """The chat-worker path still constructs the publisher.
+
+    Sibling to the embedding-worker test above: gives confidence the
+    gating doesn't accidentally short-circuit the default code path.
+    """
+    constructed: dict[str, int] = {}
+
+    def _count(name):
+        def _wrapped(*_a, **_kw):
+            constructed[name] = constructed.get(name, 0) + 1
+            return SimpleNamespace()
+
+        return _wrapped
+
+    monkeypatch.setattr(
+        publisher_mod, "setup_prometheus_registry", _count("setup_prometheus_registry")
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "register_engine_metrics_callback",
+        _count("register_engine_metrics_callback"),
+    )
+    monkeypatch.setattr(publisher_mod, "LLMBackendMetrics", _count("LLMBackendMetrics"))
+
+    # Replace the publisher constructor with one that returns a stub whose
+    # methods exist but no-op, so we can keep the test free of real ZMQ / NATS.
+    class _StubPublisher:
+        def __init__(self, *_a, **_kw):
+            constructed["DynamoSglangPublisher"] = (
+                constructed.get("DynamoSglangPublisher", 0) + 1
+            )
+            self.metrics_publisher = SimpleNamespace(
+                create_endpoint=lambda _ep: _async_noop()
+            )
+
+        def init_engine_metrics_publish(self):
+            pass
+
+        def init_kv_event_publish(self):
+            pass
+
+        def init_fpm_relay(self):
+            pass
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+    async def _async_noop():
+        return None
+
+    monkeypatch.setattr(publisher_mod, "DynamoSglangPublisher", _StubPublisher)
+
+    engine = SimpleNamespace(
+        server_args=SimpleNamespace(
+            served_model_name="Qwen/Qwen3-0.6B",
+            enable_metrics=False,  # skip setup_prometheus_registry but still run chat path
+            node_rank=0,
+        )
+    )
+    config = SimpleNamespace(
+        dynamo_args=SimpleNamespace(
+            embedding_worker=False,
+            component="sglang-decode",
+        ),
+        server_args=engine.server_args,
+    )
+    generate_endpoint = SimpleNamespace()
+
+    publisher, task, _labels = await setup_sgl_metrics(
+        engine, config, generate_endpoint
+    )
+
+    try:
+        assert publisher is not None
+        # All three chat-shaped constructors fired.
+        assert constructed.get("register_engine_metrics_callback", 0) == 1
+        assert constructed.get("LLMBackendMetrics", 0) == 1
+        assert constructed.get("DynamoSglangPublisher", 0) == 1
+        # setup_prometheus_registry was gated off by enable_metrics=False.
+        assert "setup_prometheus_registry" not in constructed
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
