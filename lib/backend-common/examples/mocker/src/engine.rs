@@ -386,10 +386,7 @@ impl LLMEngine for MockerBackend {
             .max_tokens
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_MAX_TOKENS);
-        let logprobs_top_k = request
-            .output_options
-            .logprobs
-            .map(|k| k.min(MAX_LOGPROBS));
+        let logprobs_top_k = request.output_options.logprobs.map(|k| k.min(MAX_LOGPROBS));
         // Prefill workers only need to populate KV cache for the prompt; cap
         // generation at one token regardless of what the client asked for, so
         // the response carries a single terminal with disaggregated_params.
