@@ -328,7 +328,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         if self.worker_type == "decode" {
             tracing::info!(
-                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, host_pinned blocks: {}, disk blocks: {}",
+                router_mode = "kv",
+                worker_type = %self.worker_type,
+                worker_id = best_worker.worker_id,
+                dp_rank = ?best_worker.dp_rank,
+                logit = best_logit,
+                host_pinned_blocks = best_host_pinned_overlap_blocks,
+                disk_blocks = best_disk_overlap_blocks,
+                "Selected worker: worker_type={}, worker_id={}, dp_rank={:?}, logit={:.3}, host_pinned blocks={}, disk blocks={}",
                 self.worker_type,
                 best_worker.worker_id,
                 best_worker.dp_rank,
@@ -357,7 +364,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or_default();
 
         tracing::info!(
-            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}{}",
+            router_mode = "kv",
+            worker_type = %self.worker_type,
+            worker_id = best_worker.worker_id,
+            dp_rank = ?best_worker.dp_rank,
+            logit = best_logit,
+            effective_cached_blocks = best_overlap,
+            host_pinned_blocks = best_host_pinned_overlap_blocks,
+            disk_blocks = best_disk_overlap_blocks,
+            "Selected worker: worker_type={}, worker_id={}, dp_rank={:?}, logit={:.3}, effective cached blocks={:.2}, host_pinned blocks={}, disk blocks={}{}",
             self.worker_type,
             best_worker.worker_id,
             best_worker.dp_rank,

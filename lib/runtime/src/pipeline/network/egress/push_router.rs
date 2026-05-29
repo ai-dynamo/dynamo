@@ -702,15 +702,16 @@ where
         // Per-request routing decision — mirrors the KV router's
         // `dynamo_kv_router::scheduling::selector` "Selected worker:" INFO log so
         // the LL path is observable for imbalance analysis without flipping
-        // DYN_LOG. Match the same INFO level as the KV path for symmetry.
+        // DYN_LOG. Field names harmonized with the KV log (worker_id,
+        // router_mode, load) for cross-arm grep-ability.
         let selected_load = state.load(instance_id);
         tracing::info!(
-            endpoint = %self.client.endpoint.id(),
             router_mode = "least-loaded",
+            endpoint = %self.client.endpoint.id(),
+            worker_id = instance_id,
+            load = selected_load,
             candidate_count,
-            selected_instance = instance_id,
-            selected_load,
-            "Selected worker: router_mode=least-loaded, instance_id={}, load={}, candidates={}",
+            "Selected worker: router_mode=least-loaded, worker_id={}, load={}, candidates={}",
             instance_id,
             selected_load,
             candidate_count,
