@@ -7,7 +7,9 @@ use std::time::Duration;
 use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_runtime::component::{Component, Instance};
-use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryQuery, EndpointInstanceId};
+use dynamo_runtime::discovery::{
+    DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, EndpointInstanceId,
+};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
 use rand::Rng;
@@ -17,6 +19,8 @@ use super::worker_query_directory::{DiscoveredQueryEndpoint, WorkerQueryEndpoint
 #[cfg(test)]
 use super::worker_query_endpoint::WorkerKvQueryEngine;
 use super::worker_query_state::{LiveEventAction, PendingDrainAction, RecoveryKey, WorkerState};
+#[cfg(feature = "velo-recovery")]
+use super::worker_query_transport::VeloWorkerQueryTransport;
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
 use crate::kv_router::Indexer;
 use dynamo_kv_router::{
@@ -44,6 +48,37 @@ const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
 const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
 
+/// State held by a [`WorkerQueryClient`] that is running with Velo direct transport.
+///
+/// Bundles the transport, messenger, and a Dynamo `AddressedPushRouter` used to
+/// make one-shot peer-info queries to newly discovered workers.
+#[cfg(feature = "velo-recovery")]
+struct VeloClientState {
+    transport: Arc<VeloWorkerQueryTransport>,
+    messenger: Arc<velo::Messenger>,
+    peer_router: Arc<dynamo_runtime::pipeline::AddressedPushRouter>,
+    /// Tracks in-flight Velo peer resolutions.
+    ///
+    /// Keyed by `(worker_id, dp_rank)`.  Each entry holds the
+    /// `EndpointInstanceId` of the `Added` event that triggered the resolution
+    /// (so it can be matched against the corresponding `Removed` event) and a
+    /// [`tokio_util::sync::CancellationToken`] that wakes the retry task out of
+    /// its backoff sleep immediately when the peer is removed.
+    velo_pending: DashMap<RecoveryKey, (EndpointInstanceId, tokio_util::sync::CancellationToken)>,
+    /// Per-`(worker_id, dp_rank)` mutex that guards the commit window.
+    ///
+    /// The retry task holds this lock for the `(check-token + insert into
+    /// query_endpoints)` pair; the removal handler holds it for the
+    /// `(cancel-token + record-tombstone)` pair.  This ensures the two
+    /// operations are mutually exclusive: either the removal wins and the
+    /// retry sees a cancelled token before inserting, or the retry wins and
+    /// inserts before the removal, at which point `remove_if_matches` will
+    /// find the entry and clean it up.
+    ///
+    /// Lock ordering: `velo_commit_lock` → `worker_states` mutex.
+    velo_commit_lock: DashMap<RecoveryKey, Arc<Mutex<()>>>,
+}
+
 /// Router-side client for querying worker local KV indexers.
 ///
 /// Discovers query endpoints via `ComponentEndpoints` discovery, filtering for
@@ -64,6 +99,9 @@ pub struct WorkerQueryClient {
     worker_states: DashMap<WorkerId, Arc<Mutex<WorkerState>>>,
     query_endpoints: WorkerQueryEndpointDirectory,
     recovery_semaphore: Arc<Semaphore>,
+    /// Present only when using Velo direct transport (`velo-recovery` feature).
+    #[cfg(feature = "velo-recovery")]
+    velo_state: Option<Arc<VeloClientState>>,
 }
 
 impl WorkerQueryClient {
@@ -79,6 +117,8 @@ impl WorkerQueryClient {
             worker_states: DashMap::new(),
             query_endpoints: WorkerQueryEndpointDirectory::default(),
             recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
+            #[cfg(feature = "velo-recovery")]
+            velo_state: None,
         })
     }
 
@@ -96,6 +136,60 @@ impl WorkerQueryClient {
         tokio::spawn(async move {
             if let Err(e) = client_bg.run_discovery_loop(cancel_token).await {
                 tracing::error!("WorkerQueryClient discovery loop failed: {e}");
+            }
+        });
+
+        Ok(client)
+    }
+
+    /// Create a [`WorkerQueryClient`] that uses Velo direct transport for gap-recovery queries.
+    ///
+    /// Identical to [`spawn`] in lifecycle, but the recovery queries are sent over Velo
+    /// unary RPCs instead of the Dynamo runtime push-router.  The discovery loop is
+    /// extended to also watch `worker_kv_velo_peer_dp{N}` endpoints: when one appears the
+    /// client makes a one-shot Dynamo request to obtain the worker's `PeerInfo`, registers
+    /// it with `messenger`, and maps the `(worker_id, dp_rank)` to the worker's Velo
+    /// `InstanceId` in the transport.
+    ///
+    /// Workers must call [`start_worker_kv_velo_peer_endpoint`] and
+    /// [`register_velo_query_handler`] (or [`VeloQueryDispatch::register_on`]) before
+    /// their discovery entries will be usable.
+    #[cfg(feature = "velo-recovery")]
+    pub async fn spawn_with_velo(
+        component: Component,
+        indexer: Indexer,
+        messenger: Arc<velo::Messenger>,
+    ) -> Result<Arc<Self>> {
+        use dynamo_runtime::pipeline::AddressedPushRouter;
+
+        let velo_transport = Arc::new(VeloWorkerQueryTransport::new(messenger.clone()));
+        let peer_router = AddressedPushRouter::from_runtime_provider(&component).await?;
+
+        let velo_state = Some(Arc::new(VeloClientState {
+            transport: velo_transport.clone(),
+            messenger,
+            peer_router: Arc::new(peer_router),
+            velo_pending: DashMap::new(),
+            velo_commit_lock: DashMap::new(),
+        }));
+
+        let transport: Arc<dyn WorkerQueryTransport> = velo_transport;
+        // Construct directly to set `velo_state`; same-module access allows this.
+        let client = Arc::new(Self {
+            component: component.clone(),
+            transport,
+            indexer,
+            worker_states: DashMap::new(),
+            query_endpoints: WorkerQueryEndpointDirectory::default(),
+            recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
+            velo_state,
+        });
+
+        let client_bg = client.clone();
+        let cancel_token = component.drt().primary_token();
+        tokio::spawn(async move {
+            if let Err(e) = client_bg.run_discovery_loop(cancel_token).await {
+                tracing::error!("WorkerQueryClient (velo) discovery loop failed: {e}");
             }
         });
 
@@ -133,6 +227,27 @@ impl WorkerQueryClient {
 
             match event {
                 DiscoveryEvent::Added(instance) => {
+                    // When velo transport is active, check for velo peer-info endpoints
+                    // before falling through to the standard query endpoint path.
+                    #[cfg(feature = "velo-recovery")]
+                    if self.velo_state.is_some() {
+                        let velo_key = if let DiscoveryInstance::Endpoint(ref ep) = instance {
+                            WorkerQueryEndpointDirectory::parse_velo_peer_endpoint_name(
+                                &ep.endpoint,
+                                ep.instance_id,
+                            )
+                        } else {
+                            None
+                        };
+                        if let Some((worker_id, dp_rank)) = velo_key {
+                            let DiscoveryInstance::Endpoint(ep) = instance else {
+                                continue;
+                            };
+                            self.handle_discovered_velo_peer(worker_id, dp_rank, ep);
+                            continue;
+                        }
+                    }
+
                     let Some(endpoint) = WorkerQueryEndpointDirectory::parse_added(instance) else {
                         continue;
                     };
@@ -140,7 +255,7 @@ impl WorkerQueryClient {
                 }
                 DiscoveryEvent::Removed(id) => {
                     let Some((worker_id, dp_rank, endpoint_id)) =
-                        WorkerQueryEndpointDirectory::parse_removed(id)
+                        WorkerQueryEndpointDirectory::parse_removed_any(id)
                     else {
                         continue;
                     };
@@ -252,6 +367,25 @@ impl WorkerQueryClient {
         dp_rank: DpRank,
         endpoint_id: EndpointInstanceId,
     ) {
+        // Cancel any in-flight Velo peer resolution for this key so the retry
+        // task cannot re-insert a stale endpoint after the removal is processed.
+        // Match on endpoint_id to avoid cancelling a resolution for a *newer*
+        // Added event that may have replaced the removed one.
+        #[cfg(feature = "velo-recovery")]
+        if let Some(velo_state) = &self.velo_state {
+            let should_cancel = velo_state
+                .velo_pending
+                .get(&(worker_id, dp_rank))
+                .map(|entry| entry.value().0 == endpoint_id)
+                .unwrap_or(false);
+            if should_cancel {
+                if let Some((_, (_, token))) = velo_state.velo_pending.remove(&(worker_id, dp_rank))
+                {
+                    token.cancel();
+                }
+            }
+        }
+
         if !self
             .query_endpoints
             .remove_if_matches(worker_id, dp_rank, &endpoint_id)
@@ -260,7 +394,231 @@ impl WorkerQueryClient {
         }
 
         self.transport.cancel_instance_streams(&endpoint_id).await;
+
+        // Clean up the Velo peer map so stale instance ids do not survive until
+        // a later overwrite.  This is a no-op if the entry was already absent.
+        #[cfg(feature = "velo-recovery")]
+        if let Some(velo_state) = &self.velo_state {
+            velo_state.transport.unregister_peer(worker_id, dp_rank);
+        }
+
         self.remove_worker_dp_state(worker_id, dp_rank).await;
+    }
+
+    /// Spawn a bounded-retry task to resolve the worker's Velo peer-info and seed recovery.
+    ///
+    /// Discovery rarely re-emits an unchanged `Added` event, so a single-attempt failure
+    /// would permanently leave the worker without a recovery query owner.  The spawned task
+    /// retries with exponential backoff up to [`RECOVERY_MAX_RETRIES`] times, sharing the
+    /// same concurrency semaphore used by recovery tasks.
+    ///
+    /// A [`tokio_util::sync::CancellationToken`] is registered in
+    /// `velo_state.velo_pending` so that a concurrent `Removed` event can abort
+    /// the retry before it inserts a stale endpoint into `query_endpoints`.
+    #[cfg(feature = "velo-recovery")]
+    fn handle_discovered_velo_peer(
+        self: &Arc<Self>,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        target: Instance,
+    ) {
+        let Some(velo_state) = &self.velo_state else {
+            return;
+        };
+        let endpoint_id = target.endpoint_instance_id();
+        let token = tokio_util::sync::CancellationToken::new();
+        // Cancel any previous resolution for this key (re-discovery after restart).
+        if let Some((_, (_, old_token))) = velo_state.velo_pending.remove(&(worker_id, dp_rank)) {
+            old_token.cancel();
+        }
+        velo_state
+            .velo_pending
+            .insert((worker_id, dp_rank), (endpoint_id, token.clone()));
+
+        let this = self.clone();
+        let semaphore = self.recovery_semaphore.clone();
+        tokio::spawn(async move {
+            let _permit = semaphore.acquire_owned().await.ok();
+            this.resolve_velo_peer_with_retry(worker_id, dp_rank, target, token)
+                .await;
+        });
+    }
+
+    /// Retry loop for [`handle_discovered_velo_peer`].
+    ///
+    /// Calls [`try_resolve_velo_peer`] up to [`RECOVERY_MAX_RETRIES`] times with
+    /// exponential backoff.  Logs a warning on each transient failure and an error
+    /// after the final attempt.  The `token` is checked at the start of each
+    /// attempt and the inter-attempt sleep is interruptible; the task exits
+    /// immediately if the corresponding `Removed` event arrives.
+    #[cfg(feature = "velo-recovery")]
+    async fn resolve_velo_peer_with_retry(
+        self: &Arc<Self>,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        target: Instance,
+        token: tokio_util::sync::CancellationToken,
+    ) {
+        for attempt in 0..RECOVERY_MAX_RETRIES {
+            if token.is_cancelled() {
+                tracing::debug!(
+                    worker_id,
+                    dp_rank,
+                    "Velo peer endpoint removed, aborting peer-info resolution"
+                );
+                return;
+            }
+            match self
+                .try_resolve_velo_peer(worker_id, dp_rank, target.clone(), &token)
+                .await
+            {
+                Ok(()) => return,
+                Err(e) if attempt < RECOVERY_MAX_RETRIES - 1 => {
+                    let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                    tracing::warn!(
+                        worker_id,
+                        dp_rank,
+                        attempt,
+                        "Velo peer-info query failed, retrying after {backoff_ms}ms: {e}"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                        _ = token.cancelled() => {
+                            tracing::debug!(
+                                worker_id,
+                                dp_rank,
+                                "Velo peer removed during backoff, aborting resolution"
+                            );
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        worker_id,
+                        dp_rank,
+                        "Velo peer-info resolution failed after {RECOVERY_MAX_RETRIES} \
+                         attempts: {e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Single attempt: query the Velo peer-info endpoint, register the peer, seed recovery.
+    ///
+    /// Returns `Ok(())` when the endpoint was fully registered and
+    /// [`handle_discovered_query_endpoint`] was called, `Err` on any transient
+    /// failure.  Checks `token` immediately before inserting into
+    /// `query_endpoints`; if the peer was removed during the attempt the peer
+    /// registration is rolled back and `Ok(())` is returned to stop the loop.
+    #[cfg(feature = "velo-recovery")]
+    async fn try_resolve_velo_peer(
+        self: &Arc<Self>,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        target: Instance,
+        token: &tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<()> {
+        use super::worker_query_endpoint::{WorkerVeloPeerRequest, WorkerVeloPeerResponse};
+        use dynamo_runtime::{
+            pipeline::{AddressedRequest, ManyOut, SingleIn},
+            protocols::maybe_error::MaybeError,
+        };
+
+        let velo_state = self
+            .velo_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("velo_state absent"))?;
+
+        let addressed = SingleIn::new(WorkerVeloPeerRequest)
+            .map(|req| AddressedRequest::for_instance(req, target.clone()));
+
+        let mut stream: ManyOut<WorkerVeloPeerResponse> = velo_state
+            .peer_router
+            .generate(addressed)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "peer_router.generate failed for worker {worker_id} dp_rank {dp_rank}: {e}"
+                )
+            })?;
+
+        let response = stream.next().await.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Velo peer-info endpoint returned empty stream \
+                 for worker {worker_id} dp_rank {dp_rank}"
+            )
+        })?;
+
+        if let Some(err) = response.err() {
+            return Err(anyhow::anyhow!(
+                "Velo peer-info response error for worker {worker_id} dp_rank {dp_rank}: {err}"
+            ));
+        }
+
+        let WorkerVeloPeerResponse::Success {
+            peer_info_bytes,
+            instance_id_bytes,
+        } = response
+        else {
+            anyhow::bail!(
+                "unexpected non-Success Velo peer-info response variant \
+                 for worker {worker_id} dp_rank {dp_rank}"
+            );
+        };
+
+        let peer_info = serde_json::from_slice::<velo::PeerInfo>(&peer_info_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to deserialize velo::PeerInfo: {e}"))?;
+        let instance_id = serde_json::from_slice::<velo::InstanceId>(&instance_id_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to deserialize velo::InstanceId: {e}"))?;
+
+        // Propagate register_peer errors.  NoCompatibleTransports and similar
+        // are real failures that would silently break all subsequent Velo queries
+        // for this peer if ignored.
+        velo_state.messenger.register_peer(peer_info).map_err(|e| {
+            anyhow::anyhow!(
+                "messenger.register_peer failed for worker {worker_id} \
+                     dp_rank {dp_rank}: {e}"
+            )
+        })?;
+        velo_state
+            .transport
+            .register_peer(worker_id, dp_rank, instance_id);
+
+        tracing::info!(
+            worker_id,
+            dp_rank,
+            "Registered Velo peer for worker KV recovery"
+        );
+
+        // If the peer was removed while we were resolving, unregister it and
+        // return without inserting into query_endpoints.  The removal handler
+        // already cancelled the token and removed the velo_pending entry.
+        if token.is_cancelled() {
+            tracing::info!(
+                worker_id,
+                dp_rank,
+                "Velo peer was removed during resolution; unregistering and aborting"
+            );
+            velo_state.transport.unregister_peer(worker_id, dp_rank);
+            return Ok(());
+        }
+
+        // Resolution committed.  Remove from the pending map now so the removal
+        // handler does not try to cancel a token that is no longer in use.
+        velo_state.velo_pending.remove(&(worker_id, dp_rank));
+
+        // Seed the query_endpoints directory and schedule recovery.
+        // The Velo transport ignores the target Instance (uses its internal peers map),
+        // so the velo peer-info endpoint's Instance is a valid lifecycle anchor.
+        let endpoint = DiscoveredQueryEndpoint {
+            worker_id,
+            dp_rank,
+            target,
+        };
+        self.handle_discovered_query_endpoint(endpoint).await;
+        Ok(())
     }
 
     async fn remove_worker_dp_state(&self, worker_id: WorkerId, dp_rank: DpRank) {

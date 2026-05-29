@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use super::worker_query::WorkerQueryClient;
 use crate::kv_router::Indexer;
 use anyhow::Result;
@@ -45,7 +47,7 @@ async fn start_kv_router_background_event_plane(
 
     // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
     // No blocking wait — recovery happens asynchronously as endpoints are discovered.
-    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer).await?;
+    let worker_query_client = make_worker_query_client(component.clone(), indexer).await?;
     let kv_event_subject = format!(
         "namespace.{}.component.{}.{}",
         component.namespace().name(),
@@ -109,6 +111,53 @@ async fn start_kv_router_background_event_plane(
     });
 
     Ok(())
+}
+
+// WorkerQueryClient factory
+//
+// When the `velo-recovery` feature is enabled the router uses Velo direct
+// transport for gap-recovery queries.  The messenger is constructed here so
+// the caller doesn't need to know about the transport choice.
+
+/// Build a `WorkerQueryClient` using Velo direct transport.
+///
+/// Creates a TCP-bound Velo `Messenger`, then delegates to
+/// [`WorkerQueryClient::spawn_with_velo`].
+#[cfg(feature = "velo-recovery")]
+async fn make_worker_query_client(
+    component: Component,
+    indexer: Indexer,
+) -> Result<Arc<WorkerQueryClient>> {
+    use std::net::TcpListener;
+    use velo::backend::tcp::TcpTransportBuilder;
+
+    let listener =
+        TcpListener::bind("0.0.0.0:0").map_err(|e| anyhow::anyhow!("Velo TCP bind: {e}"))?;
+    let transport = Arc::new(
+        TcpTransportBuilder::new()
+            .from_listener(listener)
+            .map_err(|e| anyhow::anyhow!("Velo TCP from_listener: {e}"))?
+            .build()
+            .map_err(|e| anyhow::anyhow!("Velo TCP build: {e}"))?,
+    );
+    let messenger = Arc::new(
+        velo::Messenger::builder()
+            .add_transport(transport as Arc<dyn velo::backend::Transport>)
+            .build()
+            .await
+            .map_err(|e| anyhow::anyhow!("Velo Messenger build: {e}"))?,
+    );
+    tracing::info!("Router using Velo direct transport for KV gap-recovery queries");
+    WorkerQueryClient::spawn_with_velo(component, indexer, messenger).await
+}
+
+/// Build a `WorkerQueryClient` using the default Dynamo runtime transport.
+#[cfg(not(feature = "velo-recovery"))]
+async fn make_worker_query_client(
+    component: Component,
+    indexer: Indexer,
+) -> Result<Arc<WorkerQueryClient>> {
+    WorkerQueryClient::spawn(component, indexer).await
 }
 
 /// Helper to decide which subscriber (JetStream or Event Plane) to start based on config

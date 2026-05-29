@@ -140,6 +140,26 @@ pub fn worker_kv_indexer_query_endpoint_for_worker(worker_id: WorkerId, dp_rank:
     )
 }
 
+/// Generates the Dynamo endpoint name under which a worker publishes its Velo `PeerInfo`
+/// for direct-transport peer discovery.
+///
+/// Use this form when the route instance id equals the logical worker id.
+/// When they differ, use [`worker_kv_velo_peer_endpoint_for_worker`] instead.
+///
+/// Workers register this endpoint via [`indexer::recovery::start_worker_kv_velo_peer_endpoint`];
+/// routers query it when `worker_kv_velo_peer_dp{N}` appears in `ComponentEndpoints` discovery.
+#[cfg(feature = "velo-recovery")]
+pub fn worker_kv_velo_peer_endpoint(dp_rank: DpRank) -> String {
+    format!("worker_kv_velo_peer_dp{dp_rank}")
+}
+
+/// Generates the Dynamo endpoint name for a worker whose logical `worker_id` differs
+/// from the route instance id (e.g. multi-worker-per-pod deployments).
+#[cfg(feature = "velo-recovery")]
+pub fn worker_kv_velo_peer_endpoint_for_worker(worker_id: WorkerId, dp_rank: DpRank) -> String {
+    format!("worker_kv_velo_peer_dp{dp_rank}_worker{worker_id}")
+}
+
 fn log_routing_input_hashes(
     request_id: Option<&str>,
     block_size: u32,

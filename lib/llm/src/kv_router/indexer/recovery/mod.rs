@@ -11,3 +11,8 @@ mod worker_query_transport;
 
 pub(crate) use subscriber::start_subscriber;
 pub(crate) use worker_query_endpoint::start_worker_kv_query_endpoint;
+
+#[cfg(feature = "velo-recovery")]
+pub(crate) use worker_query_endpoint::{
+    VeloQueryDispatch, register_velo_query_handler, start_worker_kv_velo_peer_endpoint,
+};

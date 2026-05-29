@@ -34,6 +34,9 @@ pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_ind
 pub use self::side::SideIndexer;
 pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
 
+#[cfg(feature = "velo-recovery")]
+pub(crate) use recovery::{register_velo_query_handler, start_worker_kv_velo_peer_endpoint};
+
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed
 /// remotely. Routing decisions populate it with a short TTL; engine KV events

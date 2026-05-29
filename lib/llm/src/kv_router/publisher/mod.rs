@@ -234,6 +234,11 @@ impl KvEventPublisher {
             None
         };
 
+        // Start the legacy Dynamo/NATS query endpoint.  When `velo-recovery` is
+        // compiled in, the Velo peer endpoint below serves as the sole recovery
+        // lifecycle anchor so we skip this to avoid a second entry in the router's
+        // query_endpoints directory for the same (worker_id, dp_rank).
+        #[cfg(not(feature = "velo-recovery"))]
         let _local_indexer_query_handle = local_indexer.as_ref().map(|local_indexer_ref| {
             let component = component.clone();
             let local_indexer = local_indexer_ref.clone();
@@ -248,6 +253,24 @@ impl KvEventPublisher {
                     dp_rank,
                     local_indexer,
                 ))
+        });
+
+        // When the `velo-recovery` feature is enabled, also start the Velo query
+        // handler and the peer-info endpoint so routers using Velo direct transport
+        // can discover this worker and query it.
+        #[cfg(feature = "velo-recovery")]
+        let _velo_kv_handle = local_indexer.as_ref().map(|local_indexer_ref| {
+            let component_v = component.clone();
+            let local_indexer_v = local_indexer_ref.clone();
+
+            component.drt().runtime().secondary().spawn(async move {
+                if let Err(e) =
+                    start_worker_velo_kv_transport(component_v, worker_id, dp_rank, local_indexer_v)
+                        .await
+                {
+                    tracing::error!(worker_id, dp_rank, "Failed to start Velo KV transport: {e}");
+                }
+            })
         });
 
         let cancellation_token_clone = cancellation_token.clone();
@@ -364,4 +387,58 @@ impl Drop for KvEventPublisher {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+// Velo direct-transport helpers
+
+/// Create a Velo Messenger, register the worker KV query handler, and start the
+/// peer-info endpoint so routers using Velo direct transport can discover and
+/// query this worker.
+///
+/// This is gated behind `velo-recovery` and called once per `(worker_id, dp_rank)`
+/// that has a local KV indexer.  It runs until the peer-info Dynamo endpoint shuts
+/// down (i.e., for the lifetime of the worker process).
+#[cfg(feature = "velo-recovery")]
+async fn start_worker_velo_kv_transport(
+    component: Component,
+    worker_id: u64,
+    dp_rank: DpRank,
+    local_indexer: Arc<LocalKvIndexer>,
+) -> anyhow::Result<()> {
+    use std::net::TcpListener;
+    use velo::backend::tcp::TcpTransportBuilder;
+
+    use crate::kv_router::indexer::{
+        register_velo_query_handler, start_worker_kv_velo_peer_endpoint,
+    };
+
+    let listener = TcpListener::bind("0.0.0.0:0")
+        .map_err(|e| anyhow::anyhow!("Velo TCP bind for worker {worker_id}: {e}"))?;
+    let transport = Arc::new(
+        TcpTransportBuilder::new()
+            .from_listener(listener)
+            .map_err(|e| anyhow::anyhow!("Velo TCP from_listener: {e}"))?
+            .build()
+            .map_err(|e| anyhow::anyhow!("Velo TCP build: {e}"))?,
+    ) as Arc<dyn velo::backend::Transport>;
+    let messenger = Arc::new(
+        velo::Messenger::builder()
+            .add_transport(transport)
+            .build()
+            .await
+            .map_err(|e| anyhow::anyhow!("Velo Messenger build: {e}"))?,
+    );
+
+    register_velo_query_handler(&messenger, worker_id, dp_rank, local_indexer)
+        .map_err(|e| anyhow::anyhow!("register_velo_query_handler: {e}"))?;
+
+    tracing::info!(
+        worker_id,
+        dp_rank,
+        "Worker Velo KV transport started; publishing peer-info endpoint"
+    );
+
+    // Runs until the component shuts down.
+    start_worker_kv_velo_peer_endpoint(component, worker_id, dp_rank, messenger).await;
+    Ok(())
 }

@@ -31,6 +31,8 @@ media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 lightseek-mm = ["dep:llm-multimodal", "dep:llm-tokenizer"]
+# Enable optional Velo unary transport for worker KV gap-recovery queries.
+velo-recovery = ["dep:velo"]
 
 [[bench]]
 name = "tokenizer_simple"
@@ -91,6 +93,7 @@ thiserror = { workspace = true }
 tmq = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+velo = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 validator = { workspace = true }

@@ -2552,6 +2552,7 @@ dependencies = [
  "utoipa-swagger-ui",
  "uuid",
  "validator",
+ "velo",
  "video-rs",
  "xxhash-rust",
 ]
