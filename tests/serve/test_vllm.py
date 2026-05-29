@@ -111,9 +111,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                510
-            ),  # 3x observed 168s under GPU-parallel load (job-log 2026-05-29)
+            pytest.mark.timeout(610),  # 3x ~203s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -163,7 +161,7 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
-            pytest.mark.timeout(510),  # 3x observed 170s (job-log 2026-05-29)
+            pytest.mark.timeout(610),  # 3x ~203s unified, new scheduler (3d1554f)
             pytest.mark.pre_merge,
             pytest.mark.unified,
         ],
@@ -218,9 +216,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                550
-            ),  # 3x observed 182s under GPU-parallel load (job-log 2026-05-29)
+            pytest.mark.timeout(600),  # 3x ~200s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -244,9 +240,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                540
-            ),  # 3x observed 177s under GPU-parallel load (job-log 2026-05-29)
+            pytest.mark.timeout(600),  # 3x ~199s multiproc, new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -272,9 +266,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                570
-            ),  # 3x observed 187s under GPU-parallel load (job-log 2026-05-29)
+            pytest.mark.timeout(640),  # 3x ~213s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -296,9 +288,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                500
-            ),  # 3x observed 165s under GPU-parallel load (job-log 2026-05-29)
+            pytest.mark.timeout(600),  # 3x ~199s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -598,7 +588,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(210),  # 3x observed 67s (job-log 2026-05-29)
+            pytest.mark.timeout(220),  # 3x ~72s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",

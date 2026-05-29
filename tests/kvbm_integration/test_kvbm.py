@@ -116,9 +116,7 @@ def tester(llm_server_kvbm):  # noqa: F811
 @pytest.mark.parametrize("llm_server_kvbm", [{"model": KVBM_TEST_MODEL}], indirect=True)
 @pytest.mark.profiled_vram_gib(3.8)
 @pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
-@pytest.mark.timeout(
-    320
-)  # 3x observed 104s under GPU-parallel load (job-log 2026-05-29)
+@pytest.mark.timeout(410)  # 3x ~135s under new scheduler (3d1554f)
 def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     """
     Test offload → cache reset → onboard cycle with determinism verification.
@@ -187,9 +185,7 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
 )
 @pytest.mark.profiled_vram_gib(3.8)
 @pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
-@pytest.mark.timeout(
-    320
-)  # 3x observed 105s under GPU-parallel load (job-log 2026-05-29)
+@pytest.mark.timeout(420)  # 3x ~137s under new scheduler (3d1554f)
 def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     """
     Test GPU cache eviction mechanics.
@@ -266,9 +262,7 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 )
 @pytest.mark.profiled_vram_gib(3.8)
 @pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
-@pytest.mark.timeout(
-    240
-)  # 3x observed 77s under GPU-parallel load (job-log 2026-05-29)
+@pytest.mark.timeout(250)  # 3x ~83s under new scheduler (3d1554f)
 def test_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     """
     Test onboarding determinism under eviction scenario.

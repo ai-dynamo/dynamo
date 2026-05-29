@@ -307,10 +307,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                # 3x observed 192s under GPU-parallel load (job-log 2026-05-29);
-                # was 300 (~1.6x), which under-ranked this 12 GiB test in the LPT
-                # scheduler and pushed it onto the tail of the run.
-                timeout_s=580,
+                # 3x ~221s under the new scheduler (job-log 3d1554f); was 300
+                # (~1.6x) and under-ranked this 12 GiB test in the LPT scheduler,
+                # pushing it onto the tail of the run.
+                timeout_s=670,
                 profiled_vram_gib=12.0,
                 requested_vllm_kv_cache_bytes=922_354_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],

@@ -645,9 +645,7 @@ def test_router_decisions_vllm_disagg(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(
-    410
-)  # 3x observed 136s under GPU-parallel load (job-log 2026-05-29)
+@pytest.mark.timeout(690)  # 3x ~230s under new scheduler (3d1554f)
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [
