@@ -59,7 +59,7 @@ def _generate_dgd_from_pick(
     best_config_df: pd.DataFrame,
     chosen_exp: str,
     task_configs: dict[str, TaskConfig],
-    picking_mode: str,
+    picking_mode: str = "default",
 ) -> dict | None:
     """Generate a DGD config dict from the rank-1 picked result via AIC's generator."""
     if best_config_df is None or best_config_df.empty:

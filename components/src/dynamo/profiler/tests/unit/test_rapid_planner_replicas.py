@@ -153,6 +153,38 @@ class TestAutoscaleSuppressesRescale:
         # is below budget so total_gpus becomes 4.
         assert captured["total_gpus"] == 4
 
+    def test_default_picking_mode_omitted_is_non_autoscale(self):
+        """Regression: `picking_mode` carries a non-autoscale default, so direct
+        callers may omit it without a TypeError. The default must NOT take the
+        autoscale path — total_gpus is preserved (clamped to budget), never zeroed.
+        """
+        dgdr = _make_dgdr()
+        row = _make_picked_row(with_total_gpus_needed=True)
+        task = _make_task()
+        captured: dict = {}
+
+        def fake_task_config_to_generator_config(
+            task_config, result_df, generator_overrides=None, **_kw
+        ):
+            captured["total_gpus"] = task_config.total_gpus
+            return {}
+
+        with (
+            patch(
+                "dynamo.profiler.rapid.task_config_to_generator_config",
+                side_effect=fake_task_config_to_generator_config,
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={"k8s_deploy.yaml": ""},
+            ),
+        ):
+            # Omit picking_mode entirely to exercise the default.
+            _generate_dgd_from_pick(dgdr, row, "disagg", {"disagg": task})
+
+        # needed=4 ≤ budget 8 → clamp is a no-op, total_gpus becomes 4 (not 0).
+        assert captured["total_gpus"] == 4
+
     def test_autoscale_keeps_k8s_overrides(self):
         """Suppressing total_gpus must not drop K8sConfig overrides."""
         dgdr = _make_dgdr()
