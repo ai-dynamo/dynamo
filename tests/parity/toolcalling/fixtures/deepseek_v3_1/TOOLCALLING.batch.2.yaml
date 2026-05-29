@@ -74,6 +74,7 @@ cases:
         normal_text: 'Both: '
       vllm: *id005
       sglang:
+        reason: SGLang trims trailing whitespace from normal_text that precedes DeepSeek V3.1 tool-call blocks.
         calls:
         - name: get_weather
           arguments:
