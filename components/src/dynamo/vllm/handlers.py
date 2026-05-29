@@ -3006,9 +3006,22 @@ class EmbeddingWorkerHandler:
         # single forward pass instead of N sequential ones. ``asyncio.gather``
         # returns results in input order, so ``outputs[k]`` matches ``prompts[k]``
         # regardless of engine completion order.
-        outputs = await asyncio.gather(
-            *(_encode_one(i, p) for i, p in enumerate(prompts))
-        )
+        #
+        # Use explicit tasks + a ``finally`` cancellation pass so that if one
+        # ``_encode_one`` raises, we cancel siblings still in flight instead
+        # of leaving them running -- otherwise vLLM keeps consuming engine
+        # capacity for output that this handler will discard.
+        tasks = [
+            asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)
+        ]
+        try:
+            outputs = await asyncio.gather(*tasks)
+        finally:
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         embedding_objects: list[Dict[str, Any]] = []
         prompt_tokens = 0
