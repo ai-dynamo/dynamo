@@ -2940,6 +2940,8 @@ class EmbeddingWorkerHandler:
         # load time for non-embedding workers.
         from vllm import PoolingParams
 
+        t_entry = time.perf_counter()  # DEBUG-TIMING
+
         model_name = request.get("model") or self.config.served_model_name or ""
         input_field = request.get("input")
         if input_field is None:
@@ -2980,7 +2982,11 @@ class EmbeddingWorkerHandler:
         # unique enough to scope a vLLM ``request_id``.
         base_request_id = context.id()
 
+        t_before_gather = time.perf_counter()  # DEBUG-TIMING
+        encode_timings: list[float] = []  # DEBUG-TIMING per-prompt engine.encode wall time
+
         async def _encode_one(idx: int, prompt: Any):
+            t_enc_start = time.perf_counter()  # DEBUG-TIMING
             request_id = f"{base_request_id}-{idx}"
             encode_arg: Any = (
                 prompt
@@ -2999,6 +3005,7 @@ class EmbeddingWorkerHandler:
                 raise RuntimeError(
                     f"vLLM engine.encode produced no output for input index {idx}"
                 )
+            encode_timings.append(time.perf_counter() - t_enc_start)  # DEBUG-TIMING
             return final_output
 
         # Submit every prompt to the engine in the same event-loop tick so
@@ -3009,6 +3016,8 @@ class EmbeddingWorkerHandler:
         outputs = await asyncio.gather(
             *(_encode_one(i, p) for i, p in enumerate(prompts))
         )
+
+        t_after_gather = time.perf_counter()  # DEBUG-TIMING
 
         embedding_objects: list[Dict[str, Any]] = []
         prompt_tokens = 0
@@ -3037,6 +3046,27 @@ class EmbeddingWorkerHandler:
             )
             token_ids = getattr(final_output, "prompt_token_ids", None) or []
             prompt_tokens += len(token_ids)
+
+        t_done = time.perf_counter()  # DEBUG-TIMING
+        # DEBUG-TIMING summary -- localizing the residual gap to vllm-serve.
+        # Sorted encode timings let us see the spread; if max ~= sum/N then
+        # gather actually coalesced into one batched forward pass; if max ~=
+        # sum then the engine ran them sequentially.
+        et_sorted = sorted(encode_timings)
+        logger.info(  # DEBUG-TIMING
+            "[embedding-timing] total=%.2fms preflight=%.2fms gather=%.2fms "
+            "postproc=%.2fms n=%d encode_max=%.2fms encode_min=%.2fms "
+            "encode_mean=%.2fms encode_sum=%.2fms",
+            (t_done - t_entry) * 1000.0,
+            (t_before_gather - t_entry) * 1000.0,
+            (t_after_gather - t_before_gather) * 1000.0,
+            (t_done - t_after_gather) * 1000.0,
+            len(prompts),
+            (et_sorted[-1] * 1000.0) if et_sorted else 0.0,
+            (et_sorted[0] * 1000.0) if et_sorted else 0.0,
+            (sum(encode_timings) / max(1, len(encode_timings))) * 1000.0,
+            sum(encode_timings) * 1000.0,
+        )
 
         yield {
             "object": "list",
