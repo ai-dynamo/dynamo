@@ -264,7 +264,7 @@ impl ErrorMessage {
                 err.as_ref(),
                 dynamo_runtime::error::ErrorType::ResourceExhausted,
             )
-            .map(|dynamo_err| dynamo_err.to_string())
+            .map(|dynamo_err| dynamo_err.message().to_string())
             .unwrap_or_else(|| err.to_string());
 
             return (
@@ -2905,7 +2905,7 @@ mod tests {
         assert_eq!(
             response.1.message,
             format!(
-                "ResourceExhausted: All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}"
+                "All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}"
             )
         );
     }
