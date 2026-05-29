@@ -174,8 +174,7 @@ class GMSWorker(Worker):
         cudagraph_memory_estimate = 0
         if (
             current_platform.is_cuda()
-            and self.vllm_config.compilation_config.cudagraph_mode
-            != CUDAGraphMode.NONE
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
         cudagraph_memory_estimate_applied = (
@@ -270,8 +269,7 @@ class GMSWorker(Worker):
             )
 
             model_memory_usage_bytes = int(
-                get_imported_weights_bytes()
-                + get_model_memory_usage_offset_bytes()
+                get_imported_weights_bytes() + get_model_memory_usage_offset_bytes()
             )
             if model_memory_usage_bytes > 0 and self.model_runner is not None:
                 old_usage = getattr(self.model_runner, "model_memory_usage", 0)
