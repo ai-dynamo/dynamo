@@ -7,14 +7,14 @@ from __future__ import annotations
 
 from typing import List, Mapping, Sequence
 
+from gpu_memory_service.snapshot.backends.nixl_common import NixlFileGroup
 from gpu_memory_service.snapshot.backends.nixl_staging import (
-    NixlFileGroup,
     NixlPosixStagingTransferBackend,
 )
 from gpu_memory_service.snapshot.transfer import (
-    NIXL_TRANSFER_BACKEND,
     FileTransferSource,
     GMSSnapshotConfig,
+    TransferBackendKind,
     group_sources_by_path,
 )
 
@@ -38,7 +38,7 @@ class NixlTransferBackend(NixlPosixStagingTransferBackend):
     def __init__(self, *, config: GMSSnapshotConfig) -> None:
         super().__init__(
             config=config,
-            backend_name=NIXL_TRANSFER_BACKEND,
+            backend_name=TransferBackendKind.NIXL.value,
             group_sources=_group_sources_by_file,
             group_kind="file",
         )

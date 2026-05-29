@@ -10,14 +10,17 @@ import os
 from pathlib import Path
 from typing import List, Mapping, Sequence
 
-from gpu_memory_service.snapshot.backends.nixl_staging import (
+from gpu_memory_service.snapshot.backends.nixl_common import (
     NixlFileGroup,
+    split_work_groups,
+)
+from gpu_memory_service.snapshot.backends.nixl_staging import (
     NixlPosixStagingTransferBackend,
 )
 from gpu_memory_service.snapshot.transfer import (
-    SHARDED_SSD_TRANSFER_BACKEND,
     FileTransferSource,
     GMSSnapshotConfig,
+    TransferBackendKind,
     group_sources_by_path,
 )
 
@@ -27,7 +30,7 @@ logger = logging.getLogger(__name__)
 def parse_sharded_ssd_roots(value: str | None) -> List[str]:
     if not value:
         return []
-    return _normalize_roots(value.split(","))
+    return [os.path.abspath(root.strip()) for root in value.split(",") if root.strip()]
 
 
 def device_sharded_ssd_roots(
@@ -36,7 +39,11 @@ def device_sharded_ssd_roots(
     roots: Sequence[str],
 ) -> List[str]:
     suffix = _checkpoint_suffix(checkpoint_dir) / f"device-{device}"
-    return [str(Path(root) / suffix) for root in _normalize_roots(roots)]
+    return [
+        str(Path(os.path.abspath(str(root).strip())) / suffix)
+        for root in roots
+        if str(root).strip()
+    ]
 
 
 def _checkpoint_suffix(checkpoint_dir: str) -> Path:
@@ -46,43 +53,6 @@ def _checkpoint_suffix(checkpoint_dir: str) -> Path:
         if idx > 0 and idx + 1 < len(parts):
             return Path(parts[idx - 1]) / "versions" / parts[idx + 1]
     return Path(checkpoint_dir.strip(os.sep).replace(os.sep, "_"))
-
-
-def _normalize_roots(values: Sequence[str]) -> List[str]:
-    return [
-        os.path.abspath(str(value).strip()) for value in values if str(value).strip()
-    ]
-
-
-def _split_root_file_groups(
-    file_groups: Sequence[NixlFileGroup],
-    queues_per_root: int,
-) -> List[List[NixlFileGroup]]:
-    if not file_groups:
-        return []
-
-    queue_count = max(1, min(int(queues_per_root), len(file_groups)))
-    if queue_count == 1:
-        return [list(file_groups)]
-
-    bucket_file_groups: List[List[NixlFileGroup]] = [[] for _ in range(queue_count)]
-    bucket_bytes = [0] * queue_count
-    sized_groups = [
-        (sum(source.byte_count for source in file_group[1]), index, file_group)
-        for index, file_group in enumerate(file_groups)
-    ]
-    sized_groups.sort(key=lambda item: (-item[0], item[1]))
-
-    for size_bytes, _index, file_group in sized_groups:
-        bucket_index = min(range(queue_count), key=lambda idx: bucket_bytes[idx])
-        bucket_file_groups[bucket_index].append(file_group)
-        bucket_bytes[bucket_index] += size_bytes
-
-    return [
-        sorted(bucket, key=lambda item: item[0])
-        for bucket in bucket_file_groups
-        if bucket
-    ]
 
 
 def _group_sources_by_root(
@@ -104,8 +74,9 @@ def _group_sources_by_root(
                 continue
         if root is None:
             raise RuntimeError(
-                f"{SHARDED_SSD_TRANSFER_BACKEND} source path {file_path!r} is not "
-                f"under any configured sharded SSD root: {list(roots)}"
+                f"{TransferBackendKind.SHARDED_SSD.value} source path "
+                f"{file_path!r} is not under any configured sharded SSD root: "
+                f"{list(roots)}"
             )
         groups_by_root.setdefault(root, []).append((file_path, grouped_sources))
     for grouped_paths in groups_by_root.values():
@@ -113,7 +84,13 @@ def _group_sources_by_root(
 
     queued_groups: dict[str, List[NixlFileGroup]] = {}
     for root, file_groups in groups_by_root.items():
-        buckets = _split_root_file_groups(file_groups, queues_per_root)
+        buckets = [
+            sorted(bucket_file_groups, key=lambda item: item[0])
+            for _group_name, bucket_file_groups in split_work_groups(
+                [(file_group[0], [file_group]) for file_group in file_groups],
+                queues_per_root,
+            )
+        ]
         if len(buckets) == 1:
             queued_groups[root] = buckets[0]
             continue
@@ -137,24 +114,28 @@ class ShardedSSDTransferBackend(NixlPosixStagingTransferBackend):
         elif isinstance(configured_roots, str):
             self._roots = parse_sharded_ssd_roots(configured_roots)
         else:
-            self._roots = _normalize_roots(configured_roots)
+            self._roots = [
+                os.path.abspath(str(root).strip())
+                for root in configured_roots
+                if str(root).strip()
+            ]
         self._queues_per_root = int(
             config.backend_config.get("sharded_ssd_queues_per_root") or 2
         )
         if not self._roots:
             raise RuntimeError(
-                f"{SHARDED_SSD_TRANSFER_BACKEND} requires "
+                f"{TransferBackendKind.SHARDED_SSD.value} requires "
                 "sharded_ssd_roots=<root0>,<root1>,..."
             )
         logger.info(
             "%s initialized with %d root(s), %d queue(s)/root using NIXL POSIX staging",
-            SHARDED_SSD_TRANSFER_BACKEND,
+            TransferBackendKind.SHARDED_SSD.value,
             len(self._roots),
             self._queues_per_root,
         )
         super().__init__(
             config=config,
-            backend_name=SHARDED_SSD_TRANSFER_BACKEND,
+            backend_name=TransferBackendKind.SHARDED_SSD.value,
             group_sources=self._group_sources,
             group_kind="ssd_root",
             warn_under_parallelized=True,

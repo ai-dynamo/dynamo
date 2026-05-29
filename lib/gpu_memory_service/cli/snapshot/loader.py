@@ -22,19 +22,13 @@ from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
-from gpu_memory_service.snapshot.transfer import (
-    CHECKPOINT_DIR_TRANSFER_BACKENDS,
-    DEFAULT_TRANSFER_BACKEND,
-    TRANSFER_BACKEND_CHOICES,
-)
+from gpu_memory_service.snapshot.transfer import TransferBackendKind
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-DEFAULT_LOAD_WORKERS = 16
 
 
 def _load_device(
@@ -76,26 +70,29 @@ def _load_device(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Load a GMS checkpoint into GMS.")
+    parser = argparse.ArgumentParser(
+        description="Load a GMS checkpoint into GMS.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
         "--checkpoint-dir",
         default=None,
         help=(
             "Checkpoint directory. Required for directory-backed transfer "
-            f"backends: {', '.join(CHECKPOINT_DIR_TRANSFER_BACKENDS)}."
+            f"backends: {', '.join(backend.value for backend in TransferBackendKind)}."
         ),
     )
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=DEFAULT_LOAD_WORKERS,
-        help=f"Shard load workers per device (default: {DEFAULT_LOAD_WORKERS}).",
+        default=16,
+        help="Shard load workers per device.",
     )
     parser.add_argument(
         "--transfer-backend",
-        choices=TRANSFER_BACKEND_CHOICES,
-        default=DEFAULT_TRANSFER_BACKEND,
-        help=f"Restore transfer backend. Default is {DEFAULT_TRANSFER_BACKEND!r}.",
+        choices=[backend.value for backend in TransferBackendKind],
+        default=TransferBackendKind.NIXL.value,
+        help="Restore transfer backend.",
     )
     parser.add_argument(
         "--sharded-ssd-roots",
@@ -106,10 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sharded-ssd-queues-per-root",
         type=int,
         default=2,
-        help=(
-            "Number of independent sharded-ssd restore queues per SSD root. "
-            "Default is 2."
-        ),
+        help="Number of independent sharded-ssd restore queues per SSD root.",
     )
     return parser
 
@@ -138,8 +132,8 @@ def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
             f"{checkpoint_path} do not match CUDA/NVML-visible devices: "
             f"visible={devices} "
             f"checkpoint={sorted(checkpoint_devices)} "
-            f"missing={missing_devices} "
-            f"extra={extra_devices}"
+            f"missing={','.join(str(device) for device in missing_devices) or '-'} "
+            f"extra={','.join(str(device) for device in extra_devices) or '-'}"
         )
 
     logger.info(
@@ -153,10 +147,7 @@ def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if (
-        args.transfer_backend in CHECKPOINT_DIR_TRANSFER_BACKENDS
-        and not args.checkpoint_dir
-    ):
+    if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"
         )
