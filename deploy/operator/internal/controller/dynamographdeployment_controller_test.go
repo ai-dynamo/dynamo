@@ -659,7 +659,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Clea
 	}
 }
 
-func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_CreatesCheckpointTemplate(t *testing.T) {
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DoesNotDeleteCheckpointTemplate(t *testing.T) {
 	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
@@ -726,10 +726,33 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Crea
 			IdentityHash: hash,
 		},
 	}
+	checkpointTemplate := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      checkpointGMSResourceClaimTemplateName(hash),
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(existingCheckpoint, v1alpha1.GroupVersion.WithKind("DynamoCheckpoint")),
+			},
+		},
+		Spec: resourcev1.ResourceClaimTemplateSpec{
+			Spec: resourcev1.ResourceClaimSpec{
+				Devices: resourcev1.DeviceClaim{
+					Requests: []resourcev1.DeviceRequest{{
+						Name: "gpus",
+						Exactly: &resourcev1.ExactDeviceRequest{
+							DeviceClassName: dra.DefaultDeviceClassName,
+							AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+							Count:           1,
+						},
+					}},
+				},
+			},
+		},
+	}
 	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(dgd, existingCheckpoint, deviceClass).
+		WithObjects(dgd, existingCheckpoint, checkpointTemplate, deviceClass).
 		Build()
 	r := &DynamoGraphDeploymentReconciler{
 		Client:        cl,
@@ -750,7 +773,10 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Crea
 	require.NotNil(t, request.Exactly)
 	assert.Equal(t, int64(1), request.Exactly.Count)
 	assert.Equal(t, dra.DefaultDeviceClassName, request.Exactly.DeviceClassName)
-	assert.True(t, metav1.IsControlledBy(template, dgd))
+	controllerRef := metav1.GetControllerOf(template)
+	require.NotNil(t, controllerRef)
+	assert.Equal(t, "DynamoCheckpoint", controllerRef.Kind)
+	assert.Equal(t, existingCheckpoint.Name, controllerRef.Name)
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
@@ -844,6 +870,82 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 	}
 }
 
+func TestDynamoGraphDeploymentReconciler_createCheckpointCRAdoptsExistingCheckpointTemplate(t *testing.T) {
+	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	require.NoError(t, err)
+
+	existing := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-worker-checkpoint",
+			Namespace: "default",
+			UID:       types.UID("checkpoint-uid"),
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity:         identity,
+			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			IdentityHash: hash,
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+	}
+	claimTemplateName := checkpointGMSResourceClaimTemplateName(hash)
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimTemplateName,
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+			},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(existing, dgd, template).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		Experimental: &v1beta1.ExperimentalSpec{
+			Checkpoint: &v1beta1.ComponentCheckpointConfig{
+				Mode: v1beta1.CheckpointModeAuto,
+				Identity: &v1beta1.DynamoCheckpointIdentity{
+					Model:            identity.Model,
+					BackendFramework: identity.BackendFramework,
+				},
+			},
+		},
+	}
+
+	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", component)
+	require.NoError(t, err)
+	assert.Equal(t, existing.Name, ckpt.Name)
+
+	updatedTemplate := &resourcev1.ResourceClaimTemplate{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Name: claimTemplateName, Namespace: "default"}, updatedTemplate))
+	controllerRef := metav1.GetControllerOf(updatedTemplate)
+	require.NotNil(t, controllerRef)
+	assert.Equal(t, "DynamoCheckpoint", controllerRef.Kind)
+	assert.Equal(t, existing.Name, controllerRef.Name)
+}
+
 func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClient(t *testing.T) {
 	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ctx := context.Background()
@@ -852,10 +954,14 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClie
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
 	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	require.NoError(t, err)
+	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
 			WithScheme(testScheme).
+			WithObjects(deviceClass).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
@@ -932,13 +1038,23 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClie
 	assert.Contains(t, main.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
 	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName))
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	require.NoError(t, err)
 	claimTemplateName := checkpointGMSResourceClaimTemplateName(hash)
 	assert.Contains(t, ckpt.Spec.Job.PodTemplateSpec.Spec.ResourceClaims, corev1.PodResourceClaim{
 		Name:                      dra.ClaimName,
 		ResourceClaimTemplateName: &claimTemplateName,
 	})
+
+	template := &resourcev1.ResourceClaimTemplate{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Name: claimTemplateName, Namespace: "default"}, template))
+	require.Len(t, template.Spec.Spec.Devices.Requests, 1)
+	request := template.Spec.Spec.Devices.Requests[0]
+	require.NotNil(t, request.Exactly)
+	assert.Equal(t, int64(1), request.Exactly.Count)
+	assert.Equal(t, dra.DefaultDeviceClassName, request.Exactly.DeviceClassName)
+	controllerRef := metav1.GetControllerOf(template)
+	require.NotNil(t, controllerRef)
+	assert.Equal(t, "DynamoCheckpoint", controllerRef.Kind)
+	assert.Equal(t, ckpt.Name, controllerRef.Name)
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t *testing.T) {

@@ -32,6 +32,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -390,6 +391,33 @@ func TestBuildCheckpointJobPreservesPreparedEnvAndSharedMemory(t *testing.T) {
 		assert.NotEqual(t, "MODEL_EXPRESS_URL", env.Name)
 		assert.NotEqual(t, "PROMETHEUS_ENDPOINT", env.Name)
 	}
+}
+
+func TestCheckpointReconciler_handlePendingFailsUnpreparedGMSCheckpoint(t *testing.T) {
+	t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+		Enabled: true,
+	}
+
+	r := makeCheckpointReconciler(s, ckpt)
+	result, err := r.handlePending(context.Background(), ckpt)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: ckpt.Name, Namespace: ckpt.Namespace}, updated))
+	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
+	assert.Contains(t, updated.Status.Message, "gpuMemoryService checkpoint pod template is missing pod resource claim")
+	condition := meta.FindStatusCondition(updated.Status.Conditions, string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated))
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, "GMSPodTemplateNotPrepared", condition.Reason)
+
+	jobs := &batchv1.JobList{}
+	require.NoError(t, r.List(context.Background(), jobs, client.InNamespace(testNamespace)))
+	assert.Empty(t, jobs.Items)
 }
 
 func TestCheckpointReconciler_Reconcile(t *testing.T) {

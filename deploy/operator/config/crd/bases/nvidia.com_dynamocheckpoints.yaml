@@ -73,6 +73,8 @@ spec:
                     a prepared checkpoint Job pod. The DynamoCheckpoint controller does not
                     inject GMS/DRA resources; auto-created checkpoints from
                     DynamoGraphDeployment prepare the pod template before creating this object.
+                    Manual GMS-enabled checkpoints must provide the prepared pod template; the
+                    controller fails the checkpoint if the required GMS/DRA wiring is missing.
                     This field is intentionally outside spec.identity, so it does not affect
                     the checkpoint identity hash or deduplication.
                   properties:

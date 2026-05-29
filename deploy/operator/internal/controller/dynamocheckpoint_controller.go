@@ -176,22 +176,10 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	logger := log.FromContext(ctx)
 
 	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService); err != nil {
-		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
-		ckpt.Status.JobName = ""
-		ckpt.Status.CreatedAt = nil
-		ckpt.Status.Message = err.Error()
-		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
-			Status:             metav1.ConditionFalse,
-			Reason:             "GMSSnapshotDisabled",
-			Message:            err.Error(),
-			LastTransitionTime: metav1.Now(),
-		})
-		if updateErr := r.Status().Update(ctx, ckpt); updateErr != nil {
-			logger.Error(updateErr, "Failed to mark DynamoCheckpoint as failed")
-			return ctrl.Result{}, updateErr
-		}
-		return ctrl.Result{}, nil
+		return r.failPendingCheckpoint(ctx, ckpt, "GMSSnapshotDisabled", err)
+	}
+	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {
+		return r.failPendingCheckpoint(ctx, ckpt, "GMSPodTemplateNotPrepared", err)
 	}
 
 	hash := ckpt.Status.IdentityHash
@@ -239,6 +227,31 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	}
 
 	// Status update will trigger next reconcile via watch
+	return ctrl.Result{}, nil
+}
+
+func (r *CheckpointReconciler) failPendingCheckpoint(
+	ctx context.Context,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+	reason string,
+	err error,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+	ckpt.Status.JobName = ""
+	ckpt.Status.CreatedAt = nil
+	ckpt.Status.Message = err.Error()
+	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+		Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            err.Error(),
+		LastTransitionTime: metav1.Now(),
+	})
+	if updateErr := r.Status().Update(ctx, ckpt); updateErr != nil {
+		logger.Error(updateErr, "Failed to mark DynamoCheckpoint as failed")
+		return ctrl.Result{}, updateErr
+	}
 	return ctrl.Result{}, nil
 }
 
