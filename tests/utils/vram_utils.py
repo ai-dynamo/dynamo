@@ -90,6 +90,46 @@ def auto_worker_count(
     return len(gpus) * workers_per_gpu
 
 
+def effective_cpu_budget() -> int:
+    """Best estimate of the CPUs actually available to this container/process.
+
+    ``os.cpu_count()`` / ``os.sched_getaffinity`` / ``psutil`` all report the
+    HOST core count and ignore Docker ``--cpus`` (which is a CFS quota, not an
+    affinity mask). xdist resolves ``-n auto`` from ``os.cpu_count()``, so on a
+    many-core host limited to a few CPUs it overshoots badly (e.g. 32 slots
+    under ``--cpus=4``). Resolve the real budget, in order:
+
+      1. ``NUM_CPUS`` env (CI sets it to the container's ``--cpus``),
+      2. cgroup v2 ``cpu.max`` quota (``quota period``; reflects ``--cpus``),
+      3. cgroup v1 ``cpu.cfs_quota_us`` / ``cpu.cfs_period_us``,
+      4. ``os.cpu_count()`` (no container limit detectable).
+    """
+    env = os.environ.get("NUM_CPUS")
+    if env:
+        try:
+            n = int(float(env))
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+    try:
+        quota_s, period_s = open("/sys/fs/cgroup/cpu.max").read().split()[:2]
+        if quota_s != "max":
+            n = int(int(quota_s) / int(period_s))
+            if n > 0:
+                return n
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+    try:
+        quota = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
+        period = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+        if quota > 0 and period > 0:
+            return max(1, quota // period)
+    except (OSError, ValueError):
+        pass
+    return os.cpu_count() or 1
+
+
 def write_test_meta(items, dest_dir: str | None = None) -> None:
     """Serialize profiled_vram_gib, timeout, and KV cache markers to JSON.
 

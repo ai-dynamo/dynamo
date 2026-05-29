@@ -365,6 +365,30 @@ def test_full_change_beats_status_quo():
     assert shipped <= 0.85 * status_quo  # >= 15% end-to-end makespan reduction
 
 
+# --------------------------------------------------------------------------- #
+# effective_cpu_budget: don't let -n auto (host os.cpu_count) oversubscribe CPU
+# --------------------------------------------------------------------------- #
+def test_effective_cpu_budget_prefers_num_cpus_env():
+    import os
+
+    from tests.utils.vram_utils import effective_cpu_budget
+
+    old = os.environ.get("NUM_CPUS")
+    try:
+        os.environ["NUM_CPUS"] = "4"
+        assert effective_cpu_budget() == 4
+        os.environ["NUM_CPUS"] = "7"
+        assert effective_cpu_budget() == 7
+        # Invalid value falls through to cgroup/os.cpu_count() and stays positive.
+        os.environ["NUM_CPUS"] = "bogus"
+        assert effective_cpu_budget() >= 1
+    finally:
+        if old is None:
+            os.environ.pop("NUM_CPUS", None)
+        else:
+            os.environ["NUM_CPUS"] = old
+
+
 def test_simulation_conserves_work_and_respects_budget():
     # Sanity guard for the simulator itself: every test runs, and makespan is at
     # least the longest single test and at least total-work / slots.

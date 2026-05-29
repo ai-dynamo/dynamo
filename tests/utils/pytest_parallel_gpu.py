@@ -43,6 +43,7 @@ from tests.utils.vram_utils import (  # noqa: E402
     VRAM_MULTI_PROC_MARGIN,
     auto_worker_count,
     detect_gpus,
+    effective_cpu_budget,
     load_test_meta,
 )
 
@@ -468,6 +469,20 @@ def run_parallel(
     if not gpus:
         _print("ERROR: No GPUs detected")
         return 1
+
+    # xdist resolves `-n auto` from os.cpu_count(), which reports HOST cores and
+    # ignores Docker --cpus -- so num_slots can be many times the real CPU budget
+    # (e.g. 32 under --cpus=4). Combined with the zero-VRAM filler backfill that
+    # would oversubscribe the CPU and slow every concurrent test. Cap at the
+    # container's true CPU budget; raise NUM_CPUS (or --cpus) to allow more.
+    cpu_budget = effective_cpu_budget()
+    if num_slots > cpu_budget:
+        _print(
+            f"Capping concurrency: {num_slots} -> {cpu_budget} slots "
+            f"(CPU budget; raise NUM_CPUS to allow more)"
+        )
+        num_slots = cpu_budget
+    num_slots = max(1, num_slots)
 
     if gpu_indices is None:
         gpu_indices = [g["index"] for g in gpus]
