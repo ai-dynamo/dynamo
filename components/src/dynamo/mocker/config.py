@@ -11,6 +11,7 @@ from dynamo._internal.aic import (
     DEFAULT_MEM_FRACTION_STATIC,
     estimate_num_gpu_blocks,
 )
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import MockEngineArgs, ModelRuntimeConfig, ReasoningConfig, SglangArgs
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
@@ -266,7 +267,18 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
         mem_fraction_static=getattr(args, "mem_fraction_static", None),
         enable_local_indexer=not getattr(args, "durable_kv_events", False),
+        kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
+        num_g2_blocks=getattr(args, "num_g2_blocks", None),
+        num_g3_blocks=getattr(args, "num_g3_blocks", None),
+        enable_g4_storage=getattr(args, "enable_g4_storage", False),
+        offload_batch_size=getattr(args, "offload_batch_size", None),
+        bandwidth_g1_to_g2_gbps=getattr(args, "bandwidth_g1_to_g2_gbps", None),
+        bandwidth_g2_to_g1_gbps=getattr(args, "bandwidth_g2_to_g1_gbps", None),
+        bandwidth_g2_to_g3_gbps=getattr(args, "bandwidth_g2_to_g3_gbps", None),
+        bandwidth_g3_to_g2_gbps=getattr(args, "bandwidth_g3_to_g2_gbps", None),
+        bandwidth_g2_to_g4_gbps=getattr(args, "bandwidth_g2_to_g4_gbps", None),
+        bandwidth_g4_to_g2_gbps=getattr(args, "bandwidth_g4_to_g2_gbps", None),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
         sglang=_build_sglang_args(args),
         preemption_mode=getattr(args, "preemption_mode", "lifo"),
@@ -325,5 +337,7 @@ def build_runtime_config(
         rc.set_disaggregated_endpoint(
             bootstrap_host=host, bootstrap_port=bootstrap_port
         )
+
+    apply_topology_config(rc)
 
     return engine_args.block_size, rc

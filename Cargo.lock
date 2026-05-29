@@ -106,7 +106,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -117,7 +117,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1270,6 +1270,20 @@ name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+dependencies = [
+ "bytemuck_derive",
+]
+
+[[package]]
+name = "bytemuck_derive"
+version = "1.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9abbd1bc6865053c427f7198e6af43bfdedc55ab791faed4fbd361d789575ff"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "byteorder"
@@ -2377,11 +2391,16 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-runtime",
  "futures",
+ "opentelemetry",
+ "parking_lot",
+ "prometheus",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2389,10 +2408,10 @@ name = "dynamo-bench"
 version = "1.2.0"
 dependencies = [
  "anyhow",
- "bytemuck",
  "chrono",
  "clap 4.6.1",
  "crossbeam-channel",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-mocker",
  "dynamo-tokens",
@@ -2426,10 +2445,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-config"
+name = "dynamo-data-gen"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
+ "dynamo-tokens",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2508,7 +2533,6 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-bench",
- "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2606,9 +2630,11 @@ name = "dynamo-mocker"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
@@ -2621,6 +2647,7 @@ dependencies = [
  "ndarray-interp",
  "ndarray-npy",
  "rand 0.9.4",
+ "rmp-serde",
  "rstest 0.18.2",
  "rustc-hash 2.1.2",
  "serde",
@@ -2628,6 +2655,7 @@ dependencies = [
  "serde_path_to_error",
  "slotmap",
  "tempfile",
+ "tmq",
  "tokio",
  "tokio-timerfd",
  "tokio-util",
@@ -2663,7 +2691,6 @@ name = "dynamo-parsers"
 version = "1.2.0"
 dependencies = [
  "anyhow",
- "dynamo-protocols",
  "num-traits",
  "openai-harmony",
  "regex",
@@ -2715,14 +2742,12 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
- "dynamo-config",
  "educe",
  "either",
  "etcd-client",
  "figment",
  "futures",
  "humantime",
- "hyper-util",
  "jsonschema",
  "k8s-openapi",
  "kube",
@@ -2775,6 +2800,8 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake3",
+ "dashmap",
  "fastokens",
  "rayon",
  "rustc-hash 1.1.0",
@@ -2994,7 +3021,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3108,9 +3135,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d32240c0737afda27afb5c55c5e56b24b0d9e7d5058bf7f61898d83e9f01e32"
+checksum = "796a262ed47d1458a4b40d0ed831c927e6f54d5b9c1de2683bb4ac9b04f4c7cc"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
@@ -3639,6 +3666,7 @@ version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
 dependencies = [
+ "bytemuck",
  "cfg-if",
  "crunchy",
  "num-traits",
@@ -4331,7 +4359,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.2",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4403,7 +4431,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5275,9 +5303,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+checksum = "2929e494b2280e1e18959bb2e121da03347ae896896fdfaceaab43c88a02803f"
 dependencies = [
  "memo-map",
  "serde",
@@ -5286,9 +5314,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45092d80391870622fcf3bd82f5d2af18f99533ea60debb4bc9db0c76f0e809a"
+checksum = "99df5123c54391e2a228014c1dbbd85a3dab08a25e776c810526f2f47542b3de"
 dependencies = [
  "minijinja",
  "serde",
@@ -7064,7 +7092,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7718,7 +7746,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8493,7 +8521,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8753,7 +8781,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -10246,14 +10274,16 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 [[package]]
 name = "vllm-engine-core-client"
 version = "0.1.0"
-source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e70039679264223b931016e6604cbe10af39bd54#e70039679264223b931016e6604cbe10af39bd54"
+source = "git+https://github.com/vllm-project/vllm.git?rev=94d3f4d205fdfe44212a7958c6af647ecba15556#94d3f4d205fdfe44212a7958c6af647ecba15556"
 dependencies = [
  "arc-swap",
  "bytemuck",
  "byteorder",
  "bytes",
+ "easy-ext",
  "enum-as-inner",
  "futures",
+ "half 2.7.1",
  "hex",
  "itertools 0.14.0",
  "parking_lot",
@@ -10278,7 +10308,7 @@ dependencies = [
 [[package]]
 name = "vllm-llm"
 version = "0.1.0"
-source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e70039679264223b931016e6604cbe10af39bd54#e70039679264223b931016e6604cbe10af39bd54"
+source = "git+https://github.com/vllm-project/vllm.git?rev=94d3f4d205fdfe44212a7958c6af647ecba15556#94d3f4d205fdfe44212a7958c6af647ecba15556"
 dependencies = [
  "easy-ext",
  "enum-as-inner",
@@ -10297,7 +10327,7 @@ dependencies = [
 [[package]]
 name = "vllm-managed-engine"
 version = "0.1.0"
-source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e70039679264223b931016e6604cbe10af39bd54#e70039679264223b931016e6604cbe10af39bd54"
+source = "git+https://github.com/vllm-project/vllm.git?rev=94d3f4d205fdfe44212a7958c6af647ecba15556#94d3f4d205fdfe44212a7958c6af647ecba15556"
 dependencies = [
  "anyhow",
  "clap 4.6.1",
@@ -10309,7 +10339,7 @@ dependencies = [
 [[package]]
 name = "vllm-metrics"
 version = "0.1.0"
-source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e70039679264223b931016e6604cbe10af39bd54#e70039679264223b931016e6604cbe10af39bd54"
+source = "git+https://github.com/vllm-project/vllm.git?rev=94d3f4d205fdfe44212a7958c6af647ecba15556#94d3f4d205fdfe44212a7958c6af647ecba15556"
 dependencies = [
  "prometheus-client",
 ]

@@ -252,7 +252,7 @@ impl LLMEngine for VllmBackend {
         Ok(EngineConfig {
             model: self.model.clone(),
             served_model_name: Some(self.model.clone()),
-            context_length,
+            context_length: Some(context_length),
             kv_cache_block_size: self.extra.block_size,
             total_kv_blocks,
             max_num_seqs: self.extra.max_num_seqs,
@@ -279,7 +279,7 @@ impl LLMEngine for VllmBackend {
                 .as_ref()
                 .ok_or_else(|| engine_shutdown("vLLM backend has not been started"))?;
             let max_model_len = inner.llm.engine_core_client().max_model_len();
-            let generate_request = lower_request(request_id, request, max_model_len)?;
+            let generate_request = lower_request(request_id, request, Some(max_model_len))?;
 
             inner
                 .llm

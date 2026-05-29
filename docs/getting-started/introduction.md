@@ -4,6 +4,10 @@
 sidebar-title: Introduction
 ---
 
+<p align="left">
+  <a href="./introduction.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 # Introduction to Dynamo
 
 Dynamo is an open-source, high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
@@ -78,7 +82,7 @@ The full list of supported ecosystem components:
 | :--- | :--- |
 | Inference engines | SGLang, TensorRT-LLM, vLLM |
 | Kubernetes | Inference gateway |
-| Memory management | Dynamo KV Block Manager, [LMCache](../integrations/lmcache-integration.md), [SGLang HiCache](../integrations/sglang-hicache.md), [FlexKV](../integrations/flexkv-integration.md) |
+| Memory management | Dynamo KV Block Manager, [LMCache](../integrations/lmcache-integration.md), [SGLang HiCache](../backends/sglang/sglang-hicache.md), [FlexKV](../integrations/flexkv-integration.md) |
 | Networking and storage | Mooncake, DOCA NetIO, GDS, POSIX, S3, 3FS ([supported via NIXL](../design-docs/kvbm-design.md)) |
 | Multi-HW | Intel XPU, AMD |
 

@@ -345,14 +345,14 @@ class ActiveOperation(AbstractOperation):
 
         self._local_xfer_descs = self._connection._nixl.get_xfer_descs(
             descs=self._local_desc_tlist,
-            mem_type=str(self._local_device_kind),
+            mem_type=self._local_device_kind.nixl_mem_type,
         )
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created local NIXL transfer descriptors: {self._local_xfer_descs}"
         )
         self._remote_xfer_descs = self._connection._nixl.get_xfer_descs(
             descs=self._remote_desc_tlist,
-            mem_type=str(self._remote_device_kind),
+            mem_type=self._remote_device_kind.nixl_mem_type,
         )
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created remote NIXL transfer descriptors: {self._remote_xfer_descs}"
@@ -946,10 +946,16 @@ class Descriptor:
 
         # Data is `torch.Tensor`.
         if isinstance(data, torch.Tensor):
+            # NIXL registration uses pointer+size, so the underlying storage must be contiguous.
+            if not data.is_contiguous():
+                data = data.contiguous()
+
             self._data_ptr = data.data_ptr()
             self._data_size = data.numel() * data.element_size()
             if data.is_cuda:
                 self._data_device = Device((DeviceKind.CUDA, data.get_device()))
+            elif data.device.type == "xpu":
+                self._data_device = Device((DeviceKind.XPU, data.get_device()))
             self._data_ref = data
 
             logger.debug(
@@ -1158,16 +1164,29 @@ class Descriptor:
             return
 
         # Register the memory with NIXL.
-        self._connection = connection
-
         if isinstance(self._data_ref, torch.Tensor):
-            self._nixl_hndl = connection._nixl.register_memory(self._data_ref)
+            # TODO: Remove the following WA when default NIXL version with dynamo is updated to > v1.0.1
+            # XPU tensors passed before https://github.com/ai-dynamo/nixl/pull/1534 fix need the following WA:
+            if self._data_ref.device.type == "xpu":
+                mem_type = "VRAM"
+                reg_list = [
+                    (self._data_ptr, self._data_size, self._data_device.id, mem_type)
+                ]
+                nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+            else:
+                nixl_hndl = connection._nixl.register_memory(self._data_ref)
+            # After NIXL is updated we can simply use this one-line instead:
+            # nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
-            mem_type = str(self._data_device.kind)
+            mem_type = self._data_device.kind.nixl_mem_type
             reg_list = [
                 (self._data_ptr, self._data_size, self._data_device.id, mem_type)
             ]
-            self._nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+            nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+
+        # Mark as bound after successful registration.
+        self._nixl_hndl = nixl_hndl
+        self._connection = connection
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Registered {self.__repr__()} with NIXL."
@@ -1245,12 +1264,17 @@ class Device:
                 device_id = (
                     0 if metadata.find(":") == -1 else int(metadata.split(":")[1])
                 )
+            elif metadata.startswith("xpu"):
+                kind = DeviceKind.XPU
+                device_id = (
+                    0 if metadata.find(":") == -1 else int(metadata.split(":")[1])
+                )
             elif metadata.startswith("cpu") or metadata.startswith("host"):
                 kind = DeviceKind.HOST
                 device_id = 0
             else:
                 raise ValueError(
-                    "Argument `metadata` must be in the format 'cuda:<device_id>' or 'cpu'."
+                    "Argument `metadata` must be in the format 'cuda:<device_id>', 'xpu:<device_id>', or 'cpu'."
                 )
         else:
             raise TypeError(
@@ -1266,7 +1290,7 @@ class Device:
     def __str__(self) -> str:
         return (
             f"{self._kind}:{self._device_id}"
-            if self._kind is DeviceKind.CUDA
+            if self._kind in (DeviceKind.CUDA, DeviceKind.XPU)
             else f"{self._kind}"
         )
 
@@ -1302,13 +1326,30 @@ class DeviceKind(IntEnum):
     CUDA addressable device (GPU) memory.
     """
 
+    XPU = 3
+    """
+    Intel XPU (Level-Zero) device memory.
+    """
+
     def __str__(self) -> str:
         if self == DeviceKind.HOST:
             return "cpu"
         elif self == DeviceKind.CUDA:
             return "cuda"
+        elif self == DeviceKind.XPU:
+            return "xpu"
         else:
             return "<invalid>"
+
+    @property
+    def nixl_mem_type(self) -> str:
+        """Return the canonical NIXL segment name for this device kind."""
+        if self == DeviceKind.HOST:
+            return "DRAM"
+        elif self in (DeviceKind.CUDA, DeviceKind.XPU):
+            return "VRAM"
+        else:
+            return "VRAM"
 
 
 class OperationKind(IntEnum):
@@ -1825,9 +1866,9 @@ class SerializedDescriptor(BaseModel):
         if not isinstance(v, str):
             raise TypeError("Argument `device` must be `str`.")
         v = v.strip().lower()
-        if not (v.startswith("cuda") or v == "cpu"):
+        if not (v.startswith("cuda") or v.startswith("xpu") or v == "cpu"):
             raise ValueError(
-                "Argument `device` must be one of 'cpu' or 'cuda:<device_id>'."
+                "Argument `device` must be one of 'cpu', 'cuda:<device_id>', or 'xpu:<device_id>'."
             )
         return v
 

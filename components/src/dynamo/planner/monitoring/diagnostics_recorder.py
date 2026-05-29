@@ -282,6 +282,32 @@ class DiagnosticsRecorder:
             row=1,
             col=1,
         )
+        recommended_prefill = _vals("scale_to_prefill")
+        if any(v is not None for v in recommended_prefill):
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=recommended_prefill,
+                    name="Recommended Prefill Replicas",
+                    mode="markers",
+                    marker=dict(symbol="diamond", size=10),
+                ),
+                row=1,
+                col=1,
+            )
+        recommended_decode = _vals("scale_to_decode")
+        if any(v is not None for v in recommended_decode):
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=recommended_decode,
+                    name="Recommended Decode Replicas",
+                    mode="markers",
+                    marker=dict(symbol="diamond", size=10),
+                ),
+                row=1,
+                col=1,
+            )
         tp_lower_p = _vals("throughput_lower_bound_prefill")
         if any(v is not None and v > 1 for v in tp_lower_p):
             fig.add_trace(

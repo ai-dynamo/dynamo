@@ -92,6 +92,11 @@ on:
         required: false
         type: string
         default: ''
+      image_tag_suffix:
+        description: 'Suffix appended to the SHA-keyed image tag (e.g. "-nightly"). Empty = no suffix.'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -159,8 +164,9 @@ jobs:
             TAG_BUILDER+="-cuda${CUDA_MAJOR}"
           fi
           SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-          IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}
-          TEST_IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}-test
+          IMAGE_TAG_SUFFIX='${{ inputs.image_tag_suffix }}'
+          IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}
+          TEST_IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}-test
 
           IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${IMAGE_TAG}"
           TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"

@@ -214,6 +214,9 @@ pub struct AnthropicMessage {
 pub enum AnthropicRole {
     User,
     Assistant,
+    /// Compatibility for clients that place system instructions in `messages[]`
+    /// instead of the top-level `system` field.
+    System,
 }
 
 /// Message content -- either a plain string or an array of content blocks.
@@ -807,6 +810,7 @@ impl AnthropicCountTokensRequest {
             total_len += match msg.role {
                 AnthropicRole::User => 4,
                 AnthropicRole::Assistant => 9,
+                AnthropicRole::System => 6,
             };
             // Count content
             match &msg.content {

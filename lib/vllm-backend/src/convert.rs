@@ -102,6 +102,7 @@ pub(crate) fn lower_request(
         request_id,
         prompt_token_ids: request.token_ids,
         sampling_params,
+        mm_features: None,
         arrival_time: request.request_timestamp_ms.map(|ms| ms / 1000.0),
         cache_salt: request.mdc_sum,
         trace_headers: None,
