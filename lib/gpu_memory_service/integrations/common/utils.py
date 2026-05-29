@@ -93,6 +93,10 @@ def finalize_gms_write(
     referenced_allocation_ids = register_module_tensors(allocator, model)
     before_prune_bytes = allocator.total_bytes
     before_prune_count = len(allocator.mappings)
+
+    # prune_allocations synchronizes allocator.device before destroying
+    # unreferenced mappings. allocator.commit() performs the publish-barrier
+    # sync before committing the remaining registered weights.
     prune_allocations(
         allocator,
         referenced_allocation_ids=referenced_allocation_ids,
@@ -100,9 +104,6 @@ def finalize_gms_write(
     total_bytes = allocator.total_bytes
     pruned_bytes = before_prune_bytes - total_bytes
     pruned_count = before_prune_count - len(allocator.mappings)
-
-    # Synchronize before commit — caller's writes must be visible
-    torch.cuda.synchronize()
 
     allocator.commit()
 
@@ -113,7 +114,7 @@ def finalize_gms_write(
         "[GMS] Committed %.2f GiB, switched to read mode with %d mappings "
         "(pruned %d allocations / %.2f GiB before commit)",
         total_bytes / (1 << 30),
-        len(allocator._mappings),
+        len(allocator.mappings),
         pruned_count,
         pruned_bytes / (1 << 30),
     )
