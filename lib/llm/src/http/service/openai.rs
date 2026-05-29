@@ -1024,11 +1024,14 @@ fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error>
             bytes.len()
         );
     }
-    let mut floats = Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
-    for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
-        floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(floats)
+    // ``pod_collect_to_vec`` allocates a freshly 4-byte-aligned ``Vec<f32>``
+    // (Rust's allocator guarantees ``align_of::<f32>()``) and bulk-memcpys
+    // the bytes in. Because little-endian ``f32`` bit-pattern equals the raw
+    // byte pattern, no per-element conversion is needed -- modern CPUs do
+    // this memcpy via SIMD at ~20-30 GB/s. Alignment is "guarded" by design:
+    // the destination is freshly allocated and always aligned, so the
+    // alignment of ``bytes`` does not matter.
+    Ok(bytemuck::pod_collect_to_vec::<u8, f32>(&bytes))
 }
 
 async fn handler_chat_completions(
