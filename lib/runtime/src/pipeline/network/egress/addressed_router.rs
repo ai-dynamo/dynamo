@@ -192,10 +192,10 @@ where
     Ok(buffer)
 }
 
-/// Await the request-stream dial-in (if `request_stream_provider` is `Some`)
+/// Await the network request-stream dial-in (if `request_stream_provider` is `Some`)
 /// and spawn a detached task that forwards every item from `input_stream` onto
-/// the request stream. `None` is the unary no-op. Returns once the forwarder is
-/// spawned; `Err` if the worker never dialed in.
+/// the request stream. Returns once the forwarder is spawned; `Err` if request-stream
+/// dial-in fails.
 async fn spawn_request_stream_forwarder<T>(
     request_stream_provider: Option<StreamProvider<StreamSender>>,
     mut input_stream: crate::engine::DataStream<T>,
@@ -230,9 +230,9 @@ where
 
     // The task exits on stream end, context kill/stop, send error (worker
     // dropped its receiver), or local serialize failure. On any exit
-    // `request_sender` drops → upstream mpsc closes → server-side handler emits
-    // `Sentinel` → worker's reader ends cleanly, so no explicit end-of-stream
-    // signal is needed on any path.
+    // `request_sender` drops and triggers transport shutdown (see server.rs for details)
+    // which closes the upstream mpsc, triggering the server-side handler to emit
+    // `Sentinel`, which signals the worker's reader to end cleanly.
     tokio::spawn(async move {
         loop {
             let item = tokio::select! {
@@ -414,9 +414,11 @@ impl AddressedPushRouter {
             .await
     }
 
-    /// Bidirectional dispatch to a specific `(instance, address)` pair. All
-    /// input frames flow on the request-stream half of the call-home TCP
-    /// transport; the initial envelope is header-only.
+    /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
+    /// becasue there is no trivail way to wrap (instance and address) into ManyIn style.
+    /// May wrap as SingleIn<AddressedStreamRequest<T>> and unwrap here but really just syntax
+    /// sugar, so we just do it inline here. Will consider only if we do want to call this from
+    /// typed erased AsyncEngine impls.
     pub async fn generate_bidirectional<T, U>(
         &self,
         instance: Instance,
