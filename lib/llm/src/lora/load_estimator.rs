@@ -236,11 +236,16 @@ impl LoadEstimatorConfig {
     }
 
     fn bucket_duration(&self) -> Duration {
-        if self.buckets_per_second == 0 {
-            Duration::from_secs(1)
-        } else {
-            Duration::from_nanos(1_000_000_000 / self.buckets_per_second)
-        }
+        // Spread exactly `num_buckets` buckets across the configured rate
+        // window. Deriving the duration from the (possibly clamped) bucket
+        // count keeps `num_buckets * bucket_duration == rate_window`, so
+        // clamping the count lengthens each bucket rather than silently
+        // shrinking the retained window. For unclamped configs this equals the
+        // requested 1s / buckets_per_second.
+        let buckets = self.num_buckets() as u128; // num_buckets() >= 1
+        let window_nanos = self.rate_window.as_nanos().max(1);
+        let per = (window_nanos / buckets).clamp(1, u64::MAX as u128) as u64;
+        Duration::from_nanos(per)
     }
 }
 

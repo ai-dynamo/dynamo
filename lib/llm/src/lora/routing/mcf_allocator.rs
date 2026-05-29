@@ -529,35 +529,48 @@ impl McfPlacementSolver {
         };
 
         // Run the delta-impacted placement first (low churn).
-        let (mut frozen_hosts, mut solved_hosts, mut overflow_count) = place(&impacted)?;
-
-        // Global-unfreeze correctness fallback. Delta freezing keeps churn low,
+        //
+        // Global-unfreeze correctness fallback: delta freezing keeps churn low,
         // but a frozen non-impacted LoRA can block an otherwise-feasible
-        // placement, leaving overflow even though a full re-placement would fit
-        // (violating the "overflow == true capacity shortage" contract). When
-        // overflow remains, some LoRA was actually frozen, and total live
-        // capacity still exceeds what we placed, retry with every LoRA impacted
-        // (no freezing) and adopt that result only if it strictly reduces
-        // overflow. This self-corrects in one tick and does not recur, since the
-        // next solve starts from the now-conflict-free assignment.
+        // placement. That surfaces two ways — as residual overflow (overflow
+        // enabled) or as a hard InsufficientFlow error (allow_overflow=false).
+        // In both cases, when freezing actually occurred, retry with every LoRA
+        // impacted (no freezing) and adopt that result only if it does better.
+        // This self-corrects in one tick (the next solve starts from the now
+        // conflict-free assignment) so it cannot loop.
         let froze_some = loras.iter().any(|l| !impacted.contains(&l.name));
-        if overflow_count > 0 && froze_some {
-            let total_full_demand: usize = loras
-                .iter()
-                .fold(0usize, |a, l| a.saturating_add(l.replicas));
-            let live_capacity: usize = workers
-                .iter()
-                .fold(0usize, |a, w| a.saturating_add(w.capacity));
-            if live_capacity > total_full_demand.saturating_sub(overflow_count) {
-                let all_impacted: HashSet<String> = loras.iter().map(|l| l.name.clone()).collect();
-                let (f2, s2, ov2) = place(&all_impacted)?;
-                if ov2 < overflow_count {
-                    frozen_hosts = f2;
-                    solved_hosts = s2;
-                    overflow_count = ov2;
+        let all_impacted = || -> HashSet<String> { loras.iter().map(|l| l.name.clone()).collect() };
+
+        let (frozen_hosts, solved_hosts, overflow_count) = match place(&impacted) {
+            // Infeasible under freezing (only possible with allow_overflow=false).
+            // A frozen blocker may be the cause; retry unfrozen before failing.
+            Err(e) => {
+                if froze_some {
+                    place(&all_impacted())?
+                } else {
+                    return Err(e);
                 }
             }
-        }
+            // Feasible but overflowed while a frozen blocker and spare live
+            // capacity remain: a full re-placement may fit. Adopt it only if it
+            // strictly reduces overflow.
+            Ok((f, s, ov)) => {
+                let total_full_demand: usize = loras
+                    .iter()
+                    .fold(0usize, |a, l| a.saturating_add(l.replicas));
+                let live_capacity: usize = workers
+                    .iter()
+                    .fold(0usize, |a, w| a.saturating_add(w.capacity));
+                if ov > 0 && froze_some && live_capacity > total_full_demand.saturating_sub(ov) {
+                    match place(&all_impacted()) {
+                        Ok((f2, s2, ov2)) if ov2 < ov => (f2, s2, ov2),
+                        _ => (f, s, ov),
+                    }
+                } else {
+                    (f, s, ov)
+                }
+            }
+        };
 
         // ── Step 7: Merge frozen + solved ────────────────────────────────────
         let mut assignment: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
@@ -1327,6 +1340,42 @@ mod tests {
             }
         }
         assert!(counts[&w0] <= 1 && counts[&w1] <= 2);
+    }
+
+    #[test]
+    fn test_frozen_blocker_global_unfreeze_under_no_overflow() {
+        // Same frozen-blocker topology but allow_overflow=false: the delta
+        // solve returns InsufficientFlow (no overflow edge). The solver must
+        // still retry unfrozen and find the feasible full placement rather than
+        // surfacing a spurious hard error.
+        let solver = McfPlacementSolver::new(McfSolveParams {
+            allow_overflow: false,
+            ..Default::default()
+        });
+        let w0 = WorkerWithDpRank::new(0, 0);
+        let w1 = WorkerWithDpRank::new(1, 0);
+        let workers = vec![
+            WorkerInput {
+                worker: w0,
+                capacity: 1,
+            },
+            WorkerInput {
+                worker: w1,
+                capacity: 2,
+            },
+        ];
+        let loras = vec![make_lora("A", 2), make_lora("B", 1)];
+        let mut prev: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
+        prev.insert("A".to_string(), HashSet::from([w1]));
+        prev.insert("B".to_string(), HashSet::from([w0]));
+
+        let changed = HashSet::from(["A".to_string()]);
+        let result = solver
+            .solve(&workers, &loras, &prev, Some(&changed), None)
+            .expect("global unfreeze must yield a feasible solve, not a hard error");
+        assert_eq!(result.overflow_count, 0);
+        assert_eq!(result.assignment["A"].len(), 2);
+        assert_eq!(result.assignment["B"].len(), 1);
     }
 
     #[test]
