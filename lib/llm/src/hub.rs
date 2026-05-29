@@ -85,10 +85,8 @@ fn shard_files_present(index_path: &Path) -> bool {
     let Some(weight_map) = value.get("weight_map").and_then(|v| v.as_object()) else {
         return false;
     };
-    let shards: std::collections::HashSet<&str> = weight_map
-        .values()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let shards: std::collections::HashSet<&str> =
+        weight_map.values().filter_map(|v| v.as_str()).collect();
     if shards.is_empty() {
         return false;
     }
