@@ -1,20 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=coreai_comparch_aarwlt-benchx.3ctx4gen.dynamo.kvrouter
+#SBATCH --job-name=coreai_comparch_aarwlt-benchx.2ctx6gen.dynamo.kvrouter
 #SBATCH --nodes=1
 #SBATCH --partition=batch_long
 #SBATCH --account=coreai_comparch_aarwlt
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=10:00:00
-#SBATCH --output=bench/logs/run_benchx_3ctx4gen_dynamo_kvrouter_%j.log
-#SBATCH --error=bench/logs/run_benchx_3ctx4gen_dynamo_kvrouter_%j.err
+#SBATCH --output=bench/logs/run_benchx_2ctx6gen_dynamo_kvrouter_%j.log
+#SBATCH --error=bench/logs/run_benchx_2ctx6gen_dynamo_kvrouter_%j.err
 
 # =============================================================================
-# benchx (feat/bench_x sha 11e16c) — 3 ctx + 4 gen with kv router,
+# benchx (feat/bench_x sha 11e16c) — 2 ctx + 6 gen with kv router,
 # driven by dynamo.trtllm (etcd + nats + dynamo frontend).
 #
 # Layout:
-#   NODE0 — etcd + nats + dynamo frontend + 3 ctx worker(s) (GPUs 0-2) + 4 gen worker(s) (GPUs 3-6)
+#   NODE0 — etcd + nats + dynamo frontend + 2 ctx worker(s) (GPUs 0-1) + 6 gen worker(s) (GPUs 2-7)
 #
 # Driven by dynamo.trtllm (etcd + nats + dynamo frontend) instead of
 # trtllm-serve disaggregated.
@@ -31,8 +31,8 @@
 #                    0 = neither (default; reduces publisher GIL pressure on workers)
 #
 # Submit:
-#   sbatch --export=ALL,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_3ctx4gen_dynamo_kvrouter.sh
-#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_3ctx4gen_dynamo_kvrouter.sh
+#   sbatch --export=ALL,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_2ctx6gen_dynamo_kvrouter.sh
+#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_2ctx6gen_dynamo_kvrouter.sh
 # =============================================================================
 
 set -uo pipefail
@@ -51,7 +51,7 @@ else
 fi
 
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/rihuo/dynamo-trtllm-rihuo-x86_64-1-2-0-cachefix-final-with-trace.sqsh}"
-EXP_NAME="run_benchx_3ctx4gen_dynamo_kvrouter_${HCTAG}_c${C_TAG}"
+EXP_NAME="run_benchx_2ctx6gen_dynamo_kvrouter_${HCTAG}_c${C_TAG}"
 
 HF_TOKEN="${HF_TOKEN:-}"
 REPO_DIR="${REPO_DIR:-/lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/rihuo/artificial-analysis}"
@@ -72,11 +72,12 @@ DYNAMO_REQUEST_PLANE=tcp
 # DYN_SYSTEM_PORT assignments (one per worker)
 DYN_SYS_PORT_CTX_0=8081
 DYN_SYS_PORT_CTX_1=8082
-DYN_SYS_PORT_CTX_2=8083
-DYN_SYS_PORT_GEN_3=8085
-DYN_SYS_PORT_GEN_4=8086
-DYN_SYS_PORT_GEN_5=8087
-DYN_SYS_PORT_GEN_6=8088
+DYN_SYS_PORT_GEN_2=8085
+DYN_SYS_PORT_GEN_3=8086
+DYN_SYS_PORT_GEN_4=8087
+DYN_SYS_PORT_GEN_5=8088
+DYN_SYS_PORT_GEN_6=8089
+DYN_SYS_PORT_GEN_7=8090
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$REPO_DIR/bench/results/dynamo-b200-0528/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
@@ -315,9 +316,9 @@ echo "Infrastructure services are ready"
 # Stage 2: Start TRTLLM workers via dynamo.trtllm
 # ==============================================================================
 
-# --- 4 gen worker(s) on $NODE0 GPUs 3-6 (decode) ---
+# --- 6 gen worker(s) on $NODE0 GPUs 2-7 (decode) ---
 GEN_PIDS=()
-for GPU in 3 4 5 6; do
+for GPU in 2 3 4 5 6 7; do
   PORT_VAR="DYN_SYS_PORT_GEN_${GPU}"
   GEN_PORT="${!PORT_VAR}"
   echo "[$(date +%H:%M:%S)] Starting gen worker on $NODE0 GPU $GPU (DYN_SYSTEM_PORT=${GEN_PORT})..."
@@ -337,9 +338,9 @@ for GPU in 3 4 5 6; do
   GEN_PIDS+=("${SRUN_PIDS[-1]}")
 done
 
-# --- 3 ctx worker(s) on $NODE0 GPUs 0-2 (prefill) ---
+# --- 2 ctx worker(s) on $NODE0 GPUs 0-1 (prefill) ---
 CTX_PIDS=()
-for GPU in 0 1 2; do
+for GPU in 0 1; do
   PORT_VAR="DYN_SYS_PORT_CTX_${GPU}"
   CTX_PORT="${!PORT_VAR}"
   echo "[$(date +%H:%M:%S)] Starting ctx worker on $NODE0 GPU $GPU (DYN_SYSTEM_PORT=${CTX_PORT})..."
@@ -391,8 +392,8 @@ require_alive "${FRONTEND_PID}" "FRONTEND_PID"
 # ==============================================================================
 # Stage 4: Wait for all workers to register, then verify model is serving
 # ==============================================================================
-echo "[$(date +%H:%M:%S)] Waiting for servers (3 prefill + 4 decode)..."
-if ! wait_for_dynamo_workers "${NODE0}" "${FRONTEND_PORT}" 3 4 2700 60; then
+echo "[$(date +%H:%M:%S)] Waiting for servers (2 prefill + 6 decode)..."
+if ! wait_for_dynamo_workers "${NODE0}" "${FRONTEND_PORT}" 2 6 2700 60; then
     echo "ERROR: workers did not become healthy"
     for f in $RESULTS_DIR/*.log; do echo "=== $(basename $f) ==="; tail -30 "$f"; done
     exit 1
@@ -410,8 +411,8 @@ echo "[$(date +%H:%M:%S)] All workers healthy and model is serving"
 if [ "$WORKER_METRICS" = "1" ]; then
   echo "[$(date +%H:%M:%S)] Starting metrics capture sidecar (interval=2s)..."
   python3 "$REPO_DIR/bench/capture_metrics.py" \
-    --endpoints "${NODE0}:8081,${NODE0}:8082,${NODE0}:8083,${NODE0}:8085,${NODE0}:8086,${NODE0}:8087,${NODE0}:8088" \
-    --labels "ctx_g0,ctx_g1,ctx_g2,gen_g0,gen_g1,gen_g2,gen_g3" \
+    --endpoints "${NODE0}:8081,${NODE0}:8082,${NODE0}:8085,${NODE0}:8086,${NODE0}:8087,${NODE0}:8088,${NODE0}:8089,${NODE0}:8090" \
+    --labels "ctx_g0,ctx_g1,gen_g0,gen_g1,gen_g2,gen_g3,gen_g4,gen_g5" \
     --output-dir "$RESULTS_DIR/metrics" \
     --interval 2 \
     > "$RESULTS_DIR/metrics/capture.stderr.log" 2>&1 &

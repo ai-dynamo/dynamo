@@ -1,169 +1,154 @@
 #!/usr/bin/env python3
-"""
-capture_metrics.py — poll Prometheus /metrics endpoints on a fixed interval and
-append one JSONL record per scrape to <label>_metrics.jsonl in --output-dir.
+"""Background metrics capture for TRT-LLM disagg workers.
 
-Designed to run as a background sidecar from the dynamo.trtllm benchx scripts.
-Stdlib-only (urllib, threading, json, signal, argparse) so it works on the
-sbatch host without any venv or container.
+Runs inside the compute node container, polls /metrics and /perf_metrics
+from worker ports every N seconds, writes JSONL.
 
-Per-line record format:
-    {"ts": 1714944000.123, "endpoint": "host:port", "metrics": {"name{labels}": value, ...}}
-On scrape failure, a record with "error" is written instead of "metrics" so the
-stream stays continuous and you can see when the worker was unreachable.
+Usage:
+    python capture_metrics.py --endpoints localhost:8001,localhost:8003 \
+        --output-dir /path/to/metrics/ --interval 2
 """
+
 import argparse
 import json
 import os
-import re
 import signal
-import sys
-import threading
 import time
-import urllib.error
-import urllib.request
+from datetime import datetime
 
-# Match a Prometheus sample line: name{labels} value [timestamp]
-# Captures: name, optional {labels} (kept literal incl. braces), value
-_SAMPLE_RE = re.compile(
-    r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(\S+)(?:\s+\d+)?\s*$"
-)
+try:
+    import urllib.error
+    import urllib.request
+except ImportError:
+    pass
 
 
-def parse_metrics(text):
-    """Parse a Prometheus text exposition payload into {name{labels}: float}."""
-    out = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+def fetch_json(url, timeout=5):
+    """Fetch JSON from URL, return None on failure."""
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def fetch_text(url, timeout=5):
+    """Fetch text from URL, return None on failure."""
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode()
+    except Exception:
+        return None
+
+
+def parse_prometheus(text):
+    """Parse prometheus text format into dict of metric_name -> value."""
+    if not text:
+        return {}
+    metrics = {}
+    for line in text.strip().split("\n"):
+        if line.startswith("#") or not line.strip():
             continue
-        m = _SAMPLE_RE.match(line)
-        if not m:
-            continue
-        name, labels, value = m.group(1), m.group(2) or "", m.group(3)
-        try:
-            v = float(value)
-        except ValueError:
-            continue
-        out[f"{name}{labels}"] = v
-    return out
-
-
-def scrape_loop(endpoint, label, output_dir, interval, stop_event):
-    url = f"http://{endpoint}/metrics"
-    out_path = os.path.join(output_dir, f"{label}_metrics.jsonl")
-    print(
-        f"[{label}] -> {out_path} (poll {url} every {interval}s)",
-        file=sys.stderr,
-        flush=True,
-    )
-
-    timeout = max(1.0, float(interval))
-    with open(out_path, "a", buffering=1) as f:
-        next_due = time.monotonic()
-        while not stop_event.is_set():
-            ts = time.time()
+        parts = line.split()
+        if len(parts) >= 2:
             try:
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": "capture_metrics/1"}
-                )
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    body = resp.read().decode("utf-8", errors="replace")
-                record = {
-                    "ts": ts,
-                    "endpoint": endpoint,
-                    "metrics": parse_metrics(body),
-                }
-            except (urllib.error.URLError, OSError, TimeoutError) as e:
-                record = {"ts": ts, "endpoint": endpoint, "error": str(e)}
-                print(f"[{label}] scrape error: {e}", file=sys.stderr, flush=True)
-
-            f.write(json.dumps(record, separators=(",", ":")) + "\n")
-
-            next_due += interval
-            sleep_for = next_due - time.monotonic()
-            if sleep_for <= 0:
-                # Fell behind (slow scrape) — reset clock instead of bursting.
-                next_due = time.monotonic()
-                continue
-            stop_event.wait(timeout=sleep_for)
+                metrics[parts[0]] = float(parts[1])
+            except ValueError:
+                metrics[parts[0]] = parts[1]
+    return metrics
 
 
 def main():
-    p = argparse.ArgumentParser(
-        description="Poll Prometheus /metrics endpoints to per-label JSONL files."
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--endpoints", required=True, help="Comma-separated host:port list"
     )
-    p.add_argument(
-        "--endpoints",
-        required=True,
-        help="Comma-separated host:port list (e.g. 'h1:8081,h2:8082').",
+    parser.add_argument(
+        "--output-dir", required=True, help="Output directory for JSONL files"
     )
-    p.add_argument(
+    parser.add_argument(
+        "--interval", type=float, default=2.0, help="Poll interval seconds"
+    )
+    parser.add_argument(
         "--labels",
-        required=True,
-        help="Comma-separated label list (1:1 with --endpoints).",
+        default="",
+        help="Comma-separated labels for each endpoint (e.g. ctx,gen)",
     )
-    p.add_argument(
-        "--output-dir",
-        required=True,
-        help="Directory for <label>_metrics.jsonl files (created if missing).",
-    )
-    p.add_argument(
-        "--interval",
-        type=float,
-        default=2.0,
-        help="Seconds between scrapes (default 2.0).",
-    )
-    args = p.parse_args()
+    args = parser.parse_args()
 
-    endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()]
-    labels = [s.strip() for s in args.labels.split(",") if s.strip()]
-    if len(endpoints) != len(labels):
-        print(
-            f"ERROR: --endpoints has {len(endpoints)} entries but --labels has {len(labels)}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    if not endpoints:
-        print("ERROR: --endpoints is empty", file=sys.stderr)
-        sys.exit(2)
-
+    endpoints = args.endpoints.split(",")
+    labels = (
+        args.labels.split(",")
+        if args.labels
+        else [f"worker{i}" for i in range(len(endpoints))]
+    )
     os.makedirs(args.output_dir, exist_ok=True)
 
-    stop_event = threading.Event()
+    # Open output files
+    files = {}
+    for i, (ep, label) in enumerate(zip(endpoints, labels)):
+        fpath = os.path.join(args.output_dir, f"{label}_metrics.jsonl")
+        files[ep] = open(fpath, "a")
+        print(f"Capturing {ep} -> {fpath}")
 
-    def _sig(sig, _frame):
-        print(
-            f"capture_metrics: caught signal {sig}, stopping...",
-            file=sys.stderr,
-            flush=True,
-        )
-        stop_event.set()
+    running = True
 
-    signal.signal(signal.SIGTERM, _sig)
-    signal.signal(signal.SIGINT, _sig)
+    def stop(sig, frame):
+        nonlocal running
+        running = False
 
-    threads = []
-    for ep, lbl in zip(endpoints, labels):
-        t = threading.Thread(
-            target=scrape_loop,
-            args=(ep, lbl, args.output_dir, args.interval, stop_event),
-            name=f"scrape-{lbl}",
-            daemon=False,
-        )
-        t.start()
-        threads.append(t)
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
 
-    print(
-        f"capture_metrics: started {len(threads)} scrape threads, interval={args.interval}s",
-        file=sys.stderr,
-        flush=True,
-    )
+    print(f"Metrics capture started, interval={args.interval}s, endpoints={endpoints}")
+    poll_count = 0
 
-    for t in threads:
-        t.join()
+    while running:
+        ts = time.time()
+        ts_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
-    print("capture_metrics: all threads stopped", file=sys.stderr, flush=True)
+        for ep, label in zip(endpoints, labels):
+            # Try /metrics (prometheus format)
+            prom_text = fetch_text(f"http://{ep}/metrics", timeout=3)
+            prom_data = parse_prometheus(prom_text) if prom_text else {}
+
+            # Try /perf_metrics (JSON)
+            perf_data = fetch_json(f"http://{ep}/perf_metrics", timeout=3)
+
+            # Try /health for basic status
+            health = fetch_json(f"http://{ep}/health", timeout=2)
+
+            entry = {
+                "ts": ts,
+                "ts_str": ts_str,
+                "worker": label,
+                "endpoint": ep,
+                "prometheus": prom_data,
+                "perf_metrics": perf_data,
+                "health": health,
+            }
+
+            try:
+                files[ep].write(json.dumps(entry) + "\n")
+                files[ep].flush()
+            except Exception:
+                pass
+
+        poll_count += 1
+        if poll_count % 30 == 0:  # Log every 60s at 2s interval
+            sample_keys = list(prom_data.keys())[:5] if prom_data else ["empty"]
+            print(
+                f"[{ts_str}] Poll #{poll_count}, sample prometheus keys: {sample_keys}"
+            )
+
+        time.sleep(args.interval)
+
+    # Close files
+    for f in files.values():
+        f.close()
+    print(f"Metrics capture stopped after {poll_count} polls")
 
 
 if __name__ == "__main__":
