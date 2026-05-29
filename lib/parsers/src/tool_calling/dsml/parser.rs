@@ -28,8 +28,9 @@ use super::super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bool {
     let start_token = &config.block_start;
 
-    // Check for complete start token
-    if chunk.contains(start_token.as_str()) {
+    // Check for complete outer block start, or a bare invoke when the outer
+    // wrapper opener is missing.
+    if chunk.contains(start_token.as_str()) || chunk.contains(config.invoke_start_prefix.as_str()) {
         return true;
     }
 
@@ -82,6 +83,23 @@ pub fn try_tool_call_parse_dsml(
 
     let Some(start_idx) = trimmed.find(&config.block_start) else {
         if let Some(marker_idx) = first_orphan_dsml_marker_index(trimmed, config) {
+            let marker_tail = &trimmed[marker_idx..];
+            if marker_tail.starts_with(config.invoke_start_prefix.as_str()) {
+                let tool_calls = extract_invokes(marker_tail, config)?;
+                if !tool_calls.is_empty() {
+                    tracing::warn!(
+                        why = "bare_invoke_recovery",
+                        recovered_calls = tool_calls.len(),
+                        recovered_bytes = marker_tail.len(),
+                        kept_prefix_bytes = marker_idx,
+                        "DSML recovery: recovered complete bare invoke(s) without outer block_start"
+                    );
+                    return Ok((
+                        tool_calls,
+                        Some(trimmed[..marker_idx].trim_end().to_string()),
+                    ));
+                }
+            }
             let stripped = &trimmed[marker_idx..];
             tracing::warn!(
                 why = "DSML tool-call marker found without the outer block_start; dropping orphan marker tail so wire tags do not leak into normal_text",

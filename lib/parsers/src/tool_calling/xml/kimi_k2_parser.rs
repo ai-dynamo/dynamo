@@ -51,6 +51,10 @@ fn get_id_regex() -> &'static Regex {
 /// Check if a chunk contains the start of a Kimi K2 style tool call.
 /// Detects `<|tool_calls_section_begin|>` (or singular variant) or partial match for streaming.
 pub fn detect_tool_call_start_kimi_k2(chunk: &str, config: &KimiK2ParserConfig) -> bool {
+    if chunk.contains(config.call_start.as_str()) {
+        return true;
+    }
+
     for start_token in &config.section_start_variants {
         debug_assert!(
             start_token.is_ascii(),
@@ -228,6 +232,21 @@ fn extract_tool_calls(
     if find_section_start(text, 0, config).is_none()
         && let Some(marker_idx) = first_orphan_kimi_marker_index(text, config)
     {
+        let orphan_tail = &text[marker_idx..];
+        if orphan_tail.starts_with(config.call_start.as_str()) {
+            let mut recovered = parse_section_block(orphan_tail, config, tools)?;
+            if !recovered.is_empty() {
+                tracing::warn!(
+                    why = "bare_call_recovery",
+                    recovered_calls = recovered.len(),
+                    recovered_bytes = orphan_tail.len(),
+                    kept_prefix_bytes = marker_idx,
+                    "Kimi K2 parser recovered complete call(s) without section_begin"
+                );
+                calls.append(&mut recovered);
+                return Ok((text[..marker_idx].trim().to_string(), calls));
+            }
+        }
         return Ok((text[..marker_idx].trim().to_string(), calls));
     }
 

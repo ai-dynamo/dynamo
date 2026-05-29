@@ -46,10 +46,13 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
         normal_text: ''
       vllm:
-        reason: "vLLM leaks the DSML envelope into normal_text on missing/orphan end marker recovery; Dynamo strips the orphan DSML marker tail."
+        reason: "vLLM leaks the DSML envelope into normal_text on missing/orphan end marker recovery; Dynamo recovers the complete bare <｜DSML｜invoke> call and strips the orphan DSML marker tail."
         calls: []
         normal_text: |-
           <｜DSML｜invoke name="get_weather">

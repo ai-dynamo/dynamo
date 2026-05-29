@@ -41,11 +41,125 @@ fn tool_call_regex() -> &'static Regex {
     })
 }
 
+fn parse_gemma_call_parts(
+    name: &str,
+    args_raw: &str,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<ToolCallResponse> {
+    let name = name.to_string();
+    if let Some(tools) = tools
+        && !tools.iter().any(|t| t.name == name)
+    {
+        tracing::warn!(
+            "Tool '{}' is not defined in the tools list (Gemma 4 parser).",
+            name
+        );
+    }
+
+    let args_value = match parse_args_object(args_raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to parse Gemma 4 args for '{}': {}. Falling back to empty object.",
+                name,
+                e
+            );
+            Value::Object(Map::new())
+        }
+    };
+    let arguments = serde_json::to_string(&args_value)?;
+
+    Ok(ToolCallResponse {
+        id: format!("call-{}", Uuid::new_v4()),
+        tp: ToolCallType::Function,
+        function: CalledFunction { name, arguments },
+    })
+}
+
+fn find_balanced_args_end(input: &str, open_brace: usize) -> Option<usize> {
+    debug_assert_eq!(input.as_bytes().get(open_brace), Some(&b'{'));
+    let mut cursor = open_brace;
+    let mut depth = 0usize;
+    let mut in_string = false;
+
+    while cursor < input.len() {
+        let rest = &input[cursor..];
+        if rest.starts_with(STRING_DELIM) {
+            in_string = !in_string;
+            cursor += STRING_DELIM.len();
+            continue;
+        }
+
+        let ch = rest.chars().next()?;
+        if !in_string {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(cursor);
+                    }
+                }
+                _ => {}
+            }
+        }
+        cursor += ch.len_utf8();
+    }
+
+    None
+}
+
+fn parse_recoverable_call_at(
+    input: &str,
+    allow_missing_start: bool,
+    allow_missing_end: bool,
+) -> Option<(&str, &str, usize)> {
+    let after_start_offset = if let Some(rest) = input.strip_prefix(TOOL_CALL_START) {
+        input.len() - rest.len()
+    } else if allow_missing_start && input.starts_with(CALL_PREFIX) {
+        0
+    } else {
+        return None;
+    };
+
+    let after_start = &input[after_start_offset..];
+    let after_prefix = after_start.strip_prefix(CALL_PREFIX)?;
+    let name_len = after_prefix.find('{').filter(|idx| *idx > 0)?;
+    let name = &after_prefix[..name_len];
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return None;
+    }
+
+    let open_brace = after_start_offset + CALL_PREFIX.len() + name_len;
+    let close_brace = find_balanced_args_end(input, open_brace)?;
+    let args_start = open_brace + 1;
+    let args_raw = &input[args_start..close_brace];
+    let after_args = &input[close_brace + 1..];
+
+    if after_args.starts_with(TOOL_CALL_END) {
+        return Some((name, args_raw, close_brace + 1 + TOOL_CALL_END.len()));
+    }
+
+    if allow_missing_end && after_args.trim().is_empty() {
+        return Some((name, args_raw, close_brace + 1));
+    }
+
+    None
+}
+
 /// Detect whether `chunk` contains the start of a Gemma 4 tool call, including
 /// partial-prefix matches at the chunk boundary so streaming pipelines can hold
 /// off emitting bytes that may belong to a tool-call marker.
 pub fn detect_tool_call_start_gemma4(chunk: &str) -> bool {
     if chunk.contains(TOOL_CALL_START) {
+        return true;
+    }
+    if chunk.contains(CALL_PREFIX)
+        && (chunk.contains(TOOL_CALL_END) || chunk.contains(STRING_DELIM))
+    {
         return true;
     }
     for i in 1..TOOL_CALL_START.len() {
@@ -92,44 +206,47 @@ pub fn try_tool_call_parse_gemma4(
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let regex = tool_call_regex();
     let mut calls = Vec::new();
+    let mut first_tool_start = None;
+    let mut last_complete_end = 0usize;
 
     for caps in regex.captures_iter(message) {
-        let name = caps
-            .name("name")
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_default();
+        if let Some(m) = caps.get(0) {
+            first_tool_start.get_or_insert(m.start());
+            last_complete_end = m.end();
+        }
+        let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
         if name.is_empty() {
             continue;
         }
         let args_raw = caps.name("args").map(|m| m.as_str()).unwrap_or("");
 
-        if let Some(tools) = tools
-            && !tools.iter().any(|t| t.name == name)
-        {
+        calls.push(parse_gemma_call_parts(name, args_raw, tools)?);
+    }
+
+    if let Some(rel_start) = message[last_complete_end..].find(TOOL_CALL_START) {
+        let abs_start = last_complete_end + rel_start;
+        if let Some(recovered) = parse_recoverable_call_at(&message[abs_start..], false, true) {
+            first_tool_start.get_or_insert(abs_start);
             tracing::warn!(
-                "Tool '{}' is not defined in the tools list (Gemma 4 parser).",
-                name
+                why = "missing_end_recovery",
+                recovered_calls = 1,
+                recovered_bytes = recovered.2,
+                "gemma4 recovery: recovered complete call body without trailing <tool_call|>"
             );
+            calls.push(parse_gemma_call_parts(recovered.0, recovered.1, tools)?);
         }
-
-        let args_value = match parse_args_object(args_raw) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to parse Gemma 4 args for '{}': {}. Falling back to empty object.",
-                    name,
-                    e
-                );
-                Value::Object(Map::new())
-            }
-        };
-        let arguments = serde_json::to_string(&args_value)?;
-
-        calls.push(ToolCallResponse {
-            id: format!("call-{}", Uuid::new_v4()),
-            tp: ToolCallType::Function,
-            function: CalledFunction { name, arguments },
-        });
+    } else if let Some(rel_call) = message[last_complete_end..].find(CALL_PREFIX) {
+        let abs_start = last_complete_end + rel_call;
+        if let Some(recovered) = parse_recoverable_call_at(&message[abs_start..], true, false) {
+            first_tool_start.get_or_insert(abs_start);
+            tracing::warn!(
+                why = "missing_start_recovery",
+                recovered_calls = 1,
+                recovered_bytes = recovered.2,
+                "gemma4 recovery: recovered complete call body without leading <|tool_call>"
+            );
+            calls.push(parse_gemma_call_parts(recovered.0, recovered.1, tools)?);
+        }
     }
 
     // No-leak contract for `normal_text`:
@@ -173,7 +290,7 @@ pub fn try_tool_call_parse_gemma4(
         // `<|tool_call>` onward (inter-call text, trailing narration,
         // truncation tails). Mirrors vLLM's
         // `content = model_output[:content_end].strip()`.
-        match message.find(TOOL_CALL_START) {
+        match first_tool_start {
             Some(idx) => {
                 let stripped = &message[idx..];
                 let preview: String = stripped.chars().take(120).collect();

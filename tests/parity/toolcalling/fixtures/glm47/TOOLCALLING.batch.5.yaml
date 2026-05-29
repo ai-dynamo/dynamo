@@ -33,10 +33,13 @@ cases:
     - *id002
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
         normal_text: ''
       vllm: &id003
-        reason: "vLLM and SGLang preserve orphan GLM <arg_key>/<arg_value>/</tool_call> markup as content when opening <tool_call> is missing; Dynamo strips the orphan marker tail."
+        reason: "vLLM and SGLang preserve orphan GLM <arg_key>/<arg_value>/</tool_call> markup as content when opening <tool_call> is missing; Dynamo recovers the complete bare call body and strips the orphan close marker."
         calls: []
         normal_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
       sglang: *id003

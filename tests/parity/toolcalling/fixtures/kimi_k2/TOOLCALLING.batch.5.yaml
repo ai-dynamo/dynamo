@@ -33,10 +33,13 @@ cases:
     - *id002
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
         normal_text: ''
       vllm: &id003
-        reason: "vLLM and SGLang preserve orphan Kimi tool-call markers as content when opening <|tool_calls_section_begin|> is missing; Dynamo strips the orphan marker tail."
+        reason: "vLLM and SGLang preserve orphan Kimi tool-call markers as content when opening <|tool_calls_section_begin|> is missing; Dynamo recovers the complete bare <|tool_call_begin|> body and strips the orphan section close marker."
         calls: []
         normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       sglang: *id003

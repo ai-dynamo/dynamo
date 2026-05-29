@@ -42,9 +42,10 @@ fn truncate_for_log(s: &str) -> String {
 /// Format: <tool_call>function_name<arg_key>...</arg_key><arg_value>...</arg_value></tool_call>
 pub fn detect_tool_call_start_glm47(chunk: &str, config: &Glm47ParserConfig) -> bool {
     let start_token = &config.tool_call_start;
+    let arg_key_start = &config.arg_key_start;
 
     // Check if we have the complete start token
-    if chunk.contains(start_token.as_str()) {
+    if chunk.contains(start_token.as_str()) || chunk.contains(arg_key_start.as_str()) {
         return true;
     }
 
@@ -68,6 +69,10 @@ pub fn detect_tool_call_start_glm47(chunk: &str, config: &Glm47ParserConfig) -> 
 pub fn find_tool_call_end_position_glm47(chunk: &str, config: &Glm47ParserConfig) -> usize {
     let start_token = &config.tool_call_start;
     let end_token = &config.tool_call_end;
+
+    if !chunk.contains(start_token.as_str()) && chunk.contains(config.arg_key_start.as_str()) {
+        return chunk.len();
+    }
 
     let Some(first_end) = chunk.find(end_token.as_str()) else {
         return chunk.len();
@@ -128,6 +133,17 @@ fn extract_tool_calls(
     if !text.contains(start_token.as_str())
         && let Some(marker_idx) = first_orphan_glm47_marker_index(text, config)
     {
+        if let Some(parsed_call) = recover_bare_glm47_call(text, marker_idx, config, tools)? {
+            warn!(
+                why = "bare_body_recovery",
+                recovered_calls = 1,
+                recovered_bytes = text.len(),
+                kept_prefix_bytes = 0,
+                "GLM-4.7 parser recovered complete bare call body without <tool_call> start"
+            );
+            calls.push(parsed_call);
+            return Ok((String::new(), calls));
+        }
         warn!(
             why = "GLM-4.7 tool-call marker found without <tool_call> start; dropping orphan marker tail so wire tags do not leak into normal_text",
             dropped_block = %truncate_for_log(&text[marker_idx..]),
@@ -274,6 +290,29 @@ fn orphan_glm47_prefix(text: &str, marker_idx: usize) -> String {
     } else {
         prefix.trim().to_string()
     }
+}
+
+fn recover_bare_glm47_call(
+    text: &str,
+    marker_idx: usize,
+    config: &Glm47ParserConfig,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<Option<ToolCallResponse>> {
+    if !text[marker_idx..].contains(config.tool_call_end.as_str()) {
+        return Ok(None);
+    }
+
+    let candidate_name = text[..marker_idx].trim();
+    if candidate_name.is_empty()
+        || !candidate_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return Ok(None);
+    }
+
+    let wrapped = format!("{}{}", config.tool_call_start, text);
+    parse_tool_call_block(&wrapped, config, tools).map(Some)
 }
 
 /// Decode XML character entities in a string.
