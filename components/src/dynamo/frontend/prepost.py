@@ -353,7 +353,9 @@ class StreamingPostProcessor:
         if extracted.tools_called:
             for i, tool_call in enumerate(extracted.tool_calls):
                 self._add_tool_call_from_extracted(i, tool_call)
-            return self._compose_delta_message(saved_reasoning, None)
+            return self._compose_delta_message(
+                saved_reasoning, extracted.content or None
+            )
 
         return self._compose_delta_message(saved_reasoning, extracted.content or None)
 
