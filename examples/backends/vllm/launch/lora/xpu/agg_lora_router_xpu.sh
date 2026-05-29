@@ -66,25 +66,37 @@ python -m dynamo.frontend \
 
 # run workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
+#
+# Parse ZE_AFFINITY_MASK (comma-separated) into per-worker device indices
+IFS=',' read -ra _GPU_IDS <<< "${ZE_AFFINITY_MASK:-0,1}"
+GPU_WORKER1="${_GPU_IDS[0]:-0}"
+GPU_WORKER2="${_GPU_IDS[1]:-1}"
+
+# KV event ports (configurable to avoid collisions in parallel test runs)
+KV_EVENT_PORT1="${DYN_VLLM_KV_EVENT_PORT1:-20080}"
+KV_EVENT_PORT2="${DYN_VLLM_KV_EVENT_PORT2:-20081}"
+
+# NIXL side channel port
+NIXL_PORT="${VLLM_NIXL_SIDE_CHANNEL_PORT:-20097}"
+
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
-ZE_AFFINITY_MASK=0 python3 -m dynamo.vllm \
+ZE_AFFINITY_MASK=$GPU_WORKER1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
     --enable-lora \
     --max-lora-rank 64 \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENT_PORT1}\",\"enable_kv_cache_events\":true}" &
 
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT2} \
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-ZE_AFFINITY_MASK=1 python3 -m dynamo.vllm \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT \
+ZE_AFFINITY_MASK=$GPU_WORKER2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
     --enable-lora \
     --max-lora-rank 64 \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENT_PORT2}\",\"enable_kv_cache_events\":true}" &
 
 # Sample output after running LoRA inference curl request twice.
 # usage.prompt_tokens_details.cached_tokens is the number of tokens that were cached from the previous request.
