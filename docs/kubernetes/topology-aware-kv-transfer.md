@@ -71,42 +71,175 @@ spec:
       labelKey: topology.kubernetes.io/zone
       domain: zone
       enforcement: required
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      envs:
-        - name: DYN_ROUTER_MODE
-          value: kv
-    VllmPrefillWorker:
-      componentType: worker
-      replicas: 2
-      envFromSecret: hf-token-secret
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
-          command: ["/bin/sh", "-c"]
-          args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill
-    VllmDecodeWorker:
-      componentType: worker
-      replicas: 2
-      envFromSecret: hf-token-secret
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+  - name: VllmPrefillWorker
+    type: worker
+    replicas: 2
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
-          command: ["/bin/sh", "-c"]
-          args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
+          command: ["python3", "-m", "dynamo.vllm"]
+          args: ["--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill"]
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+  - name: VllmDecodeWorker
+    type: worker
+    replicas: 2
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          command: ["python3", "-m", "dynamo.vllm"]
+          args: ["--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "decode"]
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
 ```
 
 `enforcement` defaults to `required` when omitted.
+
+> [!IMPORTANT]
+> `required` is a decode-routing constraint, not a capacity planner. The `DynamoGraphDeployment` author or cluster administrator must ensure that every topology domain that can receive prefill workers also has sufficient same-domain decode capacity. If a domain has prefill workers but no matching decode workers, or too little decode capacity, the router cannot spill to another domain without violating the policy.
+
+### Capacity Planning Across Domains
+
+Plan prefill and decode capacity per topology domain before enabling `enforcement: required`. For example, assume:
+
+- Two availability zones: `az-1` and `az-2`.
+- The target fleet is 60 prefill workers and 120 decode workers.
+- The fleet should be split evenly across the two zones.
+- The target prefill-to-decode ratio is 1:2 in each zone.
+
+That means each zone should run 30 prefill workers and 60 decode workers:
+
+| Zone | Prefill workers | Decode workers | Ratio |
+|------|-----------------|----------------|-------|
+| `az-1` | 30 | 60 | 1:2 |
+| `az-2` | 30 | 60 | 1:2 |
+
+In a `DynamoGraphDeployment`, express this as separate prefill and decode components per zone. Pin each component to its zone and set `kvTransferPolicy.enforcement` to `required` so the router refuses cross-zone decode selection. The DGD author or cluster administrator must ensure each zone has enough schedulable capacity for its pinned replicas. Worker command and args are omitted here; configure each worker for prefill or decode mode as in the base disaggregated serving manifest:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-disagg-zone-capacity
+spec:
+  experimental:
+    kvTransferPolicy:
+      labelKey: topology.kubernetes.io/zone
+      domain: zone
+      enforcement: required
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+  - name: VllmPrefillWorkerAz1
+    type: worker
+    replicas: 30
+    podTemplate:
+      spec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: topology.kubernetes.io/zone
+                  operator: In
+                  values: ["az-1"]
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: VllmDecodeWorkerAz1
+    type: worker
+    replicas: 60
+    podTemplate:
+      spec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: topology.kubernetes.io/zone
+                  operator: In
+                  values: ["az-1"]
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: VllmPrefillWorkerAz2
+    type: worker
+    replicas: 30
+    podTemplate:
+      spec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: topology.kubernetes.io/zone
+                  operator: In
+                  values: ["az-2"]
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: VllmDecodeWorkerAz2
+    type: worker
+    replicas: 60
+    podTemplate:
+      spec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: topology.kubernetes.io/zone
+                  operator: In
+                  values: ["az-2"]
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+```
 
 ## Preferred Same-Domain Routing
 
@@ -204,7 +337,7 @@ When topology is enabled, the worker waits for the transfer-domain file to appea
 
 ### Required Policy Fails Requests
 
-With `enforcement: required`, decode routing fails if no decode worker has the same generated topology taint as the selected prefill worker. Verify both prefill and decode workers publish the same `domain` and that at least one decode worker exists in each domain where prefill workers can be selected.
+With `enforcement: required`, decode routing fails if no decode worker has the same generated topology taint as the selected prefill worker. Verify both prefill and decode workers publish the same `domain`, and that each domain where prefill workers can be selected has enough matching decode workers for the expected p/d ratio.
 
 Use `preferred` while validating a heterogeneous rollout if cross-domain routing is acceptable during partial capacity.
 
