@@ -2904,9 +2904,7 @@ mod tests {
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.1.message,
-            format!(
-                "All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}"
-            )
+            format!("All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}")
         );
     }
 
