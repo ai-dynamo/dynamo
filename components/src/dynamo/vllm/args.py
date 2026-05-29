@@ -351,24 +351,74 @@ def create_kv_events_config(
     return None
 
 
-def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
-    """Check if the user-provided --kv-transfer-config uses NixlConnector.
+def _is_nixl_connector_class(kv_connector: str, kv_connector_module_path: str | None) -> bool:
+    """Resolve a connector name (optionally with a module path for custom
+    connectors loaded via vLLM's factory) and return True iff it is the
+    in-tree ``NixlConnector`` or any subclass of it.
 
-    Handles both direct usage (kv_connector="NixlConnector") and nested usage
-    inside PdConnector (kv_connector_extra_config.connectors contains
-    "NixlConnector").
+    Using ``issubclass`` rather than a hard-coded name allowlist means any
+    custom Dynamo subclass of ``NixlConnector`` is automatically recognized
+    and gets the NIXL side-channel-host setup, without needing to be added
+    to a list here.
+
+    Returns False on any resolution error so this never blocks startup —
+    the connector load itself will surface a real error if the path is bad.
+    """
+    if kv_connector == "NixlConnector":
+        return True
+    try:
+        # Local import to avoid pulling vLLM at module-import time for paths
+        # that don't use NIXL at all.
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+            NixlConnector,
+        )
+
+        # Reconstruct just enough of a KVTransferConfig for the factory
+        # lookup. The factory only reads ``kv_connector`` and
+        # ``kv_connector_module_path``.
+        class _Probe:
+            pass
+
+        probe = _Probe()
+        probe.kv_connector = kv_connector
+        probe.kv_connector_module_path = kv_connector_module_path
+        cls = KVConnectorFactory.get_connector_class(probe)
+        return isinstance(cls, type) and issubclass(cls, NixlConnector)
+    except Exception:
+        return False
+
+
+def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
+    """Check if the user-provided --kv-transfer-config uses NixlConnector
+    or any subclass of it (including Dynamo-side custom connectors loaded
+    via ``kv_connector_module_path``).
+
+    Handles both direct usage (kv_connector="NixlConnector") and nested
+    usage inside PdConnector (kv_connector_extra_config.connectors contains
+    a NixlConnector subclass).
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:
         return False
-    if kv_cfg.kv_connector == "NixlConnector":
+    if _is_nixl_connector_class(
+        kv_cfg.kv_connector,
+        getattr(kv_cfg, "kv_connector_module_path", None),
+    ):
         return True
     # PdConnector wraps multiple connectors in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
     if kv_cfg.kv_connector == "PdConnector":
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
-            if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
+            if not isinstance(entry, dict):
+                continue
+            if _is_nixl_connector_class(
+                entry.get("kv_connector"),
+                entry.get("kv_connector_module_path"),
+            ):
                 return True
     return False
 
