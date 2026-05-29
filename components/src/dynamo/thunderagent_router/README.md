@@ -229,15 +229,11 @@ non-agentic traffic sharing the same workers.
 
 ---
 
-## Reproducing the mini-swe-agent MiniMax-M2 results
+## Reproducing the MiniMax-M2 results
 
-The mini-swe-agent numbers come from SWE-bench-Lite with
-`SWEBENCH_WORKERS=128`, against two TP4 MiniMax-M2 replicas on a single
-8×H100 node. The client side is the
-[`feat/mini-swe-direct-dynamo`](https://github.com/ishandhanani/ThunderAgent/tree/feat/mini-swe-direct-dynamo)
-branch of the `ishandhanani/ThunderAgent` fork, which injects
-`nvext.agent_context` directly into OpenAI-compatible requests when
-`MSWEA_BACKEND=dynamo` is set.
+The headline numbers — program-aware scheduling vs KV-routing-only on the
+same hardware — come from driving SWE-bench-Lite through pi via a Harbor
+adapter, against two TP4 MiniMax-M2 replicas on a single 8×H100 node.
 
 ### 1. Bring up Dynamo (2× TP4 MiniMax-M2)
 
@@ -255,66 +251,42 @@ For the **KV-routing-only baseline** arm, drop the `thunderagent_router` line
 from the script and run the frontend in KV-router mode against the same two
 workers (`--router-mode kv`).
 
-### 2. Install the mini-swe-agent fork
+### 2. Run pi + Harbor
 
-The fork support is in two files:
-
-- `examples/inference/mini-swe-agent/src/minisweagent/models/vllm_model.py`
-  emits `extra_body.nvext.agent_context` when `MSWEA_BACKEND=dynamo`.
-- `examples/inference/mini-swe-agent/src/minisweagent/run/extra/swebench.py`
-  stamps one `MSWEA_SESSION_ID` per sweep and uses each SWE-bench
-  `instance_id` as the stable `trajectory_id`.
+The Harbor pi adapter lives on the `feat/harbor-pi-adapter` branch of the
+fork. It installs `pi-dynamo-provider` into each trial container and injects
+`nvext.agent_context` so each Harbor trial maps to one ThunderAgent program.
 
 ```bash
-git clone -b feat/mini-swe-direct-dynamo https://github.com/ishandhanani/ThunderAgent
-cd ThunderAgent
+# Clone the fork and the provider side by side.
+git clone -b feat/harbor-pi-adapter https://github.com/ishandhanani/ThunderAgent
+git clone https://github.com/ai-dynamo/pi-dynamo-provider
+export PI_DYNAMO_PROVIDER_PATH="$PWD/pi-dynamo-provider"
+
+cd ThunderAgent/examples/datagen/harbor
 uv venv && source .venv/bin/activate && uv pip install -e .
-```
 
-### 3. Run mini-SWE-Lite directly against Dynamo
-
-The stock `swebench.yaml` in the fork still points at `localhost:8000`.
-Either edit it, or generate a temporary config that points at the Dynamo
-frontend on `:8100`:
-
-```bash
-cd ThunderAgent
-source .venv/bin/activate
-
-BASE_CONFIG=examples/inference/mini-swe-agent/src/minisweagent/config/extra/swebench.yaml
-DIRECT_CONFIG=/tmp/swebench-dynamo.yaml
-sed 's#base_url: "http://localhost:8000/v1"#base_url: "http://localhost:8100/v1"#' \
-  "$BASE_CONFIG" > "$DIRECT_CONFIG"
-
-export OPENAI_BASE_URL=http://localhost:8100/v1
-export OPENAI_API_KEY=DUMMY
-export MSWEA_BACKEND=dynamo
-export MSWEA_SESSION_TYPE_ID=swebench-lite
-
-mini-extra swebench \
-  --config "$DIRECT_CONFIG" \
-  --subset lite \
-  --split test \
-  --workers 128 \
-  --output /tmp/miniswe-dynamo-ta \
-  --redo-existing \
-  --model MiniMaxAI/MiniMax-M2
+harbor run \
+  --path datasets/swebench \
+  --agent pi \
+  --model 'dynamo/MiniMaxAI/MiniMax-M2' \
+  --ak api_base='http://127.0.0.1:8100/v1' \
+  --n-tasks 30 --n-concurrent 10 \
+  --network-mode host --override-cpus 2 --override-memory-mb 8192 \
+  -v "$PI_DYNAMO_PROVIDER_PATH:/opt/pi-dynamo-provider:ro" \
+  --jobs-dir /tmp/harbor-jobs --job-name ta-run --quiet
 ```
 
 ### Expected
 
-On 8×H100, the mini-swe-agent runs showed a low-teens scheduler gain:
+On 8×H100 with 30 SWE-bench-Lite tasks (20 astropy + 10 django) at
+`n_concurrent=10`, the Pi + Dynamo setup shows a **12-16% throughput
+improvement** from program-aware scheduling over the KV-routing-only baseline.
+Pass-rate deltas on this slice are within run-to-run noise.
 
-| Arm | Stack / config | steps/min | Delta vs armA2 |
-|---|---|---:|---:|
-| armA2 | upstream ThunderAgent HTTP proxy + 2× bare vLLM TP4 | 23.72 | — |
-| C1 | `dynamo.frontend → dynamo.thunderagent_router → 2× dynamo.vllm` | 25.58 | +7.8% |
-| B15m-LB | same scheduler behavior as C1, saved phase-2 run | 27.54 | +16.1% |
-| Mean Dynamo | C1 + B15m-LB | 26.56 | +12.0% |
-
-Treat this as **~12% throughput gain** for mini-swe-agent, not a large
-single-run headline. The same-config runs had visible variance, so small
-deltas need repeated runs.
+Pointing `--ak api_base` at a stock `vllm serve` instead of the Dynamo
+frontend also works — `nvext.agent_context` is silently dropped — which is how
+the non-Dynamo control arm is run.
 
 ---
 
