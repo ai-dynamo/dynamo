@@ -11,27 +11,16 @@ import pytest
 
 pytest.importorskip("sglang")
 
-from dynamo.sglang.llm_engine import SglangLLMEngine  # noqa: E402
-from dynamo.sglang.quiesce import SGLangEngineQuiesceController  # noqa: E402
 
-pytestmark = [
-    pytest.mark.unit,
-    pytest.mark.sglang,
-    pytest.mark.gpu_0,
-    pytest.mark.pre_merge,
-]
+class _Req:
+    def __init__(self, tags=None, **kwargs):
+        self.tags = tags
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
-@pytest.fixture(autouse=True)
-def _stub_sglang_io_struct(monkeypatch):
+def _make_io_struct_stub() -> types.ModuleType:
     io_struct = types.ModuleType("sglang.srt.managers.io_struct")
-
-    class _Req:
-        def __init__(self, tags=None, **kwargs):
-            self.tags = tags
-            for key, value in kwargs.items():
-                setattr(self, key, value)
-
     io_struct.PauseGenerationReqInput = _Req
     io_struct.ReleaseMemoryOccupationReqInput = _Req
     io_struct.ResumeMemoryOccupationReqInput = _Req
@@ -41,8 +30,47 @@ def _stub_sglang_io_struct(monkeypatch):
     io_struct.UpdateWeightsFromDistributedReqInput = _Req
     io_struct.UpdateWeightsFromIPCReqInput = _Req
     io_struct.UpdateWeightVersionReqInput = _Req
+    return io_struct
 
-    monkeypatch.setitem(sys.modules, "sglang.srt.managers.io_struct", io_struct)
+
+try:
+    import sglang.srt.managers.io_struct  # noqa: F401
+except ImportError:
+    managers = types.ModuleType("sglang.srt.managers")
+    managers.__path__ = []
+    sys.modules.setdefault("sglang.srt.managers", managers)
+    sys.modules.setdefault("sglang.srt.managers.io_struct", _make_io_struct_stub())
+
+from dynamo.sglang.llm_engine import SglangLLMEngine  # noqa: E402
+from dynamo.sglang.quiesce import SGLangEngineQuiesceController  # noqa: E402
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_0,
+    pytest.mark.core,
+    pytest.mark.post_merge,
+]
+
+
+@pytest.fixture(autouse=True)
+def _stub_sglang_io_struct(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "sglang.srt.managers.io_struct", _make_io_struct_stub()
+    )
+    monkeypatch.setattr("dynamo.sglang.quiesce.PauseGenerationReqInput", _Req)
+    monkeypatch.setattr("dynamo.sglang.quiesce.ReleaseMemoryOccupationReqInput", _Req)
+    monkeypatch.setattr("dynamo.sglang.quiesce.ResumeMemoryOccupationReqInput", _Req)
+    monkeypatch.setattr("dynamo.sglang.quiesce.ContinueGenerationReqInput", _Req)
+    monkeypatch.setattr("dynamo.sglang.llm_engine.UpdateWeightFromDiskReqInput", _Req)
+    monkeypatch.setattr(
+        "dynamo.sglang.llm_engine.UpdateWeightsFromTensorReqInput", _Req
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.llm_engine.UpdateWeightsFromDistributedReqInput", _Req
+    )
+    monkeypatch.setattr("dynamo.sglang.llm_engine.UpdateWeightsFromIPCReqInput", _Req)
+    monkeypatch.setattr("dynamo.sglang.llm_engine.UpdateWeightVersionReqInput", _Req)
 
 
 def _make_engine() -> SglangLLMEngine:

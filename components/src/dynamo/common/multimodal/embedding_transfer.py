@@ -25,13 +25,25 @@ logger = logging.getLogger(__name__)
 
 
 def _load_nixl_api():
-    from nixl._api import nixl_agent, nixl_agent_config
+    try:
+        from nixl._api import nixl_agent, nixl_agent_config
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL is required for NIXL embedding transfer; install nixl "
+            "to use NIXL write-based multimodal embedding transfer."
+        ) from exc
 
     return nixl_agent, nixl_agent_config
 
 
 def _load_nixl_connect():
-    import dynamo.nixl_connect as nixl_connect
+    try:
+        import dynamo.nixl_connect as nixl_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL is required for NIXL embedding transfer; install "
+            "dynamo.nixl_connect to use NIXL read-based transfers."
+        ) from exc
 
     return nixl_connect
 
@@ -451,9 +463,9 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                             # mark the transfer as completed to unblock the sender.
                             self._complete_transfer(tensor_id)
                             continue
-                        self.remote_agents[
-                            remote_agent_id
-                        ] = self.nixl_agent.add_remote_agent(remote_agent_metadata)
+                        self.remote_agents[remote_agent_id] = (
+                            self.nixl_agent.add_remote_agent(remote_agent_metadata)
+                        )
 
                     # initiate NIXL WRITE transfer
                     source_tensor, source_desc, _ = self.transfer_tracker[tensor_id]
@@ -674,10 +686,10 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
                 raise ValueError(
                     f"Missing agent metadata for new sender {nixl_request.sender_agent_id}"
                 )
-            self.remote_agents[
-                nixl_request.sender_agent_id
-            ] = self.nixl_agent.add_remote_agent(
-                base64.b64decode(nixl_request.agent_metadata)
+            self.remote_agents[nixl_request.sender_agent_id] = (
+                self.nixl_agent.add_remote_agent(
+                    base64.b64decode(nixl_request.agent_metadata)
+                )
             )
 
         # Allocate tensor to be written into.

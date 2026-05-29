@@ -22,8 +22,7 @@ async def read_decoded_media_via_nixl(
     connector: nixl_connect.Connector,
     decoded_meta: Dict[str, Any],
     return_metadata: Literal[False] = False,
-) -> np.ndarray:
-    ...
+) -> np.ndarray: ...
 
 
 @overload
@@ -31,8 +30,7 @@ async def read_decoded_media_via_nixl(
     connector: nixl_connect.Connector,
     decoded_meta: Dict[str, Any],
     return_metadata: Literal[True],
-) -> Tuple[np.ndarray, Dict[str, Any] | None]:
-    ...
+) -> Tuple[np.ndarray, Dict[str, Any] | None]: ...
 
 
 async def read_decoded_media_via_nixl(
@@ -51,8 +49,18 @@ async def read_decoded_media_via_nixl(
         np.ndarray containing the transferred media data.
         Dict[str, Any] containing the media metadata.
     """
-    from dynamo import nixl_connect
-    from dynamo.nixl_connect import OperationKind, RdmaMetadata, SerializedDescriptor
+    try:
+        from dynamo import nixl_connect
+        from dynamo.nixl_connect import (
+            OperationKind,
+            RdmaMetadata,
+            SerializedDescriptor,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL is required to read decoded media via frontend decoding; "
+            "install dynamo.nixl_connect to enable RDMA media transfers."
+        ) from exc
 
     rdma_metadata = decoded_meta["nixl_metadata"]
     descriptor = decoded_meta["nixl_descriptor"]

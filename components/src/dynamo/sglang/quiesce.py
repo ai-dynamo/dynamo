@@ -5,6 +5,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from sglang.srt.managers.io_struct import (
+    ContinueGenerationReqInput,
+    PauseGenerationReqInput,
+    ReleaseMemoryOccupationReqInput,
+    ResumeMemoryOccupationReqInput,
+)
+
 
 class SGLangEngineQuiesceController:
     def __init__(self, engine: Any):
@@ -19,11 +26,6 @@ class SGLangEngineQuiesceController:
         if self._is_quiesced:
             return False
 
-        from sglang.srt.managers.io_struct import (
-            PauseGenerationReqInput,
-            ReleaseMemoryOccupationReqInput,
-        )
-
         await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
         await self._engine.tokenizer_manager.release_memory_occupation(
             ReleaseMemoryOccupationReqInput(tags=tags),
@@ -35,11 +37,6 @@ class SGLangEngineQuiesceController:
     async def resume(self, tags: list[str] | None = None) -> bool:
         if not self._is_quiesced:
             return False
-
-        from sglang.srt.managers.io_struct import (
-            ContinueGenerationReqInput,
-            ResumeMemoryOccupationReqInput,
-        )
 
         await self._engine.tokenizer_manager.resume_memory_occupation(
             ResumeMemoryOccupationReqInput(tags=tags),

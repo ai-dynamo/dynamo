@@ -33,15 +33,26 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 
 def _create_nixl_connector() -> Any:
-    import dynamo.nixl_connect as nixl_connect
+    try:
+        import dynamo.nixl_connect as nixl_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL is required for frontend video decoding; install "
+            "dynamo.nixl_connect to enable decoded video transfers."
+        ) from exc
 
     return nixl_connect.Connector()
 
 
 async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
-    from dynamo.common.utils.media_nixl import (
-        read_decoded_media_via_nixl as _read_decoded_media_via_nixl,
-    )
+    try:
+        from dynamo.common.utils.media_nixl import (
+            read_decoded_media_via_nixl as _read_decoded_media_via_nixl,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL media utilities are required for frontend video decoding."
+        ) from exc
 
     return await _read_decoded_media_via_nixl(*args, **kwargs)
 

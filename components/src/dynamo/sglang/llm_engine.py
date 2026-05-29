@@ -23,6 +23,13 @@ import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+from sglang.srt.managers.io_struct import (
+    UpdateWeightFromDiskReqInput,
+    UpdateWeightVersionReqInput,
+    UpdateWeightsFromDistributedReqInput,
+    UpdateWeightsFromIPCReqInput,
+    UpdateWeightsFromTensorReqInput,
+)
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
@@ -445,8 +452,8 @@ class SglangLLMEngine(LLMEngine):
                         else "Memory released"
                     ),
                 }
-            except Exception as e:
-                logger.error("Failed to release memory occupation: %s", e)
+            except (asyncio.TimeoutError, RuntimeError) as e:
+                logger.warning("Failed to release memory occupation: %s", e)
                 return {"status": "error", "message": str(e)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
@@ -473,8 +480,8 @@ class SglangLLMEngine(LLMEngine):
                         else "Memory resumed"
                     ),
                 }
-            except Exception as e:
-                logger.error("Failed to resume memory occupation: %s", e)
+            except (asyncio.TimeoutError, RuntimeError) as e:
+                logger.warning("Failed to resume memory occupation: %s", e)
                 return {"status": "error", "message": str(e)}
 
     async def start_profile(self, body: dict) -> dict:
@@ -490,8 +497,6 @@ class SglangLLMEngine(LLMEngine):
 
     async def update_weights_from_disk(self, body: dict) -> dict:
         assert self.engine is not None, "Engine not initialized"
-        from sglang.srt.managers.io_struct import UpdateWeightFromDiskReqInput
-
         req = UpdateWeightFromDiskReqInput(**(body or {}))
         (
             success,
@@ -506,8 +511,6 @@ class SglangLLMEngine(LLMEngine):
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
         assert self.engine is not None, "Engine not initialized"
-        from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
-
         req = UpdateWeightsFromTensorReqInput(**(body or {}))
         (
             success,
@@ -517,8 +520,6 @@ class SglangLLMEngine(LLMEngine):
 
     async def update_weights_from_distributed(self, body: dict) -> dict:
         assert self.engine is not None, "Engine not initialized"
-        from sglang.srt.managers.io_struct import UpdateWeightsFromDistributedReqInput
-
         req = UpdateWeightsFromDistributedReqInput(**(body or {}))
         (
             success,
@@ -530,8 +531,6 @@ class SglangLLMEngine(LLMEngine):
 
     async def update_weights_from_ipc(self, body: dict) -> dict:
         assert self.engine is not None, "Engine not initialized"
-        from sglang.srt.managers.io_struct import UpdateWeightsFromIPCReqInput
-
         req = UpdateWeightsFromIPCReqInput(**(body or {}))
         success, message = await self.engine.tokenizer_manager.update_weights_from_ipc(
             req, None
@@ -542,8 +541,6 @@ class SglangLLMEngine(LLMEngine):
 
     async def update_weight_version(self, body: dict) -> dict:
         assert self.engine is not None, "Engine not initialized"
-        from sglang.srt.managers.io_struct import UpdateWeightVersionReqInput
-
         req = UpdateWeightVersionReqInput(**(body or {}))
         if req.abort_all_requests:
             self.engine.tokenizer_manager.abort_request(abort_all=True)
