@@ -10,24 +10,16 @@
 //!   routes.  Each registered worker spawns a ZMQ listener that ingests its KV
 //!   events.  Entry point: [`run_server`].
 //!
-//! - **`velo-runtime`** (velo AM + unary RPC): workers fire-and-forget event
-//!   batches over velo active messaging; gateways call a velo unary RPC for
-//!   prefix-match queries.  No per-worker sockets, no HTTP overhead.  Entry
-//!   point: [`run_server_velo`].
+//! - **`velo-runtime`**: sets up the Velo process shell (TCP + optional UDS
+//!   transports, filesystem peer discovery).  Query and ingest handlers are
+//!   placeholders that land in follow-up MRs.  Entry point: [`run_server_velo`].
 //!
 //! ## Response shapes
 //!
-//! The two backends return **different wire formats**:
-//!
-//! - **`indexer-runtime`** (HTTP) returns a `ScoreResponse` with token counts
-//!   scaled by `block_size`, aligned with the Mooncake KV-Store Indexer API
-//!   Standardization RFC (<https://github.com/kvcache-ai/Mooncake/issues/1403>).
-//!   Tier counts are cumulative — see [`server`] for the exact semantics.
-//!
-//! - **`velo-runtime`** returns
-//!   [`crate::indexer::IndexerQueryResponse::TieredScores`] with raw
-//!   block-level overlap counts.  This is a Velo-native API; callers switching
-//!   from HTTP must update their response parsing accordingly.
+//! **`indexer-runtime`** (HTTP) returns a `ScoreResponse` with token counts
+//! scaled by `block_size`, aligned with the Mooncake KV-Store Indexer API
+//! Standardization RFC (<https://github.com/kvcache-ai/Mooncake/issues/1403>).
+//! Tier counts are cumulative — see [`server`] for the exact semantics.
 
 pub mod indexer;
 pub mod listener;
@@ -285,9 +277,6 @@ async fn run_common(
 /// Configuration for the velo-based standalone indexer.
 #[cfg(feature = "velo-runtime")]
 pub struct VeloIndexerConfig {
-    /// Number of indexer threads per shard.  0 = single-threaded.
-    /// Reserved for a follow-up MR (RuntimeRegistry); unused in this PR.
-    pub threads: usize,
     /// TCP port to bind.  0 = OS-assigned.
     pub tcp_port: u16,
     /// If set, publish a [`runtime::discovery::IndexerPeerSnapshot`] JSON file
