@@ -889,6 +889,16 @@ async fn embeddings(
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
+    // The worker always emits base64-encoded vectors over NATS (the
+    // worker->frontend wire format is ~3x smaller and ~10x faster to
+    // (de)serialize than a JSON float array). If the client asked for
+    // float (the default), decode back at the HTTP boundary so the
+    // public response shape matches their ``encoding_format`` choice.
+    let client_wants_float = !matches!(
+        request.inner.encoding_format,
+        Some(dynamo_protocols::types::EncodingFormat::Base64)
+    );
+
     // Embeddings are typically not streamed, so we default to non-streaming
     let streaming = false;
 
@@ -952,7 +962,7 @@ async fn embeddings(
 
     // Embeddings are typically returned as a single response (non-streaming)
     // so we fold the stream into a single response
-    let response = NvCreateEmbeddingResponse::from_annotated_stream(stream)
+    let mut response = NvCreateEmbeddingResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -966,11 +976,61 @@ async fn embeddings(
             err_response
         })?;
 
+    // Worker always emits Base64 -- convert back to Float when the client
+    // asked for float (or didn't specify, defaulting to float per spec).
+    if client_wants_float {
+        for embedding_obj in response.inner.data.iter_mut() {
+            if let dynamo_protocols::types::EmbeddingVector::Base64(s) =
+                &embedding_obj.embedding
+            {
+                match decode_base64_embedding_to_floats(s) {
+                    Ok(floats) => {
+                        embedding_obj.embedding =
+                            dynamo_protocols::types::EmbeddingVector::Float(floats);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to decode base64 embedding for request {}: {:?}",
+                            request_id,
+                            e
+                        );
+                        let err_response = ErrorMessage::internal_server_error(
+                            "Failed to decode embedding payload",
+                        );
+                        inflight.mark_error(extract_error_type_from_response(&err_response));
+                        return Err(err_response);
+                    }
+                }
+            }
+        }
+    }
+
     state
         .metrics_clone()
         .observe_embedding_latency(&model_name, embedding_start.elapsed().as_secs_f64());
     inflight.mark_ok();
     Ok(Json(response).into_response())
+}
+
+/// Decode a base64-encoded little-endian f32 byte string back into a float
+/// vector. The byte length must be a multiple of 4; trailing bytes are
+/// rejected. Mirrors the encoder in `lib/llm/src/preprocessor.rs` and the
+/// Python `_encode_floats_to_base64` helper in
+/// `components/src/dynamo/vllm/handlers.py`.
+fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let bytes = STANDARD.decode(s)?;
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+        anyhow::bail!(
+            "base64-decoded byte length {} is not a multiple of 4",
+            bytes.len()
+        );
+    }
+    let mut floats = Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
+    for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
+        floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(floats)
 }
 
 async fn handler_chat_completions(

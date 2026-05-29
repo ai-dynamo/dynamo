@@ -3033,16 +3033,17 @@ class EmbeddingWorkerHandler:
                     )
                 embedding = embedding[:dimensions]
 
-            embedding_payload: Any
-            if encoding_format == "base64":
-                embedding_payload = _encode_floats_to_base64(embedding)
-            else:
-                embedding_payload = embedding
-
+            # Always emit base64 over the worker->frontend wire format. The
+            # Rust frontend decodes back to float when the client's
+            # ``encoding_format`` is float (or unset). 15x1024-float responses
+            # serialized as JSON arrays cost ~110 ms in Python json.dumps +
+            # Rust serde parse; base64 bytes are ~3x smaller and ~10x faster
+            # to (de)serialize. Client-visible wire format is preserved
+            # because Rust converts at the HTTP boundary.
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": embedding_payload,
+                    "embedding": _encode_floats_to_base64(embedding),
                     "index": idx,
                 }
             )
