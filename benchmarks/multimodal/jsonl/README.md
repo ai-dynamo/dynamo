@@ -73,6 +73,35 @@ Path("/root/dynamo-mm-bench/mmvu_160_videos.txt").write_text(
 PY
 ```
 
+To generate the video inputs referenced by
+`benchmarks/multimodal/sweep/experiments/embedding_cache/sglang_e_pd.yaml`:
+
+```bash
+python benchmarks/multimodal/jsonl/main.py video-single-turn \
+  --video-manifest /root/dynamo-mm-bench/mmvu_160_videos.txt \
+  -n 100 \
+  --videos-per-request 1 \
+  --videos-pool 20 \
+  --user-text-tokens 300 \
+  -o benchmarks/multimodal/jsonl/100req_1vid_20pool_300word_http.jsonl
+
+python benchmarks/multimodal/jsonl/main.py video-single-turn \
+  --video-manifest /root/dynamo-mm-bench/mmvu_160_videos.txt \
+  -n 100 \
+  --videos-per-request 1 \
+  --videos-pool 80 \
+  --user-text-tokens 300 \
+  -o benchmarks/multimodal/jsonl/100req_1vid_80pool_300word_http.jsonl
+
+python benchmarks/multimodal/jsonl/main.py video-single-turn \
+  --video-manifest /root/dynamo-mm-bench/mmvu_160_videos.txt \
+  -n 100 \
+  --videos-per-request 2 \
+  --videos-pool 160 \
+  --user-text-tokens 300 \
+  -o benchmarks/multimodal/jsonl/100req_2vid_160pool_300word_http.jsonl
+```
+
 ## Usage
 
 ```bash
