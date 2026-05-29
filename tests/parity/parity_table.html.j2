@@ -20,14 +20,14 @@ th a:hover { background: #ffd; }
 td.model, td.parser { white-space: nowrap; }
 td.parser a { color: inherit; text-decoration: none; }
 td.parser a:hover { background: #ffd; }
-td.cell { text-align: center; min-width: 24px; font-weight: 700; }
+td.cell { text-align: center; min-width: 24px; font-weight: 400; }
 td.cell.ok         { color: #0a7d2c; }
-td.cell.donly      { color: #555; }
+td.cell.donly      { color: #8b949e; }
 td.cell.documented { color: #555; }
-td.cell.research   { color: #b00;    font-weight: bold; }
-td.cell.leak       { color: #b00;    font-weight: bold; }
-td.cell.err        { color: #b00;    font-weight: bold; }
-td.cell.na         { color: #aaa; }
+td.cell.research   { color: #b00; }
+td.cell.leak       { color: #b00; }
+td.cell.err        { color: #b00; }
+td.cell.na         { color: #aeb6bf; }
 td.cell.missing    { color: #8a6d3b; }
 td.cell a { color: inherit; text-decoration: none; display: block; }
 td.cell a:hover { background: #ffd; }
@@ -42,13 +42,18 @@ tr.section td { background: #eef; font-weight: bold; text-align: left; }
 .radio-group-label { font-size: 13px; font-weight: 600; }
 .radio-option { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
 .radio-option input { margin: 0; }
+.checkbox-option { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #d0d7de; background: #f8fafc; border-radius: 6px; padding: 6px 8px; font-size: 13px; cursor: pointer; }
+.checkbox-option input { margin: 0; }
+.view-overview .parity-option { display: none; }
 .view-overview .details-only { display: none; }
 .view-details .summary-only { display: none; }
+.parity-explainer { display: none; }
+.view-details.parity-mode .parity-explainer { display: block; }
 .summary-key { display: inline-block; width: 12px; height: 12px; border: 1px solid rgba(0,0,0,0.22); margin: 0 4px 0 10px; vertical-align: -2px; }
 .summary-key:first-of-type { margin-left: 0; }
 .summary-key.ok { background: #76b884; }
 .summary-key.problem { background: #db7777; }
-.summary-key.na { background: #c4ccd4; }
+.summary-key.na { background: #d3d8de; }
 .view-overview td.cell, .view-details td.cell { box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04); }
 .view-overview.parser-dynamo td.cell[data-status-dynamo="ok"],
 .view-overview.parser-vllm td.cell[data-status-vllm="ok"],
@@ -58,7 +63,7 @@ tr.section td { background: #eef; font-weight: bold; text-align: left; }
 .view-overview.parser-sglang td.cell[data-status-sglang="problem"] { background: #db7777; color: #db7777; }
 .view-overview.parser-dynamo td.cell[data-status-dynamo="na"],
 .view-overview.parser-vllm td.cell[data-status-vllm="na"],
-.view-overview.parser-sglang td.cell[data-status-sglang="na"] { background: #c4ccd4; color: #c4ccd4; }
+.view-overview.parser-sglang td.cell[data-status-sglang="na"] { background: #d3d8de; color: #d3d8de; }
 .view-details.parser-dynamo td.cell[data-status-dynamo="ok"],
 .view-details.parser-vllm td.cell[data-status-vllm="ok"],
 .view-details.parser-sglang td.cell[data-status-sglang="ok"] { background: #bfe3c6; }
@@ -67,15 +72,22 @@ tr.section td { background: #eef; font-weight: bold; text-align: left; }
 .view-details.parser-sglang td.cell[data-status-sglang="problem"] { background: #efb3b3; }
 .view-details.parser-dynamo td.cell[data-status-dynamo="na"],
 .view-details.parser-vllm td.cell[data-status-vllm="na"],
-.view-details.parser-sglang td.cell[data-status-sglang="na"] { background: #d8dee4; }
+.view-details.parser-sglang td.cell[data-status-sglang="na"] { background: #e4e8ec; }
 .view-overview td.cell > a { color: inherit; }
 .view-overview td.cell > a:hover { background: transparent; }
 .view-overview td.cell:hover { filter: brightness(0.98); }
 .view-details td.cell { color: transparent; }
 .view-details td.cell::before { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #111; pointer-events: none; }
+.view-details.parser-dynamo td.cell[data-status-dynamo="na"]::before,
+.view-details.parser-vllm td.cell[data-status-vllm="na"]::before,
+.view-details.parser-sglang td.cell[data-status-sglang="na"]::before { color: #aeb6bf; }
+.view-details td.cell.donly::before { color: #8b949e; }
 .view-details.parser-dynamo td.cell::before { content: attr(data-marker-dynamo); }
 .view-details.parser-vllm td.cell::before { content: attr(data-marker-vllm); }
 .view-details.parser-sglang td.cell::before { content: attr(data-marker-sglang); }
+.view-details.parity-mode.parser-dynamo td.cell::before { content: attr(data-marker-parity-dynamo); }
+.view-details.parity-mode.parser-vllm td.cell::before { content: attr(data-marker-parity-vllm); }
+.view-details.parity-mode.parser-sglang td.cell::before { content: attr(data-marker-parity-sglang); }
 .view-details td.cell a { color: transparent; }
 .view-details td.cell a:hover { background: rgba(255,255,255,0.35); }
 .view-details td.cell .ttip { font-weight: 400; }
@@ -198,10 +210,11 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   </div>
   <div class="radio-group" role="radiogroup" aria-label="Parser implementation">
     <span class="radio-group-label">Parser:</span>
-    <label class="radio-option"><input type="radio" name="parity-parser" value="dynamo" data-parser-toggle checked> Dynamo Rust parser</label>
-    <label class="radio-option"><input type="radio" name="parity-parser" value="vllm" data-parser-toggle> vLLM Python parser</label>
-    <label class="radio-option"><input type="radio" name="parity-parser" value="sglang" data-parser-toggle> SGLang Python parser</label>
+    <label class="radio-option"><input type="radio" name="parity-parser" value="dynamo" data-parser-toggle checked> Dynamo</label>
+    <label class="radio-option"><input type="radio" name="parity-parser" value="vllm" data-parser-toggle> vLLM</label>
+    <label class="radio-option"><input type="radio" name="parity-parser" value="sglang" data-parser-toggle> SGLang</label>
   </div>
+  <label class="checkbox-option parity-option"><input type="checkbox" data-parity-toggle> Parity</label>
 </div>
 {% for panel in panels %}
 <section id="{{ panel.id|e }}" class="tab-panel{% if panel.active %} active{% endif %}" role="tabpanel"{% if tabs|length > 1 %} aria-labelledby="{{ panel.id|e }}-button"{% endif %}>
@@ -230,7 +243,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 {% else %}
   <strong>Legend:</strong>
   <span style="color:#0a7d2c">=</span> all captured peers match Dynamo ·
-  <span style="color:#555">D</span> Dynamo-only fixture
+  <span style="color:#8b949e">·</span> Dynamo-only fixture
   (both peers unavailable) ·
   <span style="color:#555">V/S</span> divergence
   (V = vLLM, S = SGLang; intentional, has <code>reason:</code>) ·
@@ -258,6 +271,12 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   {% for name, version in peer_versions %}{% if not loop.first %} · {% endif %}{{ name|e }} <code>{{ version|e }}</code>{% endfor %}.
   {% endif %}
 {% endif %}
+</p>
+<p class="legend details-only parity-explainer">
+  <strong>Parity:</strong>
+  <span style="color:#0a7d2c">=</span> all three outputs match ·
+  <span style="color:#555">D</span>/<span style="color:#555">V</span>/<span style="color:#555">S</span> names parser output that differs from the selected parser ·
+  multiple letters mean multiple peer outputs differ from the selected parser.
 </p>
 <p class="stats summary-only">
   Stats for selected perspective:
@@ -329,6 +348,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   const parserKeys = new Set(parserRadios.map(function (radio) {
     return radio.value;
   }));
+  const parityToggle = document.querySelector('[data-parity-toggle]');
 
   function readActiveView() {
     const requested = new URLSearchParams(window.location.search).get('view');
@@ -339,6 +359,11 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
     const params = new URLSearchParams(window.location.search);
     const requested = params.get('parser') || params.get('perspective');
     return parserKeys.has(requested) ? requested : 'dynamo';
+  }
+
+  function readParityMode() {
+    const requested = new URLSearchParams(window.location.search).get('parity');
+    return requested === '1' || requested === 'true';
   }
 
   function updateViewUrl(view) {
@@ -356,6 +381,15 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
     url.searchParams.delete('perspective');
     if (parser !== 'dynamo') {
       url.searchParams.set('parser', parser);
+    }
+    window.history.replaceState(null, '', url.toString());
+  }
+
+  function updateParityUrl(enabled) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('parity');
+    if (enabled) {
+      url.searchParams.set('parity', '1');
     }
     window.history.replaceState(null, '', url.toString());
   }
@@ -407,8 +441,19 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
     }
   }
 
+  function applyParityMode(enabled, shouldUpdateUrl) {
+    document.body.classList.toggle('parity-mode', Boolean(enabled));
+    if (parityToggle) {
+      parityToggle.checked = Boolean(enabled);
+    }
+    if (shouldUpdateUrl) {
+      updateParityUrl(Boolean(enabled));
+    }
+  }
+
   applyView(readActiveView(), false);
   applyParser(readActiveParser(), false);
+  applyParityMode(readParityMode(), false);
   viewRadios.forEach(function (radio) {
     radio.addEventListener('change', function () {
       if (radio.checked) {
@@ -423,6 +468,11 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
       }
     });
   });
+  if (parityToggle) {
+    parityToggle.addEventListener('change', function () {
+      applyParityMode(parityToggle.checked, true);
+    });
+  }
 
   function defaultVisibleColumns() {
     const visible = new Set();

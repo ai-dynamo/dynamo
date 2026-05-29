@@ -28,7 +28,7 @@ Cell markers (per peer, vllm + sglang):
         (research-needed; we observed it but haven't classified it)
   V!/S! peer has `error: <substring>` (expected to crash)
   VS, V?S, VS!, etc. — combinations
-  D     Dynamo-only fixture; both peer blocks are `unavailable`
+  ·     Dynamo-only fixture; both peer blocks are `unavailable`
   n/a   family/case doesn't apply
   —     no fixture entry exists for this family/case yet
 
@@ -626,6 +626,57 @@ def _overview_status_attrs(case: dict | None) -> str:
     )
 
 
+def _canonical_tool_output(block: object) -> dict | None:
+    if not isinstance(block, dict) or "unavailable" in block or "error" in block:
+        return None
+    if "calls" not in block and "normal_text" not in block:
+        return None
+    return {
+        "calls": block.get("calls") or [],
+        "normal_text": block.get("normal_text") or "",
+    }
+
+
+def _selected_parity_marker(case: dict | None, impl: str) -> str | None:
+    if case is None or "expected" not in case:
+        return None
+    expected = case.get("expected", {})
+    outputs = {
+        impl: _canonical_tool_output(expected.get(impl))
+        for impl in ("dynamo", "vllm", "sglang")
+    }
+    if any(value is None for value in outputs.values()):
+        return None
+    if outputs["dynamo"] == outputs["vllm"] == outputs["sglang"]:
+        return "="
+    selected = outputs[impl]
+    peers = (
+        ("dynamo", "D"),
+        ("vllm", "V"),
+        ("sglang", "S"),
+    )
+    marker = "".join(
+        letter for peer, letter in peers if peer != impl and outputs[peer] != selected
+    )
+    return marker or "="
+
+
+def _selected_parity_suffix(case: dict | None, impl: str) -> str:
+    if case is None or "expected" not in case:
+        return ""
+    block = case.get("expected", {}).get(impl)
+    if isinstance(block, dict) and _block_tool_call_leaks(block):
+        return "↯"
+    return ""
+
+
+def _parity_marker(case: dict | None, impl: str) -> str:
+    marker = _selected_parity_marker(case, impl)
+    if marker is None:
+        return _parser_marker(case, impl)
+    return marker + _selected_parity_suffix(case, impl)
+
+
 def _parser_marker(case: dict | None, impl: str) -> str:
     if case is None:
         return "—"
@@ -640,26 +691,22 @@ def _parser_marker(case: dict | None, impl: str) -> str:
     if _block_tool_call_leaks(block):
         return "↯"
     if impl == "dynamo":
-        return cell_for(case).replace("↯", "") or "="
-
-    dyn = expected.get("dynamo")
-    if not isinstance(dyn, dict):
-        return "n/a"
-    kind, unknown = peer_status(case, dyn, impl)
-    if kind == "div":
-        return ("V" if impl == "vllm" else "S") + ("?" if unknown else "")
-    if kind == "err":
-        return "!"
-    if kind in {"na", "unavail"}:
-        return "n/a"
+        peers = (expected.get("vllm"), expected.get("sglang"))
+        if all(isinstance(peer, dict) and "unavailable" in peer for peer in peers):
+            return "·"
     return "="
 
 
 def _parser_marker_attrs(case: dict | None) -> str:
-    return " ".join(
+    attrs = [
         f'data-marker-{impl}="{html_lib.escape(_parser_marker(case, impl))}"'
         for impl in ("dynamo", "vllm", "sglang")
+    ]
+    attrs.extend(
+        f'data-marker-parity-{impl}="{html_lib.escape(_parity_marker(case, impl))}"'
+        for impl in ("dynamo", "vllm", "sglang")
     )
+    return " ".join(attrs)
 
 
 def cell_for(case: dict | None) -> str:
@@ -687,7 +734,7 @@ def cell_for(case: dict | None) -> str:
     # markup, so don't mark those as `↯`.
     if isinstance(dyn, dict) and _dynamo_tool_call_leak(dyn):
         if v_kind == "unavail" and s_kind == "unavail":
-            return "↯D"
+            return "↯·"
         if parts:
             return "↯" + "".join(parts)
         return "↯"
@@ -695,7 +742,7 @@ def cell_for(case: dict | None) -> str:
     if parts:
         return "".join(parts)
     if v_kind == "unavail" and s_kind == "unavail":
-        return "D"
+        return "·"
     return "="
 
 
@@ -716,7 +763,7 @@ def render_row(
 _LEGEND_MD = (
     "**Legend:** "
     "`=` all captured peers match Dynamo · "
-    "`D` Dynamo-only fixture (both peers unavailable) · "
+    "`·` Dynamo-only fixture (both peers unavailable) · "
     "`V`/`S` divergence (V = vLLM, S = SGLang; intentional, has `reason:`) · "
     "`?` research-needed suffix (e.g. V?, S? — diverges with no `reason:` yet) · "
     "`↯` Dynamo leaks tool call markup into `normal_text` "
@@ -909,7 +956,7 @@ def _build_na_tooltip_html(case: dict) -> str:
     reason = case.get("reason") or "n/a (no reason given)"
     return build_parity_tooltip_html(
         head=head,
-        extra_sections=[("Why n/a", linkify_text_html(str(reason)))],
+        extra_sections=[("Why not applicable", linkify_text_html(str(reason)))],
         refs=[("Ref", case.get("ref")), ("Spec ref", case.get("spec_ref"))],
     )
 
@@ -1396,7 +1443,7 @@ def _compute_stats(
             s["real"] += 1
             if text == "=":
                 s["parity"] += 1
-            elif text == "D":
+            elif text in {"D", "·"}:
                 s["dynamo_only"] += 1
             elif "!" in text:
                 s["errors"] += 1

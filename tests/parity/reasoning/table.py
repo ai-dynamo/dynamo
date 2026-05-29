@@ -512,6 +512,64 @@ def _overview_status_attrs(case: dict[str, Any] | None, family: str | None) -> s
     )
 
 
+def _canonical_reasoning_output(block: object) -> str | None:
+    if not isinstance(block, dict) or "unavailable" in block or "error" in block:
+        return None
+    return _canonical(block)
+
+
+def _selected_parity_marker(
+    case: dict[str, Any] | None,
+    family: str | None,
+    impl: str,
+) -> str | None:
+    if case is None or "expected" not in case:
+        return None
+    expected = case.get("expected", {})
+    outputs = {
+        impl: _canonical_reasoning_output(expected.get(impl))
+        for impl in ("dynamo", "vllm", "sglang")
+    }
+    if any(value is None for value in outputs.values()):
+        return None
+    if outputs["dynamo"] == outputs["vllm"] == outputs["sglang"]:
+        return "="
+    selected = outputs[impl]
+    peers = (
+        ("dynamo", "D"),
+        ("vllm", "V"),
+        ("sglang", "S"),
+    )
+    marker = "".join(
+        letter for peer, letter in peers if peer != impl and outputs[peer] != selected
+    )
+    return marker or "="
+
+
+def _selected_parity_suffix(
+    case: dict[str, Any] | None,
+    family: str | None,
+    impl: str,
+) -> str:
+    if case is None or "expected" not in case:
+        return ""
+    block = case.get("expected", {}).get(impl)
+    if isinstance(block, dict) and _block_leak_reason(block, family):
+        return "↯"
+    return ""
+
+
+def _parity_marker(
+    case: dict[str, Any] | None,
+    family: str | None,
+    impl: str,
+) -> str:
+    marker = _selected_parity_marker(case, family, impl)
+    if marker is None:
+        return _parser_marker(case, family, impl)
+    return marker + _selected_parity_suffix(case, family, impl)
+
+
 def _parser_marker(case: dict[str, Any] | None, family: str | None, impl: str) -> str:
     if case is None:
         return "—"
@@ -526,22 +584,22 @@ def _parser_marker(case: dict[str, Any] | None, family: str | None, impl: str) -
     if _block_leak_reason(block, family):
         return "↯"
     if impl == "dynamo":
-        return _cell(case, family)[0].replace("↯", "") or "="
-
-    dyn = expected.get("dynamo")
-    if not isinstance(dyn, dict):
-        return "n/a"
-    if _canonical(block) == _canonical(dyn):
-        return "="
-    suffix = "?" if "reason" not in block else ""
-    return ("V" if impl == "vllm" else "S") + suffix
+        peers = (expected.get("vllm"), expected.get("sglang"))
+        if all(isinstance(peer, dict) and "unavailable" in peer for peer in peers):
+            return "·"
+    return "="
 
 
 def _parser_marker_attrs(case: dict[str, Any] | None, family: str | None) -> str:
-    return " ".join(
+    attrs = [
         f'data-marker-{impl}="{html_lib.escape(_parser_marker(case, family, impl))}"'
         for impl in ("dynamo", "vllm", "sglang")
+    ]
+    attrs.extend(
+        f'data-marker-parity-{impl}="{html_lib.escape(_parity_marker(case, family, impl))}"'
+        for impl in ("dynamo", "vllm", "sglang")
     )
+    return " ".join(attrs)
 
 
 def _load() -> tuple[dict[str, dict[str, Any]], list[str], dict[tuple[str, str], Path]]:
@@ -718,8 +776,8 @@ def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, 
 
     if unavailable == 2:
         if dynamo_leak:
-            return "↯D", "\n".join(p for p in tooltip_parts if p)
-        return "D", "\n".join(p for p in tooltip_parts if p)
+            return "↯·", "\n".join(p for p in tooltip_parts if p)
+        return "·", "\n".join(p for p in tooltip_parts if p)
     if dynamo_leak:
         return "↯" + ("".join(markers) or "?"), "\n".join(p for p in tooltip_parts if p)
     if markers:
@@ -1490,7 +1548,7 @@ def _tooltip_html(
         return build_parity_tooltip_html(
             head=head,
             description=str(description) if description else None,
-            extra_sections=[("Why n/a", linkify_text_html(str(reason)))],
+            extra_sections=[("Why not applicable", linkify_text_html(str(reason)))],
             refs=[("Ref", case.get("ref")), ("Spec ref", case.get("spec_ref"))],
         )
 
@@ -1583,7 +1641,7 @@ def _no_reasoning_tooltip_html(case_id: str, tool_family: str) -> str:
         head=f"{case_id} — {tool_family}",
         extra_sections=[
             (
-                "Why n/a",
+                "Why not applicable",
                 html_lib.escape(
                     "This tool calling parser row has no mapped Dynamo reasoning "
                     "parser fixture."
@@ -1642,7 +1700,9 @@ def _render_no_reasoning_cell_html(tool_family: str, case_id: str) -> str:
     return (
         f'<td class="{classes}" data-col-hide-group="{group_key}" '
         'data-status-dynamo="na" data-status-vllm="na" data-status-sglang="na" '
-        'data-marker-dynamo="n/a" data-marker-vllm="n/a" data-marker-sglang="n/a">'
+        'data-marker-dynamo="n/a" data-marker-vllm="n/a" data-marker-sglang="n/a" '
+        'data-marker-parity-dynamo="n/a" data-marker-parity-vllm="n/a" '
+        'data-marker-parity-sglang="n/a">'
         f"n/a{tooltip}</td>"
     )
 
@@ -1953,7 +2013,7 @@ def _compute_stats(
                 stats["real"] += 1
                 if marker == "=":
                     stats["parity"] += 1
-                elif marker == "D":
+                elif marker in {"D", "·"}:
                     stats["dynamo_only"] += 1
                 elif "!" in marker:
                     stats["errors"] += 1
@@ -2008,7 +2068,7 @@ def _legend_html(rows: dict[str, dict[str, Any]], columns: list[str]) -> str:
     legend = (
         "<strong>Legend:</strong> "
         '<span style="color:#0a7d2c">=</span> all captured peers match Dynamo · '
-        '<span style="color:#555">D</span> Dynamo-only fixture '
+        '<span style="color:#8b949e">·</span> Dynamo-only fixture '
         "(both peers unavailable) · "
         '<span style="color:#555">V/S</span> divergence '
         "(V = vLLM, S = SGLang; intentional, has <code>reason:</code>) · "
