@@ -31,9 +31,6 @@ from gpu_memory_service.integrations.common.utils import (
     setup_meta_tensor_workaround,
     strip_gms_model_loader_config,
 )
-from gpu_memory_service.integrations.vllm.upstream_workarounds import (
-    vllm_meta_init_workarounds,
-)
 
 if os.environ.get("MX_ENABLED", "0") == "1":
     try:
@@ -428,16 +425,13 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
     setup_meta_tensor_workaround()
     meta_device = torch.device("meta")
 
-    with vllm_meta_init_workarounds():
-        with set_default_torch_dtype(model_config.dtype):
-            with meta_device:
-                model = initialize_model(
-                    vllm_config=vllm_config, model_config=model_config
-                )
+    with set_default_torch_dtype(model_config.dtype):
+        with meta_device:
+            model = initialize_model(vllm_config=vllm_config, model_config=model_config)
 
-        # Do not run vLLM post-load hooks on the RO meta model. Some
-        # quantization/attention hooks still initialize backend CUDA scratch
-        # when tensors are meta. GMS imports the writer's final parameter
-        # metadata below and rebuilds supported MLA derived tensors afterward.
+    # Do not run vLLM post-load hooks on the RO meta model. Some
+    # quantization/attention hooks still initialize backend CUDA scratch
+    # when tensors are meta. GMS imports the writer's final parameter
+    # metadata below and rebuilds supported MLA derived tensors afterward.
 
     return model

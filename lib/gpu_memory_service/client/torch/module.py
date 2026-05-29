@@ -598,6 +598,18 @@ def _clone_mutable_gms_tensor(
         ) from e
 
 
+def _gms_tensor_location_key(
+    spec: GMSTensorSpec,
+) -> tuple[str, int, tuple[int, ...], tuple[int, ...], torch.dtype]:
+    return (
+        spec.allocation_id,
+        int(spec.offset_bytes),
+        tuple(spec.meta.shape),
+        tuple(spec.meta.stride),
+        spec.meta.dtype,
+    )
+
+
 def _replace_aliases_in_value(
     value: Any,
     alias_map: _TensorAliasMap,
@@ -1116,6 +1128,51 @@ def _materialize_empty_parameter(
         setattr(mod, attr, replacement)
 
 
+def _materialize_mutable_tensor(
+    model: torch.nn.Module,
+    name: str,
+    tensor: torch.Tensor,
+    spec: GMSTensorSpec,
+    *,
+    alias_map: _TensorAliasMap,
+    mutable_by_location: dict[
+        tuple[str, int, tuple[int, ...], tuple[int, ...], torch.dtype], torch.Tensor
+    ],
+) -> None:
+    """Install a cloned mutable copy for aux/buffer/tensor_attr metadata."""
+    tensor_type = spec.meta.tensor_type
+    try:
+        old = _path_value(model, name)
+    except AttributeError:
+        try:
+            _path_parent(model, name)
+        except AttributeError:
+            if tensor_type == "aux_tensor":
+                logger.debug("[GMS] Skipping aux tensor for missing path %r", name)
+                return
+            raise
+        old = None
+
+    location = _gms_tensor_location_key(spec)
+    replacement = mutable_by_location.get(location)
+    if replacement is None:
+        replacement = _clone_mutable_gms_tensor(
+            tensor, name=name, tensor_type=tensor_type, spec=spec
+        )
+        mutable_by_location[location] = replacement
+
+    if torch.is_tensor(old):
+        _set_tensor_alias(alias_map, old, replacement)
+
+    try:
+        _set_path_value(model, name, replacement)
+    except AttributeError:
+        if tensor_type != "buffer" and _is_read_only_property_path(model, name):
+            logger.debug("[GMS] Skipping read-only %s %r", tensor_type, name)
+            return
+        raise
+
+
 def _iter_local_materialized_tensors(
     module: torch.nn.Module,
 ) -> Iterator[torch.Tensor]:
@@ -1309,69 +1366,21 @@ def materialize_module_from_gms(
             else:
                 raise
 
-        location = (
-            spec.allocation_id,
-            int(spec.offset_bytes),
-            tuple(spec.meta.shape),
-            tuple(spec.meta.stride),
-            spec.meta.dtype,
-        )
+        location = _gms_tensor_location_key(spec)
         tensor = materialized_by_location.get(location)
         if tensor is None:
             tensor = spec.materialize(gms_client_memory_manager, device_index)
             materialized_by_location[location] = tensor
 
-        if tensor_type == "aux_tensor":
-            try:
-                old = _path_value(model, name)
-            except AttributeError:
-                try:
-                    _path_parent(model, name)
-                except AttributeError:
-                    logger.debug("[GMS] Skipping aux tensor for missing path %r", name)
-                    continue
-                old = None
-            replacement = mutable_by_location.get(location)
-            if replacement is None:
-                replacement = _clone_mutable_gms_tensor(
-                    tensor, name=name, tensor_type=tensor_type, spec=spec
-                )
-                mutable_by_location[location] = replacement
-            if torch.is_tensor(old):
-                _set_tensor_alias(alias_map, old, replacement)
-            try:
-                _set_path_value(model, name, replacement)
-            except AttributeError:
-                if _is_read_only_property_path(model, name):
-                    logger.debug("[GMS] Skipping read-only aux property %r", name)
-                    continue
-                raise
-            continue
-
-        # Legacy metadata for non-parameters is cloned into mutable runtime memory.
-        if tensor_type in ("tensor_attr", "buffer"):
-            try:
-                old = _path_value(model, name)
-            except AttributeError:
-                _path_parent(model, name)
-                old = None
-            replacement = mutable_by_location.get(location)
-            if replacement is None:
-                replacement = _clone_mutable_gms_tensor(
-                    tensor, name=name, tensor_type=tensor_type, spec=spec
-                )
-                mutable_by_location[location] = replacement
-            if torch.is_tensor(old):
-                _set_tensor_alias(alias_map, old, replacement)
-            try:
-                _set_path_value(model, name, replacement)
-            except AttributeError:
-                if tensor_type == "tensor_attr" and _is_read_only_property_path(
-                    model, name
-                ):
-                    logger.debug("[GMS] Skipping read-only property %r", name)
-                    continue
-                raise
+        if tensor_type in {"aux_tensor", "tensor_attr", "buffer"}:
+            _materialize_mutable_tensor(
+                model,
+                name,
+                tensor,
+                spec,
+                alias_map=alias_map,
+                mutable_by_location=mutable_by_location,
+            )
             continue
 
         # Parameters: in-place update or replace meta tensors

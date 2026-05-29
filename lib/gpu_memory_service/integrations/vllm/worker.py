@@ -45,9 +45,6 @@ from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
 )
-from gpu_memory_service.integrations.vllm.upstream_workarounds import (
-    patch_moe_wna16_marlin_gemm_fake_impl,
-)
 
 logger = logging.getLogger(__name__)
 _GIB = 1 << 30
@@ -58,7 +55,6 @@ register_gms_loader()
 # Apply core utility patches (always needed for GMS)
 patch_empty_cache()
 patch_memory_snapshot()
-patch_moe_wna16_marlin_gemm_fake_impl()
 
 # Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
 apply_scratch_kv_patches()

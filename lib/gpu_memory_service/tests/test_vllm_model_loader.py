@@ -68,11 +68,6 @@ def test_create_meta_model_skips_vllm_post_load_hooks(monkeypatch):
 
     monkeypatch.setattr("builtins.__import__", fake_import)
     monkeypatch.setattr(model_loader, "setup_meta_tensor_workaround", lambda: None)
-    monkeypatch.setattr(
-        model_loader,
-        "vllm_meta_init_workarounds",
-        lambda: contextlib.nullcontext(),
-    )
 
     loaded = model_loader._create_meta_model(object(), model_config)
 
