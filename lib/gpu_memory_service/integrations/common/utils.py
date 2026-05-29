@@ -22,23 +22,9 @@ GMS_TAGS = ("weights", "kv_cache")
 
 
 @dataclass(frozen=True)
-class GMSWriteFinalizeResult:
-    """Result of finalizing a GMS write-mode model load.
-
-    ``committed_bytes`` is the actual pruned GMS layout published to readers.
-    ``pruned_bytes`` is the amount of transient loader memory removed before
-    commit. Backend memory profilers can add it back to their non-KV accounting
-    if pruning already appears as a free-memory delta, avoiding double-crediting
-    the same reclaimed memory as KV cache headroom.
-    """
-
+class GMSCommittedMemoryStats:
     committed_bytes: int
     pruned_bytes: int
-
-    @property
-    def accounting_bytes(self) -> int:
-        """Bytes to charge as non-KV model memory in backend profilers."""
-        return self.committed_bytes + self.pruned_bytes
 
 
 def get_gms_lock_mode(extra_config: dict):
@@ -92,9 +78,7 @@ def setup_meta_tensor_workaround() -> None:
 def finalize_gms_write(
     allocator: "GMSClientMemoryManager",
     model: torch.nn.Module,
-    *,
-    return_result: bool = False,
-) -> int | GMSWriteFinalizeResult:
+) -> GMSCommittedMemoryStats:
     """Finalize GMS write mode: register tensors, commit, reconnect in read mode.
 
     Flow: register tensors -> sync -> unmap + commit -> connect(RO) -> remap
@@ -104,8 +88,7 @@ def finalize_gms_write(
         model: The loaded model with weights to register.
 
     Returns:
-        By default, total bytes committed.  When ``return_result=True``, returns
-        committed bytes plus the number of pruned bytes.
+        Committed/pruned byte stats.
     """
     referenced_allocation_ids = register_module_tensors(allocator, model)
     before_prune_bytes = allocator.total_bytes
@@ -135,8 +118,7 @@ def finalize_gms_write(
         pruned_bytes / (1 << 30),
     )
 
-    result = GMSWriteFinalizeResult(
+    return GMSCommittedMemoryStats(
         committed_bytes=int(total_bytes),
         pruned_bytes=int(pruned_bytes),
     )
-    return result if return_result else result.committed_bytes

@@ -190,4 +190,4 @@ class GMSMemorySaverImpl:
 
         self.imported_weights_bytes = finalize_gms_write(
             self.allocators["weights"], model
-        )
+        ).committed_bytes
