@@ -184,6 +184,16 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::replay::ReasoningConfig>()?;
     m.add_class::<llm::replay::SglangArgs>()?;
     m.add_class::<llm::replay::MockEngineArgs>()?;
+    #[cfg(feature = "aic-forward-pass")]
+    {
+        m.add_class::<llm::engine_perf::AicEngineConfig>()?;
+        m.add_class::<llm::engine_perf::EngineCapacity>()?;
+        m.add_class::<llm::engine_perf::EngineCapacityRequest>()?;
+        m.add_class::<llm::engine_perf::EnginePerfLimits>()?;
+        m.add_class::<llm::engine_perf::OptimizationTarget>()?;
+        m.add_class::<llm::engine_perf::RustEnginePerfModel>()?;
+        m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
+    }
     m.add_class::<llm::replay::PlannerReplayBridge>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API

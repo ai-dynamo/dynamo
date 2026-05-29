@@ -32,6 +32,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aiconfigurator-core"
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/aiconfigurator.git?rev=69b3cff352303b95e5196a28966ae1ee4a3a3955#69b3cff352303b95e5196a28966ae1ee4a3a3955"
+dependencies = [
+ "csv",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2578,6 +2589,7 @@ dependencies = [
 name = "dynamo-mocker"
 version = "1.3.0"
 dependencies = [
+ "aiconfigurator-core",
  "anyhow",
  "bytes",
  "dashmap",
