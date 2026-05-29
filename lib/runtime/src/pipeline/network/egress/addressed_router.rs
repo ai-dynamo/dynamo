@@ -475,12 +475,11 @@ impl AddressedPushRouter {
 
         let enable_request_stream = input_stream.is_some();
 
-        // Hold the `RegisteredStream`s rather than destructuring them up front:
-        // their RAII cleanup stays armed while held, so any `?` before a
-        // provider is handed off cancels the registration. Each side is
-        // disarmed by `into_parts()` at its await site — past that point the
-        // subject is reaped by the worker's dial-in (success) or the discovery
-        // watcher (failure), so no cleanup is owed.
+        // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
+        // which simplifies the cancellation of registration on error. Each side is
+        // disarmed by `into_parts()` on awaiting stream provider: past that point the
+        // subject is reaped by the worker's dial-in (instance healthy) or the discovery
+        // watcher (instance dropped), so no cleanup is owed.
         let (send_registered, recv_registered) = self
             .register_streams(engine_ctx.clone(), enable_request_stream, true)
             .await;
