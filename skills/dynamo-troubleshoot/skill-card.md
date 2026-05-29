@@ -3,12 +3,13 @@ Diagnose failed or unhealthy Dynamo deployments. Use when pods, model-cache jobs
 
 This skill is ready for commercial/non-commercial use. <br>
 
-## Owner: NVIDIA <br>
+## Owner
+NVIDIA <br>
 
 ### License/Terms of Use: <br>
 Apache 2.0 <br>
 ## Use Case: <br>
-Developers and platform engineers use this skill to diagnose and resolve failures in Dynamo Kubernetes deployments, including pod crashes, PVC issues, model-download job failures, GPU scheduling problems, and endpoint health checks. <br>
+Developers and engineers use this skill to diagnose and triage failed or unhealthy NVIDIA Dynamo Kubernetes deployments by collecting read-only evidence and classifying failures into actionable problem categories. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -19,30 +20,27 @@ Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
 - [Failure Decision Tree](references/failure-decision-tree.md) <br>
-- [Dynamo Documentation](https://docs.nvidia.com/dynamo/) <br>
+- [Dynamo Releases](https://github.com/ai-dynamo/dynamo/releases/latest) <br>
 
 
 ## Skill Output: <br>
-**Output Type(s):** [Analysis, Shell commands, Configuration instructions] <br>
+**Output Type(s):** [Shell commands, Configuration instructions, Analysis] <br>
 **Output Format:** [Markdown with inline bash code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 
-## Evaluation Agent: <br>
-Claude (Anthropic) running the skill harness end-to-end, supplemented by the NV-ACES Tier 1 / NV-BASE 2.12.0 static scorer for schema, license, quality, security, and PII validation. <br>
-
 ## Evaluation Tasks: <br>
-Six prompts in `evals/evals.json`, split between three positive cases the skill should trigger and act on, and three negative cases it should defer to the correct sibling skill. <br>
-- Positive: `model-download-job-stuck`, `frontend-crashloop`, `dgd-not-reconciling`. <br>
-- Negative: `neg-deploy-recipe` (defers to `dynamo-recipe-runner`), `neg-enable-kv-routing` (defers to `dynamo-router-starter`), `neg-check-interconnect-ready` (defers to `dynamo-interconnect-check`). <br>
+NVSkills-Eval 3-Tier Evaluation with external profile. Tier 1 static validation ran 9 checks; Tier 2 deduplication ran 2 checks. Tier 3 live agent evaluation was not available. <br>
 
-## Evaluation Metrics: <br>
-- Trigger-routing accuracy: does the prompt invoke this skill on positive cases and correctly defer on negatives? <br>
-- NV-ACES 4-dimension static score: correctness (35% weight), discoverability (25%), reliability (25%), efficiency (15%). <br>
+## Evaluation Metrics Used: <br>
+Reported benchmark dimensions: <br>
+- Security: Checks whether skill-assisted execution avoids unsafe behavior such as secret leakage, destructive commands, or unauthorized access. <br>
+- Correctness: Checks whether the agent follows the expected workflow and produces the correct final output. <br>
+- Discoverability: Checks whether the agent loads the skill when relevant and avoids using it when irrelevant. <br>
+- Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
+- Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
 
-## Evaluation Results: <br>
-- Trigger-routing: 6/6 cases routed correctly (3 positive + 3 negative); part of the 24/24 across the four bring-up skills attested on PR #9782. <br>
-- NV-ACES Tier 1 / NV-BASE 2.12.0: 83.2 / 100 (Grade B). Dimension breakdown: correctness 70.0, discoverability 90.0, reliability 85.0, efficiency 100.0. <br>
+
 
 ## Skill Version(s): <br>
 1.2.0 (source: pyproject.toml) <br>

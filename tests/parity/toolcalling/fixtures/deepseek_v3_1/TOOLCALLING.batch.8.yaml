@@ -25,6 +25,7 @@ cases:
         normal_text: 'I will check the weather. '
       vllm: *id001
       sglang:
+        reason: SGLang trims trailing whitespace from normal_text that precedes DeepSeek V3.1 tool-call blocks.
         calls:
         - name: get_weather
           arguments:
@@ -62,6 +63,7 @@ cases:
         normal_text: 'I will check the weather. '
       vllm: *id004
       sglang:
+        reason: SGLang trims trailing whitespace from normal_text that precedes DeepSeek V3.1 tool-call blocks.
         calls:
         - name: get_weather
           arguments:
@@ -86,6 +88,7 @@ cases:
         normal_text: 'I will check the weather. '
       vllm: *id005
       sglang:
+        reason: SGLang trims trailing whitespace from normal_text that precedes DeepSeek V3.1 tool-call blocks.
         calls:
         - name: get_weather
           arguments:
