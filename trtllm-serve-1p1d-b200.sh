@@ -497,8 +497,8 @@ COMMON_ENV="export TRTLLM_SERVER_DISABLE_GC=1 && \
 export TRTLLM_WORKER_DISABLE_GC=1 && \
 export TIKTOKEN_ENCODINGS_BASE=/lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/rihuo/tiktoken_encodings && \
 export UCX_LOG_LEVEL=info && \
-export UCX_TLS=cuda_ipc,cuda_copy,self,tcp && \
-export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1,mlx5_8:1,mlx5_9:1,mlx5_10:1,mlx5_11:1"
+export UCX_TLS=cuda_ipc,cuda_copy,tcp,self && \
+export UCX_NET_DEVICES=all"
 
 # --- gen worker on $NODE0 GPU 1 (TP1) port 8002 ---
 echo "[$(date +%H:%M:%S)] Starting gen worker (TP1) on $NODE0 GPU 1 port 8002..."
