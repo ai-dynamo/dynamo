@@ -95,12 +95,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 # Replace the upstream lmsysorg/sglang image's imageio-ffmpeg (which ships a
 # GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)
 # with a source install that leaves no binary on disk. IMAGEIO_FFMPEG_EXE points
-# imageio at the LGPL CLI we copied from wheel_builder above.
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+# imageio at the LGPL CLI we copied from wheel_builder above. The --no-binary
+# directive lives in the requirements file itself.
+RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
-    if pip show --break-system-packages imageio-ffmpeg >/dev/null 2>&1; then \
-        pip install --break-system-packages --force-reinstall --no-deps --no-binary imageio-ffmpeg "imageio-ffmpeg>=0.6.0"; \
-    fi
+    pip install --break-system-packages --force-reinstall --no-deps \
+        --requirement /tmp/requirements.sglang.txt
 
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
