@@ -36,6 +36,15 @@ impl RoutingOccupancyState {
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
         let _guard = self.exact_selection_lock.lock().await;
 
+        // DYN_ROUTER_LL_DETERMINISTIC_TIES=1 disables reservoir-sample tie-breaks
+        // (mirrors v1.1.1 first-minimum-wins behavior). Lets an A/B isolate the
+        // contribution of reservoir sampling vs other 1.2-stack changes on the
+        // observed decode-imbalance fix. Default: random tie-breaks (PR #9516).
+        let deterministic_ties = std::env::var("DYN_ROUTER_LL_DETERMINISTIC_TIES")
+            .ok()
+            .as_deref()
+            == Some("1");
+
         let mut min_load = u64::MAX;
         let mut selected = None;
         let mut tie_count = 0usize;
@@ -52,7 +61,7 @@ impl RoutingOccupancyState {
             if load == min_load {
                 tie_count += 1;
                 // Reservoir sampling keeps tied minima uniform without allocating in this locked hot path.
-                if rng.random_range(0..tie_count) == 0 {
+                if !deterministic_ties && rng.random_range(0..tie_count) == 0 {
                     selected = Some(id);
                 }
             }

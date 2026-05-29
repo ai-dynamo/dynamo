@@ -688,6 +688,7 @@ where
             .iter()
             .copied()
             .collect::<Vec<_>>();
+        let candidate_count = instance_ids.len();
         let instance_id = state
             .select_exact_min_and_increment(&instance_ids)
             .await
@@ -698,9 +699,21 @@ where
                 )
             })?;
         let permit = OccupancyPermit::new(state.clone(), instance_id);
-        tracing::trace!(
-            "least loaded router selected {instance_id} (connections: {})",
-            state.load(instance_id)
+        // Per-request routing decision — mirrors the KV router's
+        // `dynamo_kv_router::scheduling::selector` "Selected worker:" INFO log so
+        // the LL path is observable for imbalance analysis without flipping
+        // DYN_LOG. Match the same INFO level as the KV path for symmetry.
+        let selected_load = state.load(instance_id);
+        tracing::info!(
+            endpoint = %self.client.endpoint.id(),
+            router_mode = "least-loaded",
+            candidate_count,
+            selected_instance = instance_id,
+            selected_load,
+            "Selected worker: router_mode=least-loaded, instance_id={}, load={}, candidates={}",
+            instance_id,
+            selected_load,
+            candidate_count,
         );
 
         match self
