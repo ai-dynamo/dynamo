@@ -32,11 +32,13 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id003
-        reason: "Dynamo's kimi_k2 parser leaves <|tool_call_begin|>, <|tool_call_argument_begin|>, <|tool_call_end|>, <|tool_calls_section_end|> tokens in normal_text when opening <|tool_calls_section_begin|> marker is missing (impl-defined recovery)"
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm: &id003
+        reason: "vLLM and SGLang preserve orphan Kimi tool-call markers as content when opening <|tool_calls_section_begin|> is missing; Dynamo strips the orphan marker tail."
         calls: []
         normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
-      vllm: *id003
       sglang: *id003
   TOOLCALLING.batch.5.c:
     description: Truncation mid-arguments (incomplete JSON body)

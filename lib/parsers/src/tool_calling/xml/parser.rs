@@ -160,6 +160,7 @@ pub fn try_tool_call_parse_xml(
     // (minimax_m2, kimi_k2 alias paths) keep their stricter behavior.
     if config.passthrough_when_no_function
         && !message.contains(config.function_start_token.as_str())
+        && !message.contains(config.tool_call_start_token.as_str())
     {
         return Ok((vec![], Some(message.to_string())));
     }
@@ -186,6 +187,13 @@ pub fn try_tool_call_parse_xml(
                 .unwrap_or_default();
             return Ok((calls, Some(prefix)));
         }
+    }
+
+    if config.strict_match
+        && !message.contains(config.tool_call_start_token.as_str())
+        && let Some(prefix) = prefix_before_orphan_xml_marker(message, config)
+    {
+        return Ok((vec![], Some(prefix)));
     }
 
     let (normal_text, tool_calls) = extract_tool_calls(message, config, tools)?;
@@ -245,16 +253,18 @@ fn extract_tool_calls(
                 // `<tool_call>` is preserved verbatim.
                 let block = &text[abs_start..];
                 let function_start = &config.function_start_token;
+                let looks_like_tool_call = block.contains(function_start.as_str())
+                    || block.contains(config.parameter_start_token.as_str());
                 if config.allow_eof_recovery
                     && !config.strict_match
-                    && block.contains(function_start.as_str())
+                    && looks_like_tool_call
                     && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
                     && !parsed_calls.is_empty()
                 {
                     calls.append(&mut parsed_calls);
                     break;
                 }
-                if calls.is_empty() {
+                if calls.is_empty() && !looks_like_tool_call {
                     normal_parts.push(&text[abs_start..]);
                 }
                 break;
@@ -275,6 +285,20 @@ fn extract_tool_calls(
         normal_text
     };
     Ok((normal_text, calls))
+}
+
+fn prefix_before_orphan_xml_marker(text: &str, config: &XmlParserConfig) -> Option<String> {
+    [
+        config.tool_call_end_token.as_str(),
+        config.function_start_token.as_str(),
+        config.function_end_token.as_str(),
+        config.parameter_start_token.as_str(),
+        config.parameter_end_token.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|marker| text.find(marker))
+    .min()
+    .map(|idx| text[..idx].trim().to_string())
 }
 
 /// Parse a single tool call block

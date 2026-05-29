@@ -125,6 +125,17 @@ fn extract_tool_calls(
     let start_token = &config.tool_call_start;
     let end_token = &config.tool_call_end;
 
+    if !text.contains(start_token.as_str())
+        && let Some(marker_idx) = first_orphan_glm47_marker_index(text, config)
+    {
+        warn!(
+            why = "GLM-4.7 tool-call marker found without <tool_call> start; dropping orphan marker tail so wire tags do not leak into normal_text",
+            dropped_block = %truncate_for_log(&text[marker_idx..]),
+            "GLM-4.7 parser dropping orphan tool-call marker tail"
+        );
+        return Ok((orphan_glm47_prefix(text, marker_idx), calls));
+    }
+
     while cursor < text.len() {
         // Find next tool call start
         if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
@@ -230,6 +241,39 @@ fn extract_tool_calls(
         normal_text
     };
     Ok((normal_text, calls))
+}
+
+fn first_orphan_glm47_marker_index(text: &str, config: &Glm47ParserConfig) -> Option<usize> {
+    [
+        config.tool_call_end.as_str(),
+        config.arg_key_start.as_str(),
+        config.arg_key_end.as_str(),
+        config.arg_value_start.as_str(),
+        config.arg_value_end.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|marker| text.find(marker))
+    .min()
+}
+
+fn orphan_glm47_prefix(text: &str, marker_idx: usize) -> String {
+    let prefix = text[..marker_idx].trim_end();
+    let token_start = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+    let tail = &prefix[token_start..];
+    if !tail.is_empty()
+        && tail
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        prefix[..token_start].trim().to_string()
+    } else {
+        prefix.trim().to_string()
+    }
 }
 
 /// Decode XML character entities in a string.

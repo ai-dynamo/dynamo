@@ -225,6 +225,12 @@ fn extract_tool_calls(
     let mut calls = Vec::new();
     let mut cursor = 0;
 
+    if find_section_start(text, 0, config).is_none()
+        && let Some(marker_idx) = first_orphan_kimi_marker_index(text, config)
+    {
+        return Ok((text[..marker_idx].trim().to_string(), calls));
+    }
+
     while cursor < text.len() {
         if let Some((start_pos, _start_len)) = find_section_start(text, cursor, config) {
             let abs_start = cursor + start_pos;
@@ -282,6 +288,25 @@ fn extract_tool_calls(
             joined_normal_text.trim().to_string()
         };
     Ok((normal_text, calls))
+}
+
+fn first_orphan_kimi_marker_index(text: &str, config: &KimiK2ParserConfig) -> Option<usize> {
+    let mut best = [
+        config.call_start.as_str(),
+        config.call_end.as_str(),
+        config.argument_begin.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|marker| text.find(marker))
+    .min();
+
+    for marker in &config.section_end_variants {
+        if let Some(idx) = text.find(marker.as_str()) {
+            best = Some(best.map_or(idx, |current| current.min(idx)));
+        }
+    }
+
+    best
 }
 
 /// Parse a tool calls section block, extracting individual tool calls.

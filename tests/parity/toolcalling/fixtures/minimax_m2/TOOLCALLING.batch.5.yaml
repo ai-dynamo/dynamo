@@ -23,11 +23,7 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: |-
-          <minimax:tool_call>
-          <invoke name="get_weather">
-          <parameter name="location">NYC</parameter>
-          </invoke>
+        normal_text: ''
       vllm:
         calls: []
         normal_text: |-
@@ -55,15 +51,17 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id002
-        reason: "Dynamo's minimax_m2 parser leaves </invoke>, </parameter> closing tags plus their content in normal_text when opening <minimax:tool_call> marker is missing (impl-defined recovery)"
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm: &id002
+        reason: "vLLM and SGLang preserve orphan MiniMax invoke/parameter markers as content when opening <minimax:tool_call> is missing; Dynamo strips the orphan marker tail."
         calls: []
         normal_text: |-
           <invoke name="get_weather">
           <parameter name="location">NYC</parameter>
           </invoke>
           </minimax:tool_call>
-      vllm: *id002
       sglang: *id002
   TOOLCALLING.batch.5.c:
     description: Truncation mid-parameter value
@@ -77,10 +75,7 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: |-
-          <minimax:tool_call>
-          <invoke name="get_weather">
-          <parameter name="location">NY
+        normal_text: ''
       vllm:
         calls: []
         normal_text: |-
@@ -112,15 +107,7 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: |-
-          I'll start by fetching the weather for both Boston and New York at the same time!
-          <minimax:tool_call>
-          <invoke name="get_weather">
-          <parameter name="location">Boston</parameter>
-          </invoke>
-          <invoke name="get_weather">
-          <parameter name="location">New York</parameter>
-          </invoke>
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
         calls: []
         normal_text: |-
@@ -132,6 +119,7 @@ cases:
           <invoke name="get_weather">
           <parameter name="location">New York</parameter>
           </invoke>
+        reason: vLLM preserves the unterminated MiniMax tool-call block as content; Dynamo strips it after preserving prefix text.
       sglang:
         calls: []
         normal_text: |-
@@ -143,6 +131,7 @@ cases:
           <invoke name="get_weather">
           <parameter name="location">New York</parameter>
           </invoke>
+        reason: SGLang preserves the unterminated MiniMax tool-call block as content; Dynamo strips it after preserving prefix text.
   TOOLCALLING.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
@@ -159,14 +148,7 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: |-
-          I'll start by fetching the weather for both Boston and New York at the same time!
-          <minimax:tool_call>
-          <invoke name="get_weather">
-          <parameter name="location">Boston</parameter>
-          </invoke>
-          <invoke name="get_weather">
-          <parameter name="location">New York
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
         calls: []
         normal_text: |-
@@ -177,6 +159,7 @@ cases:
           </invoke>
           <invoke name="get_weather">
           <parameter name="location">New York
+        reason: vLLM preserves the truncated MiniMax tool-call block as content; Dynamo strips it after preserving prefix text.
       sglang:
         calls: []
         normal_text: |-
@@ -187,3 +170,4 @@ cases:
           </invoke>
           <invoke name="get_weather">
           <parameter name="location">New York
+        reason: SGLang preserves the truncated MiniMax tool-call block as content; Dynamo strips it after preserving prefix text.
