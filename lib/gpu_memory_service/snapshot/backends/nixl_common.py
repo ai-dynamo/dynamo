@@ -16,6 +16,7 @@ from gpu_memory_service.snapshot.transfer import FileTransferSource
 
 NIXL_POSIX_BACKEND = "POSIX"
 NIXL_GDS_BACKEND = "GDS_MT"
+NIXL_UCX_BACKEND = "UCX"
 
 FILE_MEM_TYPE = "FILE"
 DRAM_MEM_TYPE = "DRAM"
