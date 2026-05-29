@@ -86,6 +86,20 @@ impl MinCostFlowGraph {
     /// Returns `(flow_sent, min_cost)`.
     /// Returns `Err` if unable to send `max_flow` units (the partial flow sent
     /// is included in the error).
+    ///
+    /// ## Negative edge costs
+    ///
+    /// The LoRA allocator intentionally emits negative "keep" edges (a reward
+    /// for retaining a prior placement), so potentials are *not* initialized
+    /// under a non-negativity assumption. The shortest-path loop below never
+    /// finalizes a node permanently — it re-pushes and reprocesses any node
+    /// whenever a shorter distance is found (`d == dist[v]` guard only skips
+    /// stale queue entries) — making the first pass a label-correcting
+    /// (Bellman–Ford/SPFA-style) search that is correct with negative edges.
+    /// After the first augmentation the potentials make all reduced costs
+    /// non-negative, so subsequent passes behave as standard Dijkstra. This is
+    /// sound as long as the residual graph has no negative cycle, which a
+    /// min-cost-flow residual built from a bipartite assignment never does.
     pub fn min_cost_flow(
         &mut self,
         s: usize,
