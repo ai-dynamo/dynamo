@@ -229,7 +229,7 @@ def test_finalize_gms_write_prunes_unreferenced_allocations(running_gms):
     unreferenced_va = writer.create_mapping(size=1024 * 1024, tag="weights")
     unreferenced_allocation_id = writer.mappings[unreferenced_va].allocation_id
 
-    committed_bytes = finalize_gms_write(writer, gms_model)
+    committed_bytes = finalize_gms_write(writer, gms_model).committed_bytes
     assert committed_bytes == sum(m.aligned_size for m in writer.mappings.values())
     assert all(
         mapping.allocation_id != unreferenced_allocation_id
