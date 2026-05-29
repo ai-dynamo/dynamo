@@ -16,11 +16,7 @@ that request until either:
   1. The decode worker sends a notification on successful NIXL READ.
   2. The static ``VLLM_NIXL_ABORT_REQUEST_TIMEOUT`` (default 480 s) expires.
 
-These requests are NOT counted in any standard scheduler-state metric —
-``vllm:num_requests_running`` reports ``len(self.running)`` and
-``vllm:num_requests_waiting`` reports ``len(self.waiting)``, both excluding
-the pending-transfer side channel. So a prefill worker can be at 100 % KV
-usage while both gauges read zero.
+These requests are NOT counted in any standard scheduler-state metric.
 
 This connector exposes the missing visibility:
 
@@ -38,13 +34,37 @@ Set the connector via the vLLM ``--kv-transfer-config`` flag::
         "kv_connector_module_path":
             "dynamo.vllm.custom_connectors.nixl_with_pending_metrics"
     }'
+
+Implementation notes
+--------------------
+
+Gauge values are stored as **single-element lists** in the stats data dict
+(not bare scalars). This is because ``NixlKVConnectorStats.aggregate()``
+iterates the data dict and calls ``list.extend()`` on every value — it
+asserts each value is a list. Storing as ``[v]`` makes our gauge fields
+aggregate-safe, and ``observe()`` reads the last element (gauge semantics:
+latest wins).
+
+We also subclass ``NixlKVConnectorStats`` so that ``reset()`` always
+includes our gauge keys as empty lists. This avoids ``KeyError`` when
+``aggregate()`` iterates ``other.data`` and looks up the same key on
+``self.data`` after a reset. We lazily swap the worker's ``xfer_stats`` to
+our subclass on the first ``get_kv_connector_stats()`` call.
+
+We always return a stats object from ``get_kv_connector_stats()`` (even
+when nothing else is happening), so ``observe()`` runs every cycle and the
+Prometheus gauge gets updated — including dropping back to 0 once a pinned
+request is released. Without this, the gauge would stay stuck at its last
+non-zero reading after a successful round-trip.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
+    KVConnectorStats,
     PromMetric,
     PromMetricT,
 )
@@ -55,10 +75,60 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
 
-# Data-dict keys (kept in one place so the snapshot site and the observe site
-# can't drift).
+# Data-dict keys (kept in one place so the snapshot site, the reset site,
+# and the observe site can't drift).
 _NUM_PENDING_SENDS_KEY = "num_pending_sends"
 _NUM_IN_PROCESS_KEY = "num_in_process"
+
+
+@dataclass
+class NixlKVConnectorStatsWithPending(NixlKVConnectorStats):
+    """``NixlKVConnectorStats`` extended with two gauge-style fields for
+    pending-send queue depth.
+
+    The fields are stored as single-element lists (``[scalar]``) so that
+    ``NixlKVConnectorStats.aggregate()`` — which iterates the data dict and
+    calls ``list.extend`` on every value — doesn't fail. ``observe()`` in
+    ``NixlPromMetricsWithPending`` reads the LAST element of each list,
+    which gives gauge semantics (latest value wins) when stats are
+    aggregated across multiple steps or workers.
+    """
+
+    def reset(self):
+        super().reset()
+        # Always include our keys in the data dict, even on a fresh reset,
+        # so aggregate() doesn't KeyError when other has these keys but
+        # self was just reset.
+        self.data[_NUM_PENDING_SENDS_KEY] = []
+        self.data[_NUM_IN_PROCESS_KEY] = []
+
+    def is_empty(self) -> bool:
+        # The base class ``is_empty()`` only checks failure/transfer
+        # counters. The scheduler-side aggregator does:
+        #
+        #     if not other.is_empty():
+        #         for k, v in other.data.items(): self.data[k].extend(v)
+        #
+        # If we relied on the base is_empty(), our gauge keys would be
+        # SILENTLY DROPPED whenever no transfers happened in the interval —
+        # which is the common case for idle/normal-traffic workers. The
+        # Prometheus gauge would then never update from its last value.
+        # Treat our keys as "data" so aggregate() always extends them.
+        return super().is_empty() and not (
+            self.data.get(_NUM_PENDING_SENDS_KEY)
+            or self.data.get(_NUM_IN_PROCESS_KEY)
+        )
+
+    def aggregate(self, other: KVConnectorStats) -> "NixlKVConnectorStatsWithPending":
+        # Defensive override: if ``other.data`` contains our gauge keys but
+        # ``self.data`` does not (e.g., self is a deserialized base-class
+        # stats that didn't go through our ``build_kv_connector_stats``
+        # factory), the base ``aggregate()`` would ``KeyError`` on
+        # ``self.data[k]``. Pre-seed our keys before delegating.
+        if not other.is_empty():
+            for k in (_NUM_PENDING_SENDS_KEY, _NUM_IN_PROCESS_KEY):
+                self.data.setdefault(k, [])
+        return super().aggregate(other)
 
 
 class NixlConnectorWithPendingMetrics(NixlConnector):
@@ -73,22 +143,51 @@ class NixlConnectorWithPendingMetrics(NixlConnector):
         if self.connector_worker is None:
             return None
         worker = self.connector_worker
-        pending = len(worker._reqs_to_send)
-        in_process = len(worker._reqs_to_process)
 
-        # Inject directly into the stats data dict. The existing
-        # cross-process serialization treats `data` as a plain dict, so new
-        # keys travel without further plumbing.
-        worker.xfer_stats.data[_NUM_PENDING_SENDS_KEY] = pending
-        worker.xfer_stats.data[_NUM_IN_PROCESS_KEY] = in_process
+        # Lazily upgrade the worker's xfer_stats to our subclass. The base
+        # NixlConnectorWorker.__init__ hardcodes
+        # `self.xfer_stats = NixlKVConnectorStats()`, which means reset()
+        # there wipes our keys. Swapping in our subclass ensures reset()
+        # always re-initializes our gauge fields as empty lists.
+        #
+        # We merge the old container's data onto our subclass — but skip our
+        # own gauge keys so we don't overwrite the empty lists that the
+        # subclass's reset() just installed. (Today's base class doesn't
+        # define our keys; this guard is forward-compat against a future
+        # vLLM version that might pre-define them.)
+        if not isinstance(worker.xfer_stats, NixlKVConnectorStatsWithPending):
+            new_stats = NixlKVConnectorStatsWithPending()
+            for k, v in worker.xfer_stats.data.items():
+                if k in (_NUM_PENDING_SENDS_KEY, _NUM_IN_PROCESS_KEY):
+                    continue
+                new_stats.data[k] = v
+            worker.xfer_stats = new_stats
 
-        # Always emit when there's any pending-side activity, even if the
-        # base is_empty() would otherwise suppress the report. This catches
-        # the "prefill is idle but KV is pinned" case, which is exactly the
-        # diagnostic case we care about.
-        if not worker.xfer_stats.is_empty() or pending > 0 or in_process > 0:
-            return worker.xfer_stats.clone_and_reset()
-        return None
+        # Snapshot current queue depths as single-element lists.
+        worker.xfer_stats.data[_NUM_PENDING_SENDS_KEY] = [
+            len(worker._reqs_to_send)
+        ]
+        worker.xfer_stats.data[_NUM_IN_PROCESS_KEY] = [
+            len(worker._reqs_to_process)
+        ]
+
+        # ALWAYS emit (don't gate on is_empty()). Prometheus gauges use
+        # multiprocess_mode="mostrecent": if observe() doesn't run on a
+        # given cycle, the gauge holds its previous value. Returning None
+        # when pending drops back to 0 would leave the gauge stuck at the
+        # last non-zero reading. Histograms/counters in the base class get
+        # empty lists / no inc() calls here, which is a no-op.
+        return worker.xfer_stats.clone_and_reset()
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        # Returned to the scheduler side; needs to be our subclass so
+        # aggregate() finds our keys in reset()-fresh instances.
+        if data is not None:
+            return NixlKVConnectorStatsWithPending(data=data)
+        return NixlKVConnectorStatsWithPending()
 
     @classmethod
     def build_prom_metrics(
@@ -102,16 +201,13 @@ class NixlConnectorWithPendingMetrics(NixlConnector):
             vllm_config, metric_types, labelnames, per_engine_labelvalues,
         )
 
-    # build_kv_connector_stats() and the rest of the surface are inherited
-    # from NixlConnector unchanged.
-
 
 class NixlPromMetricsWithPending(NixlPromMetrics):
     """``NixlPromMetrics`` plus two gauges for pending-send queue depth.
 
-    v0.19.0 uses the free function ``create_metric_per_engine`` from
-    ``vllm.v1.metrics.utils`` (replacing the ``self.make_per_engine`` method
-    that was on the parent class in v0.16.0).
+    The gauge values arrive in ``transfer_stats_data`` as single-element
+    lists (so they survive ``aggregate()``). We read the last element —
+    that's the most recent observation, which is the correct gauge value.
     """
 
     def __init__(
@@ -154,12 +250,15 @@ class NixlPromMetricsWithPending(NixlPromMetrics):
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         # Run the parent's histogram + counter dispatch first.
         super().observe(transfer_stats_data, engine_idx)
-        # Then our two gauges, defensively — keys may be missing if a stats
-        # object from a non-pending-aware source ever reaches us (e.g. during
-        # a rolling upgrade).
+        # Then our two gauges. Values arrive as single-element lists (so
+        # aggregate() doesn't break); take the last element for gauge
+        # semantics (latest wins). Gauge.set() internally injects
+        # time.time() as the timestamp when multiprocess_mode='mostrecent',
+        # so we don't need to pass one.
         for gauge_obj, key in (
             (self.gauge_nixl_num_pending_sends, _NUM_PENDING_SENDS_KEY),
             (self.gauge_nixl_num_in_process_reqs, _NUM_IN_PROCESS_KEY),
         ):
-            if key in transfer_stats_data:
-                gauge_obj[engine_idx].set(transfer_stats_data[key])
+            values = transfer_stats_data.get(key)
+            if values is not None:
+                gauge_obj[engine_idx].set(values[-1] if values else 0)
