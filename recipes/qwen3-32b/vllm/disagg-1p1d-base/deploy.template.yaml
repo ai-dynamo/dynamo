@@ -20,7 +20,7 @@
 #   2. RDMA resource (vpc.amazonaws.com/efa | rdma/ib | rdma/shared_ib | none-for-GKE-A4X)
 #   3. Pod-level RDMA annotations (only GKE A4X uses these; Multus interfaces)
 #   4. NIXL backend selection env (LIBFABRIC for AWS, UCX/default for everyone else)
-#   5. Transport provider env (FI_* for AWS EFA; UCX_TLS + UCX_NET_DEVICES for IB/RoCE)
+#   5. Transport provider env (FI_* for AWS EFA; UCX_NET_DEVICES for IB/RoCE — do NOT set UCX_TLS)
 #   6. Model PVC name + mount path
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -119,7 +119,12 @@ spec:
           # - { name: LD_LIBRARY_PATH,            value: "/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/local/lib" }
           # - { name: PATH,                       value: "/opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
           # IB / RoCE example (Azure / Nebius / Nscale / GKE-A4X):
-          # - { name: UCX_TLS,         value: "rc,cuda_copy,cuda_ipc" }
+          # DO NOT set UCX_TLS — UCX needs internal transports (e.g. ud_mlx5 for
+          # wireup AM) that an explicit allowlist almost always omits. Let UCX
+          # auto-probe; constrain only via UCX_NET_DEVICES.
+          # On clusters that expose `mlx5_bond_*` LAG devices (e.g. Nscale), exclude
+          # them — the bond is unusable by UCX in containers (ibv_create_ah
+          # segfaults). Pin to raw HCAs instead.
           # - { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }   # adjust port count per provider
       replicas: 1
       resources:

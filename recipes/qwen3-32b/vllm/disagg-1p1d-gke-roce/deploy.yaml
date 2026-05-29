@@ -138,7 +138,9 @@ spec:
           - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
           # --- UCX backend over RoCE (NIXL default; no DYN_KVBM_NIXL_BACKEND_* needed) ---
-          - { name: UCX_TLS,            value: "rc,cuda_copy,cuda_ipc" }
+          # NOTE: don't set UCX_TLS. UCX needs internal transports (notably ud_mlx5
+          # for active-messages wireup) that an explicit allowlist almost always
+          # omits. Let UCX auto-probe; restrict via UCX_NET_DEVICES only.
           - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
           - { name: NCCL_CROSS_NIC,     value: "0" }
@@ -279,7 +281,7 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
-          - { name: UCX_TLS,            value: "rc,cuda_copy,cuda_ipc" }
+          # NOTE: no UCX_TLS — see prefill block; let UCX auto-probe.
           - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
           - { name: NCCL_CROSS_NIC,     value: "0" }

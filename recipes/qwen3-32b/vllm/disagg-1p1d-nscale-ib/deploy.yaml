@@ -3,7 +3,7 @@
 #
 # Qwen3-32B BF16 disagg, 1 prefill + 1 decode, cross-node over Nscale NDR InfiniBand.
 # Purpose: measure NIXL KV-transfer bandwidth over UCX/IB backend on Blackwell (B200).
-# Topology: TP=8 prefill on node A, TP=8 decode on node B (pod anti-affinity).
+# Topology: TP=4 prefill on node A, TP=4 decode on node B (pod anti-affinity).
 # Each worker requests rdma/ib: "1" which (per NVIDIA Network Operator shared-device
 # plugin convention) grants access to all 8 NDR HCAs via /dev/infiniband/*.
 #
@@ -92,14 +92,23 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
-          # --- UCX TCP fallback (Nscale: IB path exhausted, see README) ---
-          # 2026-05-26 measured 1.0 GB/s aggregate via TCP. Session 1 May-21 IB config
-          # was tried again 2026-05-27 + 3 variants (PROTO_ENABLE/LIBFABRIC/RNDV_HOST/
-          # bare-minimum) — all fail at UCX backend init under current cluster state.
-          - { name: UCX_TLS,         value: "tcp,cuda_copy,cuda_ipc" }
-          - { name: UCX_NET_DEVICES, value: "eth0" }
-          - { name: NCCL_IB_HCA,     value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
-          - { name: NCCL_DEBUG,      value: "WARN" }
+          # --- UCX IB minimal symmetric (exp9, 2026-05-28) ---
+          # Symmetric minimal config: only MX_RDMA_NIC_PIN=auto + NIXL_LOG_LEVEL.
+          # UCX_NET_DEVICES, UCX_LOG_LEVEL, UCX_RNDV_SCHEME, UCX_RNDV_THRESH all
+          # commented out on BOTH sides — let UCX auto-probe everything end-to-end.
+          # Tests whether the previous failures were caused by overrestrictive
+          # UCX env on Nscale's specific fabric (vs the cluster-side issue).
+          # exp10 2026-05-28: ib-probe showed 12 raw mlx5 NICs, in two fabrics.
+          # mlx5_0..5 + mlx5_10..11 = compute IB (MTU 4096, GUID prefix 605e6503).
+          # mlx5_6..9 = SIDE fabric (MTU 512, vendor 8c913a03). Previous 0..7 list
+          # mixed compute with side — cross-rank handshake via side NICs likely
+          # what caused the disconnects.
+          - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1" }
+          - { name: MX_RDMA_NIC_PIN,    value: "auto" }
+          - { name: NIXL_LOG_LEVEL,     value: "INFO" }
+          # - { name: UCX_LOG_LEVEL,      value: "debug" }
+          # - { name: UCX_RNDV_SCHEME,    value: "get_zcopy" }
+          # - { name: UCX_RNDV_THRESH,    value: "0" }
           # --- Dynamo / vLLM ---
           - { name: DYN_HEALTH_CHECK_ENABLED,  value: "false" }
           - { name: HF_HOME,                   value: /shared-models }
@@ -181,16 +190,18 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
-          # --- UCX over NDR IB (8 HCAs) — see prefill block ---
-          - { name: UCX_TLS,         value: "tcp,cuda_copy,cuda_ipc" }
-          - { name: UCX_NET_DEVICES, value: "eth0" }
-          - { name: UCX_IB_GID_INDEX,       value: "3" }
-          - { name: UCX_PROTO_ENABLE,       value: "y" }
-          - { name: UCX_RC_TIMEOUT,         value: "600s" }
-          - { name: UCX_KEEPALIVE_INTERVAL, value: "300s" }
-          - { name: UCX_LOG_LEVEL,          value: "debug" }
-          - { name: NCCL_IB_HCA,            value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
-          - { name: NCCL_IB_GID_INDEX,      value: "3" }
+          # --- UCX IB minimal symmetric (see prefill block) ---
+          # exp10 2026-05-28: ib-probe showed 12 raw mlx5 NICs on Nscale, in two
+          # fabrics: mlx5_0..5 + mlx5_10..11 are compute IB (MTU 4096); mlx5_6..9
+          # are a SIDE fabric (MTU 512, different vendor GUID prefix). Previous
+          # recipe wrongly included mlx5_6 + mlx5_7 — cross-rank handshake via
+          # those side-fabric NICs is likely what triggered the disconnects.
+          - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1" }
+          - { name: MX_RDMA_NIC_PIN,        value: "auto" }
+          - { name: NIXL_LOG_LEVEL,         value: "INFO" }
+          # - { name: UCX_LOG_LEVEL,          value: "debug" }
+          # - { name: UCX_RNDV_SCHEME,        value: "get_zcopy" }
+          # - { name: UCX_RNDV_THRESH,        value: "0" }
           - { name: NCCL_DEBUG,             value: "WARN" }
           - { name: DYN_HEALTH_CHECK_ENABLED,  value: "false" }
           - { name: HF_HOME,                   value: /shared-models }

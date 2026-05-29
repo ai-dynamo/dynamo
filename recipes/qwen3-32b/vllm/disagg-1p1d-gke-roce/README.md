@@ -11,7 +11,7 @@ This is the **GCP GKE / A4X / RoCEv2-over-ConnectX-7** member of the cross-provi
 | **TP / GPUs per pod** | **TP=4** (not 8) — A4X nodes have 4 GPUs |
 | **RDMA NIC attachment** | Pod-level Multus annotation `networking.gke.io/interfaces` listing `rdma-0..rdma-3` (4 NICs); **no `resources.limits.custom.rdma/*` key** |
 | **NIXL backend selection** | Defaults (UCX); no `DYN_KVBM_NIXL_BACKEND_*` env |
-| **Transport env** | `UCX_TLS=rc,cuda_copy,cuda_ipc`, `UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1`, `NCCL_CROSS_NIC=0`, `LD_LIBRARY_PATH=/usr/local/gib/lib64:/usr/local/nvidia/lib64` |
+| **Transport env** | `UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1`, `NCCL_CROSS_NIC=0`, `LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64`. **No `UCX_TLS`** — let UCX auto-probe (allowlists break wireup AM selection). |
 | **HostPath mounts** | `/home/kubernetes/bin/gib` → `/usr/local/gib`, `/home/kubernetes/bin/nvidia` → `/usr/local/nvidia` (GIB NCCL plugin + GKE-injected NVIDIA driver libs) |
 | **Model PVC** | `model-cache` (per-cluster PVC on `dynamo-gcp-dev-02`) |
 

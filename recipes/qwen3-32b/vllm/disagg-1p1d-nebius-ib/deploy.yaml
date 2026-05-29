@@ -23,9 +23,17 @@ spec:
           value: /model-cache
       extraPodSpec:
         mainContainer:
-          command: [python, -m, dynamo.frontend]
+          # The vllm-runtime:1.1.1 image has a built-in ENTRYPOINT for the frontend
+          # role. Explicit `python -m dynamo.frontend` makes the Rust binary parse
+          # those as args and crash with "Unknown arguments specified".
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
+          # On a fresh empty PVC, the image's default user can't create /model-cache/hub
+          # for tokenizer registration → Permission denied (os error 13) → `/v1/models`
+          # stays empty. Workers run as root because they request privileged. Frontend
+          # needs runAsUser: 0 to write to the same PVC mount.
+          securityContext:
+            runAsUser: 0
       replicas: 1
       resources:
         requests: { cpu: "4" }
@@ -62,7 +70,7 @@ spec:
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           - --tensor-parallel-size
-          - '8'
+          - '4'
           - --no-enable-log-requests
           - --gpu-memory-utilization
           - '0.90'
@@ -86,7 +94,9 @@ spec:
           # NIXL backend: runtime defaults to UCX when DYN_KVBM_NIXL_BACKEND_LIBFABRIC
           # is unset, so no explicit selector env is needed here.
           # --- UCX over NDR InfiniBand (8 ConnectX-7 HCAs: mlx5_0..mlx5_7) ---
-          - { name: UCX_TLS,                value: "rc,cuda_copy,cuda_ipc" }
+          # NOTE: don't set UCX_TLS. UCX needs internal transports (notably ud_mlx5
+          # for active-messages wireup) that an explicit allowlist almost always
+          # omits. Let UCX auto-probe; restrict via UCX_NET_DEVICES only.
           - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }
           - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
           - { name: UCX_RNDV_THRESH,        value: "8192" }
@@ -108,11 +118,11 @@ spec:
       replicas: 1
       resources:
         limits:
-          gpu: '8'
+          gpu: '4'
           custom:
             rdma/ib: "1"
         requests:
-          gpu: '8'
+          gpu: '4'
           custom:
             rdma/ib: "1"
             ephemeral-storage: "2Gi"
@@ -151,7 +161,7 @@ spec:
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           - --tensor-parallel-size
-          - '8'
+          - '4'
           - --no-enable-log-requests
           - --gpu-memory-utilization
           - '0.90'
@@ -172,7 +182,7 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
-          - { name: UCX_TLS,                value: "rc,cuda_copy,cuda_ipc" }
+          # NOTE: no UCX_TLS — see prefill block; let UCX auto-probe.
           - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }
           - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
           - { name: UCX_RNDV_THRESH,        value: "8192" }
@@ -192,11 +202,11 @@ spec:
       replicas: 1
       resources:
         limits:
-          gpu: '8'
+          gpu: '4'
           custom:
             rdma/ib: "1"
         requests:
-          gpu: '8'
+          gpu: '4'
           custom:
             rdma/ib: "1"
             ephemeral-storage: "2Gi"

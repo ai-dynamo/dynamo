@@ -9,7 +9,7 @@ This is the **Nscale managed K8s** member of the cross-provider benchmark family
 | **Container image** | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1` (standard image; vLLM v0.19.0 / CUDA 12.9 supports B200 SM 10.0) |
 | **RDMA resource** | `rdma/ib: "1"` per pod (Network Operator shared-device plugin slot; grants all 8 HCAs via `/dev/infiniband/*`) |
 | **NIXL backend selection** | Defaults — UCX backend (no `DYN_KVBM_NIXL_BACKEND_*` env overrides) |
-| **Transport env** | `UCX_TLS=rc,cuda_copy,cuda_ipc`, `UCX_NET_DEVICES=mlx5_0:1,...,mlx5_7:1`, `NCCL_IB_HCA=mlx5_0,...,mlx5_7` |
+| **Transport env** | `UCX_NET_DEVICES=mlx5_0:1,...,mlx5_7:1` (8 raw HCAs, **not** `mlx5_bond_0` — the bond is unusable by UCX in containers, `ibv_create_ah` segfaults). **No `UCX_TLS`** — let UCX auto-probe (allowlists break wireup AM selection). |
 | **Host volume mount** | `/dev/infiniband` (hostPath) + `/dev/shm` (emptyDir, 64Gi) |
 | **Model PVC** | `model-cache` (per-cluster Nscale PVC; verify Qwen3-32B is cached or use the model-download job under `../../model-cache/`) |
 | **Cluster** | `dynamo-nscale-dev-cluster` (B200 192GB HBM × 8 per node, 8× NDR IB HCAs/node) |
@@ -104,71 +104,44 @@ tsh kubectl cp ${NAMESPACE}/q32b-1p1d-nscale-ib-benchmark:/perf-cache/artifacts 
 - **No `FI_*` env, no `LD_LIBRARY_PATH=/opt/amazon/efa/lib`** — those are AWS-EFA only; would silently break UCX device selection or load unrelated libfabric on this cluster.
 - **`--gpu-cluster`-style placement domain (Nebius):** Nscale's analog (rack/island grouping) is *unverified*; pod anti-affinity on `kubernetes.io/hostname` is enough for the 1P1D measurement here. If you scale to many workers, verify IB-island alignment with Nscale support.
 
-## Status: cross-pod NIXL fails (root cause likely image-side, NOT cluster SR-IOV); **TCP fallback measured 2026-05-26**
+## Status: cross-pod NIXL UCX works (2026-05-27 evening, after MX/NIXL team feedback)
 
-> **2026-05-26 correction:** An earlier hypothesis claimed the cluster's SR-IOV / cross-VHCA policy was the blocker. **That was wrong.** A peer in namespace `nnoble` on this same cluster ran `ibv_rc_pingpong` between two pods on different B200 nodes (`prctr-7wrxm` ↔ `prctr-9c2x7`) using `mlx5_0` on both sides — it passed at 7740 Mbit/sec with proper QP setup, MR-key exchange, and RDMA writes across SR-IOV VFs. Cross-pod RDMA at the firmware layer demonstrably works. The actual root cause of our NIXL failure is most likely **GDRCopy missing in `vllm-runtime:1.1.1`** (`libgdrapi.so.2: cannot open shared object file` in the trace) — NIXL registers GPU memory via DMA-BUF; the peer's test uses host memory; the gate is in the GPU-memory registration path, not cluster policy. Full discussion + follow-up plan in `dynamo-writings/csp/2026-05-26-nscale-detailed-experiments.md` § "Update 2026-05-26 (later)".
+The recipe currently ships in a working UCX-IB state. Prior versions of this README documented a long failure narrative (SR-IOV cross-VHCA, GDRCopy, libfabric) that turned out to be **mostly self-inflicted**. See `dynamo-writings/csp/2026-05-26-nscale-detailed-experiments.md` § "Update 2026-05-27 (evening)" for the full retraction.
 
-**What we still observe:** Cross-pod NIXL via UCX `rc_mlx5` cannot complete — workers log `mlx5dv_devx_general_cmd(ALLOW_OTHER_VHCA_ACCESS) failed: syndrome 0x172df6` then `NIXL_ERR_REMOTE_DISCONNECT` on the first transfer. (The syndrome line is likely noise — UCX probing an unrelated capability that's not load-bearing.) NCCL TP works (intra-pod, uses host memory).
+The two changes that unblocked UCX-IB on Nscale:
 
-**Recipe pivoted to `UCX_TLS=tcp` over `eth0`** as a working fallback while the root cause is investigated. Loses IB performance, but gives a real cross-node disagg measurement to compare against AWS EFA and AKS IB.
+1. **Drop `UCX_TLS` entirely.** UCX needs internal transports (notably `ud_mlx5` for active-messages wireup) that an explicit allowlist almost always omits. The `select.c:657 no active messages transport` error was caused by my own `UCX_TLS=rc,cuda_copy,cuda_ipc` restriction, not anything cluster-side. The MX library deliberately doesn't set `UCX_TLS` — let UCX auto-probe.
+2. **Use raw `mlx5_0..7`, never `mlx5_bond_0`.** The bond LAG aggregate is unusable by UCX in containers — `ibv_create_ah` segfaults regardless of how UCX is configured. ModelExpress's [`ucx_utils.py`](https://github.com/ai-dynamo/modelexpress/blob/main/modelexpress_client/python/modelexpress/ucx_utils.py) explicitly filters bond devices for the same reason.
 
-### Measured numbers (TCP fallback, 2026-05-26)
+The `syndrome 0x172df6 ALLOW_OTHER_VHCA_ACCESS` line in UCX trace logs is **noise**, not the gate — UCX brings up the data plane on these devices anyway.
 
-| Metric | Value |
-|---|---|
-| **Aggregate NIXL KV BW (TCP)** | **~1.0 GB/s** (1787.6 GiB rank-0 × TP=4 / 7200 s) |
-| Mean ITL | 8.45 ms |
-| P50 ITL | 6.86 ms |
-| P50 per-user throughput | 145.82 tok/s |
-| Mean per-user throughput | 133.77 tok/s |
-| Mean TTFT (queue-bound) | 53 min |
-| Successful requests | 2,058 / 12,031 (17%) |
-| Errored / timed-out | 3,642 (long-prompt timeouts; queue depth blew past engine's tolerance) |
-| TP | 4 (cluster IB partition layout makes TP=8 infeasible here) |
-
-aiperf artifact: `dynamo-nscale-dev-cluster / jihao / perf-cache PVC / artifacts/Qwen3-32B_nscale-ib_20260526-1808/`
-
-### Cross-CSP comparison (all 3 measured points)
-
-| | AWS H100/EFA TP=8 | AKS A100/IB TP=8 (4 NICs) | **Nscale B200/TCP TP=4** |
-|---|---|---|---|
-| Aggregate KV BW | 10.7 GB/s | 3.23 GB/s | **~1.0 GB/s (TCP fallback)** |
-| Mean ITL | 12.63 ms | 15.34 ms | **8.45 ms** ← fastest |
-| Per-user throughput (mean) | 82.75 tok/s | 68.53 tok/s | **133.77 tok/s** ← fastest |
-| Goodput | queue-bound | queue-bound | queue-bound |
-| Completion rate | 100% | 58% | 17% |
-
-**Takeaway:** B200 has the fastest per-token decode (steady-state ITL 6.9 ms p50, 33% faster than H100). But TCP transport caps aggregate KV BW at ~1 GB/s vs the ~50 GB/s NDR IB would deliver if SR-IOV were configured correctly. Result: the disagg pipeline works, but the queue grows fastest of the three clusters.
-
-### Root cause (preserved for cluster-ops record)
-
-UCX trace at `UCX_LOG_LEVEL=trace` on both prefill and decode produced these errors during cross-pod RDMA setup:
+### Smoke-test validation (2026-05-27 evening, TP=2)
 
 ```
-mlx5dv_devx_general_cmd(ALLOW_OTHER_VHCA_ACCESS) failed on mlx5_0,
-  syndrome 0x172df6: Remote I/O error
-dlopen('libuct_cuda_gdrcopy.so.0') failed:
-  libgdrapi.so.2: cannot open shared object file
+agent_rx_bytes  BEFORE: 0  →  AFTER: 8388608   (8 MiB transferred via NIXL UCX-IB)
 ```
 
-**What didn't fix it (don't retry on Nscale):**
-- `UCX_IB_GPU_DIRECT_RDMA=yes`
-- `kv_connector_extra_config:{"backends":["UCX"]}`
-- Picking specific HCAs via `UCX_NET_DEVICES`
-- All `UCX_TLS=rc*` variants
-- Clean delete + reapply (no rolling-update race)
+First cross-pod RDMA KV transfer on Nscale Dynamo this whole investigation. Recipe ships at TP=2 because the cluster was GPU-tight during validation; scale to TP=4 when capacity recovers.
 
-**What would unblock the IB path (cluster-ops task):**
-- Enable `ALLOW_OTHER_VHCA_ACCESS` on the SR-IOV / IB partition config, OR
-- Migrate from `rdma/ib` (shared-device-plugin) to per-pod exclusive HCA mode, AND
-- Bake `libgdrapi.so.2` (GDRCopy) into the runtime image for full GPUDirect
+### Open follow-ups (not blocking)
+
+1. Run Mooncake `aiperf` at TP=2 with the working recipe to get a real Nscale-IB KV bandwidth datapoint (vs the ~1 GB/s TCP fallback measured 2026-05-26).
+2. Scale to TP=4 when cluster capacity recovers.
+3. Without per-rank NUMA-local NIC pinning, all TP ranks end up on whichever NIC UCX picks first — throughput will be bottlenecked. Integrate the MX helper `apply_nic_pin_for_device` from `modelexpress.ucx_utils` ahead of NIXL connector init for optimal throughput on multi-rank-per-pod recipes.
+
+### Earlier TCP fallback measurement (preserved for record)
+
+The old TCP fallback config (`UCX_TLS=tcp,cuda_copy,cuda_ipc` over `eth0`) was measured 2026-05-26 at ~1.0 GB/s aggregate KV BW, mean ITL 8.45 ms. Replaced by the working UCX-IB config above.
+
+aiperf artifact (TCP run): `dynamo-nscale-dev-cluster / jihao / perf-cache PVC / artifacts/Qwen3-32B_nscale-ib_20260526-1808/`
 
 ## Recipe state (current persisted config)
 
-- `UCX_TLS=tcp,cuda_copy,cuda_ipc` + `UCX_NET_DEVICES=eth0` — TCP fallback over standard pod network. Working but eth0-line-rate bound (~1 GB/s measured single-stream cross-node).
+- **No `UCX_TLS`** — let UCX auto-probe (allowlists break wireup AM selection).
+- `UCX_NET_DEVICES=mlx5_0:1,...,mlx5_7:1` — all 8 raw HCAs, no `mlx5_bond_0`.
 - `--gpu-memory-utilization 0.70` (not 0.90): multi-tenant cluster leaves ~45 GiB/GPU of ghost CUDA contexts that K8s `nvidia.com/gpu` doesn't account for.
 - `NCCL_DEBUG=WARN`: TP NCCL uses IB (intra-pod path works fine).
-- TP=4: cluster IB partition layout makes TP=8 across nodes infeasible.
-- `privileged: true` + `IPC_LOCK`: still required for any NIXL backend that does GPU memory registration; harmless under TCP.
+- TP=2 (currently, due to GPU capacity). Scale to TP=4 when cluster recovers.
+- `privileged: true` + `IPC_LOCK`: required for NIXL GPU memory registration.
 
 ## Results (filled — see "Measured numbers" above)

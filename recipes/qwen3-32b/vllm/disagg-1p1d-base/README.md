@@ -47,7 +47,7 @@ Each variant overrides **only** these things:
    - Everyone else: defaults (UCX backend)
 4. **Transport provider env**:
    - AWS: `FI_PROVIDER=efa`, `FI_EFA_USE_DEVICE_RDMA=1`, `FI_EFA_ENABLE_SHM_TRANSFER=0`, `LD_LIBRARY_PATH=/opt/amazon/efa/lib:...`
-   - IB / RoCE (UCX): `UCX_TLS=rc,cuda_copy,cuda_ipc`, `UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,...` (number of mlx5 ports depends on provider — 8 on AKS/Nebius/Nscale H200, 4 on GKE A4X GB200)
+   - IB / RoCE (UCX): `UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,...` (number of mlx5 ports depends on provider — 8 on AKS/Nebius/Nscale H200, 4 on GKE A4X GB200). **Do NOT set `UCX_TLS`** — UCX needs internal transports (e.g. `ud_mlx5` for wireup AM) that an explicit allowlist almost always omits, breaking transport selection. Let UCX auto-probe. On clusters with `mlx5_bond_*` LAG devices (e.g. Nscale), exclude the bond from `UCX_NET_DEVICES` — the bond is unusable by UCX in containers (`ibv_create_ah` segfaults). Pin to raw HCAs.
 5. **Hostpath/volume mounts** for special device files when the provider needs them (`/dev/infiniband` on most IB providers; not needed on AWS EFA since the device plugin handles it).
 6. **PVC name for the model** — each provider has its own model cache:
    - AWS dev-02: `shared-model-cache`

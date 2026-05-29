@@ -70,7 +70,7 @@ spec:
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           - --tensor-parallel-size
-          - '8'
+          - '4'
           - --no-enable-log-requests
           - --gpu-memory-utilization
           - '0.90'
@@ -108,11 +108,11 @@ spec:
       replicas: 1
       resources:
         limits:
-          gpu: '8'
+          gpu: '4'
           custom:
             vpc.amazonaws.com/efa: "32"
         requests:
-          gpu: '8'
+          gpu: '4'
           custom:
             vpc.amazonaws.com/efa: "32"
             ephemeral-storage: "2Gi"
@@ -151,7 +151,7 @@ spec:
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           - --tensor-parallel-size
-          - '8'
+          - '4'
           - --no-enable-log-requests
           - --gpu-memory-utilization
           - '0.90'
@@ -187,11 +187,11 @@ spec:
       replicas: 1
       resources:
         limits:
-          gpu: '8'
+          gpu: '4'
           custom:
             vpc.amazonaws.com/efa: "32"
         requests:
-          gpu: '8'
+          gpu: '4'
           custom:
             vpc.amazonaws.com/efa: "32"
             ephemeral-storage: "2Gi"

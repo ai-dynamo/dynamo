@@ -98,7 +98,7 @@ spec:
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}'
           - --tensor-parallel-size
-          - '8'
+          - '4'
           - --no-enable-log-requests
           - --gpu-memory-utilization
           - '0.90'
@@ -122,10 +122,22 @@ spec:
           # NIXL backend: runtime defaults to UCX when DYN_KVBM_NIXL_BACKEND_LIBFABRIC
           # is unset, so no explicit selector env is needed here.
           # --- UCX over InfiniBand (8 ConnectX-7 rails: mlx5_ib0..mlx5_ib7) ---
-          - { name: UCX_TLS,                value: "rc,cuda_copy,cuda_ipc" }
+          # NOTE: don't set UCX_TLS. UCX needs internal transports (notably ud_mlx5
+          # for active-messages wireup) that an explicit allowlist almost always
+          # omits, breaking transport selection on some clusters. Let UCX auto-probe.
           # At TP=8, UCX tries to DMA-BUF-register each KV buffer on every listed device
           # (8 ranks x 8 devices = 64 registrations) and rank 2 -> mlx5_7 times out at kernel level.
           # Limiting to 4 devices keeps total registrations at 32 (same as known-working TP=4 case).
+          # 2026-05-28: verified auto-probe works at TP=4 (UCX picks the 8 compute
+          # IB NICs cleanly; smoke test passed). The explicit list below is kept as
+          # defense-in-depth — required for TP=8 (8 ranks × 8 NICs = 64 DMA-BUF
+          # registrations → kernel timeout) and protects against side-fabric NIC
+          # mlx5_8 (MTU 1024) being picked if cluster device layout changes.
+          # 2026-05-28: verified auto-probe works at TP=4 (UCX picks the 8 compute
+          # IB NICs cleanly; smoke test passed). The explicit list below is kept as
+          # defense-in-depth — required for TP=8 (8 ranks × 8 NICs = 64 DMA-BUF
+          # registrations → kernel timeout) and protects against side-fabric NIC
+          # mlx5_8 (MTU 1024) being picked if cluster device layout changes.
           - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
           - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
           - { name: UCX_RNDV_THRESH,        value: "8192" }
@@ -148,11 +160,11 @@ spec:
       replicas: 1
       resources:
         limits:
-          gpu: '8'
+          gpu: '4'
           custom:
             rdma/shared_ib: "1"
         requests:
-          gpu: '8'
+          gpu: '4'
           custom:
             rdma/shared_ib: "1"
             ephemeral-storage: "2Gi"
@@ -207,7 +219,7 @@ spec:
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}'
           - --tensor-parallel-size
-          - '8'
+          - '4'
           - --no-enable-log-requests
           - --gpu-memory-utilization
           - '0.90'
@@ -228,10 +240,20 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
-          - { name: UCX_TLS,                value: "rc,cuda_copy,cuda_ipc" }
+          # NOTE: no UCX_TLS — see prefill block; let UCX auto-probe.
           # At TP=8, UCX tries to DMA-BUF-register each KV buffer on every listed device
           # (8 ranks x 8 devices = 64 registrations) and rank 2 -> mlx5_7 times out at kernel level.
           # Limiting to 4 devices keeps total registrations at 32 (same as known-working TP=4 case).
+          # 2026-05-28: verified auto-probe works at TP=4 (UCX picks the 8 compute
+          # IB NICs cleanly; smoke test passed). The explicit list below is kept as
+          # defense-in-depth — required for TP=8 (8 ranks × 8 NICs = 64 DMA-BUF
+          # registrations → kernel timeout) and protects against side-fabric NIC
+          # mlx5_8 (MTU 1024) being picked if cluster device layout changes.
+          # 2026-05-28: verified auto-probe works at TP=4 (UCX picks the 8 compute
+          # IB NICs cleanly; smoke test passed). The explicit list below is kept as
+          # defense-in-depth — required for TP=8 (8 ranks × 8 NICs = 64 DMA-BUF
+          # registrations → kernel timeout) and protects against side-fabric NIC
+          # mlx5_8 (MTU 1024) being picked if cluster device layout changes.
           - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
           - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
           - { name: UCX_RNDV_THRESH,        value: "8192" }
@@ -252,11 +274,11 @@ spec:
       replicas: 1
       resources:
         limits:
-          gpu: '8'
+          gpu: '4'
           custom:
             rdma/shared_ib: "1"
         requests:
-          gpu: '8'
+          gpu: '4'
           custom:
             rdma/shared_ib: "1"
             ephemeral-storage: "2Gi"

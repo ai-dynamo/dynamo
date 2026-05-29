@@ -9,7 +9,7 @@ This is the **Azure AKS + InfiniBand** member of the cross-provider benchmark fa
 | **Container image** | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1` (standard image — no `-efa` suffix; UCX/IB are built in) |
 | **RDMA resource** | `rdma/shared_ib: "1"` per pod (boolean scheduling hint; the NVIDIA Network Operator's RDMA shared device plugin grants the pod access to all 8 IB rails) |
 | **NIXL backend selection** | _(default)_ — runtime defaults to UCX when `DYN_KVBM_NIXL_BACKEND_LIBFABRIC` is unset. No `DYN_KVBM_NIXL_BACKEND_*` env required. |
-| **Transport env** | `UCX_TLS=rc,cuda_copy,cuda_ipc`, `UCX_NET_DEVICES=mlx5_ib0:1,...,mlx5_ib7:1`, `UCX_IB_GPU_DIRECT_RDMA=yes`, `NCCL_IB_HCA=mlx5_ib0,...,mlx5_ib7`, `NCCL_IB_GID_INDEX=3`, `NCCL_SOCKET_IFNAME=eth0` (control plane only) |
+| **Transport env** | `UCX_NET_DEVICES=mlx5_0:1,...,mlx5_3:1` (4 of 8 rails — see "TP=8 DMA-BUF" gotcha below), `UCX_IB_GPU_DIRECT_RDMA=yes`, `NCCL_IB_HCA=mlx5_0,...,mlx5_7`, `NCCL_IB_GID_INDEX=3`, `NCCL_SOCKET_IFNAME=eth0` (control plane only). **No `UCX_TLS`** — let UCX auto-probe (an explicit allowlist breaks the wireup AM transport selection). |
 | **Volume mounts** | `/dev/infiniband` from host (hostPath) and a 64 GiB tmpfs `/dev/shm` per worker pod — Azure shared-device plugin grants access but the device files still need to be in the pod namespace |
 | **Model PVC** | `model-cache` (per-cluster PVC name; differs from AWS `shared-model-cache`) |
 | **Cluster** | `dynamo-aks-dev` (4 nodes, 8x A100-SXM4-80GB, `rdma/ib: 8` + `rdma/shared_ib: 63`); fallback `dynamo-aks-exp` (2 nodes, same shape) |
