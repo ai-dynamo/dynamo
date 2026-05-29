@@ -89,6 +89,39 @@ func ApplyRestorePodMetadataWithStorageConfig(
 	return nil
 }
 
+func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) error {
+	if labels == nil {
+		return fmt.Errorf("checkpoint restore candidate labels map is required")
+	}
+	if annotations == nil {
+		return fmt.Errorf("checkpoint restore candidate annotations map is required")
+	}
+	delete(labels, snapshotprotocol.CheckpointIDLabel)
+	delete(labels, snapshotprotocol.RestoreTargetLabel)
+	delete(labels, snapshotprotocol.CheckpointSourceLabel)
+	delete(annotations, snapshotprotocol.CheckpointArtifactVersionAnnotation)
+	delete(annotations, snapshotprotocol.CheckpointStatusAnnotation)
+	delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
+	delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
+	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
+	delete(annotations, commonconsts.CheckpointNameAnnotation)
+	delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
+	delete(annotations, snapshotprotocol.TargetContainersAnnotation)
+	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
+		return nil
+	}
+
+	targets := checkpointInfo.RestoreTargetContainers
+	if len(targets) == 0 {
+		targets = []string{commonconsts.MainContainerName}
+	}
+	annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
+	annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.CheckpointName
+	annotations[commonconsts.CheckpointStartupPolicyAnnotation] = string(StartupPolicy(checkpointInfo.StartupPolicy))
+	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
+	return nil
+}
+
 func InjectCheckpointIntoPodSpec(
 	ctx context.Context,
 	reader ctrlclient.Reader,
@@ -145,12 +178,54 @@ func injectCheckpointIntoPodSpec(
 		return nil
 	}
 
-	info := checkpointInfo
+	info := *checkpointInfo
+	if info.Hash == "" {
+		if info.CheckpointName == "" {
+			if info.Identity == nil {
+				return fmt.Errorf("checkpoint enabled but identity is nil and hash is not set")
+			}
+
+			hash, err := ComputeIdentityHash(*info.Identity)
+			if err != nil {
+				return fmt.Errorf("failed to compute identity hash: %w", err)
+			}
+			info.Hash = hash
+		} else if reader != nil {
+			ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
+			if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: info.CheckpointName}, ckpt); err != nil {
+				return fmt.Errorf("failed to get checkpoint %s/%s: %w", namespace, info.CheckpointName, err)
+			}
+			hash, err := CheckpointID(ckpt)
+			if err != nil {
+				return err
+			}
+			info.Hash = hash
+			if info.ArtifactVersion == "" {
+				info.ArtifactVersion = checkpointArtifactVersion(ckpt)
+			}
+			if info.GPUMemoryService == nil {
+				info.GPUMemoryService = ckpt.Spec.GPUMemoryService
+			}
+		} else {
+			if info.Identity == nil {
+				return fmt.Errorf("checkpoint enabled but identity is nil and hash is not set")
+			}
+			hash, err := ComputeIdentityHash(*info.Identity)
+			if err != nil {
+				return fmt.Errorf("failed to compute identity hash: %w", err)
+			}
+			info.Hash = hash
+		}
+	}
+
+	if info.ArtifactVersion == "" {
+		info.ArtifactVersion = snapshotprotocol.DefaultCheckpointArtifactVersion
+	}
+
 	if info.Hash == "" {
 		if info.Identity == nil {
 			return fmt.Errorf("checkpoint enabled but identity is nil and hash is not set")
 		}
-
 		hash, err := ComputeIdentityHash(*info.Identity)
 		if err != nil {
 			return fmt.Errorf("failed to compute identity hash: %w", err)

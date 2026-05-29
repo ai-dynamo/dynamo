@@ -1008,16 +1008,22 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
 	if r.Config.Checkpoint.Enabled {
-		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-			ctx,
-			r.Client,
-			dcd.Namespace,
-			podSpec,
-			checkpointInfo,
-			r.Config.Checkpoint.Storage,
-			r.Config.Checkpoint.EffectiveSeccompProfile(),
-		); err != nil {
-			return nil, errors.Wrap(err, "failed to inject checkpoint config")
+		if checkpointInfo != nil && checkpoint.UsesImmediateStartup(checkpointInfo.StartupPolicy) {
+			// Immediate mode keeps owner pod templates stable when checkpoint
+			// readiness changes. The pod-create webhook performs restore shaping
+			// only for newly-created Pods after the checkpoint is Ready.
+		} else {
+			if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
+				ctx,
+				r.Client,
+				dcd.Namespace,
+				podSpec,
+				checkpointInfo,
+				r.Config.Checkpoint.Storage,
+				r.Config.Checkpoint.EffectiveSeccompProfile(),
+			); err != nil {
+				return nil, errors.Wrap(err, "failed to inject checkpoint config")
+			}
 		}
 	}
 
@@ -1034,9 +1040,14 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
-	// Restore labels are operator-controlled state. Clear stale values after
-	// metadata merge and only reapply them when checkpoint material is ready.
-	if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(podLabels, podAnnotations, checkpointInfo, r.Config.Checkpoint.Storage); err != nil {
+	// Restore labels are operator-controlled state. Immediate mode stamps a
+	// stable candidate annotation and defers restore mutation to Pod CREATE; all
+	// other modes can shape the owner template once the checkpoint is ready.
+	if checkpointInfo != nil && checkpoint.UsesImmediateStartup(checkpointInfo.StartupPolicy) {
+		if err := checkpoint.ApplyRestoreCandidateMetadata(podLabels, podAnnotations, checkpointInfo); err != nil {
+			return nil, errors.Wrap(err, "failed to apply checkpoint candidate metadata")
+		}
+	} else if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(podLabels, podAnnotations, checkpointInfo, r.Config.Checkpoint.Storage); err != nil {
 		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
 	}
 

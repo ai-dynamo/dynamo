@@ -24,6 +24,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
@@ -372,7 +373,7 @@ func (c *createHookClient) Create(ctx context.Context, obj client.Object, opts .
 	return c.Client.Create(ctx, obj, opts...)
 }
 
-func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *testing.T) {
+func TestCreateOrGetAutoCheckpointDoesNotReuseDifferentCheckpointWithSameLegacyHash(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
 
@@ -412,14 +413,13 @@ func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *te
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{}, "", nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", "", nil, nil)
 	require.NoError(t, err)
-	assert.Equal(t, friendly.Name, ckpt.Name)
+	assert.Equal(t, "checkpoint-"+testHash, ckpt.Name)
 
 	list := &nvidiacomv1alpha1.DynamoCheckpointList{}
 	require.NoError(t, baseClient.List(ctx, list))
-	require.Len(t, list.Items, 1)
-	assert.Equal(t, friendly.Name, list.Items[0].Name)
+	require.Len(t, list.Items, 2)
 }
 
 func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
@@ -427,10 +427,18 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{}, "", nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", "", nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
+	assert.Equal(t, "true", ckpt.Annotations[consts.CheckpointAutoAnnotation])
+	assert.Equal(t, string(nvidiacomv1alpha1.CheckpointDeletionPolicyDelete), ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation])
+	assert.Equal(t, testHash, ckpt.Labels[snapshotprotocol.CheckpointIDLabel])
+	assert.True(t, commonController.ContainsFinalizer(ckpt))
+
+	stored := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: ckpt.Namespace}, stored))
+	assert.True(t, commonController.ContainsFinalizer(stored))
 }
 
 func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.T) {
@@ -443,13 +451,46 @@ func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.
 		ctx,
 		c,
 		testNamespace,
+		testHash,
 		testIdentity(),
 		corev1.PodTemplateSpec{},
 		"",
+		"",
 		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
+		nil,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GMS + Snapshot is temporarily disabled")
+}
+
+func TestCreateOrGetAutoCheckpointRetainStoresDeletionPolicy(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+	owner := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: testNamespace,
+			UID:       types.UID("dgd-uid"),
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(owner).Build()
+
+	ckpt, err := CreateOrGetAutoCheckpoint(
+		ctx,
+		c,
+		testNamespace,
+		testHash,
+		testIdentity(),
+		corev1.PodTemplateSpec{},
+		"",
+		nvidiacomv1alpha1.CheckpointDeletionPolicyRetain,
+		nil,
+		owner,
+	)
+	require.NoError(t, err)
+
+	assert.Empty(t, ckpt.OwnerReferences)
+	assert.Equal(t, string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain), ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation])
 }
 
 // --- InjectCheckpointIntoPodSpec tests ---
@@ -483,7 +524,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
-		assert.Len(t, info.Hash, 16)
 
 		volumes := map[string]corev1.Volume{}
 		for _, volume := range podSpec.Volumes {
@@ -855,10 +895,14 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.Len(t, info.Hash, 16)
 	})
 
-	t.Run("errors when enabled but no ref and no identity", func(t *testing.T) {
+	t.Run("enabled without ref or identity waits for auto-created checkpoint", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
-		assert.ErrorContains(t, err, "no checkpointRef or identity")
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
+		require.NoError(t, err)
+		assert.True(t, info.Enabled)
+		assert.False(t, info.Exists)
+		assert.False(t, info.Ready)
+		assert.Equal(t, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate, info.StartupPolicy)
 	})
 }
 

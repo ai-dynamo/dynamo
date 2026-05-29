@@ -7801,10 +7801,10 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 // no CRIU state to capture; shaping them as restore targets would replace
 // the GMS wrapper command with `sleep infinity` and break the layout.
 //
-// Engine cliques in the same service must still be shaped: target-
-// containers annotation set to "main", restore-target label set to true,
-// and the placeholder `sleep infinity` command injected so the snapshot
-// agent can drive the restore.
+// Engine cliques in the same service must still be restore candidates: the
+// target-containers annotation is set to "main", but Immediate startup keeps
+// the owner template cold-start-shaped. The pod-create mutating webhook turns
+// newly-created engine pods into restore targets after the checkpoint is Ready.
 func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) {
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -7873,7 +7873,13 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 	}).Build()
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
-		"decode": {Enabled: true, Ready: true, Hash: "abc123def4567890"},
+		"decode": {
+			Enabled:        true,
+			Exists:         true,
+			Ready:          true,
+			Hash:           "abc123def4567890",
+			CheckpointName: "decode-checkpoint",
+		},
 	}
 
 	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
@@ -7896,10 +7902,12 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 			sawEngine = true
 			assert.Equal(t, commonconsts.MainContainerName, targetAnnotation,
 				"engine clique %q must carry snapshot-target-containers=main annotation", clique.Name)
-			assert.NotEmpty(t, checkpointID,
-				"engine clique %q must carry checkpoint-id label (selected by snapshot-agent restore informer)", clique.Name)
-			assert.Equal(t, []string{"sleep", "infinity"}, mainContainer.Command,
-				"engine clique %q main container must be shaped as a snapshot restore target", clique.Name)
+			assert.Empty(t, checkpointID,
+				"engine clique %q must not carry checkpoint-id label until the pod-create mutating webhook restore-shapes a Pod", clique.Name)
+			assert.Equal(t, "true", clique.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation],
+				"engine clique %q must carry the restore-candidate annotation for the pod-create webhook", clique.Name)
+			assert.NotEqual(t, []string{"sleep", "infinity"}, mainContainer.Command,
+				"engine clique %q main container must stay cold-start-shaped in Immediate startup", clique.Name)
 		}
 	}
 	assert.True(t, sawGMS, "test setup should produce at least one GMS clique")
@@ -7920,7 +7928,9 @@ func findContainerInClique(t *testing.T, clique *grovev1alpha1.PodCliqueTemplate
 // TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets pins the
 // contract that intra-pod failover services (Failover.Mode=intraPod) stamp
 // the snapshot-target-containers annotation with "engine-0,engine-1" on
-// the restore pod and shape every engine container as a restore target.
+// the restore candidate pod template. Immediate startup leaves the owner
+// template cold-start-shaped; the pod-create mutating webhook shape every
+// engine container as a restore target after the checkpoint is Ready.
 // Intra-pod failover clones the main container into engine-0 + engine-1 and
 // both engines must be driven by the snapshot agent from the same checkpoint.
 func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.T) {
@@ -7991,8 +8001,10 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
 			Enabled:                 true,
+			Exists:                  true,
 			Ready:                   true,
 			Hash:                    "abc123def4567890",
+			CheckpointName:          "decode-checkpoint",
 			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
 		},
 	}
@@ -8009,22 +8021,81 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 		sawDecode = true
 		assert.Equal(t, "engine-0,engine-1", clique.Annotations[snapshotprotocol.TargetContainersAnnotation],
 			"clique %q must carry snapshot-target-containers=engine-0,engine-1", clique.Name)
+		assert.Equal(t, "true", clique.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation],
+			"clique %q must carry the restore-candidate annotation for the pod-create webhook", clique.Name)
 		for _, engineName := range IntraPodFailoverEngineContainerNames() {
 			c := findContainerInClique(t, clique, engineName)
-			assert.Equal(t, []string{"sleep", "infinity"}, c.Command,
-				"%s in clique %q must be shaped as a snapshot restore target", engineName, clique.Name)
-			foundMount := false
+			assert.NotEqual(t, []string{"sleep", "infinity"}, c.Command,
+				"%s in clique %q must stay cold-start-shaped in Immediate startup", engineName, clique.Name)
 			for _, m := range c.VolumeMounts {
 				if m.Name == snapshotprotocol.SnapshotControlVolumeName {
-					foundMount = true
-					assert.Equal(t, engineName, m.SubPath,
-						"%s in clique %q must have its own subPath on the control volume", engineName, clique.Name)
+					t.Fatalf("%s in clique %q must not mount the snapshot-control volume before the pod-create webhook runs", engineName, clique.Name)
 				}
 			}
-			assert.True(t, foundMount, "%s in clique %q must mount the snapshot-control volume", engineName, clique.Name)
 		}
 	}
 	assert.True(t, sawDecode, "test setup should produce the decode engine clique")
+}
+
+func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "test-ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(3)),
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+					Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled:       true,
+						StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+					},
+				},
+			},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true}},
+		&controller_common.RuntimeConfig{DRAEnabled: true},
+		nil,
+		nil,
+		nil,
+		nil,
+		map[string]*checkpoint.CheckpointInfo{
+			"decode": {
+				Enabled:        true,
+				Exists:         true,
+				StartupPolicy:  v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				CheckpointName: "decode-checkpoint",
+			},
+		},
+	)
+	require.NoError(t, err)
+
+	require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+	pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
+	require.NotNil(t, pcsg.Replicas)
+	assert.EqualValues(t, 0, *pcsg.Replicas)
+	require.NotNil(t, pcsg.MinAvailable)
+	assert.EqualValues(t, 0, *pcsg.MinAvailable)
+	for _, clique := range got.Spec.Template.Cliques {
+		if strings.Contains(clique.Name, "gms") {
+			continue
+		}
+		assert.EqualValues(t, 0, clique.Spec.Replicas, "clique %q should be gated", clique.Name)
+		require.NotNil(t, clique.Spec.MinAvailable)
+		assert.EqualValues(t, 0, *clique.Spec.MinAvailable, "clique %q should be gated", clique.Name)
+	}
 }
 
 // TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant pins

@@ -33,9 +33,9 @@ spec:
           jsonPath: .status.phase
           name: Phase
           type: string
-        - description: Identity hash of the checkpoint
-          jsonPath: .status.identityHash
-          name: Hash
+        - description: Artifact ID of the checkpoint
+          jsonPath: .status.checkpointID
+          name: CheckpointID
           type: string
         - jsonPath: .metadata.creationTimestamp
           name: Age
@@ -139,7 +139,9 @@ spec:
                     - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
                       rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                 identity:
-                  description: Identity defines the inputs that determine checkpoint equivalence
+                  description: |-
+                    Identity is legacy compatibility metadata. DGD-managed automatic
+                    checkpoints use an operator-owned checkpoint ID instead.
                   properties:
                     backendFramework:
                       description: BackendFramework is the runtime framework (vllm, sglang, trtllm)
@@ -153,9 +155,9 @@ spec:
                       type: string
                     dynamoVersion:
                       description: |-
-                        DynamoVersion is the Dynamo platform version (optional)
-                        If not specified, version is not included in identity hash
-                        This ensures checkpoint compatibility across Dynamo releases
+                        DynamoVersion is the Dynamo platform version (optional).
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       type: string
                     extraParameters:
                       additionalProperties:
@@ -8306,6 +8308,9 @@ spec:
             status:
               description: DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
               properties:
+                checkpointID:
+                  description: CheckpointID is the artifact ID used by the snapshot protocol.
+                  type: string
                 conditions:
                   description: 'DEPRECATED: Conditions are deprecated. Use status.phase instead.'
                   items:
@@ -8368,8 +8373,9 @@ spec:
                   type: string
                 identityHash:
                   description: |-
-                    IdentityHash is the computed hash of the checkpoint identity
-                    This hash is used to identify equivalent checkpoints
+                    IdentityHash is the computed hash of the checkpoint identity.
+                    Deprecated: use CheckpointID. This field is retained for compatibility
+                    with older status consumers.
                   type: string
                 jobName:
                   description: JobName is the name of the checkpoint creation Job

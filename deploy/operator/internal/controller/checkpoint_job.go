@@ -62,12 +62,15 @@ func buildCheckpointJob(
 	jobName string,
 ) (*batchv1.Job, error) {
 	podTemplate := ckpt.Spec.Job.PodTemplateSpec.DeepCopy()
-	hash := ckpt.Status.IdentityHash
+	hash := ckpt.Status.CheckpointID
+	if hash == "" {
+		hash = ckpt.Status.IdentityHash
+	}
 	if hash == "" {
 		var err error
-		hash, err = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+		hash, err = checkpoint.CheckpointID(ckpt)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+			return nil, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
 		}
 	}
 
@@ -100,6 +103,10 @@ func buildCheckpointJob(
 	}
 	if targetContainer == nil {
 		return nil, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", targetContainerName)
+	}
+	gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
+	if err != nil {
+		return nil, fmt.Errorf("invalid GPU resource requirements for checkpoint target %q: %w", targetContainerName, err)
 	}
 	targetContainer.Env = dynamo.MergeEnvs(
 		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
@@ -189,18 +196,10 @@ func buildCheckpointJob(
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
-	// Wrap with cuda-checkpoint --launch-job for multi-GPU jobs (TP*PP > 1).
-	// Use checkpoint identity (not container limits) because DRA may have
-	// already removed nvidia.com/gpu from the template.
-	tp := ckpt.Spec.Identity.TensorParallelSize
-	pp := ckpt.Spec.Identity.PipelineParallelSize
-	if tp == 0 {
-		tp = 1
-	}
-	if pp == 0 {
-		pp = 1
-	}
-	wrapLaunchJob := tp*pp > 1
+	// Wrap with cuda-checkpoint --launch-job for multi-GPU jobs. This is based
+	// on the workload container's GPU request captured before any DRA/GMS wiring
+	// mutates scalar GPU resources.
+	wrapLaunchJob := gpuCount > 1
 
 	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
 
