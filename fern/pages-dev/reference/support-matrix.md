@@ -60,7 +60,7 @@ For **v1.1.0-dev.2**, **v1.1.0-dev.3**, **v1.2.0-deepseek-v4-dev.2**, and **v1.2
 
 ### Version Labels
 
-- **main (ToT)** reflects the current development branch.
+- **1.3.0 (main / ToT)** reflects the current development branch.
 - Releases marked *(experimental, partial)* are pre-releases: the table shows branch build pins, which may include backends with no NGC image for that dev tag yet.
 - Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
 
