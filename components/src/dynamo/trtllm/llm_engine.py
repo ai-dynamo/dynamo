@@ -395,7 +395,8 @@ class TrtllmLLMEngine(LLMEngine):
         # env-off engine started with `skip_tokenizer_init=True` is
         # safe (the tokenizer is never dereferenced).
         assert self._engine is not None
-        return resolve_test_logits_processor_spec(lambda: self._engine.llm.tokenizer)
+        engine = self._engine
+        return resolve_test_logits_processor_spec(lambda: engine.llm.tokenizer)
 
     def component_metrics_dp_ranks(self) -> list[int]:
         return list(range(self._attention_dp_size))
