@@ -582,9 +582,7 @@ class VllmProcessor:
                 output_request_ids[output_idx] = child_request_id
                 registered_request_ids.append(child_request_id)
 
-        # Totals for the llm_metrics annotation emitted below — the
-        # Rust postprocessor that normally produces these is bypassed
-        # on the vllm chat processor path.
+        # llm_metrics totals; Rust postprocessor is bypassed on this path.
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
 
@@ -622,6 +620,11 @@ class VllmProcessor:
                 if "token_ids" not in engine_response:
                     yield handle_engine_error(engine_response, request_id, logger)
                     break
+
+                # Count before any choice gate — tool/reasoning parsers may
+                # consume tokens without emitting a visible delta.
+                chunk_tokens = len(engine_response.get("token_ids") or [])
+                cumulative_output_tokens += chunk_tokens
 
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
@@ -666,25 +669,27 @@ class VllmProcessor:
                     pass
 
                 choices = []
-                if not vllm_out.request_outputs:
-                    continue
-                for output in vllm_out.request_outputs[0].outputs:
-                    post = post_processors.get(output.index)
-                    if post is None:
-                        yield {
-                            "error": {
-                                "message": (
-                                    f"Invalid postprocessor choice index {output.index} "
-                                    f"for request {request_id}"
-                                ),
-                                "type": "internal_error",
+                if vllm_out.request_outputs:
+                    for output in vllm_out.request_outputs[0].outputs:
+                        post = post_processors.get(output.index)
+                        if post is None:
+                            yield {
+                                "error": {
+                                    "message": (
+                                        f"Invalid postprocessor choice index {output.index} "
+                                        f"for request {request_id}"
+                                    ),
+                                    "type": "internal_error",
+                                }
                             }
-                        }
-                        break
-                    choice = post.process_output(output)
-                    if choice:
-                        choices.append(choice)
+                            break
+                        choice = post.process_output(output)
+                        if choice:
+                            choices.append(choice)
 
+                # One envelope per iteration carries both data and metrics so
+                # client cancellation can't drop the annotation between yields.
+                envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choices:
                     dynamo_out = {
                         "id": request_id,
@@ -695,22 +700,17 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = usage
+                    envelope["data"] = dynamo_out
 
-                    yield dynamo_out
+                metrics = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": cumulative_output_tokens,
+                    "chunk_tokens": chunk_tokens,
+                }
+                envelope["event"] = "llm_metrics"
+                envelope["comment"] = [json.dumps(metrics)]
 
-                    chunk_tokens = len(engine_response.get("token_ids") or [])
-                    if chunk_tokens > 0:
-                        cumulative_output_tokens += chunk_tokens
-                        metrics = {
-                            "input_tokens": input_tokens,
-                            "output_tokens": cumulative_output_tokens,
-                            "chunk_tokens": chunk_tokens,
-                        }
-                        yield {
-                            "_dynamo_annotated": True,
-                            "event": "llm_metrics",
-                            "comment": [json.dumps(metrics)],
-                        }
+                yield envelope
             _nvtx.end_range(rng_stream)
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)

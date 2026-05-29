@@ -325,14 +325,13 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        # VllmProcessor emits a data chunk followed by an llm_metrics
-        # annotation envelope on every worker iteration. The annotation is
-        # consumed by the HTTP-service metric observer (TTFT/ITL/OSL
-        # histograms) and stripped before reaching the SSE response.
-        assert len(chunks) == 2
-        data_chunk, annotation = chunks
+        # One annotated envelope per iteration carries both data and the
+        # llm_metrics annotation; observer strips the annotation before SSE.
+        assert len(chunks) == 1
+        envelope = chunks[0]
 
-        assert data_chunk == {
+        assert envelope["_dynamo_annotated"] is True
+        assert envelope["data"] == {
             "id": "request-id",
             "choices": [
                 {
@@ -341,16 +340,14 @@ class TestRoutedEnginePath:
                     "finish_reason": None,
                 }
             ],
-            "created": data_chunk["created"],
+            "created": envelope["data"]["created"],
             "model": MODEL,
             "object": "chat.completion.chunk",
         }
 
-        assert annotation["_dynamo_annotated"] is True
-        assert annotation["event"] == "llm_metrics"
-        assert len(annotation["comment"]) == 1
-        payload = json.loads(annotation["comment"][0])
-        assert payload == {
+        assert envelope["event"] == "llm_metrics"
+        assert len(envelope["comment"]) == 1
+        assert json.loads(envelope["comment"][0]) == {
             "input_tokens": 3,
             "output_tokens": 1,
             "chunk_tokens": 1,
