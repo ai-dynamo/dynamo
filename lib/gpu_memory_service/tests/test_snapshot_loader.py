@@ -93,12 +93,14 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
         "nixl",
         [],
         2,
+        False,
     )
 
     assert calls[0] == ("set_device", 3)
     assert calls[1][0] == "init"
     assert calls[1][1]["socket_path"] == "/tmp/gms-3"
     assert calls[1][1]["device"] == 3
+    assert calls[1][1]["overlap_restore_transfers"] is False
     assert calls[2] == (
         "load_to_gms",
         {

@@ -120,6 +120,7 @@ def _run_load(args) -> None:
         transfer_backend=args.transfer_backend,
         sharded_ssd_roots=parse_sharded_ssd_roots(args.sharded_ssd_roots or ""),
         sharded_ssd_queues_per_root=args.sharded_ssd_queues_per_root,
+        overlap_restore_transfers=not args.no_overlap_restore_transfers,
     )
 
     id_map = client.load_to_gms(
@@ -284,6 +285,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Do not clear existing GMS allocations before loading. "
             "Default behaviour clears the server to produce an exact replica."
+        ),
+    )
+    load_p.add_argument(
+        "--no-overlap-restore-transfers",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable streaming restore target submission and allocate all GMS "
+            "targets before starting backend transfers."
         ),
     )
     load_p.add_argument(

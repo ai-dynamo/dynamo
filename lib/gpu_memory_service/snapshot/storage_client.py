@@ -27,12 +27,21 @@ from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
 from gpu_memory_service.snapshot.transfer import (
     GMSSnapshotConfig,
     GMSTransferTarget,
+    StreamingTransferSession,
     TransferBackendKind,
     build_file_transfer_sources,
     create_transfer_backend,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_streaming_transfer_session(
+    session: Any,
+) -> bool:
+    return callable(getattr(session, "submit_targets", None)) and callable(
+        getattr(session, "finish_restore", None)
+    )
 
 
 class GMSStorageClient:
@@ -50,6 +59,7 @@ class GMSStorageClient:
         sharded_ssd_roots: Optional[Sequence[str]] = None,
         sharded_ssd_queues_per_root: int = 2,
         posix_backend_params: Optional[Mapping[str, str]] = None,
+        overlap_restore_transfers: bool = True,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
@@ -71,6 +81,7 @@ class GMSStorageClient:
             if posix_backend_params is None
             else {str(key): str(value) for key, value in posix_backend_params.items()}
         )
+        self._overlap_restore_transfers = bool(overlap_restore_transfers)
 
         if socket_path is None:
             from gpu_memory_service.common.utils import get_socket_path
@@ -230,6 +241,44 @@ class GMSStorageClient:
         )
         return id_map, targets
 
+    def _allocate_and_submit_restore_targets(
+        self,
+        mm: Any,
+        manifest: SaveManifest,
+        session: StreamingTransferSession,
+    ) -> Tuple[Dict[str, str], Dict[str, GMSTransferTarget]]:
+        """Allocate restore targets and publish each target immediately.
+
+        The allocation loop intentionally preserves manifest order because the
+        committed GMS layout/remap hash depends on allocation rank.  Streaming
+        only changes when the transfer backend learns about a target, not the
+        resulting committed layout.
+        """
+        t0 = time.monotonic()
+        id_map: Dict[str, str] = {}
+        targets: Dict[str, GMSTransferTarget] = {}
+        for entry in manifest.allocations:
+            old_id = entry.allocation_id
+            va = mm.create_mapping(size=entry.size, tag=entry.tag)
+            new_target = GMSTransferTarget(
+                allocation_id=old_id,
+                va=va,
+                device=self.device,
+                byte_count=entry.aligned_size,
+            )
+            id_map[old_id] = mm.mappings[va].allocation_id
+            targets[old_id] = new_target
+            session.submit_targets({old_id: new_target})
+
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Allocated and submitted %d restore target GMS VAs in %.3fs",
+            len(targets),
+            elapsed,
+        )
+        session.finish_restore()
+        return id_map, targets
+
     def load_to_gms(
         self,
         input_dir: str,
@@ -240,32 +289,48 @@ class GMSStorageClient:
     ) -> Dict[str, str]:
         backend_name = transfer_backend or self._transfer_backend
 
-        backend = create_transfer_backend(
-            backend_name,
-            GMSSnapshotConfig(
-                device=self.device,
-                max_workers=max_workers,
-                backend_config={
-                    "sharded_ssd_roots": self._sharded_ssd_roots,
-                    "sharded_ssd_queues_per_root": self._sharded_ssd_queues_per_root,
-                    "posix_backend_params": self._posix_backend_params,
-                },
-            ),
-        )
+        backend_config = {
+            "sharded_ssd_roots": self._sharded_ssd_roots,
+            "sharded_ssd_queues_per_root": self._sharded_ssd_queues_per_root,
+            "posix_backend_params": self._posix_backend_params,
+        }
+        backend = None
         session = None
         id_map: Dict[str, str] = {}
 
         try:
             manifest, saved_metadata = load_manifest_and_metadata(input_dir)
             sources = build_file_transfer_sources(input_dir, manifest.allocations)
+
+            backend = create_transfer_backend(
+                backend_name,
+                GMSSnapshotConfig(
+                    device=self.device,
+                    max_workers=max_workers,
+                    backend_config=backend_config,
+                ),
+            )
             session = backend.start_restore(sources)
             with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
                 mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
                 if clear_existing:
                     logger.info("RW connect cleared any previously committed GMS state")
 
-                id_map, targets = self._allocate_restore_targets(mm, manifest)
-                session.restore(targets)
+                if self._overlap_restore_transfers and _is_streaming_transfer_session(
+                    session
+                ):
+                    logger.info(
+                        "Using streaming restore target submission for %s",
+                        backend_name,
+                    )
+                    id_map, targets = self._allocate_and_submit_restore_targets(
+                        mm,
+                        manifest,
+                        session,
+                    )
+                else:
+                    id_map, targets = self._allocate_restore_targets(mm, manifest)
+                    session.restore(targets)
                 logger.info(
                     "%s restored %d allocation(s) to GMS memory",
                     backend_name,
@@ -278,7 +343,8 @@ class GMSStorageClient:
         finally:
             if session is not None:
                 session.close()
-            backend.close()
+            if backend is not None:
+                backend.close()
 
         logger.info(
             "load_to_gms complete: %d allocations, %d metadata keys",

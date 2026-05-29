@@ -67,6 +67,21 @@ class TransferSession(Protocol):
         """Release resources and cancel any pending work."""
 
 
+class StreamingTransferSession(TransferSession, Protocol):
+    """Transfer session that accepts GMS targets as soon as they are allocated.
+
+    Restore allocation order is still controlled by the caller.  Backends that
+    implement this protocol may start transferring any internally complete work
+    group before every allocation in the checkpoint has a destination VA.
+    """
+
+    def submit_targets(self, targets: Mapping[str, GMSTransferTarget]) -> None:
+        """Publish newly allocated restore targets to the backend."""
+
+    def finish_restore(self) -> None:
+        """Block until all submitted targets have been restored."""
+
+
 class TransferBackend(Protocol):
     """Backend capable of restoring bytes into GMS targets."""
 

@@ -38,6 +38,7 @@ def _load_device(
     transfer_backend: str,
     sharded_ssd_roots: list[str],
     sharded_ssd_queues_per_root: int,
+    overlap_restore_transfers: bool,
 ) -> None:
     input_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info(
@@ -59,6 +60,7 @@ def _load_device(
         transfer_backend=transfer_backend,
         sharded_ssd_roots=sharded_ssd_roots,
         sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
+        overlap_restore_transfers=overlap_restore_transfers,
     )
     client.load_to_gms(
         input_dir,
@@ -104,6 +106,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Number of independent sharded-ssd restore queues per SSD root.",
+    )
+    parser.add_argument(
+        "--no-overlap-restore-transfers",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable streaming restore target submission and allocate all GMS "
+            "targets before starting backend transfers."
+        ),
     )
     return parser
 
@@ -158,13 +169,16 @@ def main(argv: list[str] | None = None) -> None:
     transfer_backend = args.transfer_backend
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
     sharded_ssd_queues_per_root = args.sharded_ssd_queues_per_root
+    overlap_restore_transfers = not args.no_overlap_restore_transfers
     logger.info(
         "Starting GMS load: transfer_backend=%s max_workers=%d "
-        "sharded_ssd_roots=%s sharded_ssd_queues_per_root=%d",
+        "sharded_ssd_roots=%s sharded_ssd_queues_per_root=%d "
+        "overlap_restore_transfers=%s",
         transfer_backend,
         max_workers,
         ",".join(sharded_ssd_roots) or "-",
         sharded_ssd_queues_per_root,
+        overlap_restore_transfers,
     )
     devices = _list_checkpoint_devices(checkpoint_dir)
 
@@ -179,6 +193,7 @@ def main(argv: list[str] | None = None) -> None:
                 transfer_backend,
                 sharded_ssd_roots,
                 sharded_ssd_queues_per_root,
+                overlap_restore_transfers,
             ): dev
             for dev in devices
         }
