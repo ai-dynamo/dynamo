@@ -42,6 +42,16 @@ The quick test targets aggregated deployments. In disaggregated mode the prefill
 
 For a public, user-defined processor loader (CLI/import-string), see the deferred follow-up in the design doc; this env hook intentionally stays test-focused.
 
+### How the unified backend wires this up
+
+The unified TRT-LLM engine threads logits processors through a shared, backend-agnostic spec entry layer in `dynamo.common.backend.engine` (next to the `LLMEngine` ABC) and a per-backend realizer at `dynamo.trtllm.logits_processing.adapter`:
+
+- `from_args` inlines `if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1": engine_args["skip_tokenizer_init"] = False` so an attached processor that needs the tokenizer can't be starved by an explicit user `skip_tokenizer_init=True`. The flag is backend-shaped (TRT-LLM dict; SGLang/vLLM set their own).
+- `start()` resolves a `LogitsProcessorSpec` once via `resolve_test_logits_processor_spec(get_tokenizer)`. The lambda is invoked lazily after the env check, so engines started with `skip_tokenizer_init=True` and the hook off don't crash. The spec carries a `ForcedTokenSequenceSpec` with token IDs already resolved at startup — no per-request tokenizer access. `None` when the env var is off.
+- `generate()` calls `logits_processors_for_request(spec, is_prefill=is_prefill)` to get the spec entry list (empty in PREFILL or when spec is `None`), then `attach_logits_processors(sampling_params, entries)` to plug them into TRT-LLM. The TRT-LLM realizer materializes each spec entry into a fresh `BaseLogitsProcessor` (e.g. `ForcedSequenceLogitsProcessor`) and wraps in `TrtllmDynamoLogitsAdapter`.
+
+The same shared layer will host the vLLM and SGLang slices when those land. vLLM loads a batch-level adapter class at engine init and activates it per request via `SamplingParams.extra_args`; SGLang flips `--enable-custom-logit-processor` at startup and passes a serialized class spec + `custom_params` per request. Each backend translates the same `LogitsProcessorSpec` differently. The public config-driven loader (when it lands) plugs in by resolving a `LogitsProcessorSpec` from CLI/config instead of from this env var; no engine code changes.
+
 ### Bring your own processor
 
 Implement a processor by conforming to `BaseLogitsProcessor` and modify logits in-place. For example, temperature scaling:
