@@ -980,9 +980,7 @@ async fn embeddings(
     // asked for float (or didn't specify, defaulting to float per spec).
     if client_wants_float {
         for embedding_obj in response.inner.data.iter_mut() {
-            if let dynamo_protocols::types::EmbeddingVector::Base64(s) =
-                &embedding_obj.embedding
-            {
+            if let dynamo_protocols::types::EmbeddingVector::Base64(s) = &embedding_obj.embedding {
                 match decode_base64_embedding_to_floats(s) {
                     Ok(floats) => {
                         embedding_obj.embedding =
