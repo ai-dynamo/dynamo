@@ -917,11 +917,12 @@ async fn embeddings(
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
-    // The worker always emits base64-encoded vectors over NATS (the
-    // worker->frontend wire format is ~3x smaller and ~10x faster to
-    // (de)serialize than a JSON float array). If the client asked for
-    // float (the default), decode back at the HTTP boundary so the
-    // public response shape matches their ``encoding_format`` choice.
+    // The worker always emits base64-encoded vectors over NATS so we
+    // avoid serializing/parsing a JSON float array on the internal hop.
+    // If the client asked for float (the default), decode back at the
+    // HTTP boundary so the public response shape matches their
+    // ``encoding_format`` choice. See the PR description / DIS-2154 for
+    // measured impact.
     let client_wants_float = !matches!(
         request.inner.encoding_format,
         Some(dynamo_protocols::types::EncodingFormat::Base64)
@@ -4901,6 +4902,57 @@ mod tests {
         assert!(
             !is_empty_completion_stream_response(&make_completion_chunk("", None, Some(usage))),
             "usage present → not empty",
+        );
+    }
+
+    // ── decode_base64_embedding_to_floats ────────────────────────────────
+    //
+    // The Python embedding worker always emits ``embedding`` as a base64
+    // string in the new internal wire format; the HTTP handler decodes
+    // back to ``Vec<f32>`` at the response boundary when the client
+    // requested float. These tests cover the decoder's three invariants:
+    // little-endian f32 byte-for-byte equivalence, invalid base64
+    // rejection, and non-multiple-of-4 byte length rejection.
+
+    #[test]
+    fn decode_base64_embedding_to_floats_round_trips_little_endian_f32() {
+        use base64::Engine as _;
+        let floats: Vec<f32> = vec![0.0, 1.0, -1.0, 3.14, -42.5, f32::MIN, f32::MAX];
+        let mut bytes: Vec<u8> = Vec::with_capacity(floats.len() * 4);
+        for f in &floats {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let decoded = decode_base64_embedding_to_floats(&encoded)
+            .expect("valid base64 of f32 bytes should decode");
+        assert_eq!(decoded, floats);
+    }
+
+    #[test]
+    fn decode_base64_embedding_to_floats_rejects_invalid_base64() {
+        // Padding and alphabet violations: standard base64 alphabet is
+        // A-Za-z0-9+/= -- the '!' byte forces a decode error.
+        let result = decode_base64_embedding_to_floats("not!valid!base64");
+        assert!(
+            result.is_err(),
+            "non-base64 input should fail decode, got Ok({:?})",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn decode_base64_embedding_to_floats_rejects_non_multiple_of_4_byte_length() {
+        // 5 raw bytes -> base64 string. The handler must reject because
+        // 5 is not a whole number of f32 values.
+        use base64::Engine as _;
+        let bytes: Vec<u8> = vec![1, 2, 3, 4, 5];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let result = decode_base64_embedding_to_floats(&encoded);
+        assert!(result.is_err(), "5-byte payload must fail, got Ok");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not a multiple of 4"),
+            "error should mention the multiple-of-4 check, got: {err_msg}"
         );
     }
 }
