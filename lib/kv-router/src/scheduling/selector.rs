@@ -7,9 +7,8 @@ use rand::Rng;
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
-use super::types::{
-    KvSchedulerError, RoutingEligibility, SchedulingRequest, WorkerEligibilityError,
-};
+use super::filter::{RoutingEligibility, WorkerEligibilityError};
+use super::types::{KvSchedulerError, SchedulingRequest};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// A trait that users can implement to define custom selection logic.
