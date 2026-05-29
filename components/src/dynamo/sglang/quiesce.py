@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sglang.srt.managers.io_struct import (
@@ -11,6 +12,8 @@ from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SGLangEngineQuiesceController:
@@ -27,10 +30,22 @@ class SGLangEngineQuiesceController:
             return False
 
         await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
-        await self._engine.tokenizer_manager.release_memory_occupation(
-            ReleaseMemoryOccupationReqInput(tags=tags),
-            None,
-        )
+        try:
+            await self._engine.tokenizer_manager.release_memory_occupation(
+                ReleaseMemoryOccupationReqInput(tags=tags),
+                None,
+            )
+        except Exception:
+            try:
+                await self._engine.tokenizer_manager.continue_generation(
+                    ContinueGenerationReqInput()
+                )
+            except Exception:
+                logger.exception(
+                    "failed to resume generation after memory release failed"
+                )
+            raise
+
         self._is_quiesced = True
         return True
 

@@ -158,6 +158,7 @@ class VllmLLMEngine(LLMEngine):
         self._quiesce_controller: VllmEngineQuiesceController | None = None
         self._quiesce_lock = asyncio.Lock()
         self._scale_ep_lock = asyncio.Lock()
+        self._scale_ep_in_progress = False
 
     @classmethod
     async def from_args(
@@ -542,39 +543,47 @@ class VllmLLMEngine(LLMEngine):
                 "message": "new_data_parallel_size must be >= 2 when elastic EP/ePLB is enabled",
             }
 
-        if self._scale_ep_lock.locked():
-            msg = (
-                "A scale_elastic_ep operation is already in progress; "
-                f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
-            )
-            logger.warning("[ElasticEP] %s", msg)
-            return {"status": "error", "message": msg}
-
         async with self._scale_ep_lock:
+            if self._scale_ep_in_progress:
+                msg = (
+                    "A scale_elastic_ep operation is already in progress; "
+                    f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
+                )
+                logger.warning("[ElasticEP] %s", msg)
+                return {"status": "error", "message": msg}
+            self._scale_ep_in_progress = True
+
+        try:
+            import ray
+            import ray.util.state as _ray_util_state
+
+            class _NodeInfo:
+                __slots__ = ("node_id", "node_ip")
+
+                def __init__(self, d: dict) -> None:
+                    self.node_ip: str = d["NodeManagerAddress"]
+                    self.node_id: str = d["NodeID"]
+
+            original_list_nodes = _ray_util_state.list_nodes
             try:
-                import ray
-                import ray.util.state as _ray_util_state
-
-                class _NodeInfo:
-                    __slots__ = ("node_id", "node_ip")
-
-                    def __init__(self, d: dict) -> None:
-                        self.node_ip: str = d["NodeManagerAddress"]
-                        self.node_id: str = d["NodeID"]
-
                 _ray_util_state.list_nodes = lambda **kw: [
                     _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
                 ]
-
                 await self.engine_client.scale_elastic_ep(new_dp_size)
-                return {
-                    "status": "ok",
-                    "message": f"Scaled to data_parallel_size={new_dp_size}",
-                    "new_data_parallel_size": new_dp_size,
-                }
-            except Exception as e:
-                logger.error("[ElasticEP] Scaling failed: %s", e)
-                return {"status": "error", "message": str(e)}
+            finally:
+                _ray_util_state.list_nodes = original_list_nodes
+
+            return {
+                "status": "ok",
+                "message": f"Scaled to data_parallel_size={new_dp_size}",
+                "new_data_parallel_size": new_dp_size,
+            }
+        except Exception as e:
+            logger.error("[ElasticEP] Scaling failed: %s", e)
+            return {"status": "error", "message": str(e)}
+        finally:
+            async with self._scale_ep_lock:
+                self._scale_ep_in_progress = False
 
     async def abort(self, context: Context) -> None:
         request_id = context.id()
