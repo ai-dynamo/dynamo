@@ -39,6 +39,16 @@ WATCHED_ENV_PREFIXES = (
     "NEMOTRON_",
 )
 
+# Exact keys to watch that fall outside WATCHED_ENV_PREFIXES. The broad
+# "DYNAMO_" prefix is intentionally excluded (it would catch this guard's own
+# bypass flag and other test-harness vars), but specific runtime keys under it
+# still leak from imports -- e.g. the log-init env fixed in #9724.
+WATCHED_ENV_KEYS = frozenset(
+    {
+        "DYNAMO_SKIP_PYTHON_LOG_INIT",
+    }
+)
+
 SENSITIVE_PATTERNS = (
     "TOKEN",
     "API_KEY",
@@ -78,7 +88,9 @@ def snapshot_collection_env(environ: Mapping[str, str] | None = None) -> EnvSnap
     """Snapshot watched env vars before pytest imports test modules."""
     env = os.environ if environ is None else environ
     return {
-        key: value for key, value in env.items() if key.startswith(WATCHED_ENV_PREFIXES)
+        key: value
+        for key, value in env.items()
+        if key.startswith(WATCHED_ENV_PREFIXES) or key in WATCHED_ENV_KEYS
     }
 
 

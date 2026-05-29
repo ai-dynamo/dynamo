@@ -1,17 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 import pytest
 
 from tests.utils.collection_env_guard import (
     ALLOWED_COLLECTION_ENV_MUTATIONS,
     COLLECTION_ENV_GUARD_DISABLE_ENV,
+    WATCHED_ENV_KEYS,
     WATCHED_ENV_PREFIXES,
     collection_env_guard_disabled,
     diff_collection_env,
     format_collection_env_changes,
     snapshot_collection_env,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 pytestmark = [
     pytest.mark.parallel,
@@ -24,6 +33,7 @@ pytestmark = [
 def test_snapshot_collection_env_filters_to_watched_prefixes():
     env = {
         "DYNAMO_TEST_FRAMEWORK": "vllm",
+        "DYNAMO_SKIP_PYTHON_LOG_INIT": "1",
         "DYN_SYSTEM_PORT": "9090",
         "SGLANG_LOGGING_LEVEL": "debug",
         "TRTLLM_LOG_LEVEL": "info",
@@ -36,7 +46,11 @@ def test_snapshot_collection_env_filters_to_watched_prefixes():
         "PATH": "/usr/bin",
     }
 
+    # DYNAMO_SKIP_PYTHON_LOG_INIT is watched as an exact key even though the
+    # broad "DYNAMO_" prefix is intentionally not watched (DYNAMO_TEST_FRAMEWORK
+    # is dropped).
     assert snapshot_collection_env(env) == {
+        "DYNAMO_SKIP_PYTHON_LOG_INIT": "1",
         "DYN_SYSTEM_PORT": "9090",
         "SGLANG_LOGGING_LEVEL": "debug",
         "TRTLLM_LOG_LEVEL": "info",
@@ -54,11 +68,17 @@ def test_watched_prefixes_cover_backend_env_without_long_dynamo_prefix():
     assert "SGLANG_" in WATCHED_ENV_PREFIXES
     assert "TRTLLM_" in WATCHED_ENV_PREFIXES
     assert "DYNAMO_" not in WATCHED_ENV_PREFIXES
+    # The #9724 leak key is watched exactly, since "DYNAMO_" is not a prefix.
+    assert "DYNAMO_SKIP_PYTHON_LOG_INIT" in WATCHED_ENV_KEYS
+    assert not any(
+        "DYNAMO_SKIP_PYTHON_LOG_INIT".startswith(prefix)
+        for prefix in WATCHED_ENV_PREFIXES
+    )
 
 
 def test_diff_collection_env_reports_added_changed_and_removed_values():
     before = {
-        "DYN_SKIP_PYTHON_LOG_INIT": "1",
+        "DYNAMO_SKIP_PYTHON_LOG_INIT": "1",
         "SGLANG_LOGGING_CONFIG_PATH": "/example/old.json",
         "VLLM_NO_USAGE_STATS": "1",
         "CUDA_VISIBLE_DEVICES": "0",
@@ -71,7 +91,7 @@ def test_diff_collection_env_reports_added_changed_and_removed_values():
     }
 
     assert diff_collection_env(before, after) == {
-        "DYN_SKIP_PYTHON_LOG_INIT": ("1", None),
+        "DYNAMO_SKIP_PYTHON_LOG_INIT": ("1", None),
         "NCCL_DEBUG": (None, "INFO"),
         "VLLM_NO_USAGE_STATS": ("1", "0"),
     }
@@ -96,12 +116,12 @@ def test_format_collection_env_changes_redacts_sensitive_values():
     message = format_collection_env_changes(
         {
             "DYN_API_KEY": (None, "secret-value"),
-            "DYN_SKIP_PYTHON_LOG_INIT": (None, "1"),
+            "DYNAMO_SKIP_PYTHON_LOG_INIT": (None, "1"),
         }
     )
 
     assert "DYN_API_KEY: <unset> -> <redacted>" in message
-    assert "DYN_SKIP_PYTHON_LOG_INIT: <unset> -> '1'" in message
+    assert "DYNAMO_SKIP_PYTHON_LOG_INIT: <unset> -> '1'" in message
     assert COLLECTION_ENV_GUARD_DISABLE_ENV in message
     assert "secret-value" not in message
 
@@ -114,3 +134,75 @@ def test_collection_env_guard_disabled_accepts_truthy_values(value):
 def test_collection_env_guard_disabled_rejects_default_and_falsey_values():
     assert not collection_env_guard_disabled({})
     assert not collection_env_guard_disabled({COLLECTION_ENV_GUARD_DISABLE_ENV: "0"})
+
+
+# Watched var the wider suite never sets, so the regression below is the only
+# thing mutating it during collection.
+_REGRESSION_ENV_VAR = "SGLANG_COLLECTION_ENV_GUARD_REGRESSION"
+
+
+def _run_collect_only_with_import_mutation(
+    tmp_path: Path, *, guard_disabled: bool
+) -> subprocess.CompletedProcess[str]:
+    """Collect a dummy module that mutates a watched env var at import time.
+
+    The real ``tests/conftest.py`` is loaded as a plugin (``-p tests.conftest``)
+    so this exercises the wired hooks end-to-end, not just the helpers. If the
+    hooks are ever removed from conftest, the failure assertion below breaks.
+    """
+    dummy = tmp_path / "test_collection_env_guard_regression_dummy.py"
+    dummy.write_text(
+        textwrap.dedent(
+            f"""
+            import os
+
+            os.environ["{_REGRESSION_ENV_VAR}"] = "leaked-at-import"
+
+
+            def test_placeholder():
+                pass
+            """
+        )
+    )
+
+    env = os.environ.copy()
+    env.pop(_REGRESSION_ENV_VAR, None)
+    if guard_disabled:
+        env[COLLECTION_ENV_GUARD_DISABLE_ENV] = "1"
+    else:
+        env.pop(COLLECTION_ENV_GUARD_DISABLE_ENV, None)
+
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "tests.conftest",
+            "--collect-only",
+            "-q",
+            str(dummy),
+        ],
+        cwd=_REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_collection_guard_fails_on_import_time_env_mutation(tmp_path):
+    result = _run_collect_only_with_import_mutation(tmp_path, guard_disabled=False)
+
+    # pytest.UsageError raised in pytest_collection_finish -> exit code 4.
+    assert result.returncode == 4, result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert "pytest collection mutated watched environment variables" in combined
+    assert _REGRESSION_ENV_VAR in combined
+
+
+def test_collection_guard_bypass_allows_import_time_env_mutation(tmp_path):
+    result = _run_collect_only_with_import_mutation(tmp_path, guard_disabled=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert "pytest collection mutated watched environment variables" not in combined
