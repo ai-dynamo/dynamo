@@ -8,14 +8,15 @@ Run NVIDIA's **Cosmos3** omni model through Dynamo's
 [vLLM-Omni backend](vllm-omni.md) for **text-to-image**, **text-to-video**, and
 **image-to-video** generation.
 
-Cosmos3 is a unified world foundation model (WFM) for Physical AI, built on a
-Mixture-of-Transformers (MoT) architecture. A single `Cosmos3OmniTransformer`
-runs a Qwen-style "understanding" stream alongside a "generation" stream
-joined by a 3D multimodal RoPE, replacing the separate Predict / Reason /
-Transfer models from earlier Cosmos releases. See the
+Cosmos3 is a unified world foundation model for Physical AI, built on a
+Mixture-of-Transformers architecture. A single `Cosmos3OmniTransformer` runs
+a Qwen-style "understanding" stream alongside a "generation" stream joined
+by a 3D multimodal RoPE, replacing the separate Predict / Reason / Transfer
+models from earlier Cosmos releases. See the
 [Cosmos World Foundation Model Platform paper](https://huggingface.co/papers/2501.03575)
 for the architectural background, and the
-[diffusers Cosmos3 reference](https://huggingface.co/docs/diffusers/main/en/api/pipelines/cosmos3) for the underlying pipeline.
+[diffusers Cosmos3 reference](https://huggingface.co/docs/diffusers/main/en/api/pipelines/cosmos3)
+for the underlying pipeline.
 
 Cosmos3 support in Dynamo is provided by the native vLLM-Omni pipeline added in
 [vllm-project/vllm-omni#3454](https://github.com/vllm-project/vllm-omni/pull/3454).
@@ -27,7 +28,7 @@ swap the model identifier on the worker (`--model …`) and in request payloads.
 
 | Checkpoint | Description | HF Hub |
 |------------|-------------|--------|
-| `nvidia/Cosmos3-Nano` | Smaller, faster — default in this repo's launch scripts | [link](https://huggingface.co/nvidia/Cosmos3-Nano) |
+| `nvidia/Cosmos3-Nano` | Smaller, faster — default in the Dynamo launch scripts below | [link](https://huggingface.co/nvidia/Cosmos3-Nano) |
 | `nvidia/Cosmos3-Super` | Larger, higher quality | [link](https://huggingface.co/nvidia/Cosmos3-Super) |
 
 ## Supported modalities
