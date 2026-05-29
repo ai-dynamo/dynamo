@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, Optional, Required, TypedDict
 
 from dynamo._core import Context
 
@@ -14,6 +15,7 @@ from .publisher import KvEventSource
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
+    from dynamo.logits_processing import BaseLogitsProcessor
 
     from .worker import WorkerConfig
 
@@ -218,6 +220,31 @@ class LLMEngine(ABC):
         of KV-aware routing. ``Worker`` calls once after :meth:`start`."""
         return []
 
+    async def logits_processor_spec(self) -> "LogitsProcessorSpec | None":
+        """Engine-declared logits-processor activation. Default returns
+        ``None`` (no engine-level processors).
+
+        Subclasses override to return a :class:`LogitsProcessorSpec` whose
+        ``entries`` are backend-neutral activation data. The shared
+        :func:`logits_processors_for_request` helper applies the PREFILL skip
+        policy and hands the spec entry list to each backend's own
+        realizer (TRT-LLM materializes live processors; vLLM/SGLang
+        translate to their respective per-request metadata channels).
+
+        Unlike framework-consumed hooks (:meth:`kv_event_sources`,
+        :meth:`register_prometheus`, :meth:`health_check_payload`),
+        the result of this method is consumed by the engine's own
+        :meth:`generate` via :func:`logits_processors_for_request`. Engines
+        call ``await self.logits_processor_spec()`` once in ``start()``
+        after engine init, and cache the result on
+        ``self._logits_processor_spec``.
+
+        Overrides typically delegate to :func:`resolve_test_logits_processor_spec`
+        to honour ``DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1``. When the
+        public user-facing loader (CLI/config) lands, overrides will
+        resolve from that source instead."""
+        return None
+
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
         """Bridge a vendor-prefixed Prometheus registry into the runtime's
         ``/metrics`` output via :func:`metrics.add_expfmt_callback`. Default
@@ -262,3 +289,194 @@ class LLMEngine(ABC):
         ``DYN_HEALTH_CHECK_PAYLOAD`` / ``--health-check-payload`` overrides
         on top."""
         return None
+
+
+# ---------------------------------------------------------------------------
+# Custom logits processors: spec entry-based activation + backend-specific realization
+#
+# The shared layer expresses logits-processor activation as a backend-
+# neutral `LogitsProcessorSpec`: a list of entries plus the
+# disaggregated-serving policy flags. Portable entries (e.g.
+# `ForcedTokenSequenceSpec`) carry only JSON-style data so they can
+# cross worker boundaries; `PythonProcessorSpec` is a TRT-LLM-only
+# escape hatch that carries a live `Callable[[], BaseLogitsProcessor]`
+# factory and is rejected by the vLLM/SGLang adapters.
+#
+# Each backend translates active entries into its native logits-
+# processor API:
+#
+#   - TRT-LLM:  spec entry -> live BaseLogitsProcessor instance ->
+#               TrtllmDynamoLogitsAdapter -> sampling_params.logits_processor
+#   - vLLM:     spec ->  engine_args.logits_processors at startup +
+#               sampling_params.extra_args["dynamo_logits"] per request
+#               (loaded adapter cannot be added per-request).
+#   - SGLang:   spec ->  server_args.enable_custom_logit_processor at startup +
+#               generate_kwargs["custom_logit_processor"] +
+#               sampling_params["custom_params"] per request.
+#
+# Things this layer intentionally does NOT do:
+#
+#   - Force tokenizer init. Each backend's engine-init kwargs are
+#     shaped differently (TRT-LLM dict, SGLang `ServerArgs` object, vLLM
+#     `EngineArgs`). Each backend's `from_args` inlines its own setter
+#     using the centralized `TEST_LOGITS_PROCESSOR_ENV` constant.
+#   - Mandate a uniform attach signature. SGLang in particular may need
+#     to return additional `async_generate` kwargs alongside writes to
+#     the sampling-params dict; vLLM needs both startup-time engine_args
+#     setup and per-request extra_args. Each backend exposes its own
+#     translation entry point.
+#
+# Two cross-backend policies DO live here:
+#
+#   - Per-request realization. Stateful processors (e.g. forced-
+#     sequence position counters) cannot be shared across concurrent
+#     requests. Each backend's realizer constructs fresh state per
+#     request from the same `LogitsProcessorEntry`.
+#   - PREFILL skip. Prefill emits one visible token before decode
+#     resumes; a fresh stateful processor on each side would corrupt
+#     the leading characters. `logits_processors_for_request` returns an
+#     empty list when `is_prefill` and `spec.skip_prefill` is True.
+#
+# Engines override `LLMEngine.logits_processor_spec()` (ABC hook next
+# to `kv_event_sources`) to declare their engine-level spec. The
+# default returns `None`. The env-gated smoke hook
+# (`DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1`) resolves into a
+# `LogitsProcessorSpec` via `resolve_test_logits_processor_spec`. It is the only
+# currently-shipping resolver; production user-facing loaders (CLI /
+# config / import-string) are a deferred design that will produce a
+# `LogitsProcessorSpec` the same way.
+#
+# Why entries instead of factories:
+#
+#   The previous design held a list of `Callable[[], BaseLogitsProcessor]`
+#   factories. That works for TRT-LLM (which accepts live callables) but
+#   does not survive SGLang's worker-subprocess JSON serialization or
+#   vLLM's per-request `extra_args` (which carries JSON-shaped data, not
+#   Python callables). Portable entries (e.g. `ForcedTokenSequenceSpec`)
+#   are JSON-serializable by construction, so the same spec can be
+#   activated by any of the three backends; `PythonProcessorSpec` is the
+#   sole exception, reserved as a TRT-LLM-only escape hatch and rejected
+#   by the vLLM/SGLang adapters.
+# ---------------------------------------------------------------------------
+
+
+#: Env var that activates the built-in smoke hook on any unified backend.
+TEST_LOGITS_PROCESSOR_ENV = "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR"
+
+
+@dataclass(frozen=True)
+class ForcedTokenSequenceSpec:
+    """Force the next ``len(token_ids)`` outputs, then EOS thereafter.
+
+    Token IDs are pre-resolved (typically once at engine startup), so
+    consumers do not need tokenizer access per request. JSON-
+    serializable: TRT-LLM realizes this into a live
+    `ForcedSequenceLogitsProcessor`, vLLM/SGLang will pass it through
+    their per-request metadata channels.
+
+    ``token_ids`` is a tuple so the cached spec is genuinely immutable;
+    realizers that need a mutable sequence (e.g. for an internal state
+    counter) should copy it.
+    """
+
+    token_ids: tuple[int, ...]
+    eos_token_id: int
+
+
+@dataclass(frozen=True)
+class PythonProcessorSpec:
+    """Escape hatch for live Python `BaseLogitsProcessor` instances.
+
+    Only consumable by backends that accept in-process callables
+    (TRT-LLM). vLLM/SGLang adapters should reject this spec entry.
+    Not used by the env-hook smoke; kept available for future
+    in-process callers that bypass serialization.
+    """
+
+    factory: Callable[[], "BaseLogitsProcessor"]
+
+
+LogitsProcessorEntry = ForcedTokenSequenceSpec | PythonProcessorSpec
+
+
+@dataclass(frozen=True)
+class LogitsProcessorSpec:
+    """Engine-declared logits-processor activation.
+
+    Backend-neutral. Each backend's realizer interprets the entries.
+    ``skip_prefill`` is True by default because every spec entry type
+    shipping in DIS-2048 PR 1 is stateful (corrupts leading characters
+    across the prefill/decode boundary). Future stateless entries can
+    opt out by constructing a spec with ``skip_prefill=False``.
+
+    ``entries`` is a tuple so the cached spec is genuinely immutable;
+    :func:`logits_processors_for_request` returns ``list(spec.entries)``
+    so per-call mutations cannot leak back into the cache.
+    """
+
+    entries: tuple[LogitsProcessorEntry, ...]
+    skip_prefill: bool = True
+    needs_tokenizer: bool = False
+
+
+def logits_processors_for_request(
+    spec: LogitsProcessorSpec | None, *, is_prefill: bool
+) -> list[LogitsProcessorEntry]:
+    """Return the entries a backend should activate for one request.
+
+    The shared layer applies the PREFILL skip policy here so every
+    backend gets it for free. Returns:
+
+      * an empty list when ``spec`` is None (no hook resolved) or when
+        ``is_prefill`` and ``spec.skip_prefill`` are both True.
+      * ``spec.entries`` otherwise. Realization (spec entry -> live
+        processor / extra_args entry / SGLang custom-processor string)
+        is the responsibility of each backend's adapter; the same
+        entries are passed through each request, so realizers MUST
+        construct fresh per-request state when needed.
+    """
+    if spec is None:
+        return []
+    if is_prefill and spec.skip_prefill:
+        return []
+    return list(spec.entries)
+
+
+def resolve_test_logits_processor_spec(
+    get_tokenizer: Callable[[], Any],
+) -> LogitsProcessorSpec | None:
+    """Resolve the `DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1` smoke hook
+    into a `LogitsProcessorSpec`, or return ``None`` if the env var is unset.
+
+    Engines call this once during ``start()`` after the engine is
+    initialized, and store the returned spec for use in ``generate()``.
+
+    ``get_tokenizer`` is a zero-arg callable returning the engine's
+    tokenizer. Invoked lazily AFTER the env check, so engines that
+    were started with ``skip_tokenizer_init=True`` (and therefore have
+    no tokenizer to expose) don't crash during ``start()`` when the
+    hook is off. Engines pass ``lambda: self._engine.llm.tokenizer``
+    or the backend-specific equivalent.
+
+    The hook resolves the fixed ``"Hello world!"`` token IDs ONCE
+    (tokenizer is consulted here, not per request), then emits a
+    single :class:`ForcedTokenSequenceSpec` so the activation is
+    backend-neutral. When the user-facing loader lands, it will
+    produce a `LogitsProcessorSpec` the same way (different resolver, same
+    spec entry types).
+    """
+    if os.getenv(TEST_LOGITS_PROCESSOR_ENV) != "1":
+        return None
+    tokenizer = get_tokenizer()
+    eos = tokenizer.eos_token_id
+    if eos is None:
+        raise ValueError(
+            "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR requires a tokenizer "
+            "with eos_token_id"
+        )
+    token_ids = tuple(tokenizer.encode("Hello world!", add_special_tokens=False))
+    return LogitsProcessorSpec(
+        entries=(ForcedTokenSequenceSpec(token_ids=token_ids, eos_token_id=eos),),
+        skip_prefill=True,
+        needs_tokenizer=True,
+    )
