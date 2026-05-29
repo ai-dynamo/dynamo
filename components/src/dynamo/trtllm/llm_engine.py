@@ -33,6 +33,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
@@ -772,6 +773,19 @@ class TrtllmLLMEngine(LLMEngine):
             self._default_sampling_params, request
         )
 
+        # TRT-LLM's `logprobs` is the top-k count; 0 disables logprob
+        # computation entirely. Floor it at 1 so a caller asking for
+        # `logprobs=0` (chosen-token only) still gets that back.
+        logprobs_count, prompt_logprobs_count = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
+        if logprobs_count is not None and hasattr(sampling_params, "logprobs"):
+            sampling_params.logprobs = max(1, logprobs_count)
+        if prompt_logprobs_count is not None and hasattr(
+            sampling_params, "prompt_logprobs"
+        ):
+            sampling_params.prompt_logprobs = prompt_logprobs_count
+
         # Prefill: context_only handle → packed into the response.
         # Decode: read prefill peer's handle, flip to generation_only.
         disaggregated_params: LlmDisaggregatedParams | None = None
@@ -854,6 +868,22 @@ class TrtllmLLMEngine(LLMEngine):
                         "token_ids": output.token_ids[tokens_so_far:],
                         "index": output_idx,
                     }
+
+                    # output.logprobs is cumulative in lockstep with
+                    # output.token_ids — reuse the same slice offset.
+                    (
+                        log_probs,
+                        top_logprobs,
+                    ) = _shared_logprobs.extract_from_completion_output(
+                        output,
+                        tokens_so_far,
+                        fallback_to_first_on_missing=True,
+                        include_bytes=False,
+                    )
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if top_logprobs is not None:
+                        out["top_logprobs"] = top_logprobs
 
                     if output.finish_reason:
                         out["finish_reason"] = str(output.finish_reason)

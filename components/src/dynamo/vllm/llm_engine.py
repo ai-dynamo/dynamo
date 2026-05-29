@@ -25,6 +25,7 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
@@ -327,6 +328,7 @@ class VllmLLMEngine(LLMEngine):
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
+        tokenizer = getattr(self.engine_client, "tokenizer", None)
 
         total_output_tokens_by_index: dict[int, int] = {}
         async for res in gen:
@@ -348,13 +350,30 @@ class VllmLLMEngine(LLMEngine):
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
-                prepared_outputs.append((output_idx, token_ids, finish_reason))
+                prepared_outputs.append((output, output_idx, token_ids, finish_reason))
 
-            for output_idx, token_ids, finish_reason in prepared_outputs:
+            for output, output_idx, token_ids, finish_reason in prepared_outputs:
                 out: GenerateChunk = {
                     "index": output_idx,
                     "token_ids": token_ids,
                 }
+
+                # `build_sampling_params` forces DELTA output, so each
+                # `output.logprobs` slot already aligns to this chunk —
+                # the offset into the cumulative array is 0.
+                (
+                    log_probs,
+                    top_logprobs,
+                ) = _shared_logprobs.extract_from_completion_output(
+                    output,
+                    0,
+                    tokenizer=tokenizer,
+                    include_bytes=True,
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
 
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
