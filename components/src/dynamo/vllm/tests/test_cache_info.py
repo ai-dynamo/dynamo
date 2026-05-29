@@ -113,17 +113,25 @@ class TestConfigureKvEventBlockSize:
         engine.engine_core.call_utility_async.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_raises_when_exact_match_required_and_metadata_unavailable(self):
-        """require_exact_match=True raises RuntimeError when engine call fails."""
+    @pytest.mark.parametrize("require_exact_match", [False, True])
+    async def test_warns_and_falls_back_when_metadata_api_unavailable(
+        self, caplog, require_exact_match
+    ):
+        """A failed metadata API call always warns and falls back to block_size.
+
+        This covers older vLLM builds that don't expose get_kv_cache_group_metadata.
+        require_exact_match does NOT raise in this case because the API being absent
+        means block_size is the correct fallback for that build.
+        """
         vllm_config = _make_vllm_config()
         engine = _make_engine(side_effect=AttributeError("missing method"))
 
-        with pytest.raises(RuntimeError, match="DYN_VLLM_KV_EVENT_BLOCK_SIZE"):
-            await configure_kv_event_block_size(
-                engine,
-                vllm_config,
-                require_exact_match=True,
-            )
+        result = await configure_kv_event_block_size(
+            engine, vllm_config, require_exact_match=require_exact_match
+        )
+
+        assert result == 16
+        assert "falling back to vLLM cache_config.block_size" in caplog.text
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -133,7 +141,7 @@ class TestConfigureKvEventBlockSize:
         self,
         group_metadata,
     ):
-        """require_exact_match=True raises RuntimeError when no main-attention group is found."""
+        """require_exact_match=True raises RuntimeError when metadata is returned but has no main-attention group."""
         vllm_config = _make_vllm_config()
         engine = _make_engine(return_value=group_metadata)
 
@@ -143,14 +151,3 @@ class TestConfigureKvEventBlockSize:
                 vllm_config,
                 require_exact_match=True,
             )
-
-    @pytest.mark.asyncio
-    async def test_warns_and_falls_back_when_exact_match_not_required(self, caplog):
-        """Without require_exact_match, a failed metadata call logs a warning and falls back."""
-        vllm_config = _make_vllm_config()
-        engine = _make_engine(side_effect=AttributeError("missing method"))
-
-        result = await configure_kv_event_block_size(engine, vllm_config)
-
-        assert result == 16
-        assert "falling back to vLLM cache_config.block_size" in caplog.text

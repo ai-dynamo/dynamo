@@ -69,17 +69,14 @@ async def configure_kv_event_block_size(
                     "get_kv_cache_group_metadata"
                 )
             except Exception as e:
-                if require_exact_match:
-                    raise RuntimeError(
-                        "Failed to fetch KV cache group metadata needed to determine "
-                        "the vLLM KV event block size. Set "
-                        "DYN_VLLM_KV_EVENT_BLOCK_SIZE to an explicit value or run "
-                        "with a vLLM build that exposes "
-                        "EngineCoreProc.get_kv_cache_group_metadata()."
-                    ) from e
+                # Metadata API unavailable means an older vLLM build where
+                # block_size is always the correct fallback. Warn so users
+                # can set DYN_VLLM_KV_EVENT_BLOCK_SIZE if the fallback is wrong.
                 logger.warning(
                     "Failed to fetch KV cache group metadata; falling back to "
-                    "vLLM cache_config.block_size: %s",
+                    "vLLM cache_config.block_size=%d. If this is incorrect, set "
+                    "DYN_VLLM_KV_EVENT_BLOCK_SIZE explicitly: %s",
+                    fallback_block_size,
                     e,
                 )
                 kv_event_block_size = fallback_block_size
