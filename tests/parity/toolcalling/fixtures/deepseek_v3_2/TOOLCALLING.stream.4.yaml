@@ -24,21 +24,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        calls: []
-        normal_text: ''
-      sglang:
+      dynamo: &d_4_a
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
+      sglang: *d_4_a
+      vllm: *d_4_a
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from TOOLCALLING.batch.5.c
@@ -68,3 +61,49 @@ cases:
           arguments: {}
         normal_text: ''
       vllm: *id001
+  TOOLCALLING.stream.4.c:
+    description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
+      repeated close markers
+    ref: derived from nemotron-ultra-preview-tool-call-leak-repro/repro_tool_call_leak.py
+    chunks:
+    - delta_text: |-
+        <｜DSML｜invoke name="get_weather">
+        <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜invoke>
+        </｜DSML｜invoke>
+    - delta_text: ''
+      finish_reason: length
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |-
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          </｜DSML｜invoke>
+          </｜DSML｜invoke>
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: |-
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          </｜DSML｜invoke>
+          </｜DSML｜invoke>
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''

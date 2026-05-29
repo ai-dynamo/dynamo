@@ -300,7 +300,7 @@ BATCH_SUB_CASE_GROUPS = [
     ("Multi-call", ("2.a", "2.b", "2.c", "2.d", "2.e", "10")),
     (
         "Malformed / recovery",
-        ("4.a", "4.b", "4.c", "4.d", "4.e", "5.a", "5.b", "5.c", "5.d", "5.e"),
+        ("4.a", "4.b", "4.c", "4.d", "4.e", "4.f", "5.a", "5.b", "5.c", "5.d", "5.e"),
     ),
     (
         "Args",
@@ -339,7 +339,7 @@ STREAM_SUB_CASE_GROUPS = [
     ("Single-call", ("1.a", "1.b")),
     ("Multi-call", ("2",)),
     ("Partial-token", ("3",)),
-    ("Termination", ("4.a", "4.b")),
+    ("Termination", ("4.a", "4.b", "4.c")),
 ]
 
 SUB_CASE_GROUPS_BY_MODE = {
@@ -677,7 +677,7 @@ def render_markdown(
     others: list[tuple[str, str]],
 ) -> str:
     inheritance = _build_family_inheritance(_build_family_to_rust_ref())
-    header = "| model | Tool calling parser | " + " | ".join(sub_cases) + " |"
+    header = "| model | Tool calling family | " + " | ".join(sub_cases) + " |"
     sep = "|---|---|" + ":-:|" * len(sub_cases)
     lines = [header, sep]
     lines.append("| **Top-N models** |   |" + "   |" * len(sub_cases))
@@ -1243,9 +1243,9 @@ def _column_control_header_html(
 def _subcase_group_headers_html(mode: str, sub_cases: list[str]) -> str:
     """Build semantic group headers spanning the displayed sub-case columns."""
     spans: list[str] = [
-        _column_control_header_html("model", "Model", default_visible=False),
+        _column_control_header_html("model", "Model", default_visible=True),
         _column_control_header_html(
-            "parser", "Tool calling parser", default_visible=True
+            "parser", "Tool calling family", default_visible=True
         ),
     ]
     for run in _subcase_runs(mode, sub_cases):

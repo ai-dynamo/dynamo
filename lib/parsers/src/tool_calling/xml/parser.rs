@@ -123,6 +123,11 @@ pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) ->
     loop {
         let rest = &chunk[cursor..];
         let trimmed = rest.trim_start();
+        if config.is_bare_function_mode(chunk) && trimmed.starts_with(end_token.as_str()) {
+            let trim_offset = rest.len() - trimmed.len();
+            cursor += trim_offset + end_token.len();
+            continue;
+        }
         if !trimmed.starts_with(start_token.as_str()) {
             break;
         }
@@ -812,6 +817,7 @@ mod tests {
                     "precise_count": {"type": "number"}
                 }
             })),
+            strict: None,
         }];
 
         let (calls, normal) =
@@ -958,6 +964,7 @@ Orlando
                     "config": {"type": "object"}
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -1216,6 +1223,7 @@ NYC
                 },
                 "required": ["param1", "param2", "param3", "param4", "param5", "param6", "param7", "param8"]
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -1279,6 +1287,7 @@ NYC
                     "bool_param": {"type": "boolean"}
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -1332,6 +1341,7 @@ NYC
                     }
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>

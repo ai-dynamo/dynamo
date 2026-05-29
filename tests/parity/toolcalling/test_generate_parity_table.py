@@ -50,6 +50,11 @@ def test_generate_parser_parity_table_html() -> None:
     assert "<html" in html.lower()
     assert "<table" in html.lower()
     assert "Dynamo Tool Calling Parser - Parity Table" in html
+    assert re.search(
+        r'data-col-toggle="model"[^>]+data-default-visible="true"[^>]+aria-pressed="true"',
+        html,
+    )
+    assert "Tool calling family" in html
     assert "generate_parity_table.py toolcalling --html" in html
     assert "TOOLCALLING.batch.*" in html
     assert "TOOLCALLING.stream.*" in html
@@ -77,19 +82,32 @@ def test_generate_parser_parity_table_batch_mode_excludes_stream_links() -> None
 def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> None:
     html = _render_html_for("reasoning")
 
-    assert "Dynamo Reasoning - Parity Table" in html
+    assert "Dynamo Reasoning Parser - Parity Table" in html
+    assert "Reasoning family" in html
+    assert re.search(
+        r'data-col-toggle="model"[^>]+data-default-visible="true"[^>]+aria-pressed="true"',
+        html,
+    )
     assert re.search(
         r'<td class="cell na[^"]*"[^>]*><a href="fixtures/qwen3/REASONING\.batch\.yaml">n/a</a>'
         r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.3\.b — qwen3',
         html,
     )
+    split_end_cell = _cell_for(html, "REASONING.stream.3.b — gpt_oss")
     assert re.search(
-        r'<td class="cell leak[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">↯D</a>'
-        r'<div class="ttip"><div class="ttip-head">REASONING\.stream\.3\.b — gpt_oss',
-        html,
+        r'<td class="cell documented[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">S</a>',
+        split_end_cell,
     )
+    handoff_cell = _cell_for(html, "REASONING.stream.4.b — gpt_oss")
     assert re.search(
-        r'<td class="cell research[^"]*"[^>]*><a href="fixtures/kimi_k25/REASONING\.batch\.yaml">V\?</a>'
+        r'<td class="cell documented[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">V</a>',
+        handoff_cell,
+    )
+    assert "↯ Dynamo leaks" not in handoff_cell
+    assert "Dynamo: Unlike vLLM streaming reasoning" in handoff_cell
+    assert "Divergent reasons" not in handoff_cell
+    assert re.search(
+        r'<td class="cell ok[^"]*"[^>]*><a href="fixtures/kimi_k25/REASONING\.batch\.yaml">=</a>'
         r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.3\.b — kimi_k25',
         html,
     )
@@ -124,3 +142,12 @@ def _render_html_for(table: str, *extra_args: str) -> str:
         text=True,
     )
     return result.stdout
+
+
+def _cell_for(html: str, heading: str) -> str:
+    idx = html.find(heading)
+    assert idx != -1
+    start = html.rfind("<td", 0, idx)
+    end = html.find("</td>", idx)
+    assert start != -1 and end != -1
+    return html[start:end]

@@ -10,7 +10,7 @@ cases:
   REASONING.batch.1.b:
     description: Plain text without reasoning markers
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     model_text: plain answer
     expected:
       dynamo: &d_0
@@ -72,10 +72,10 @@ cases:
   REASONING.batch.2.d:
     description: Normal text around reasoning
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     model_text: before <think>thinking</think> after
     expected:
-      dynamo: &d_11
+      dynamo:
         reasoning_text: thinking
         normal_text: before  after
       vllm:
@@ -85,20 +85,22 @@ cases:
       sglang:
         reasoning_text: before thinking
         normal_text: ' after'
-        reason: Dynamo keeps visible text outside a complete reasoning span as normal_text; SGLang folds the prefix into reasoning_text.
+        reason: Dynamo keeps text emitted before the reasoning open marker as normal_text; SGLang strips the start marker in place and folds that prefix into reasoning_text.
   REASONING.batch.4:
     description: Dangling end marker without an opening think tag
-    dynamo_leak: true
     ref: *upstream_ref
     model_text: normal</think>answer
     expected:
-      dynamo: &d_4
-        reasoning_text: ''
-        normal_text: normal</think>answer
+      dynamo:
+        reasoning_text: normal
+        normal_text: answer
       vllm:
         reasoning_text: normal
         normal_text: answer
-      sglang: *d_4
+      sglang:
+        reasoning_text: ''
+        normal_text: normal</think>answer
+        reason: Dynamo treats the text before an unpaired end marker as reasoning (implicit-opener recovery, matching vLLM); SGLang enters reasoning only on an explicit start marker, so the dangling end marker and surrounding text stay in normal_text.
   REASONING.batch.5:
     description: Missing end marker keeps the remaining text as reasoning
     ref: *upstream_ref
@@ -148,10 +150,10 @@ cases:
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/agents/reasoning'
+    spec_ref: lib/parsers/REASONING_CASES.md; https://qwen.readthedocs.io/en/stable/inference/transformers.html#parsing-thinking-content; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     model_text: <think>first</think> middle <think>second</think> done
     expected:
-      dynamo: &d_9
+      dynamo:
         reasoning_text: firstsecond
         normal_text: middle  done
       vllm:
@@ -161,4 +163,4 @@ cases:
       sglang:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
-        reason: Dynamo extracts each complete reasoning span; SGLang leaves the later complete span in normal_text.
+        reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span, with its literal markers, in normal_text.
