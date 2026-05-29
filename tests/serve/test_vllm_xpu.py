@@ -201,8 +201,14 @@ vllm_configs = {
         marks=[
             pytest.mark.xpu_2,
             pytest.mark.router,
+            pytest.mark.profiled_vram_gib(7.6),  # 2x 3.8 GiB (one per GPU)
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap per worker (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                420
+            ),  # 2 workers + router startup; bumped for GPU-parallel headroom
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2263"),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -218,8 +224,14 @@ vllm_configs = {
         marks=[
             pytest.mark.xpu_2,
             pytest.mark.router,
+            pytest.mark.profiled_vram_gib(7.6),  # 2x 3.8 GiB (one per GPU)
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap per worker (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                420
+            ),  # 2 workers + router startup; bumped for GPU-parallel headroom
             pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2264"),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[

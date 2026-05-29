@@ -1,6 +1,16 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated serving with approximate KV routing on 2 XPU GPUs.
+#
+# GPU assignment:
+#   ZE_AFFINITY_MASK - Comma-separated XPU device indices (e.g. "0,1" or "2,3").
+#                      First device → worker 1, second → worker 2. Default: "0,1"
+#
+# Port configuration:
+#   VLLM_NIXL_SIDE_CHANNEL_PORT - NIXL side channel port (default: 20097)
+
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
@@ -13,8 +23,16 @@ export VLLM_TARGET_DEVICE=xpu
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
+# Parse ZE_AFFINITY_MASK (comma-separated) into per-worker device indices
+IFS=',' read -ra _GPU_IDS <<< "${ZE_AFFINITY_MASK:-0,1}"
+GPU_WORKER1="${_GPU_IDS[0]:-0}"
+GPU_WORKER2="${_GPU_IDS[1]:-1}"
+
+# NIXL side channel port
+NIXL_PORT="${VLLM_NIXL_SIDE_CHANNEL_PORT:-20097}"
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching Aggregated + Approximate KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT"
+print_launch_banner "Launching Aggregated + Approximate KV Routing (2 GPUs: $GPU_WORKER1, $GPU_WORKER2)" "$MODEL" "$HTTP_PORT"
 
 # run frontend with KV router (--router-mode kv) in approximate mode (--no-kv-events)
 python -m dynamo.frontend \
@@ -26,17 +44,16 @@ python -m dynamo.frontend \
 #
 # If multiple workers are launched, they must not share the same system/metrics port.
 # Use DYN_SYSTEM_PORT{1,2} so tests/launchers can provide a simple numbered port set.
-# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-ZE_AFFINITY_MASK=0 python3 -m dynamo.vllm \
+ZE_AFFINITY_MASK=$GPU_WORKER1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-events-config '{"enable_kv_cache_events": false}' &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-ZE_AFFINITY_MASK=1 python3 -m dynamo.vllm \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT \
+ZE_AFFINITY_MASK=$GPU_WORKER2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-events-config '{"enable_kv_cache_events": false}' &
