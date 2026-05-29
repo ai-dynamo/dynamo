@@ -25,10 +25,10 @@ from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import (
     UpdateWeightFromDiskReqInput,
-    UpdateWeightVersionReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromTensorReqInput,
+    UpdateWeightVersionReqInput,
 )
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
