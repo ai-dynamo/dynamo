@@ -378,6 +378,7 @@ mod tests {
             created_at_ms: 1000,
             expires_at_ms: 2000,
             plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
+            kv_block_hashes: vec![],
         }
     }
 
