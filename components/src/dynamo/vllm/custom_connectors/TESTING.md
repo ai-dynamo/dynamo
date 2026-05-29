@@ -157,15 +157,141 @@ Notable findings from the audit:
 
 ### 5. Running through Dynamo's own entrypoint (`python -m dynamo.vllm`)
 
-The repro above uses `vllm serve` directly. To verify the connector activates
-through Dynamo's own launch path (`python -m dynamo.vllm`, which is what the
-customer's DGD invokes), see `verification/dynamo_runtime_test.sh`. Findings:
+The repro in section 2 uses `vllm serve` directly. The customer's DGD actually
+runs `python -m dynamo.vllm`, which goes through Dynamo's arg parsing
+(including `_uses_nixl_connector()` → `ensure_side_channel_host()`) and exposes
+metrics on the Dynamo system server (`DYN_SYSTEM_PORT`). Repro through that
+launch path, single GPU, no etcd / no NATS:
 
-- The same `--kv-transfer-config` JSON works unchanged.
-- `_uses_nixl_connector(engine_config)` in `args.py` now returns True for our
-  subclass thanks to the extension above, so `ensure_side_channel_host()`
-  fires correctly.
-- The same gauges appear at `/metrics` and the same strand behavior holds.
+```bash
+# 0. Self-contained Dynamo backplane: file-backed discovery + TCP request plane
+#    + ZMQ event plane. Set ONCE in the shell, inherited by all 3 processes.
+export DYN_DISCOVERY_BACKEND=file
+export DYN_REQUEST_PLANE=tcp
+export DYN_EVENT_PLANE=zmq
+
+# 1. Frontend on :8000 (the HTTP entrypoint the client hits)
+PYTHONPATH=.../components/src \
+DYN_HTTP_PORT=8000 \
+python -m dynamo.frontend &
+
+# 2. Decode worker — Dynamo /metrics on :8081
+CUDA_VISIBLE_DEVICES=0 \
+PYTHONPATH=.../components/src \
+DYN_SYSTEM_PORT=8081 \
+python -m dynamo.vllm \
+    --model Qwen/Qwen2.5-0.5B-Instruct \
+    --enforce-eager --max-model-len 512 --max-num-seqs 4 \
+    --gpu-memory-utilization 0.30 \
+    --disaggregation-mode decode \
+    --kv-transfer-config '{"kv_connector":"NixlConnectorWithPendingMetrics",
+                           "kv_role":"kv_both",
+                           "kv_connector_module_path":
+                             "dynamo.vllm.custom_connectors.nixl_with_pending_metrics"}' &
+DECODE_PID=$!
+
+# 3. Prefill worker — Dynamo /metrics on :8082, NIXL side-channel on a
+#    different port from the decode worker
+CUDA_VISIBLE_DEVICES=0 \
+PYTHONPATH=.../components/src \
+DYN_SYSTEM_PORT=8082 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
+VLLM_NIXL_ABORT_REQUEST_TIMEOUT=600 \
+python -m dynamo.vllm \
+    --model Qwen/Qwen2.5-0.5B-Instruct \
+    --enforce-eager --max-model-len 512 --max-num-seqs 4 \
+    --gpu-memory-utilization 0.30 \
+    --disaggregation-mode prefill \
+    --kv-transfer-config '...same as above...' &
+
+# 4. Wait for both workers' vLLM engines to load (Dynamo /metrics responds
+#    with 0 lines before vLLM is up; wait until vllm: lines appear)
+until [ $(curl -s localhost:8082/metrics | grep -c '^vllm:') -gt 0 ]; do
+    sleep 2; done
+
+# 5. Confirm our connector was loaded (look for the factory log line):
+grep "NixlConnectorWithPendingMetrics" /tmp/dynamo_runtime_test/prefill.log
+# → INFO factory.py: Creating v1 connector with name: NixlConnectorWithPendingMetrics ...
+
+# 6. Send a successful chat completion through the Dynamo frontend:
+curl -X POST localhost:8000/v1/chat/completions \
+     -H 'Content-Type: application/json' \
+     -d '{"model":"Qwen/Qwen2.5-0.5B-Instruct",
+          "messages":[{"role":"user","content":"What is 7+8?"}],
+          "max_tokens":32}'
+# → {"...","content":"The sum of 7 and 8 is 15.",...}
+
+# 7. Fire another request, then SIGKILL decode mid-transfer to strand it:
+curl -X POST localhost:8000/v1/chat/completions \
+     -H 'Content-Type: application/json' \
+     -d '{"model":"Qwen/Qwen2.5-0.5B-Instruct",
+          "messages":[{"role":"user","content":"Write a 6-line poem."}],
+          "max_tokens":128}' &
+sleep 3
+kill -9 $DECODE_PID
+
+# 8. Query the PREFILL worker's Dynamo /metrics:
+curl -s localhost:8082/metrics | grep -E \
+    "num_requests_(running|waiting)|nixl_num_pending_sends|num_kv_expired"
+# Expected — the "awkward state" through Dynamo:
+#   vllm:num_requests_running ...     0.0
+#   vllm:num_requests_waiting ...     0.0
+#   vllm:nixl_num_pending_sends ...   1.0        ← the new gauge
+#   vllm:nixl_num_kv_expired_reqs_total ... 0.0  ← timeout hasn't fired
+```
+
+Observed result (real run, file-backed discovery, single RTX 5880 Ada,
+Qwen2.5-0.5B):
+
+```
+====================================================================
+  T0: cold start — through Dynamo runtime
+====================================================================
+  vllm:num_requests_running                                  0.0
+  vllm:num_requests_waiting                                  0.0
+  vllm:nixl_num_pending_sends                                0.0   [NEW]
+  vllm:nixl_num_in_process_reqs                              0.0   [NEW]
+
+[T1] response: "The sum of 7 and 8 is 15."
+
+====================================================================
+  T1: after successful round-trip via Dynamo frontend
+====================================================================
+  vllm:nixl_num_pending_sends                                1.0   [NEW]
+  vllm:nixl_num_in_process_reqs                              1.0   [NEW]
+  vllm:kv_cache_usage_perc                       4.530490199039505e-05
+
+====================================================================
+  T2: 3s after decode killed — invisible occupancy, prefill side
+====================================================================
+  vllm:num_requests_running                                  0.0    ← invisible!
+  vllm:num_requests_waiting                                  0.0    ← invisible!
+  vllm:nixl_num_pending_sends                                1.0   [NEW]
+  vllm:nixl_num_in_process_reqs                              1.0   [NEW]
+
+====================================================================
+  T3: 13s after decode killed — strand holds, no traffic
+====================================================================
+  vllm:nixl_num_pending_sends                                1.0   [NEW]  (stable)
+```
+
+The full Prometheus output on Dynamo `/metrics` carries the standard Dynamo
+labels in addition to the vLLM ones, e.g.:
+
+```
+vllm:nixl_num_pending_sends{
+    dynamo_component="backend",
+    dynamo_endpoint="generate",
+    dynamo_namespace="dynamo",
+    engine="0",
+    model="Qwen/Qwen2.5-0.5B-Instruct",
+    model_name="Qwen/Qwen2.5-0.5B-Instruct",
+    worker_id="4a713c17c835edfd"
+} 1.0
+```
+
+A scripted version of the above lives at
+`verification/dynamo_runtime_test.sh`.
 
 ## Production diagnostic the new metric enables
 
