@@ -47,8 +47,6 @@ use std::sync::{Arc, Weak};
 
 use handle::BlockRegistrationHandleInner;
 
-pub(crate) use crate::blocks::RegisteredReturnFn;
-
 pub(crate) type PositionalRadixTree<V> = dynamo_tokens::PositionalRadixTree<V, SequenceHash>;
 
 /// Builder for [`BlockRegistry`].
@@ -144,10 +142,32 @@ impl BlockRegistry {
         }
     }
 
-    /// Check presence of sequence hashes for blocks with specific metadata type T.
-    /// Returns Vec<(SequenceHash, bool)> where bool indicates if a Block<T, Registered> exists.
+    /// Check presence of sequence hashes for blocks with specific metadata type `T`.
+    /// Returns `Vec<(SequenceHash, bool)>` where `bool` indicates whether a
+    /// `Block<T, Registered>` is currently believed to exist somewhere in
+    /// the active or inactive pool for this tier.
     ///
-    /// This checks for existence in either active or inactive pools without acquiring ownership.
+    /// # Consistency model
+    ///
+    /// This view is a **refcounted shadow** of the authoritative
+    /// `BlockStore<T>` state, *not* a linearizable snapshot. The store is
+    /// the single source of truth for slot state and is updated under its
+    /// own mutex; the registry-side presence count is then incremented
+    /// (`mark_present`) or decremented (`mark_absent`) in a separate
+    /// critical section that runs *after* the store mutex has been
+    /// released — see `pools/store.rs::register_completed_block`,
+    /// `allocate_atomic`, `release_duplicate`, and `drain_inactive_to_mutable`.
+    ///
+    /// In steady state and after every operation has fully completed, the
+    /// shadow count agrees with the authoritative state because the
+    /// per-slot increments and decrements commute (refcounted). However,
+    /// while a registration, eviction, or duplicate drop is mid-flight,
+    /// `check_presence` can briefly report the pre-update value. Callers
+    /// who need the exact current state must instead acquire a strong
+    /// reference via `BlockManager::match_blocks` /
+    /// `BlockManager::scan_matches` (which consult the store directly) or
+    /// otherwise serialize against the mutating operation.
+    ///
     /// Does NOT trigger frequency tracking.
     pub fn check_presence<T: crate::blocks::BlockMetadata>(
         &self,
@@ -176,7 +196,12 @@ impl BlockRegistry {
     }
 
     /// Check presence of sequence hashes for blocks with any of the specified metadata types.
-    /// Returns Vec<(SequenceHash, bool)> where bool is true if the block exists in ANY of the specified pools.
+    /// Returns `Vec<(SequenceHash, bool)>` where `bool` is true if a block
+    /// exists for at least one of the supplied tier `TypeId`s.
+    ///
+    /// Same consistency caveats as [`check_presence`]: this is a
+    /// refcounted shadow of authoritative store state, not a linearizable
+    /// snapshot. May briefly disagree with the store mid-mutation.
     ///
     /// Does NOT trigger frequency tracking.
     pub fn check_presence_any(

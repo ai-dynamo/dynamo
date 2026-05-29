@@ -16,6 +16,7 @@ LOAD_DECISION_STATES = [
     "scale_up",
     "scale_down",
     "scale_down_capped_by_throughput",
+    "scale_down_refused_consolidation",
 ]
 
 THROUGHPUT_DECISION_STATES = [

@@ -51,6 +51,7 @@ pub use config::{
     KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
     SharedCacheType,
 };
+#[allow(deprecated)]
 pub use indexer::{
     AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
     LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
@@ -58,8 +59,8 @@ pub use indexer::{
 };
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
-    KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, RouterEventSink,
-    SharedCacheHits, WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
+    KvCacheEventError, KvTransferEnforcement, LocalBlockHash, OverlapScores, RouterEvent,
+    RouterEventSink, SharedCacheHits, WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
 };
 pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;

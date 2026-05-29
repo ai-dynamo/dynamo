@@ -141,6 +141,27 @@ class TestPrefillRegressionModel:
             model.add_observation(fpm)
         assert abs(model.avg_isl - 2000.0) < 1.0
 
+    def test_idle_fpms_decay_avg_isl_after_traffic(self):
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=3, min_observations=3, bucket_count=16
+        )
+        model.add_observation(_make_fpm(wall_time=0.0))
+        assert model.avg_isl == 0.0
+
+        for isl in [1000, 2000, 3000]:
+            model.add_observation(
+                _make_fpm(
+                    sum_prefill_tokens=isl,
+                    num_prefill_requests=1,
+                    wall_time=0.01,
+                )
+            )
+        assert abs(model.avg_isl - 2000.0) < 1.0
+
+        for _ in range(3):
+            model.add_observation(_make_fpm(wall_time=0.0))
+        assert model.avg_isl == 0.0
+
     def test_find_best_engine_prefill_rps(self):
         model = PrefillRegressionModel(
             max_num_fpm_samples=50, min_observations=3, bucket_count=16
@@ -684,13 +705,13 @@ class TestRefreshWorkerInfoFromConnector:
         ):
             mock_metrics.return_value = Mock()
             config = PlannerConfig.model_construct(
-                throughput_adjustment_interval=60,
+                throughput_adjustment_interval_seconds=60,
                 prefill_engine_num_gpu=1,
                 decode_engine_num_gpu=1,
                 min_endpoint=1,
                 max_gpu_budget=-1,
-                ttft=500.0,
-                itl=50.0,
+                ttft_ms=500.0,
+                itl_ms=50.0,
                 backend="vllm",
                 no_operation=True,
                 metric_pulling_prometheus_endpoint="http://localhost:9090",
@@ -701,7 +722,7 @@ class TestRefreshWorkerInfoFromConnector:
                 mode="agg",
                 enable_load_scaling=True,
                 enable_throughput_scaling=True,
-                load_adjustment_interval=5,
+                load_adjustment_interval_seconds=5,
                 max_num_fpm_samples=50,
                 fpm_sample_bucket_size=16,
                 load_scaling_down_sensitivity=80,

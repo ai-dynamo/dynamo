@@ -100,6 +100,10 @@ dynamo/
 | Deployment         | Deployment validation                 | `tests/deploy/`                               |
 | Benchmark          | Performance/load                      | `benchmarks/`                                 |
 
+### Test Oracles
+
+Prefer API responses, structured response fields, metrics, or direct test helper APIs for functional and semantic assertions. If a router-internal fact is only exposed as a structured tracing event, keep parsing in a shared helper rather than duplicating ad hoc log scraping in tests.
+
 ---
 
 ## Test Marking: How to Mark Tests
@@ -108,22 +112,29 @@ Markers are required for all tests. They are used for test selection in CI and l
 
 ### Marker Requirements
 - Every test must have at least one **Lifecycle** marker, and **Test Type** and **Hardware** markers.
-- **Component/Framework** markers are required as applicable.
+- **Framework** and **Component** markers are required as applicable. When a test
+  has a framework marker (`vllm`/`trtllm`/`sglang`), it must also pick **exactly
+  one** component marker so tests are grouped consistently by feature area and
+  remain selectable via expressions like `pytest -m "vllm and multimodal"`.
 
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
 |-------------------------|------------------------------------------------------------------|------------------------------------|
 | Lifecycle [required]    | pre_merge, post_merge, nightly                                   | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
-| Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
+| Test Type [required]    | unit, integration, e2e, benchmark, performance, stress | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
 | vLLM KV cache bytes     | requested_vllm_kv_cache_bytes(N)                                             | (vLLM only) Exact KV cache bytes. Sets `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` → `--kv-cache-memory-bytes`. Deterministic, parallel-safe. |
 | SGLang KV tokens        | requested_sglang_kv_tokens(N)                                                          | (SGLang only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. Deterministic, parallel-safe. |
+| SGLang VRAM GiB         | requested_sglang_vram_gib(N)                                                           | (SGLang only) Max VRAM in GiB. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
 | TRT-LLM KV tokens      | requested_trtllm_kv_tokens(N)                                                          | (TRT-LLM only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args`. Deterministic, parallel-safe. |
 | TRT-LLM VRAM GiB       | requested_trtllm_vram_gib(N)                                                           | (TRT-LLM only) Max VRAM in GiB. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args`. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
-| Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
-| Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
+| Framework               | vllm, trtllm, sglang                                             | Which backend the test runs against. Pair with a component marker. |
+| Component               | core, multimodal, router, kvbm, kvbm_concurrency, fault_tolerance, planner | Which part of the backend the test exercises. Pick exactly one of {core, multimodal, router, kvbm, fault_tolerance} per framework-tagged test (disjoint); use `kvbm_concurrency` additionally for KVBM stress tests. `planner` is its own component used by the planner test suite. |
+| Infrastructure          | k8s, deploy                                                      | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
+| Dependency add-ons      | lmcache                                                          | Optional dependency required by the test (paired with a framework marker, e.g. `vllm + lmcache`). |
+| Selector-only           | none                                                             | Defined in `pyproject.toml` for CI selector expressions (e.g. `pre_merge and none and gpu_1` to target tests with no framework marker). Not applied to individual tests. |
 | Other                   | slow, skip, xfail, custom_build, model, aiconfigurator           | Special handling                   |
 
 ### Example (vLLM)
@@ -134,6 +145,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 @pytest.mark.profiled_vram_gib(20.5)  # actual nvidia-smi peak
 @pytest.mark.requested_vllm_kv_cache_bytes(942_054_000)  # KV cache cap (2x safety over min=471_027_000)
 @pytest.mark.vllm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_kv_cache_behavior():
     ...
 ```
@@ -147,6 +159,7 @@ def test_kv_cache_behavior():
 @pytest.mark.requested_sglang_kv_tokens(96)     # KV cache cap (2x safety over min=48)
 @pytest.mark.timeout(265)
 @pytest.mark.sglang
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_sglang_aggregated():
     ...
 ```
@@ -160,6 +173,7 @@ def test_sglang_aggregated():
 @pytest.mark.requested_trtllm_kv_tokens(2592)   # KV cache cap (2x safety over min=1296)
 @pytest.mark.timeout(300)
 @pytest.mark.trtllm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_trtllm_aggregated():
     ...
 ```
@@ -169,6 +183,7 @@ def test_trtllm_aggregated():
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.multimodal  # video output → multimodal component
 # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens doesn't apply
 # and requested_trtllm_vram_gib (KvCacheConfig.max_gpu_total_bytes) has no effect —
 # the VRAM is model weights + activations. Only profiled_vram_gib is meaningful.
@@ -188,7 +203,8 @@ Markers differ by engine:
 
 **SGLang** uses token-based control:
 - **`profiled_vram_gib(N)`** — actual peak from nvidia-smi at the recommended token count. Used for `--max-vram-gib` filtering and scheduler budget.
-- **`requested_sglang_kv_tokens(N)`** — max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. SGLang's default `--mem-fraction-static` is never overridden; the token cap is the sole allocation control. Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
+- **`requested_sglang_kv_tokens(N)`** — max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens N --mem-fraction-static 0.9`. The token cap controls actual KV allocation; `--mem-fraction-static 0.9` is also emitted to keep SGLang's pool-creation gate open on small GPUs (see PR #9238). Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
+- **`requested_sglang_vram_gib(N)`** — max VRAM in GiB for non-text workloads (video/image diffusion), where token-based control doesn't apply. Used for scheduler admission and display only.
 
 **TRT-LLM** uses token-based control (text models) or byte-based control (diffusion models):
 - **`profiled_vram_gib(N)`** — actual peak from nvidia-smi. Used for `--max-vram-gib` filtering and scheduler budget.
@@ -206,7 +222,7 @@ GPU tests run concurrently via a custom VRAM-aware scheduler (`tests/utils/pytes
 2. **Profiling race**: engines snapshot free memory during init; concurrent startups corrupt each other. The scheduler staggers launches (VRAM stability check) and retries transient failures.
 3. **Engine-specific allocation**: each test gets a constrained allocation so it uses only its budgeted share. xdist has no mechanism for this.
    - **vLLM**: `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES = N` → `--kv-cache-memory-bytes` (from `requested_vllm_kv_cache_bytes` marker). Byte-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_vllm_gpu_mem_args` in `gpu_utils.sh`.
-   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_sglang_gpu_mem_args` in `gpu_utils.sh`.
+   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens N --mem-fraction-static 0.9` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe; `--mem-fraction-static 0.9` is also emitted to keep SGLang's pool-creation gate open on small GPUs (see PR #9238). Non-text workloads may use `requested_sglang_vram_gib` for scheduler admission only.
    - **TRT-LLM**: `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS = N` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON (from `requested_trtllm_kv_tokens` marker). Token-based cap is deterministic and parallel-safe. Uses `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate function because TRT-LLM requires JSON merging).
 
 ```bash
@@ -342,8 +358,8 @@ cd lib/bindings/python && maturin develop --uv && cd -
 
 Sanity check (optional but recommended) -- verify the environment is wired up correctly:
 ```bash
-deploy/sanity_check.py                        # local-dev / dev containers
-deploy/sanity_check.py --runtime-check-only   # runtime containers
+dev/sanity_check.py                        # local-dev / dev containers
+dev/sanity_check.py --runtime-check-only   # runtime containers
 ```
 
 ### Environment Setup
@@ -376,7 +392,7 @@ pytest tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -v --tb=
 pytest tests/serve/test_trtllm.py::test_deployment[aggregated-2] -v --tb=short
 ```
 
-**Pre-merge CI equivalent** -- this is what [`container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml) runs on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
+**Pre-merge CI equivalent** -- this is what [`pr.yaml`](../.github/workflows/pr.yaml) runs via [`dynamo-pipeline.yml`](../.github/workflows/dynamo-pipeline.yml) on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
 ```bash
 # Parallel pre-merge tests (4 workers, CPU-only; typically <5min)
 pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" -n 4 --dist=loadscope -v --tb=short
@@ -438,14 +454,14 @@ It is highly recommended that you run tests thoroughly on your local machine bef
 
 Source workflow files (see [`.github/workflows/`](../.github/workflows/) for the full set):
 - **Pre-merge (Rust):** [`.github/workflows/pre-merge.yml`](../.github/workflows/pre-merge.yml)
-- **Pre-merge (Python):** [`.github/workflows/container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml)
-- **Post-merge:** [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml) -> [`.github/workflows/build-test-distribute-flavor.yml`](../.github/workflows/build-test-distribute-flavor.yml)
+- **Pre-merge (Python):** [`.github/workflows/pr.yaml`](../.github/workflows/pr.yaml) -> [`.github/workflows/dynamo-pipeline.yml`](../.github/workflows/dynamo-pipeline.yml)
+- **Post-merge:** [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml)
 - **Nightly:** [`.github/workflows/nightly-ci.yml`](../.github/workflows/nightly-ci.yml)
 - **Pytest action:** [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml)
 
 ### Pre-merge (every PR)
 
-Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml).
+Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`pr.yaml`](../.github/workflows/pr.yaml).
 
 **Rust checks** (only if Rust files changed) -- runs `pre-commit`, then the full sequence from [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 4 workspace dirs (`.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`): format, clippy, cargo-deny, machete, compile, doc tests, unit tests.
 
@@ -463,7 +479,7 @@ Runs per framework (vllm, sglang, trtllm). Each framework goes through: **Build*
 | Stage | What it does | Local equivalent |
 |-------|-------------|-----------------|
 | Build image | Render Dockerfile, build runtime container | `container/render.py --framework=vllm --target=runtime && docker build ...` |
-| Sanity check | Verify packages are installed in the image | `docker run --rm <image> /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check` |
+| Sanity check | Verify packages are installed in the image | `docker run --rm <image> /workspace/dev/sanity_check.py --runtime-check --no-gpu-check` |
 | CPU-only tests (parallel) | `(pre_merge or post_merge) and <framework> and gpu_0` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_0" -n auto --dist=loadscope -v --tb=short` |
 | Single GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and gpu_1` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short` |
 | Multi-GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and (gpu_2 or gpu_4)` | `pytest -m "(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)" -v --tb=short` |
@@ -488,12 +504,57 @@ All commands shown in the "Local equivalent" columns above are also documented i
 Tests must be deterministic. A flaky test -- one that sometimes passes and sometimes fails without code changes -- wastes CI time and erodes developer trust in the test suite. If you encounter or introduce a flaky test:
 
 1. **Fix it first.** Remove sources of non-determinism: set a fixed random seed, eliminate race conditions, mock network calls, avoid relying on execution order.
-2. **If a fix is not immediately possible**, quarantine the test to prevent it from blocking other developers:
+
+   **Special case — LLM-output assertions.** Pass `temperature=0` and `seed=0` so sampling picks the same logits, but treat that as **necessary, not sufficient**: GPU-served LLM inference remains non-deterministic in practice from FP non-associativity in tensor-parallel reductions, batch-size-dependent kernel selection (cuBLAS / flash-attn), prefix-cache state across calls, and non-deterministic attention kernels. For any test asserting on served-model response content, configure retry (step 2b below) — treat it as required, not a fallback.
+2. **If determinism truly isn't reachable** (LLM-output content as above, model genuinely non-deterministic, an upstream library has races we don't own, etc.), retry. There are two mechanisms; pick based on what the test does.
+
+   **2a. Whole-test retry — `@pytest.mark.flaky`** (use for unit tests, parser tests, tool-calling tests, anything that doesn't launch a server)
+
+   The plugin (`pytest-rerunfailures`) is pinned in `container/deps/requirements.test.txt` and the `flaky` marker is registered in `pyproject.toml`. Apply it as narrowly as you can:
+   ```python
+   @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
+   def test_named_tool_choice_forces_specific_function(...):
+       ...
+   ```
+   - `reruns=2` means up to 2 retries (3 attempts total). Pick the smallest number that gets you green; don't paper over a real bug.
+   - `only_rerun=[...]` restricts retries to **content / validation failures**. Use the bare exception class name. Common values:
+     - `"AssertionError"` -- direct pytest asserts (most tool-calling and parser tests).
+     - `"EngineResponseError"` -- `tests/utils/engine_process.py` wraps the validator's `AssertionError` here.
+   - **Never** match infra exceptions (`TimeoutError`, `ConnectionError`, `RuntimeError`) -- those signal a real problem, and retrying hides it.
+   - For tests parametrized via dataclasses, add the marker to the per-parametrization `marks=[...]` list so it only applies to the offending case.
+   - Cost: `@pytest.mark.flaky` reruns the *whole* test. For e2e tests where startup costs 60-90s, three attempts can spend 5+ minutes before failing. Use 2b instead.
+
+   **2b. In-process query retry — `payload.max_attempts`** (use for tests going through `run_serve_deployment` — e2e serving, multimodal smoke checks)
+
+   The server is launched once and stays up across attempts; only the request/response is re-issued. Set `max_attempts` on the payload:
+   ```python
+   # tests/serve/multimodal_profiles/vllm.py
+   tests=[
+       MmCase(
+           payload=make_image_payload(
+               ["green", "white", "black", "purple", "red", ...],
+               max_attempts=3,  # known-flaky model output; see comment above
+           )
+       )
+   ],
+   ```
+   For background on the `MultimodalModelProfile → TopologyConfig → MmCase` shape, see [`tests/serve/multimodal_profiles/README.md`](serve/multimodal_profiles/README.md).
+   - The factory functions (`make_image_payload`, `make_video_payload`, `chat_payload`, ...) accept a `max_attempts: int` kwarg that lands on `BasePayload.max_attempts`.
+   - `tests/serve/common.py:run_serve_deployment` wraps the `send_request` + `check_response` pair in a small inline retry loop, catching `ResponseValidationError` with exponential backoff (1.0 → 1.5 → 2.25 → ... seconds, factor 1.5).
+   - Cost: each attempt is ~one inference call (a few seconds), not a server restart. The 60-90s server startup is amortized across all attempts.
+   - Trade-off: only re-issues the same request -- if the flake is in startup or model loading, this won't help; use 2a for those cases.
+
+   **Other in-repo retry sites** (in case you need to roll your own for a different layer):
+   - `tests/frontend/test_frontend_api_surface_compliance.py:_retry_network_op` -- sync, network-only exception list.
+   - `tests/router/helper.py:send_request_with_retry` -- async, status-code-driven (aiohttp).
+   - `tests/utils/managed_deployment.py` -- sync connect retry with 1.5x backoff.
+   - `components/src/dynamo/planner/connectors/remote_client.py` -- sync exponential backoff (`2**attempt`).
+3. **If retry is not enough either**, quarantine the test to prevent it from blocking other developers:
    - `@pytest.mark.skip(reason="Flaky: <ticket link>")` -- disables the test entirely. Use when the test provides no signal in its current state.
    - `@pytest.mark.xfail(reason="Flaky: <ticket link>", strict=False)` -- runs the test but does not fail the suite. Use when you still want visibility into pass/fail rates while you investigate.
    - In Rust, use `#[ignore]` with a comment explaining why.
-3. **File a ticket** for every quarantined test. Flaky tests without an owner drift indefinitely.
-4. **Do not leave tests quarantined for more than one sprint.** If the root cause is elusive, delete the test and rewrite it.
+4. **File a ticket** for every retried or quarantined test. Even tests using `@pytest.mark.flaky` need an owner -- retry hides the symptom; the underlying non-determinism still exists.
+5. **Do not leave tests quarantined for more than one sprint.** If the root cause is elusive, delete the test and rewrite it. A test marked `flaky` should aim to drop the marker once the upstream determinism issue is fixed.
 
 ### Timeouts
 
@@ -589,7 +650,7 @@ The profiler automatically detects the engine type and uses the appropriate bina
 
 **Requirement (vLLM):** The launch script must honor `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`. This is handled by `build_vllm_gpu_mem_args` in `gpu_utils.sh` (returns `--kv-cache-memory-bytes N`).
 
-**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
+**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N --mem-fraction-static 0.9`).
 
 **Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args` because TRT-LLM requires JSON merging.
 
@@ -629,9 +690,9 @@ Env vars control engine allocation during profiling and parallel test execution:
 
 **`_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`** (integer) — SGLang only:
 
-| Engine  | Returned CLI flag                | Notes |
-|---------|----------------------------------|-------|
-| SGLang  | `--max-total-tokens N`           | Token-based KV cache cap |
+| Engine  | Returned CLI flag                                  | Notes |
+|---------|----------------------------------------------------|-------|
+| SGLang  | `--max-total-tokens N --mem-fraction-static 0.9`   | Token-based KV cache cap; `--mem-fraction-static 0.9` keeps the pool-creation gate open on small GPUs (see PR #9238) |
 
 **`_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS`** (integer) — TRT-LLM text models:
 

@@ -8,7 +8,7 @@ subtitle: Cache vision encoder embeddings to skip re-encoding repeated images
 ## Overview
 
 The embedding cache is a CPU-side LRU cache that stores vision encoder outputs. When the same image appears in multiple requests, the cached embedding is reused instead of running the vision encoder again. This reduces GPU load on the encoder and lowers latency for repeated images.
-> Note: This feature can also be referred to as **encoder cache**. Embedding cache is separate from KV cache, which reuses attention key/value state after prefill to skip prefill and go straight to decode. For KV cache reuse and routing, see [Multimodal KV Routing](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-kv-routing.md).
+> Note: This feature can also be referred to as **encoder cache**. Embedding cache is separate from KV cache, which reuses attention key/value state after prefill to skip prefill and go straight to decode. For KV cache reuse and routing, see [Multimodal KV Routing](multimodal-kv-routing.md).
 ## When to Use
 
 Use the embedding cache when your workload includes repeated images across requests. Common scenarios:
@@ -65,4 +65,4 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 
 Set the capacity based on your expected working set of unique images. A larger cache holds more embeddings but consumes more host memory.
 
-See the backend-specific documentation ([vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache), [TRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-trtllm.md#embedding-cache)) for more details.
+See the backend-specific documentation ([vLLM](multimodal-vllm.md#embedding-cache), [TRT-LLM](multimodal-trtllm.md#embedding-cache)) for more details.

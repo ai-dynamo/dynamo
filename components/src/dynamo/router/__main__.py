@@ -155,6 +155,28 @@ class StandaloneRouterHandler:
 
         yield worker_id
 
+    async def get_overlap_scores(self, request):
+        """
+        Get per-worker KV overlap by storage tier without routing the request.
+
+        This endpoint returns matched blocks for each worker_id/dp_rank pair.
+        Shared-cache hits are request-global and are also reported per row as
+        blocks beyond that rank's device-local prefix.
+        """
+        if self.kv_router is None:
+            logger.error("KvRouter not initialized - cannot get overlap scores")
+            raise RuntimeError("Router not initialized")
+
+        scores = await self.kv_router.get_overlap_scores(
+            request["token_ids"],
+            request.get("router_config_override"),
+            request.get("block_mm_infos"),
+            request.get("lora_name"),
+            request.get("include_shared", True),
+        )
+
+        yield scores
+
 
 def parse_args(argv=None) -> DynamoRouterConfig:
     """Parse router CLI arguments (compatibility shim delegating to args.parse_args)."""
@@ -170,7 +192,8 @@ async def worker(runtime: DistributedRuntime):
     logger.info("Starting Standalone Router Service")
     logger.debug(
         f"Configuration: endpoint={config.endpoint}, router_block_size={config.router_block_size}, "
-        f"overlap_score_weight={config.overlap_score_weight}, "
+        f"overlap_score_credit={config.overlap_score_credit}, "
+        f"prefill_load_scale={config.prefill_load_scale}, "
         f"router_temperature={config.router_temperature}, "
         f"use_kv_events={config.use_kv_events}, "
         f"durable_kv_events={config.durable_kv_events}, "
@@ -199,6 +222,9 @@ async def worker(runtime: DistributedRuntime):
     # Create endpoints
     generate_endpoint = runtime.endpoint(f"{config.namespace}.router.generate")
     best_worker_endpoint = runtime.endpoint(f"{config.namespace}.router.best_worker_id")
+    overlap_scores_endpoint = runtime.endpoint(
+        f"{config.namespace}.router.get_overlap_scores"
+    )
 
     logger.debug("Starting to serve endpoints...")
 
@@ -212,6 +238,11 @@ async def worker(runtime: DistributedRuntime):
             ),
             best_worker_endpoint.serve_endpoint(
                 handler.best_worker_id,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "router")],
+            ),
+            overlap_scores_endpoint.serve_endpoint(
+                handler.get_overlap_scores,
                 graceful_shutdown=True,
                 metrics_labels=[("service", "router")],
             ),

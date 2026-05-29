@@ -32,8 +32,8 @@ python -m dynamo.sglang \
   ...
 ```
 
-| Flag | Description |
-|------|-------------|
+| Flag                           | Description                                                |
+| ------------------------------ | ---------------------------------------------------------- |
 | `--enable-priority-scheduling` | Enables priority-based request scheduling instead of FCFS. |
 
 When priority scheduling is enabled, the engine uses the `priority` field from `nvext.agent_hints` to order requests in its internal queue. Requests with higher effective priority are scheduled before lower-priority ones. Ties are broken by arrival time.
@@ -49,9 +49,9 @@ python -m dynamo.sglang \
   ...
 ```
 
-| Flag | Values | Default | Description |
-|------|--------|---------|-------------|
-| `--radix-eviction-policy` | `lru`, `priority` | `lru` | Eviction strategy for the GPU radix cache. `priority` uses a heap ordered by the request's priority value. |
+| Flag                      | Values            | Default | Description                                                                                                |
+| ------------------------- | ----------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `--radix-eviction-policy` | `lru`, `priority` | `lru`   | Eviction strategy for the GPU radix cache. `priority` uses a heap ordered by the request's priority value. |
 
 This does **not** require HiCache. It controls GPU-only radix tree eviction. When the GPU KV cache is full:
 
@@ -62,10 +62,10 @@ This does **not** require HiCache. It controls GPU-only radix tree eviction. Whe
 
 When both `--radix-eviction-policy priority` and `--enable-hierarchical-cache` are enabled, priority affects eviction at both tiers:
 
-| Event | Behavior |
-|-------|----------|
-| **GPU full** | Low-priority nodes are evicted (demoted to host) first. With `write_through`, all nodes survive on host -- priority only affects demotion order. |
-| **Host full** | Low-priority nodes are deleted from host first. High-priority nodes with active retention survive longer. |
+| Event         | Behavior                                                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **GPU full**  | Low-priority nodes are evicted (demoted to host) first. With `write_through`, all nodes survive on host -- priority only affects demotion order. |
+| **Host full** | Low-priority nodes are deleted from host first. High-priority nodes with active retention survive longer.                                        |
 
 The practical impact depends on your write policy. With `write_through`, GPU eviction is just a demotion -- the real deletion happens at host eviction, which is where priority ordering matters most.
 
@@ -73,11 +73,11 @@ The practical impact depends on your write policy. With `write_through`, GPU evi
 
 Dynamo's `nvext.agent_hints` fields are consumed by the router and forwarded to SGLang workers. Here is how each hint interacts with the SGLang engine:
 
-| Agent Hint | Router Behavior | SGLang Engine Behavior |
-|------------|----------------|----------------------|
-| `priority` | Router queue ordering when `--router-queue-threshold` is set. | Request scheduling when `--enable-priority-scheduling` is set. Radix cache eviction order when `--radix-eviction-policy priority` is set. |
-| `osl` | Output block tracking for routing decisions (requires `--router-track-output-blocks`) | No direct engine effect. |
-| `speculative_prefill` | After response completes, sends a `max_tokens=1` prefill to warm the KV cache for the predicted next turn. | SGLang processes the prefill request normally, populating the radix cache. |
+| Agent Hint            | Router Behavior                                                                                            | SGLang Engine Behavior                                                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `priority`            | Router queue ordering when `--router-queue-threshold` is set.                                              | Request scheduling when `--enable-priority-scheduling` is set. Radix cache eviction order when `--radix-eviction-policy priority` is set. |
+| `osl`                 | Output block tracking for routing decisions (requires `--router-track-output-blocks`)                      | No direct engine effect.                                                                                                                  |
+| `speculative_prefill` | After response completes, sends a `max_tokens=1` prefill to warm the KV cache for the predicted next turn. | SGLang processes the prefill request normally, populating the radix cache.                                                                |
 
 ### Example: Agentic Request with Hints
 
@@ -165,17 +165,17 @@ Key behaviors:
 - **Turns 2+** skip the radix tree entirely. KV is restored from the `SessionSlot` in O(1).
 - **Session KV is invisible to eviction**. It cannot be evicted -- only freed by explicit close or inactivity timeout.
 - **Deterministic cleanup**: On close, session KV is freed immediately.
-- **Router-side affinity**: The `StickySessionRouter` maintains a `session_id -> worker_id` mapping with sliding-window TTL. Clients only need to send `session_id`.
+- **Router-side affinity**: The `StickySessionRouter` maintains a `session_id -> (worker_id, dp_rank)` mapping with sliding-window TTL. Clients can use `action: "bind"` for router-only sticky routing, or `action: "open"` for SGLang streaming-session KV isolation; both route later turns to the pinned worker/rank.
 
 ### Enabling Session Control
 
-Session control is request-driven. The router's `AgentController` (session lifecycle RPCs) and `StickySessionRouter` (session affinity) activate automatically when a request carries `nvext.session_control` -- no additional frontend flags are needed beyond `--router-mode kv`. On the worker side, streaming sessions must be explicitly enabled.
+Session control is request-driven. The `StickySessionRouter` activates automatically when a request carries `nvext.session_control` -- no additional frontend flags are needed beyond `--router-mode kv`. Use `action: "bind"` for router-only sticky routing without calling SGLang. On the worker side, streaming sessions must be explicitly enabled only for `action: "open"` / `action: "close"` lifecycle RPCs and session KV isolation.
 
 > [!NOTE]
 > Session control is currently supported only on the SGLang backend. vLLM and TensorRT-LLM do not yet expose the streaming session API.
 
 > [!IMPORTANT]
-> Streaming sessions require SGLang changes from [sgl-project/sglang#21875](https://github.com/sgl-project/sglang/pull/21875) (session-aware cache, race condition fixes, session metrics). This is merged to SGLang main but not yet in a release. Until a version after `0.5.10.post1` is published, build SGLang from source (`pip install -e "python"` from the SGLang repo).
+> Streaming sessions require SGLang `0.5.11` or later, which includes changes from [sgl-project/sglang#21875](https://github.com/sgl-project/sglang/pull/21875) (session-aware cache, race condition fixes, session metrics).
 
 **SGLang worker:**
 
@@ -186,8 +186,8 @@ python -m dynamo.sglang \
   ...
 ```
 
-| Flag | Description |
-|------|-------------|
+| Flag                         | Description                                                                                                 |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `--enable-streaming-session` | Wraps the radix cache with `SessionAwareCache`, enabling streaming session slots for subagent KV isolation. |
 
 **Router:**
@@ -206,23 +206,28 @@ Include `session_control` with `action: "open"` on the first request:
 
 ```json
 {
-    "model": "Qwen/Qwen3-14B-FP8",
-    "messages": [{"role": "user", "content": "Research every Federer Grand Slam final in exhaustive detail."}],
-    "nvext": {
-        "session_control": {
-            "session_id": "sub-1",
-            "action": "open",
-            "timeout": 60
-        }
+  "model": "Qwen/Qwen3-14B-FP8",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Research every Federer Grand Slam final in exhaustive detail."
     }
+  ],
+  "nvext": {
+    "session_control": {
+      "session_id": "sub-1",
+      "action": "open",
+      "timeout": 60
+    }
+  }
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `session_control.session_id` | `string` | Unique session identifier. Present on every turn. |
-| `session_control.action` | `string` | `"open"` or `"close"`. Omit on intermediate turns. |
-| `session_control.timeout` | `integer` | Inactivity timeout in seconds (default 300). Only used with `action: "open"`. |
+| Field                        | Type      | Description                                                                   |
+| ---------------------------- | --------- | ----------------------------------------------------------------------------- |
+| `session_control.session_id` | `string`  | Unique session identifier. Present on every turn.                             |
+| `session_control.action`     | `string`  | `"bind"`, `"open"`, or `"close"`. Omit on intermediate turns.                 |
+| `session_control.timeout`    | `integer` | Inactivity timeout in seconds (default 300). Used with `action: "bind"` and `action: "open"`. |
 
 #### Subsequent turns
 
@@ -230,13 +235,18 @@ Include `session_control` with just `session_id` (no action). The router resolve
 
 ```json
 {
-    "model": "Qwen/Qwen3-14B-FP8",
-    "messages": [{"role": "user", "content": "Now compare his Wimbledon 2007 final vs Nadal to any shot in human history."}],
-    "nvext": {
-        "session_control": {
-            "session_id": "sub-1"
-        }
+  "model": "Qwen/Qwen3-14B-FP8",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Now compare his Wimbledon 2007 final vs Nadal to any shot in human history."
     }
+  ],
+  "nvext": {
+    "session_control": {
+      "session_id": "sub-1"
+    }
+  }
 }
 ```
 
@@ -246,14 +256,19 @@ Include `action: "close"`. The close RPC fires after generation completes:
 
 ```json
 {
-    "model": "Qwen/Qwen3-14B-FP8",
-    "messages": [{"role": "user", "content": "Write a 500-word love letter to Federer's single-handed backhand."}],
-    "nvext": {
-        "session_control": {
-            "session_id": "sub-1",
-            "action": "close"
-        }
+  "model": "Qwen/Qwen3-14B-FP8",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Write a 500-word love letter to Federer's single-handed backhand."
     }
+  ],
+  "nvext": {
+    "session_control": {
+      "session_id": "sub-1",
+      "action": "close"
+    }
+  }
 }
 ```
 
@@ -320,14 +335,14 @@ Model and endpoint are configured in `.opencode/opencode.jsonc`:
           "release_date": "2025-06-01",
           "limit": { "context": 131072, "output": 8192 },
           "cost": { "input": 0, "output": 0 },
-          "interleaved": { "field": "reasoning_content" }
-        }
+          "interleaved": { "field": "reasoning_content" },
+        },
       },
       "options": {
-        "baseURL": "http://localhost:8000/v1"
-      }
-    }
-  }
+        "baseURL": "http://localhost:8000/v1",
+      },
+    },
+  },
 }
 ```
 

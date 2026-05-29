@@ -64,7 +64,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           imagePullPolicy: Always
           startupProbe:
             httpGet:
@@ -148,7 +148,7 @@ spec:
               value: "300s"
             - name: NIXL_LOG_LEVEL
               value: INFO
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           imagePullPolicy: Always
           securityContext:
             capabilities:
@@ -237,7 +237,7 @@ spec:
               value: "300s"
             - name: NIXL_LOG_LEVEL
               value: INFO
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           imagePullPolicy: Always
           securityContext:
             capabilities:

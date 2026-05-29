@@ -20,6 +20,15 @@ def random_call_id() -> str:
     return f"call_{uuid.uuid4().int & _MASK_64_BITS:016x}"
 
 
+def nvext_extra_field_requested(request: dict[str, Any], field: str) -> bool:
+    """Return whether a request opted into a response nvext field."""
+    nvext = request.get("nvext")
+    if not isinstance(nvext, dict):
+        return False
+    extra_fields = nvext.get("extra_fields")
+    return isinstance(extra_fields, list) and field in extra_fields
+
+
 def worker_warmup() -> bool:
     """Dummy task to ensure a ProcessPoolExecutor worker is fully initialized."""
     return True

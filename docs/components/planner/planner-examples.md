@@ -20,13 +20,14 @@ metadata:
 spec:
   model: Qwen/Qwen3-32B
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Deploy:
 ```bash
 export NAMESPACE=your-namespace
-kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
+# Save the manifest above as sla-aic.yaml first.
+kubectl apply -f sla-aic.yaml -n $NAMESPACE
 ```
 
 ### Online Profiling (Real Measurements)
@@ -41,18 +42,14 @@ metadata:
 spec:
   model: meta-llama/Llama-3.3-70B-Instruct
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Deploy:
 ```bash
-kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_dgdr.yaml -n $NAMESPACE
+# Save the manifest above as sla-online.yaml first.
+kubectl apply -f sla-online.yaml -n $NAMESPACE
 ```
-
-Available sample DGDRs in `components/src/dynamo/profiler/deploy/`:
-- **`profile_sla_dgdr.yaml`**: Standard online profiling for dense models
-- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator
-- **`profile_sla_moe_dgdr.yaml`**: Online profiling for MoE models (SGLang)
 
 > **Note**: Starting with Dynamo 1.0.0 (DGDR API version v1beta1), DGDR fields use structured spec fields (e.g., `spec.workload`, `spec.sla`, `spec.hardware`) instead of the nested `profilingConfig.config` blob used in v1alpha1.
 
@@ -70,12 +67,13 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Deploy:
 ```bash
-kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_moe_dgdr.yaml -n $NAMESPACE
+# Save the manifest above as sla-moe.yaml first.
+kubectl apply -f sla-moe.yaml -n $NAMESPACE
 ```
 
 ### Using Existing DGD Configs (Custom Setups)
@@ -101,7 +99,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `spec.model` and `spec.backend` into the final configuration.
@@ -126,7 +124,7 @@ spec:
   searchStrategy: rapid
 ```
 
-### Mocker Deployment (Testing)
+### Simulation with Mocker
 
 Deploy a mocker backend that simulates GPU timing behavior without real GPUs. Useful for:
 - Large-scale experiments without GPU resources
@@ -141,7 +139,7 @@ spec:
     mocker:
       enabled: true  # Deploy mocker instead of real backend
 
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Profiling runs against the real backend (via GPUs or AIC). The mocker deployment then uses profiling data to simulate realistic timing.

@@ -11,11 +11,14 @@ so reports work identically in live mode (wall clock) and replay
 
 from __future__ import annotations
 
+import gzip
+import json
 import logging
+import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import plotly.graph_objects as go  # type: ignore[import-untyped]
 from plotly.subplots import make_subplots  # type: ignore[import-untyped]
@@ -124,7 +127,7 @@ class DiagnosticsRecorder:
             return
 
         diag = effects.diagnostics or TickDiagnostics()
-        interval = self.config.throughput_adjustment_interval
+        interval = self.config.throughput_adjustment_interval_seconds
 
         prefill_engines: list[PerEngineFpm] = []
         decode_engines: list[PerEngineFpm] = []
@@ -279,6 +282,32 @@ class DiagnosticsRecorder:
             row=1,
             col=1,
         )
+        recommended_prefill = _vals("scale_to_prefill")
+        if any(v is not None for v in recommended_prefill):
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=recommended_prefill,
+                    name="Recommended Prefill Replicas",
+                    mode="markers",
+                    marker=dict(symbol="diamond", size=10),
+                ),
+                row=1,
+                col=1,
+            )
+        recommended_decode = _vals("scale_to_decode")
+        if any(v is not None for v in recommended_decode):
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=recommended_decode,
+                    name="Recommended Decode Replicas",
+                    mode="markers",
+                    marker=dict(symbol="diamond", size=10),
+                ),
+                row=1,
+                col=1,
+            )
         tp_lower_p = _vals("throughput_lower_bound_prefill")
         if any(v is not None and v > 1 for v in tp_lower_p):
             fig.add_trace(
@@ -344,10 +373,10 @@ class DiagnosticsRecorder:
             col=1,
         )
         fig.add_hline(
-            y=self.config.ttft,
+            y=self.config.ttft_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.ttft:.0f}ms)",
+            annotation_text=f"SLA ({self.config.ttft_ms:.0f}ms)",
             row=2,
             col=1,
         )
@@ -365,10 +394,10 @@ class DiagnosticsRecorder:
             col=2,
         )
         fig.add_hline(
-            y=self.config.itl,
+            y=self.config.itl_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.itl:.0f}ms)",
+            annotation_text=f"SLA ({self.config.itl_ms:.0f}ms)",
             row=2,
             col=2,
         )
@@ -387,10 +416,10 @@ class DiagnosticsRecorder:
             col=1,
         )
         fig.add_hline(
-            y=self.config.ttft,
+            y=self.config.ttft_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.ttft:.0f}ms)",
+            annotation_text=f"SLA ({self.config.ttft_ms:.0f}ms)",
             row=3,
             col=1,
         )
@@ -408,10 +437,10 @@ class DiagnosticsRecorder:
             col=2,
         )
         fig.add_hline(
-            y=self.config.itl,
+            y=self.config.itl_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.itl:.0f}ms)",
+            annotation_text=f"SLA ({self.config.itl_ms:.0f}ms)",
             row=3,
             col=2,
         )
@@ -750,7 +779,7 @@ class DiagnosticsRecorder:
             f"Time range: {t0} — {t1} ({len(snaps)} ticks)<br>"
             f"Replica transitions: {num_scaling_events} | "
             f"GPU hours: {snaps[-1].gpu_hours:.2f}<br>"
-            f"SLA targets: TTFT={self.config.ttft:.0f}ms, ITL={self.config.itl:.0f}ms"
+            f"SLA targets: TTFT={self.config.ttft_ms:.0f}ms, ITL={self.config.itl_ms:.0f}ms"
         )
         fig.update_layout(
             title=dict(text=summary, font=dict(size=14), y=0.99, yanchor="top"),
@@ -762,6 +791,75 @@ class DiagnosticsRecorder:
         )
 
         return fig.to_html(include_plotlyjs=True, full_html=True)
+
+    @staticmethod
+    def _snapshot_log_path(report_path: str) -> str:
+        root = (
+            report_path[:-5] if report_path.lower().endswith(".html") else report_path
+        )
+        return f"{root}.log.jsonl.gz"
+
+    @classmethod
+    def _json_safe(cls, value):
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, dict):
+            return {k: cls._json_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [cls._json_safe(v) for v in value]
+        return value
+
+    @staticmethod
+    def _jsonl_dumps(record: Any) -> str:
+        return json.dumps(
+            record,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    def _write_snapshot_log(self, report_path: str, snaps: list[TickSnapshot]) -> str:
+        log_path = self._snapshot_log_path(report_path)
+        metadata = self._json_safe(
+            {
+                "schema": "planner_diagnostics_snapshot_log_v1",
+                "kind": "metadata",
+                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                "num_snapshots": len(snaps),
+                "html_report_path": report_path,
+                "ttft_ms": self.config.ttft_ms,
+                "itl_ms": self.config.itl_ms,
+            }
+        )
+        with gzip.open(log_path, "wt", encoding="utf-8") as f:
+            f.write(self._jsonl_dumps(metadata))
+            f.write("\n")
+            for snap in snaps:
+                record = self._json_safe(asdict(snap))
+                record["schema"] = "planner_diagnostics_snapshot_log_v1"
+                record["kind"] = "snapshot"
+                record["timestamp_utc"] = datetime.fromtimestamp(
+                    snap.timestamp_s,
+                    tz=timezone.utc,
+                ).isoformat()
+                f.write(self._jsonl_dumps(record))
+                f.write("\n")
+        return log_path
+
+    def _try_write_snapshot_log(
+        self,
+        report_path: str,
+        snaps: list[TickSnapshot],
+    ) -> None:
+        try:
+            log_path = self._write_snapshot_log(report_path, snaps)
+        except OSError:
+            logger.warning(
+                "Failed to write planner diagnostics gzip log",
+                exc_info=True,
+            )
+            return
+        logger.info(f"Planner diagnostics gzip log written to {log_path}")
 
     def generate_report(self) -> Optional[str]:
         """Generate a periodic report, write it to disk, and clear snapshots."""
@@ -787,6 +885,8 @@ class DiagnosticsRecorder:
         with open(filepath, "w") as f:
             f.write(html)
         logger.info(f"Planner diagnostics report written to {filepath}")
+        if self.config.report_write_gzip_log:
+            self._try_write_snapshot_log(filepath, snaps)
 
         self._last_report_s = ts[-1]
         self._snapshots.clear()

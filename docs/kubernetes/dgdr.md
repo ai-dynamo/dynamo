@@ -42,7 +42,7 @@ metadata:
   name: my-model
 spec:
   model: Qwen/Qwen3-0.6B
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 ### Field Reference
@@ -77,6 +77,55 @@ spec:
 
 For the complete CRD spec, see the [API Reference](api-reference.md).
 
+### Generated DGD Overrides
+
+Use `spec.overrides.dgd` when the generated `DynamoGraphDeployment` needs a
+field that DGDR does not expose directly. The value is a partial
+`nvidia.com/v1alpha1` DGD object that is merged into the profiler-generated
+deployment after Dynamo selects a configuration.
+
+For example, to inject an environment variable into every generated service:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-sglang
+spec:
+  model: Qwen/Qwen3-30B-A3B
+  backend: sglang
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        envs:
+          - name: TRITON_PTXAS_PATH
+            value: /usr/local/cuda/bin/ptxas
+```
+
+Use `spec.envs` for variables that should apply to all generated services. To
+target a single service, override that service's `envs` entry instead:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          decode:  # replace with the generated service name
+            envs:
+              - name: CUSTOM_WORKER_ENV
+                value: "enabled"
+```
+
+> [!NOTE]
+> `overrides.profilingJob` only customizes the profiling Job. Use
+> `overrides.dgd` for settings that must appear on the deployed worker pods.
+
 ### SKU Format
 
 When providing hardware configuration manually, use lowercase underscore format:
@@ -86,15 +135,24 @@ When providing hardware configuration manually, use lowercase underscore format:
 | `h100_sxm` | `H100-SXM5-80GB` |
 | `h200_sxm` | `H200-SXM-141GB` |
 | `a100_sxm` | `A100-SXM4-80GB` |
+| `a30` | `A30` |
 | `l40s` | `L40S` |
 
 All supported values: `gb200_sxm`, `b200_sxm`, `h200_sxm`, `h100_sxm`,
-`h100_pcie`, `a100_sxm`, `a100_pcie`, `l40s`, `l40`, `l4`, `v100_sxm`,
-`v100_pcie`, `t4`, `mi200`, `mi300`.
+`h100_pcie`, `a100_sxm`, `a100_pcie`, `a30`, `l40s`, `l40`, `l4`,
+`v100_sxm`, `v100_pcie`, `t4`, `mi200`, `mi300`.
 
 > [!NOTE]
 > Not all SKUs are supported by the AIC profiler for `rapid` mode. See
 > [AIC Support Matrix](model-deployment-guide.md#aic-support-matrix) for details.
+
+> [!IMPORTANT]
+> **PCIe variants not yet supported by profiler.** The CRD admits PCIe SKUs
+> (`h100_pcie`, `a100_pcie`, `v100_pcie`), but the profiler does not currently
+> ship training data for them. You can submit a DGDR with a PCIe value; the
+> operator will accept it but profiler-assisted sizing will fall back to
+> defaults. Profiler support for PCIe SKUs is tracked as an engineering
+> follow-up.
 
 ## Lifecycle
 
@@ -155,6 +213,14 @@ kubectl get dgdr my-model -n $NAMESPACE \
   `dgdr.nvidia.com/namespace`.
 - Additional resources (planner ConfigMaps) are created in the same namespace
   and labeled with `dgdr.nvidia.com/name`.
+
+## Known Issues
+
+- **`pareto_analysis.py` produces NaN for some configurations.** Tracked as an
+  engineering follow-up. Workaround: re-run with a narrower sweep; narrow
+  sweeps bypass the NaN path in practice.
+- **PCIe profiler data not yet available.** See the PCIe callout under
+  [SKU Format](#sku-format).
 
 ## Further Reading
 

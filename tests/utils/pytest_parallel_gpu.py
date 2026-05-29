@@ -59,6 +59,7 @@ class _TestEntry:
     timeout: float
     requested_vllm_kv_cache_bytes: int | None = None
     requested_sglang_kv_tokens: int | None = None
+    requested_sglang_vram_gib: float | None = None
     requested_trtllm_kv_tokens: int | None = None
     requested_trtllm_vram_gib: float | None = None
     skip_reason: str | None = None
@@ -119,6 +120,8 @@ def _fmt_req(test: _TestEntry) -> str:
     """Format the resource request value for display."""
     if test.requested_sglang_kv_tokens is not None:
         return f"req_kv_tokens={int(test.requested_sglang_kv_tokens)}"
+    if test.requested_sglang_vram_gib is not None:
+        return f"req_vram={test.requested_sglang_vram_gib:.1f} GiB"
     if test.requested_trtllm_kv_tokens is not None:
         return f"req_kv_tokens={int(test.requested_trtllm_kv_tokens)}"
     if test.requested_trtllm_vram_gib is not None:
@@ -307,6 +310,7 @@ def run_parallel(
     gpu_indices: list[int] | None = None,
     extra_pytest_args: list[str] | None = None,
     stream: bool = False,
+    parent_basetemp: str | None = None,
 ) -> int:
     """Run tests in parallel with VRAM-aware scheduling across multiple GPUs.
 
@@ -353,6 +357,7 @@ def run_parallel(
                 requested_vllm_kv_cache_bytes=m.get("requested_vllm_kv_cache_bytes"),
                 timeout=m.get("timeout", 600),
                 requested_sglang_kv_tokens=m.get("requested_sglang_kv_tokens"),
+                requested_sglang_vram_gib=m.get("requested_sglang_vram_gib"),
                 requested_trtllm_kv_tokens=m.get("requested_trtllm_kv_tokens"),
                 requested_trtllm_vram_gib=m.get("requested_trtllm_vram_gib"),
                 skip_reason=m.get("skip_reason"),
@@ -375,6 +380,7 @@ def run_parallel(
         for t in tests
         if t.requested_vllm_kv_cache_bytes is None
         and t.requested_sglang_kv_tokens is None
+        and t.requested_sglang_vram_gib is None
         and t.requested_trtllm_kv_tokens is None
         and t.requested_trtllm_vram_gib is None
         and t.profiled_gib > 0
@@ -382,8 +388,9 @@ def run_parallel(
     if no_kv:
         _print(
             f"\nERROR: {len(no_kv)} test(s) lack a requested_vllm_kv_cache_bytes, "
-            f"requested_sglang_kv_tokens, requested_trtllm_kv_tokens, "
-            f"or requested_trtllm_vram_gib marker and cannot run in parallel:"
+            f"requested_sglang_kv_tokens, requested_sglang_vram_gib, "
+            f"requested_trtllm_kv_tokens, or requested_trtllm_vram_gib marker "
+            f"and cannot run in parallel:"
         )
         for t in no_kv:
             _print(f"  {t.name}")
@@ -523,6 +530,13 @@ def run_parallel(
             )
 
         safe_name = test.name.replace("/", "_").replace("::", "__")
+        # Give each child a unique COVERAGE_FILE so its session-end combine
+        # (pytest-cov collapses data_suffix=True shards into the unsuffixed
+        # path) doesn't clobber siblings. Harmless when pytest-cov is not
+        # active — the env var is just unread.
+        parent_cov_file = env.get("COVERAGE_FILE")
+        if parent_cov_file:
+            env["COVERAGE_FILE"] = f"{parent_cov_file}.w{test.w_id}.{safe_name}"
         junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
         has_tb = extra_pytest_args and any(
             a.startswith("--tb") for a in extra_pytest_args
@@ -539,6 +553,17 @@ def run_parallel(
         ]
         if extra_pytest_args:
             cmd.extend(extra_pytest_args)
+        # Give each child a unique --basetemp under the parent's root.
+        # pytest rmtrees the given basetemp at session startup, so a shared
+        # root would let siblings wipe each other's tmp_path trees mid-run.
+        # Prefix with w{w_id} because safe_name normalizes "/" and "::" and
+        # is not guaranteed collision-free across parametrized ids.
+        # Appended after extra_pytest_args so the orchestrator's per-child
+        # path wins over any --basetemp that a caller stuffs into
+        # extra_pytest_args (pytest uses argparse semantics: last value wins).
+        if parent_basetemp:
+            child_basetemp = os.path.join(parent_basetemp, f"w{test.w_id}-{safe_name}")
+            cmd.extend(["--basetemp", child_basetemp])
 
         proc = subprocess.Popen(
             cmd,

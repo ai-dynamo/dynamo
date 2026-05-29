@@ -22,9 +22,9 @@ def check_convert_records_emits_request_stages_and_metadata():
                     "event_time_unix_ms": 2000,
                     "event_source": "dynamo",
                     "agent_context": {
-                        "workflow_type_id": "ms_agent",
-                        "workflow_id": "workflow-1",
-                        "program_id": "workflow-1:researcher",
+                        "session_type_id": "ms_agent",
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:researcher",
                     },
                     "request": {
                         "request_id": "req-1",
@@ -89,8 +89,8 @@ def check_convert_records_can_emit_stages_on_separate_tracks():
                     "event_type": "request_end",
                     "event_time_unix_ms": 1050,
                     "agent_context": {
-                        "workflow_id": "workflow-1",
-                        "program_id": "workflow-1:researcher",
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:researcher",
                     },
                     "request": {
                         "request_id": "req-1",
@@ -125,8 +125,8 @@ def check_convert_records_can_emit_stages_on_separate_tracks():
         if event.get("name") == "thread_name"
     ]
     assert thread_names == [
-        "workflow-1:researcher",
-        "workflow-1:researcher stages",
+        "session-1:researcher",
+        "session-1:researcher stages",
     ]
 
 
@@ -139,8 +139,8 @@ def check_convert_records_clamps_stage_rounding_overlap():
                     "event_type": "request_end",
                     "event_time_unix_ms": 49_743.776002,
                     "agent_context": {
-                        "workflow_id": "workflow-1",
-                        "program_id": "workflow-1:searcher",
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:searcher",
                     },
                     "request": {
                         "request_id": "req-1",
@@ -177,7 +177,7 @@ def check_convert_records_clamps_stage_rounding_overlap():
     assert stages[1]["ts"] + stages[1]["dur"] == stages[2]["ts"]
 
 
-def check_convert_records_splits_overlapping_program_requests_into_lanes():
+def check_convert_records_splits_overlapping_trajectory_requests_into_lanes():
     def record(request_id: str, start_ms: int, total_ms: int):
         return {
             "event": {
@@ -185,9 +185,9 @@ def check_convert_records_splits_overlapping_program_requests_into_lanes():
                 "event_type": "request_end",
                 "event_time_unix_ms": start_ms + total_ms,
                 "agent_context": {
-                    "workflow_type_id": "ms_agent",
-                    "workflow_id": "workflow-1",
-                    "program_id": "workflow-1:searcher",
+                    "session_type_id": "ms_agent",
+                    "session_id": "session-1",
+                    "trajectory_id": "session-1:searcher",
                 },
                 "request": {
                     "request_id": request_id,
@@ -218,8 +218,8 @@ def check_convert_records_splits_overlapping_program_requests_into_lanes():
         if event.get("name") == "thread_name"
     ]
     assert thread_names == [
-        "workflow-1:searcher [lane 1]",
-        "workflow-1:searcher [lane 2]",
+        "session-1:searcher [lane 1]",
+        "session-1:searcher [lane 2]",
     ]
 
     request_tids = {
@@ -240,9 +240,9 @@ def check_convert_records_emits_tool_duration_slices():
                     "event_time_unix_ms": 1300,
                     "event_source": "harness",
                     "agent_context": {
-                        "workflow_type_id": "ms_agent",
-                        "workflow_id": "workflow-1",
-                        "program_id": "workflow-1:searcher",
+                        "session_type_id": "ms_agent",
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -281,7 +281,7 @@ def check_convert_records_emits_tool_duration_slices():
         for event in trace["traceEvents"]
         if event.get("name") == "thread_name"
     ]
-    assert thread_names == ["workflow-1:searcher tools"]
+    assert thread_names == ["session-1:searcher tools"]
 
 
 def check_convert_records_pairs_tool_start_and_end_without_duration():
@@ -294,8 +294,8 @@ def check_convert_records_pairs_tool_start_and_end_without_duration():
                     "event_time_unix_ms": 1000,
                     "event_source": "harness",
                     "agent_context": {
-                        "workflow_id": "workflow-1",
-                        "program_id": "workflow-1:searcher",
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -311,8 +311,8 @@ def check_convert_records_pairs_tool_start_and_end_without_duration():
                     "event_time_unix_ms": 1250,
                     "event_source": "harness",
                     "agent_context": {
-                        "workflow_id": "workflow-1",
-                        "program_id": "workflow-1:searcher",
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -351,8 +351,8 @@ def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
                     "event_time_unix_ms": 1000,
                     "event_source": "harness",
                     "agent_context": {
-                        "workflow_id": "workflow-1",
-                        "program_id": "workflow-1:searcher",
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -368,8 +368,8 @@ def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
                     "event_time_unix_ms": 1000,
                     "event_source": "harness",
                     "agent_context": {
-                        "workflow_id": "workflow-1",
-                        "program_id": "workflow-1:searcher",
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -407,7 +407,7 @@ CHECKS = [
     check_convert_records_emits_request_stages_and_metadata,
     check_convert_records_can_emit_stages_on_separate_tracks,
     check_convert_records_clamps_stage_rounding_overlap,
-    check_convert_records_splits_overlapping_program_requests_into_lanes,
+    check_convert_records_splits_overlapping_trajectory_requests_into_lanes,
     check_convert_records_emits_tool_duration_slices,
     check_convert_records_pairs_tool_start_and_end_without_duration,
     check_convert_records_renders_zero_duration_tool_as_synthetic_span,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::{bus, config};
@@ -9,7 +9,7 @@ use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct AuditRecord {
     pub schema_version: u32,
     pub request_id: String,
@@ -98,10 +98,10 @@ mod tests {
             "store": true,
             "nvext": {
                 "agent_context": {
-                    "workflow_type_id": "deep_research",
-                    "workflow_id": "run-123",
-                    "program_id": "run-123:researcher",
-                    "parent_program_id": "run-123:planner"
+                    "session_type_id": "deep_research",
+                    "session_id": "run-123",
+                    "trajectory_id": "run-123:researcher",
+                    "parent_trajectory_id": "run-123:planner"
                 }
             }
         });
@@ -162,11 +162,11 @@ mod tests {
         let value = serde_json::to_value(record).unwrap();
 
         assert_eq!(
-            value["request"]["nvext"]["agent_context"]["workflow_id"],
+            value["request"]["nvext"]["agent_context"]["session_id"],
             "run-123"
         );
         assert_eq!(
-            value["request"]["nvext"]["agent_context"]["program_id"],
+            value["request"]["nvext"]["agent_context"]["trajectory_id"],
             "run-123:researcher"
         );
         assert_eq!(

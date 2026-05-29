@@ -40,6 +40,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         nvext: None,
         chat_template_args: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -134,6 +135,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        worker_trace_link: None,
         engine_data: None,
     }
 }
@@ -303,6 +305,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: None,
         };
 
@@ -371,6 +374,7 @@ async fn test_streaming_required_tool_parallel() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: None,
         };
 
@@ -441,6 +445,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        worker_trace_link: None,
         engine_data: None,
     };
 
@@ -490,7 +495,6 @@ fn make_text_chunk(
                 } else {
                     None
                 },
-                stop_reason: None,
                 logprobs: None,
             }],
             created: 1234567890,
@@ -611,9 +615,9 @@ async fn test_named_tool_with_parser_wrong_tool_is_filtered() {
 }
 
 // ---------------------------------------------------------------------------
-// PARSER.11 — tool_choice × parser-name parametrisation (cross-parser tool_choice parametrisation work-item (tracked separately))
+// TOOLCALLING.11 — tool_choice × parser-name parametrisation (cross-parser tool_choice parametrisation work-item (tracked separately))
 //
-// The hermes tests above exercise PARSER.11 only for the hermes parser. These
+// The hermes tests above exercise TOOLCALLING.11 only for the hermes parser. These
 // tests exercise the same auto / required / named-correct / named-wrong axis
 // against `kimi_k2` and `deepseek_v4` so the chart cells move from `~`/`—`
 // to ✓ at the integration layer.
@@ -714,7 +718,7 @@ fn named_choice(name: &str) -> Option<ChatCompletionToolChoiceOption> {
 
 // --- Kimi K2 × tool_choice variants ---
 
-/// `PARSER.11` — Kimi K2 + tool_choice=auto. No filter, no immediate jail —
+/// `TOOLCALLING.11` — Kimi K2 + tool_choice=auto. No filter, no immediate jail —
 /// parser path detects the call and emits it through the stream.
 #[tokio::test]
 async fn test_kimi_k2_tool_choice_auto() {
@@ -730,12 +734,12 @@ async fn test_kimi_k2_tool_choice_auto() {
     assert_eq!(calls[0].1, r#"{"location":"Paris"}"#);
 }
 
-/// `PARSER.11` — Kimi K2 + tool_choice=required. Today this combination puts
+/// `TOOLCALLING.11` — Kimi K2 + tool_choice=required. Today this combination puts
 /// the jail in `Immediate{ ArrayOfTools }` mode which expects a raw JSON
 /// array of tools rather than the kimi envelope. Pin whatever the
 /// integration layer actually produces today so a future fix is intentional.
 ///
-/// TODO(PARSER.11) — required + parser path is ill-defined: the immediate jail
+/// TODO(TOOLCALLING.11) — required + parser path is ill-defined: the immediate jail
 /// expects raw JSON while the parser expects its own envelope. cross-parser parametrisation work-item
 /// work-item #1 should reconcile these paths so `tool_choice=required` works
 /// uniformly across all top-7 parsers. Flip this assertion once reconciled.
@@ -759,7 +763,7 @@ async fn test_kimi_k2_tool_choice_required_pins_current_behavior() {
     );
 }
 
-/// `PARSER.11` — Kimi K2 + tool_choice=named with the **correct** tool name.
+/// `TOOLCALLING.11` — Kimi K2 + tool_choice=named with the **correct** tool name.
 /// `named_tool_filter` should pass the call through unchanged.
 #[tokio::test]
 async fn test_kimi_k2_tool_choice_named_correct_tool_passes() {
@@ -779,7 +783,7 @@ async fn test_kimi_k2_tool_choice_named_correct_tool_passes() {
     assert_eq!(calls[0].0, "get_weather");
 }
 
-/// `PARSER.11` — Kimi K2 + tool_choice=named with the **wrong** tool name.
+/// `TOOLCALLING.11` — Kimi K2 + tool_choice=named with the **wrong** tool name.
 /// `named_tool_filter` must drop the call.
 #[tokio::test]
 async fn test_kimi_k2_tool_choice_named_wrong_tool_filtered() {
@@ -798,7 +802,7 @@ async fn test_kimi_k2_tool_choice_named_wrong_tool_filtered() {
 
 // --- DSv4 × tool_choice variants ---
 
-/// `PARSER.11` — DSv4 + tool_choice=auto. Parser path detects the DSML
+/// `TOOLCALLING.11` — DSv4 + tool_choice=auto. Parser path detects the DSML
 /// envelope and emits the parsed invoke.
 #[tokio::test]
 async fn test_deepseek_v4_tool_choice_auto() {
@@ -815,10 +819,10 @@ async fn test_deepseek_v4_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// `PARSER.11` — DSv4 + tool_choice=required. Same parser-vs-immediate
+/// `TOOLCALLING.11` — DSv4 + tool_choice=required. Same parser-vs-immediate
 /// conflict as Kimi above. Pin current behavior.
 ///
-/// TODO(PARSER.11) — see kimi_k2 counterpart. Flip when cross-parser tool_choice parametrisation work-item (tracked separately)
+/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart. Flip when cross-parser tool_choice parametrisation work-item (tracked separately)
 /// reconciles parser path with immediate-jail mode.
 #[tokio::test]
 async fn test_deepseek_v4_tool_choice_required_pins_current_behavior() {
@@ -837,7 +841,7 @@ async fn test_deepseek_v4_tool_choice_required_pins_current_behavior() {
     );
 }
 
-/// `PARSER.11` — DSv4 + tool_choice=named with the **correct** tool name.
+/// `TOOLCALLING.11` — DSv4 + tool_choice=named with the **correct** tool name.
 #[tokio::test]
 async fn test_deepseek_v4_tool_choice_named_correct_tool_passes() {
     let responses = apply_jail_with_parser_and_choice(
@@ -856,7 +860,7 @@ async fn test_deepseek_v4_tool_choice_named_correct_tool_passes() {
     assert_eq!(calls[0].0, "get_weather");
 }
 
-/// `PARSER.11` — DSv4 + tool_choice=named with the **wrong** tool name.
+/// `TOOLCALLING.11` — DSv4 + tool_choice=named with the **wrong** tool name.
 #[tokio::test]
 async fn test_deepseek_v4_tool_choice_named_wrong_tool_filtered() {
     let responses =
@@ -879,7 +883,7 @@ const GLM47_GET_WEATHER: &str =
 const GLM47_SEARCH: &str =
     "<tool_call>search<arg_key>query</arg_key><arg_value>Paris weather</arg_value></tool_call>";
 
-/// `PARSER.11` — glm47 + tool_choice=auto. Parser path detects the call and
+/// `TOOLCALLING.11` — glm47 + tool_choice=auto. Parser path detects the call and
 /// emits it.
 #[tokio::test]
 async fn test_glm47_tool_choice_auto() {
@@ -896,10 +900,10 @@ async fn test_glm47_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// `PARSER.11` — glm47 + tool_choice=required. Same parser-vs-immediate
+/// `TOOLCALLING.11` — glm47 + tool_choice=required. Same parser-vs-immediate
 /// conflict as the kimi_k2 / deepseek_v4 counterparts. Pin current behavior.
 ///
-/// TODO(PARSER.11) — required + parser path is ill-defined; reconciled by
+/// TODO(TOOLCALLING.11) — required + parser path is ill-defined; reconciled by
 /// the cross-parser tool_choice parametrisation work-item. Flip when fixed.
 #[tokio::test]
 async fn test_glm47_tool_choice_required_pins_current_behavior() {
@@ -918,7 +922,7 @@ async fn test_glm47_tool_choice_required_pins_current_behavior() {
     );
 }
 
-/// `PARSER.11` — glm47 + tool_choice=named with the **correct** tool name.
+/// `TOOLCALLING.11` — glm47 + tool_choice=named with the **correct** tool name.
 #[tokio::test]
 async fn test_glm47_tool_choice_named_correct_tool_passes() {
     let responses =
@@ -934,7 +938,7 @@ async fn test_glm47_tool_choice_named_correct_tool_passes() {
     assert_eq!(calls[0].0, "get_weather");
 }
 
-/// `PARSER.11` — glm47 + tool_choice=named with the **wrong** tool name.
+/// `TOOLCALLING.11` — glm47 + tool_choice=named with the **wrong** tool name.
 #[tokio::test]
 async fn test_glm47_tool_choice_named_wrong_tool_filtered() {
     let responses =
@@ -970,7 +974,7 @@ async fn test_minimax_m2_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// TODO(PARSER.11) — see kimi_k2 counterpart. Flip when cross-parser
+/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart. Flip when cross-parser
 /// tool_choice parametrisation work-item reconciles paths.
 #[tokio::test]
 async fn test_minimax_m2_tool_choice_required_pins_current_behavior() {
@@ -1044,7 +1048,7 @@ async fn test_qwen3_coder_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// TODO(PARSER.11) — see kimi_k2 counterpart.
+/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart.
 #[tokio::test]
 async fn test_qwen3_coder_tool_choice_required_pins_current_behavior() {
     let responses = apply_jail_with_parser_and_choice(
@@ -1117,7 +1121,7 @@ async fn test_nemotron_deci_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// TODO(PARSER.11) — see kimi_k2 counterpart.
+/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart.
 #[tokio::test]
 async fn test_nemotron_deci_tool_choice_required_pins_current_behavior() {
     let responses = apply_jail_with_parser_and_choice(
@@ -1190,7 +1194,7 @@ async fn test_harmony_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// TODO(PARSER.11) — see kimi_k2 counterpart.
+/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart.
 #[tokio::test]
 async fn test_harmony_tool_choice_required_pins_current_behavior() {
     let responses = apply_jail_with_parser_and_choice(

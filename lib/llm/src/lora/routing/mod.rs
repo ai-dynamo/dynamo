@@ -4,6 +4,7 @@
 //! LoRA Allocation Algorithms - HRW and Random
 
 use dynamo_kv_router::protocols::WorkerWithDpRank;
+use std::collections::HashMap;
 use std::str::FromStr;
 
 pub mod hrw;
@@ -21,6 +22,18 @@ pub trait LoraAllocator: Send + Sync {
         workers: &[WorkerWithDpRank],
         replica_factor: usize,
     ) -> Vec<WorkerWithDpRank>;
+
+    /// Slot-aware variant: walks the ranked list, skipping workers that are at capacity.
+    /// Default implementation falls back to the basic `compute_replica_set`.
+    fn compute_replica_set_with_slots(
+        &self,
+        lora_name: &str,
+        workers: &[WorkerWithDpRank],
+        replica_factor: usize,
+        _worker_slot_usage: &HashMap<WorkerWithDpRank, (usize, usize)>,
+    ) -> Vec<WorkerWithDpRank> {
+        self.compute_replica_set(lora_name, workers, replica_factor)
+    }
 
     /// Name of this algorithm (for logging/metrics)
     fn name(&self) -> &str;

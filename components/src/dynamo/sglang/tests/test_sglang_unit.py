@@ -307,6 +307,16 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 
 
 @pytest.mark.asyncio
+async def test_forward_pass_metrics_enabled_from_env(monkeypatch, mock_sglang_cli):
+    """Dynamo should enable FPM when DYN_FORWARDPASS_METRIC_PORT is set."""
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "1")
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = await parse_args(sys.argv[1:])
+    assert config.server_args.enable_forward_pass_metrics is True
+
+
+@pytest.mark.asyncio
 async def test_obsolete_dyn_endpoint_types_flag_is_supported(mock_sglang_cli):
     """Obsolete --dyn-endpoint-types alias should map to endpoint_types."""
     mock_sglang_cli(

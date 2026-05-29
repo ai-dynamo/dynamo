@@ -24,14 +24,15 @@ import (
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	CheckpointID       string
-	CheckpointLocation string
-	StartedAt          time.Time
-	NSRestorePath      string
-	PodName            string
-	PodNamespace       string
-	ContainerName      string
-	Clientset          kubernetes.Interface
+	CheckpointID                string
+	CheckpointLocation          string
+	ContainerCheckpointLocation string
+	StartedAt                   time.Time
+	NSRestorePath               string
+	PodName                     string
+	PodNamespace                string
+	ContainerName               string
+	Clientset                   kubernetes.Interface
 }
 
 // Restore performs external restore for the given request.
@@ -185,13 +186,20 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
 func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
+	checkpointPath := req.ContainerCheckpointLocation
+	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
+		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
+	}
+	if checkpointPath == "" {
+		checkpointPath = snap.CheckpointPath
+	}
 	args := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 		// from the host-visible hierarchy so --cgroup-root remap works.
 		"-m", "-u", "-i", "-n", "-p",
 		"--", req.NSRestorePath,
-		"--checkpoint-path", snap.CheckpointPath,
+		"--checkpoint-path", checkpointPath,
 	}
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)

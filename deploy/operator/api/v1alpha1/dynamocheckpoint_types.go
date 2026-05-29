@@ -95,6 +95,14 @@ type DynamoCheckpointJobConfig struct {
 	// +kubebuilder:validation:Required
 	PodTemplateSpec corev1.PodTemplateSpec `json:"podTemplateSpec"`
 
+	// TargetContainerName is the container in PodTemplateSpec to snapshot.
+	// +optional
+	// +kubebuilder:default=main
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	TargetContainerName string `json:"targetContainerName,omitempty"`
+
 	// SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.
 	// When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
 	// +optional
@@ -119,7 +127,6 @@ type DynamoCheckpointJobConfig struct {
 }
 
 // DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
-// +kubebuilder:validation:XValidation:rule="!has(self.gpuMemoryService) || !self.gpuMemoryService.enabled",message="checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues"
 type DynamoCheckpointSpec struct {
 	// Identity defines the inputs that determine checkpoint equivalence
 	// +kubebuilder:validation:Required

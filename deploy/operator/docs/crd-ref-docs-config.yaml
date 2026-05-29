@@ -34,6 +34,7 @@ processor:
     # Ignore only the override wrapper type to reduce repetition
     # Keep SharedSpec so embedded fields are documented once
     # - "DynamoComponentDeploymentOverridesSpec$"
+    - "ConversionContext$"
     - "DynamoComponentDeploymentStatus$"
     - "BaseStatus$"
     - "ExcludedNamespacesChecker"

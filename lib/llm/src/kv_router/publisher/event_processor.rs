@@ -12,10 +12,12 @@ use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::*;
 use dynamo_runtime::transports::nats::NatsQueue;
 
+use crate::kv_router::metrics::kv_publisher_metrics;
+
+use super::DEFAULT_MAX_BATCH_BLOCKS;
 use super::batching::BatchingState;
 use super::dedup::EventDedupFilter;
 use super::sinks::{JetStreamPublisher, emit};
-use super::{DEFAULT_MAX_BATCH_BLOCKS, kv_publisher_metrics};
 
 pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,

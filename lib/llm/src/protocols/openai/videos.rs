@@ -8,7 +8,6 @@ use validator::Validate;
 mod aggregator;
 mod nvext;
 
-pub use aggregator::DeltaAggregator;
 pub use nvext::{NvExt, NvExtProvider};
 
 /// Request for video generation (/v1/videos endpoint)

@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NOTE: You can remove metadata.namespace if using kubectl apply -n
-# The backendRefs.namespace field should match where your InferencePool is deployed
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -24,7 +22,6 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: inference-gateway
-      namespace: default # the namespace where your gateway is deployed.
   rules:
     - backendRefs:
         - group: inference.networking.k8s.io

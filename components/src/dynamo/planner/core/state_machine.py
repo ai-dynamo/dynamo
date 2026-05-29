@@ -23,6 +23,10 @@ import math
 from typing import TYPE_CHECKING, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.budget import (
+    proportional_clamp_pair,
+    proportional_clamp_single,
+)
 from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
 from dynamo.planner.core.load_scaling import LoadScalingMixin
 from dynamo.planner.core.perf_model import (
@@ -103,6 +107,8 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._num_d_workers: int = 0
         self._expected_num_p: Optional[int] = None
         self._expected_num_d: Optional[int] = None
+        self._prefill_scaling_in_progress: bool = False
+        self._decode_scaling_in_progress: bool = False
 
         self._throughput_lower_bound_p: int = 1
         self._throughput_lower_bound_d: int = 1
@@ -141,10 +147,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._capabilities = capabilities
 
     def initial_tick(self, start_s: float) -> ScheduledTick:
-        self._next_load_s = start_s + self._config.load_adjustment_interval
+        self._next_load_s = start_s + self._config.load_adjustment_interval_seconds
         if self._config.enable_throughput_scaling:
             self._next_throughput_s = (
-                start_s + self._config.throughput_adjustment_interval
+                start_s + self._config.throughput_adjustment_interval_seconds
             )
         return self._next_scheduled_tick()
 
@@ -204,7 +210,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                 self._observe_traffic(tick_input.traffic)
                 throughput_decision = self._advance_throughput(tick_input.traffic)
             self._next_throughput_s = (
-                tick_input.now_s + self._config.throughput_adjustment_interval
+                tick_input.now_s + self._config.throughput_adjustment_interval_seconds
             )
 
         if tick.run_load_scaling:
@@ -219,7 +225,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                 load_decision = self._advance_load(tick_input.fpm_observations)
                 if load_decision is not None:
                     effects.scale_to = load_decision
-            self._next_load_s = tick_input.now_s + self._config.load_adjustment_interval
+            self._next_load_s = (
+                tick_input.now_s + self._config.load_adjustment_interval_seconds
+            )
 
         # Load scaling has precedence when it produced a decision; otherwise
         # fall back to the throughput-scaling decision.
@@ -283,10 +291,12 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         # planner can still discount prefill work by recent prefix reuse.
         if is_throughput:
             need_traffic = True
-            traffic_duration_s = float(self._config.throughput_adjustment_interval)
+            traffic_duration_s = float(
+                self._config.throughput_adjustment_interval_seconds
+            )
         elif is_load and not self._config.enable_throughput_scaling:
             need_traffic = True
-            traffic_duration_s = float(self._config.load_adjustment_interval)
+            traffic_duration_s = float(self._config.load_adjustment_interval_seconds)
         else:
             need_traffic = False
             traffic_duration_s = 0.0
@@ -311,14 +321,16 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             self._num_d_workers = counts.ready_num_decode
         self._expected_num_p = counts.expected_num_prefill
         self._expected_num_d = counts.expected_num_decode
+        self._prefill_scaling_in_progress = counts.prefill_scaling_in_progress
+        self._decode_scaling_in_progress = counts.decode_scaling_in_progress
 
     def _scaling_in_progress(self, component: str) -> bool:
         if component == "prefill":
-            return (
+            return self._prefill_scaling_in_progress or (
                 self._expected_num_p is not None
                 and self._expected_num_p != self._num_p_workers
             )
-        return (
+        return self._decode_scaling_in_progress or (
             self._expected_num_d is not None
             and self._expected_num_d != self._num_d_workers
         )
@@ -381,46 +393,55 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         return self._budget_clamp(max(desired, self._config.min_endpoint), gpu)
 
     def _apply_global_budget(self, num_p: int, num_d: int) -> tuple[int, int]:
-        budget = self._config.max_gpu_budget
+        """Apply the GPU budget band (ceiling and optional floor) to
+        ``(num_p, num_d)``. Delegates to ``budget.proportional_clamp_pair``
+        for the actual math; this method only resolves the per-engine GPU
+        counts from capabilities."""
         p_gpu = (
             self._capabilities.prefill.num_gpu if self._capabilities.prefill else None
         )
         d_gpu = self._capabilities.decode.num_gpu if self._capabilities.decode else None
-        if budget < 0 or p_gpu is None or d_gpu is None:
+        if p_gpu is None or d_gpu is None:
             return num_p, num_d
-        total = num_p * p_gpu + num_d * d_gpu
-        if total <= budget:
-            return num_p, num_d
-        min_req = self._config.min_endpoint * p_gpu + self._config.min_endpoint * d_gpu
-        if budget < min_req:
+
+        new_p, new_d = proportional_clamp_pair(
+            num_p,
+            num_d,
+            p_gpu,
+            d_gpu,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            self._config.min_endpoint,
+        )
+        if (new_p, new_d) != (num_p, num_d):
+            old_total = num_p * p_gpu + num_d * d_gpu
+            new_total = new_p * p_gpu + new_d * d_gpu
             logger.warning(
-                f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas"
+                f"GPU budget band [min={self._config.min_gpu_budget}, "
+                f"max={self._config.max_gpu_budget}] clamped "
+                f"({num_p}P + {num_d}D = {old_total}) -> "
+                f"({new_p}P + {new_d}D = {new_total})"
             )
-            return 0, 0
-        scale = budget / total
-        max_p = math.floor((budget - self._config.min_endpoint * d_gpu) / p_gpu)
-        num_p = max(self._config.min_endpoint, min(max_p, math.floor(num_p * scale)))
-        remaining = budget - num_p * p_gpu
-        num_d = max(self._config.min_endpoint, math.floor(remaining / d_gpu))
-        logger.warning(f"GPUs ({total}) > budget ({budget}), -> {num_p}P + {num_d}D")
-        return num_p, num_d
+        return new_p, new_d
 
     def _budget_clamp(self, desired: int, engine_gpu: int) -> int:
-        budget = self._config.max_gpu_budget
-        if budget < 0:
-            return desired
-        total = desired * engine_gpu
-        if total <= budget:
-            return desired
-        min_req = self._config.min_endpoint * engine_gpu
-        if budget < min_req:
+        """Apply the GPU budget band to a single component's desired replica
+        count (agg, prefill-only, or decode-only mode)."""
+        new_replicas = proportional_clamp_single(
+            desired,
+            engine_gpu,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            self._config.min_endpoint,
+        )
+        if new_replicas != desired:
             logger.warning(
-                f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas"
+                f"GPU budget band [min={self._config.min_gpu_budget}, "
+                f"max={self._config.max_gpu_budget}] clamped "
+                f"{desired} replicas (= {desired * engine_gpu} GPUs) -> "
+                f"{new_replicas} replicas (= {new_replicas * engine_gpu} GPUs)"
             )
-            return 0
-        result = max(self._config.min_endpoint, math.floor(budget / engine_gpu))
-        logger.warning(f"GPUs ({total}) > budget ({budget}), -> {result} replicas")
-        return result
+        return new_replicas
 
     # ------------------------------------------------------------------
     # FPM / worker count reconciliation

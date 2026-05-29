@@ -110,6 +110,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: None,
         },
         BackendOutput {
@@ -124,6 +125,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: None,
         },
         BackendOutput {
@@ -147,6 +149,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 completion_tokens_details: None,
             }),
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: None,
         },
     ]
@@ -194,6 +197,7 @@ fn create_chat_request(
         nvext: None,
         chat_template_args: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -501,6 +505,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         common: Default::default(),
         nvext: None,
         metadata: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -528,6 +533,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         nvext: None,
         chat_template_args: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }

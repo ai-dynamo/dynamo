@@ -10,7 +10,10 @@ import pytest
 
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
-except ImportError:
+except Exception:
+    # vllm_omni's import chain can raise NotImplementedError (and other
+    # non-ImportError types) on platforms it doesn't support — e.g. a
+    # CPU-only runner where vllm._C can't load libcuda.so.1.
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 from tests.serve.common import (
@@ -74,6 +77,7 @@ vllm_omni_configs = {
         script_name="agg_omni.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -105,6 +109,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -169,6 +174,7 @@ vllm_omni_configs = {
         script_name="agg_omni_audio.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -257,6 +263,7 @@ def vllm_omni_config_test(request):
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 def test_omni_serve_deployment(
     vllm_omni_config_test,

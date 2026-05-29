@@ -42,10 +42,11 @@ When all workers exceed their configured busy thresholds, new requests receive a
 
 ### Frontend Arguments
 
-Configure busy thresholds when starting the frontend:
+Configure busy thresholds when starting the frontend. `--admission-control token-capacity` is required to activate the thresholds; the default (`none`) leaves them disabled.
 
 ```bash
 python -m dynamo.frontend \
+    --admission-control token-capacity \
     --active-decode-blocks-threshold 0.85 \
     --active-prefill-tokens-threshold 10000
 ```
@@ -54,6 +55,8 @@ python -m dynamo.frontend \
 |----------|------|-------------|
 | `--active-decode-blocks-threshold` | float (0.0-1.0) | KV cache block utilization threshold |
 | `--active-prefill-tokens-threshold` | int | Prefill token count threshold |
+| `--active-prefill-tokens-threshold-frac` | float | Prefill token threshold as a fraction of `max_num_batched_tokens` |
+| `--admission-control` | `token-capacity` \| `none` | Admission control mode. `token-capacity` applies the busy thresholds above; `none` (the default) clears them while leaving router queueing controlled by `--router-queue-threshold`. To enable busy-worker admission, you must pass `--admission-control token-capacity` |
 
 ### Dynamic Configuration via API
 

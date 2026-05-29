@@ -17,9 +17,11 @@
 
 instances:
   - url: dynamo.docs.buildwithfern.com/dynamo
-    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com]
+    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com/dynamo]
 
 title: NVIDIA Dynamo Documentation
+
+global-theme: nvidia
 
 agents:
   page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/llms.txt. For full content including API reference and SDK examples, see https://docs.nvidia.com/dynamo/llms-full.txt."
@@ -101,23 +103,42 @@ redirects:
     destination: "/dynamo/dev/user-guides/agents"
   - source: "/dynamo/latest/planner/planner_intro.html"
     destination: "/dynamo/components/planner"
-  # SGLang HiCache moved from Integrations section to Backends > SGLang section
+  # SGLang HiCache doc: canonical URL under Backends > SGLang (see docs/index.yml)
+  - source: "/dynamo/dev/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/backends/sg-lang/hi-cache"
+  - source: "/dynamo/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/backends/sg-lang/hi-cache"
   - source: "/dynamo/dev/integrations/sglang-hicache"
-    destination: "/dynamo/dev/backends/sglang/hicache"
+    destination: "/dynamo/dev/backends/sg-lang/hi-cache"
   - source: "/dynamo/integrations/sglang-hicache"
-    destination: "/dynamo/dev/backends/sglang/hicache"
+    destination: "/dynamo/dev/backends/sg-lang/hi-cache"
+  # Digest moved from /blog to /digest
+  - source: "/dynamo/dev/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/dev/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/latest/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/latest/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/blog"
+    destination: "/dynamo/dev/digest"
 
 # GitHub repository link in navbar
 navbar-links:
   - type: dropdown
-    text: Blog
+    text: Digest
     links:
       - text: All Posts
-        href: /dynamo/dev/blog
+        href: /dynamo/dev/digest
+      - text: "Dynamo Day 0 support for TokenSpeed"
+        href: /dynamo/dev/digest/tokenspeed-day-0
+      - text: "Multi-Turn Agentic Harnesses"
+        href: /dynamo/dev/digest/agentic-harnesses
       - text: "Full-Stack Optimizations for Agentic Inference"
-        href: /dynamo/dev/blog/agentic-inference
-      - text: "Flash Indexer: Inter-Galactic KV Routing"
-        href: /dynamo/dev/blog/flash-indexer
+        href: /dynamo/dev/digest/agentic-inference
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 

@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: removed values validation
+templates:
+  - templates/validate-values.yaml
+tests:
+  # --- Platform-level subchart toggles ---
+
+  - it: should reject nats.enabled
+    set:
+      nats.enabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "'nats.enabled' has been removed"
+
+  - it: should reject etcd.enabled
+    set:
+      etcd.enabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "'etcd.enabled' has been removed"
+
+  - it: should reject grove.enabled
+    set:
+      grove.enabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "'grove.enabled' has been removed"
+
+  - it: should reject kai-scheduler.enabled
+    set:
+      kai-scheduler.enabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "'kai-scheduler.enabled' has been removed"
+
+  # --- Default values should render cleanly ---
+
+  - it: should render successfully with default values
+    asserts:
+      - notFailedTemplate: {}

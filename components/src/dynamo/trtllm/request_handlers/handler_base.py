@@ -34,7 +34,7 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
-from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
@@ -1083,7 +1083,7 @@ class HandlerBase(BaseGenerativeHandler):
         )
 
         # Build trace headers for distributed tracing
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
@@ -1350,7 +1350,9 @@ class HandlerBase(BaseGenerativeHandler):
                 regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
-                structural_tag=guided_decoding.get("structural_tag"),
+                structural_tag=serialize_structural_tag(
+                    guided_decoding.get("structural_tag")
+                ),
             )
 
         n = overrides.get("n")

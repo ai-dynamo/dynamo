@@ -51,13 +51,13 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
     ):
         mock_metrics.return_value = Mock()
         config = PlannerConfig.model_construct(
-            throughput_adjustment_interval=60,
+            throughput_adjustment_interval_seconds=60,
             prefill_engine_num_gpu=2,
             decode_engine_num_gpu=4,
             min_endpoint=1,
             max_gpu_budget=-1,
-            ttft=500.0,
-            itl=50.0,
+            ttft_ms=500.0,
+            itl_ms=50.0,
             backend="vllm",
             no_operation=True,
             metric_pulling_prometheus_endpoint="http://localhost:9090",
@@ -68,7 +68,7 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
             mode="disagg",
             enable_load_scaling=True,
             enable_throughput_scaling=True,
-            load_adjustment_interval=5,
+            load_adjustment_interval_seconds=5,
             max_num_fpm_samples=50,
             fpm_sample_bucket_size=16,
             load_scaling_down_sensitivity=80,
@@ -215,6 +215,32 @@ class TestReportDiagnosticsEnumGating:
 
         pm.load_scaling_decision.state.assert_called_once_with("scale_up")
         pm.throughput_scaling_decision.state.assert_not_called()
+
+    def test_scale_down_refused_consolidation_state_registered(self):
+        """The new consolidation-refusal reason must be a registered
+        Enum state; otherwise ``Enum.state(...)`` raises ValueError and
+        crashes the diagnostic publication path on Prometheus-backed
+        planners.
+        """
+        # Mocked Enum's state() doesn't validate, so guard against the
+        # registration list drifting away from the diag stamps by checking
+        # the constant directly.
+        from dynamo.planner.monitoring.planner_metrics import LOAD_DECISION_STATES
+
+        assert "scale_down_refused_consolidation" in LOAD_DECISION_STATES
+
+        # And verify the publication path actually writes it on tick.
+        planner = _make_planner()
+        pm = planner.prometheus_metrics
+
+        planner._report_diagnostics(
+            _tick(run_load=True, run_throughput=False),
+            _diag(load_reason="scale_down_refused_consolidation"),
+        )
+
+        pm.load_scaling_decision.state.assert_called_once_with(
+            "scale_down_refused_consolidation"
+        )
 
     def test_throughput_only_tick_does_not_touch_load_enum(self):
         planner = _make_planner()

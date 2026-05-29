@@ -11,7 +11,6 @@ from io import BytesIO
 from typing import Any, Dict, Final, List
 from urllib.parse import urlparse
 
-import httpx
 from PIL import Image
 
 import dynamo.nixl_connect as nixl_connect
@@ -19,12 +18,8 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
-from .http_client import get_http_client, get_http_semaphore
-from .url_validator import (
-    UrlValidationPolicy,
-    fetch_with_revalidation,
-    validate_media_url,
-)
+from ..http import HttpError, HttpStatusError, HttpTimeoutError, fetch_bytes
+from ..http.url_validator import UrlValidationPolicy, validate_media_url
 
 logger = logging.getLogger(__name__)
 
@@ -101,28 +96,25 @@ class ImageLoader:
         """
         try:
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
-                http_client = get_http_client(self._http_timeout)
-                async with get_http_semaphore():
-                    response = await fetch_with_revalidation(
-                        http_client, image_url, self._url_policy
-                    )
-                    response.raise_for_status()
-                    if not response.content:
-                        raise ValueError("Empty response content from image URL")
-                    image_data = BytesIO(response.content)
+                content = await fetch_bytes(
+                    image_url, self._http_timeout, policy=self._url_policy
+                )
+                if not content:
+                    raise ValueError("Empty response content from image URL")
+                image_data = BytesIO(content)
 
             return await self._open_image(image_data)
 
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP {e.response.status_code} loading image: '{image_url}'")
+        except HttpStatusError as e:
+            logger.error(f"HTTP {e.status} loading image: '{image_url}'")
             raise
-        except httpx.TimeoutException as e:
+        except HttpTimeoutError as e:
             logger.error(
                 f"{type(e).__name__} loading image: '{image_url}' "
                 f"(timeout={self._http_timeout}s)"
             )
             raise ValueError(f"Timeout loading image: '{image_url}'") from e
-        except httpx.HTTPError as e:
+        except HttpError as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise
         except Exception as e:

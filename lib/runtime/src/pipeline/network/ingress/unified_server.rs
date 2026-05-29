@@ -4,7 +4,7 @@
 //! Unified Request Plane Server Interface
 //!
 //! This module defines a transport-agnostic interface for request plane servers.
-//! All transport implementations (HTTP, TCP, NATS) implement this trait to provide
+//! All transport implementations (TCP, NATS) implement this trait to provide
 //! a consistent interface for endpoint registration and management.
 
 use super::*;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 /// Unified interface for request plane servers
 ///
-/// This trait abstracts over different transport mechanisms (HTTP/2, TCP, NATS)
+/// This trait abstracts over different transport mechanisms (TCP, NATS)
 /// providing a consistent interface for registering endpoints and managing server lifecycle.
 ///
 /// # Design Principles
@@ -87,7 +87,6 @@ pub trait RequestPlaneServer: Send + Sync {
     /// Get server bind address or identifier
     ///
     /// Returns a transport-specific address string:
-    /// - HTTP: `"http://0.0.0.0:8888"`
     /// - TCP: `"tcp://0.0.0.0:9999"`
     /// - NATS: `"nats://localhost:4222"`
     ///
@@ -101,7 +100,6 @@ pub trait RequestPlaneServer: Send + Sync {
     ///
     /// # Examples
     ///
-    /// - `"http"` - HTTP/2 transport
     /// - `"tcp"` - Raw TCP transport
     /// - `"nats"` - NATS messaging
     fn transport_name(&self) -> &'static str;

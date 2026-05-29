@@ -216,6 +216,12 @@ impl LiveRuntime {
             workload: Some(Arc::clone(&workload)),
         };
 
+        tracing::debug!(
+            total_turns,
+            num_workers = self.senders.len(),
+            "replay_diag: workload loop starting"
+        );
+
         loop {
             let now = now_ms(start);
             let ready_turns = workload.driver.lock().unwrap().pop_ready(now, usize::MAX);
@@ -245,6 +251,10 @@ impl LiveRuntime {
                 (driver.is_drained(), driver.next_ready_time_ms())
             };
             if is_drained {
+                tracing::debug!(
+                    tasks_remaining = tasks.len(),
+                    "replay_diag: workload drained, waiting for tasks"
+                );
                 break;
             }
 
@@ -259,9 +269,11 @@ impl LiveRuntime {
         self.cancel_token.cancel();
         self.schedulers.clear();
 
+        tracing::debug!("replay_diag: shutdown awaiting demux");
         let report = demux_task
             .await
             .map_err(|e| anyhow!("online replay demux task failed: {e}"))?;
+        tracing::debug!("replay_diag: shutdown awaiting router");
         router.shutdown().await?;
         Ok((report, stats.snapshot()))
     }

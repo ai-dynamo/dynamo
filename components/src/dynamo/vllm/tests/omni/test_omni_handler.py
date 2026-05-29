@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -88,9 +89,38 @@ class TestBuildEngineInputs:
         inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
         assert inputs.request_type == RequestType.IMAGE_GENERATION
         assert inputs.prompt["prompt"] == "a cat"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 512,
+            "target_w": 512,
+        }
         assert len(inputs.sampling_params_list) == 1
         sp = inputs.sampling_params_list[0]
         assert sp.height == 512
+        assert sp.width == 512
+
+    @pytest.mark.asyncio
+    async def test_image_chat_completion_uses_multimodal_prompt(self):
+        """Image chat requests must use vLLM-Omni multimodal preprocessing."""
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        handler.config.output_modalities = ["image"]
+        raw = {
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "seed": 123},
+        }
+
+        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
+
+        assert inputs.request_type == RequestType.CHAT_COMPLETION
+        assert inputs.prompt["prompt"] == "a glass teapot"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 768,
+            "target_w": 512,
+        }
+        assert len(inputs.sampling_params_list) == 2
+        sp = inputs.sampling_params_list[1]
+        assert sp.height == 768
         assert sp.width == 512
 
     @pytest.mark.asyncio
@@ -263,8 +293,7 @@ class TestBuildOriginalPrompt:
 
 
 class TestParseOmniRequest:
-    """parse_omni_request: original_prompt only has prompt/negative_prompt,
-    geometry goes into sampling_params_list dict."""
+    """parse_omni_request: image geometry goes into sampling params and processor kwargs."""
 
     @pytest.mark.asyncio
     async def test_image_sampling_params_has_geometry(self):
@@ -279,17 +308,56 @@ class TestParseOmniRequest:
         assert sp["width"] == 512
 
     @pytest.mark.asyncio
-    async def test_image_original_prompt_no_geometry(self):
+    async def test_image_prompt_uses_multimodal_preprocessor_kwargs(self):
         request = {
             "prompt": "a sunset",
             "size": "512x512",
             "output_modalities": ["image"],
         }
         result = await parse_omni_request(request, ["image"])
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "a sunset"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
+
         op = result["original_prompt"]
         assert op["prompt"] == "a sunset"
         assert "height" not in op
         assert "width" not in op
+        assert op["modalities"] == ["image"]
+        assert op["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
+
+    def test_image_request_uses_nvext_negative_prompt(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "1024x1024",
+            "nvext": {"negative_prompt": "blurry, low quality"},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["engine_inputs"]["negative_prompt"] == "blurry, low quality"
+        assert result["original_prompt"]["negative_prompt"] == "blurry, low quality"
+
+    def test_image_request_uses_nvext_dimensions_consistently(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "512x512",
+            "nvext": {"height": 640, "width": 768},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["sampling_params_list"]["height"] == 640
+        assert result["sampling_params_list"]["width"] == 768
+        assert result["engine_inputs"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
+        assert result["original_prompt"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
 
     @pytest.mark.asyncio
     async def test_nvext_params_go_into_sampling_params_not_prompt(self):
@@ -305,6 +373,26 @@ class TestParseOmniRequest:
         op = result["original_prompt"]
         assert "num_inference_steps" not in op
         assert "guidance_scale" not in op
+
+    @pytest.mark.asyncio
+    async def test_image_chat_request_uses_multimodal_preprocessor_kwargs(self):
+        request = {
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "guidance_scale": 1.5},
+        }
+
+        result = await parse_omni_request(request, ["image"])
+
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "a glass teapot"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 768, "target_w": 512}
+        assert result["original_prompt"] == prompt
+        assert result["sampling_params_list"] == {
+            "height": 768,
+            "width": 512,
+            "guidance_scale": 1.5,
+        }
 
 
 # ---------------------------------------------------------------------------
