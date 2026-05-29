@@ -7,3 +7,12 @@
 # Ignore placeholder URLs in docs templates
 ^https://\.\.\./
 ^https://github\.com/\.\.\.
+
+# blob/main URLs whose targets were moved or removed on main after this
+# release branch was cut. The Fern release workflow rewrites blob/main to
+# blob/v1.2.0 at tag-cut time, and the v1.2.0 tag (built from this branch)
+# carries each file at the referenced path, so the published v1.2.0 docs
+# links resolve. Only lychee CI on the release branch needs these ignored.
+^https://github\.com/ai-dynamo/dynamo/blob/main/\.agents/skills/(dynamo-docs|tool-parser-generator)/SKILL\.md$
+^https://github\.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf\.sh$
+^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/

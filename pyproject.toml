@@ -70,7 +70,7 @@ sglang = [
 ]
 
 mocker = [
-    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@2103aa286a822d112ea83781ad14e3e022b603d9",
+    "aiconfigurator>=0.9.0",
 ]
 
 [project.entry-points.pytest11]
