@@ -167,6 +167,19 @@ pub enum ReasoningEffort {
     Max,
 }
 
+impl From<async_openai::types::chat::ReasoningEffort> for ReasoningEffort {
+    fn from(value: async_openai::types::chat::ReasoningEffort) -> Self {
+        match value {
+            async_openai::types::chat::ReasoningEffort::None => ReasoningEffort::None,
+            async_openai::types::chat::ReasoningEffort::Minimal => ReasoningEffort::Minimal,
+            async_openai::types::chat::ReasoningEffort::Low => ReasoningEffort::Low,
+            async_openai::types::chat::ReasoningEffort::Medium => ReasoningEffort::Medium,
+            async_openai::types::chat::ReasoningEffort::High => ReasoningEffort::High,
+            async_openai::types::chat::ReasoningEffort::Xhigh => ReasoningEffort::Xhigh,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Flexible `arguments` deserialisation helpers
 // ---------------------------------------------------------------------------
@@ -898,6 +911,16 @@ mod tests {
             Stop::from(upstream),
             Stop::StringArray(vec!["END".to_string()])
         );
+    }
+
+    #[test]
+    fn request_builder_accepts_upstream_reasoning_effort() {
+        let request = CreateChatCompletionRequestArgs::default()
+            .reasoning_effort(async_openai::types::chat::ReasoningEffort::High)
+            .build()
+            .unwrap();
+
+        assert_eq!(request.reasoning_effort, Some(ReasoningEffort::High));
     }
 
     #[test]
