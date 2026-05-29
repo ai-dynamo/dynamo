@@ -3,12 +3,13 @@ Validate that a Dynamo deployment's NIXL/UCX/NCCL interconnect is ready for disa
 
 This skill is ready for commercial/non-commercial use. <br>
 
-## Owner: NVIDIA <br>
+## Owner
+NVIDIA <br>
 
 ### License/Terms of Use: <br>
 Apache-2.0 <br>
 ## Use Case: <br>
-Developers and infrastructure engineers use this skill to confirm that the NIXL/UCX/NCCL transport fabric is correctly configured for disaggregated serving before trusting benchmark numbers or production traffic. <br>
+Developers and engineers deploying Dynamo disaggregated or multi-node recipes who need to confirm the NIXL/UCX/NCCL transport fabric is operational before trusting benchmark numbers. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -24,25 +25,19 @@ Mitigation: Review and scan skill before deployment. <br>
 
 ## Skill Output: <br>
 **Output Type(s):** [Shell commands, Analysis] <br>
-**Output Format:** [Structured JSON with ok/warn/fail/skipped verdicts] <br>
+**Output Format:** [Structured JSON with ok/warn/fail/skipped verdicts per check] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 
-## Evaluation Agent: <br>
-Claude (Anthropic) running the skill harness end-to-end, supplemented by the NV-ACES Tier 1 / NV-BASE 2.12.0 static scorer for schema, license, quality, security, and PII validation. <br>
+## Evaluation Metrics Used: <br>
+Reported benchmark dimensions: <br>
+- Security: Checks whether skill-assisted execution avoids unsafe behavior such as secret leakage, destructive commands, or unauthorized access. <br>
+- Correctness: Checks whether the agent follows the expected workflow and produces the correct final output. <br>
+- Discoverability: Checks whether the agent loads the skill when relevant and avoids using it when irrelevant. <br>
+- Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
+- Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
 
-## Evaluation Tasks: <br>
-Six prompts in `evals/evals.json`, split between three positive cases the skill should trigger and act on, and three negative cases it should defer to the correct sibling skill. <br>
-- Positive: `confirm-nixl-before-trusting-disagg`, `agg-ok-disagg-slow-suspect-fabric`, `rdma-nvlink-readiness-multinode`. <br>
-- Negative: `neg-deploy-disagg-recipe` (defers to `dynamo-recipe-runner`), `neg-disagg-pods-crashing` (defers to `dynamo-troubleshoot`), `neg-switch-router-mode` (defers to `dynamo-router-starter`). <br>
 
-## Evaluation Metrics: <br>
-- Trigger-routing accuracy: does the prompt invoke this skill on positive cases and correctly defer on negatives? <br>
-- NV-ACES 4-dimension static score: correctness (35% weight), discoverability (25%), reliability (25%), efficiency (15%). <br>
-
-## Evaluation Results: <br>
-- Trigger-routing: 6/6 cases routed correctly (3 positive + 3 negative); part of the 24/24 across the four bring-up skills attested on PR #9782. <br>
-- NV-ACES Tier 1 / NV-BASE 2.12.0: 83.2 / 100 (Grade B). Dimension breakdown: correctness 70.0, discoverability 90.0, reliability 85.0, efficiency 100.0. <br>
 
 ## Skill Version(s): <br>
 1.2.0 (source: pyproject.toml) <br>
