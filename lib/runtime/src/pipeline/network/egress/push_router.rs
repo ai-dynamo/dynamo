@@ -994,9 +994,23 @@ where
                 Ok(ResponseStream::new(stream, engine_ctx))
             }
             Err(err) => {
-                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
-                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
-                    self.client.report_instance_down(instance_id);
+                if self.fault_detection_enabled {
+                    if is_inhibited(err.as_ref()) {
+                        tracing::debug!(
+                            "Reporting instance {instance_id} down due to error: {err}"
+                        );
+                        self.client.report_instance_down(instance_id);
+                    } else if match_error_chain(
+                        err.as_ref(),
+                        &[ErrorType::ResourceExhausted],
+                        &[],
+                    ) {
+                        // Backpressure: worker said "my queue is full, retry later".
+                        // Mark busy locally so this FE skips it on the next selection;
+                        // the next ActiveLoad event from worker_monitor will overwrite
+                        // instance_free and re-evaluate from metrics.
+                        self.client.mark_busy_immediate(instance_id);
+                    }
                 }
                 Err(err)
             }
