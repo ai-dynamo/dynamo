@@ -140,13 +140,12 @@ async fn make_worker_query_client(
             .build()
             .map_err(|e| anyhow::anyhow!("Velo TCP build: {e}"))?,
     );
-    let messenger = Arc::new(
-        velo::Messenger::builder()
-            .add_transport(transport as Arc<dyn velo::backend::Transport>)
-            .build()
-            .await
-            .map_err(|e| anyhow::anyhow!("Velo Messenger build: {e}"))?,
-    );
+    // Messenger::builder().build() returns Arc<Messenger> directly.
+    let messenger = velo::Messenger::builder()
+        .add_transport(transport as Arc<dyn velo::backend::Transport>)
+        .build()
+        .await
+        .map_err(|e| anyhow::anyhow!("Velo Messenger build: {e}"))?;
     tracing::info!("Router using Velo direct transport for KV gap-recovery queries");
     WorkerQueryClient::spawn_with_velo(component, indexer, messenger).await
 }

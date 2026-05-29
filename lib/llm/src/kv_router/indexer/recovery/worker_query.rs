@@ -163,12 +163,13 @@ impl WorkerQueryClient {
         use dynamo_runtime::pipeline::AddressedPushRouter;
 
         let velo_transport = Arc::new(VeloWorkerQueryTransport::new(messenger.clone()));
+        // from_runtime_provider returns Arc<AddressedPushRouter> directly.
         let peer_router = AddressedPushRouter::from_runtime_provider(&component).await?;
 
         let velo_state = Some(Arc::new(VeloClientState {
             transport: velo_transport.clone(),
             messenger,
-            peer_router: Arc::new(peer_router),
+            peer_router,
             velo_pending: DashMap::new(),
             velo_commit_lock: DashMap::new(),
         }));
@@ -369,21 +370,34 @@ impl WorkerQueryClient {
     ) {
         // Cancel any in-flight Velo peer resolution for this key so the retry
         // task cannot re-insert a stale endpoint after the removal is processed.
-        // Match on endpoint_id to avoid cancelling a resolution for a *newer*
-        // Added event that may have replaced the removed one.
+        // Acquire the per-key commit lock first so this cancel is mutually
+        // exclusive with the retry task's (token-check + insert) pair — closing
+        // the window where a Removed event arrives after the token check but
+        // before handle_discovered_query_endpoint inserts the entry.
         #[cfg(feature = "velo-recovery")]
         if let Some(velo_state) = &self.velo_state {
-            let should_cancel = velo_state
-                .velo_pending
-                .get(&(worker_id, dp_rank))
-                .map(|entry| entry.value().0 == endpoint_id)
-                .unwrap_or(false);
-            if should_cancel {
-                if let Some((_, (_, token))) = velo_state.velo_pending.remove(&(worker_id, dp_rank))
-                {
-                    token.cancel();
+            let lock = velo_state
+                .velo_commit_lock
+                .entry((worker_id, dp_rank))
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone();
+            {
+                let _guard = lock.lock().await;
+                // Only cancel if the pending entry belongs to *this* endpoint_id.
+                // A newer Added event may have already replaced it.
+                let should_cancel = velo_state
+                    .velo_pending
+                    .get(&(worker_id, dp_rank))
+                    .map(|entry| entry.value().0 == endpoint_id)
+                    .unwrap_or(false);
+                if should_cancel {
+                    if let Some((_, (_, token))) =
+                        velo_state.velo_pending.remove(&(worker_id, dp_rank))
+                    {
+                        token.cancel();
+                    }
                 }
-            }
+            } // commit lock released before remove_if_matches
         }
 
         if !self
@@ -522,6 +536,7 @@ impl WorkerQueryClient {
     ) -> anyhow::Result<()> {
         use super::worker_query_endpoint::{WorkerVeloPeerRequest, WorkerVeloPeerResponse};
         use dynamo_runtime::{
+            engine::AsyncEngine,
             pipeline::{AddressedRequest, ManyOut, SingleIn},
             protocols::maybe_error::MaybeError,
         };
@@ -592,9 +607,20 @@ impl WorkerQueryClient {
             "Registered Velo peer for worker KV recovery"
         );
 
-        // If the peer was removed while we were resolving, unregister it and
-        // return without inserting into query_endpoints.  The removal handler
-        // already cancelled the token and removed the velo_pending entry.
+        // Acquire the per-key commit lock and atomically check the cancellation
+        // token then insert into query_endpoints.  This is mutually exclusive
+        // with the removal handler's (cancel-token + record-tombstone) pair,
+        // closing the race where a Removed event lands after the token check
+        // but before handle_discovered_query_endpoint inserts the entry.
+        //
+        // Lock ordering: velo_commit_lock → worker_states mutex.
+        let commit_lock = velo_state
+            .velo_commit_lock
+            .entry((worker_id, dp_rank))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = commit_lock.lock().await;
+
         if token.is_cancelled() {
             tracing::info!(
                 worker_id,
@@ -618,6 +644,7 @@ impl WorkerQueryClient {
             target,
         };
         self.handle_discovered_query_endpoint(endpoint).await;
+        // _guard dropped here — commit lock released after insert
         Ok(())
     }
 

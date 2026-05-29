@@ -32,7 +32,10 @@ mod side;
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
-pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
+pub(crate) use recovery::start_subscriber;
+// Legacy NATS query endpoint is not started when velo-recovery is active.
+#[cfg(not(feature = "velo-recovery"))]
+pub(crate) use recovery::start_worker_kv_query_endpoint;
 
 #[cfg(feature = "velo-recovery")]
 pub(crate) use recovery::{register_velo_query_handler, start_worker_kv_velo_peer_endpoint};

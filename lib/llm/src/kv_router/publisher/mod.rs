@@ -21,9 +21,11 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
-    metrics::KvPublisherMetrics,
+    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, metrics::KvPublisherMetrics,
 };
+// Legacy NATS query endpoint is only started when velo-recovery is not compiled in.
+#[cfg(not(feature = "velo-recovery"))]
+use crate::kv_router::indexer::start_worker_kv_query_endpoint;
 
 mod batching;
 mod dedup;
@@ -421,13 +423,12 @@ async fn start_worker_velo_kv_transport(
             .build()
             .map_err(|e| anyhow::anyhow!("Velo TCP build: {e}"))?,
     ) as Arc<dyn velo::backend::Transport>;
-    let messenger = Arc::new(
-        velo::Messenger::builder()
-            .add_transport(transport)
-            .build()
-            .await
-            .map_err(|e| anyhow::anyhow!("Velo Messenger build: {e}"))?,
-    );
+    // Messenger::builder().build() returns Arc<Messenger> directly.
+    let messenger = velo::Messenger::builder()
+        .add_transport(transport)
+        .build()
+        .await
+        .map_err(|e| anyhow::anyhow!("Velo Messenger build: {e}"))?;
 
     register_velo_query_handler(&messenger, worker_id, dp_rank, local_indexer)
         .map_err(|e| anyhow::anyhow!("register_velo_query_handler: {e}"))?;
