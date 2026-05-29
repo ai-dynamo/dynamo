@@ -551,8 +551,17 @@ impl McfPlacementSolver {
                     return Err(e);
                 }
             }
-            // Feasible but overflowed while a frozen blocker and spare live
-            // capacity remain: a full re-placement may fit. Adopt it only if it
+            // Feasible but overflowed while a frozen LoRA remains: a full
+            // re-placement may fit. Only retry when the overflow could actually
+            // be reduced — i.e. it exceeds the provable lower bound that no
+            // graph (frozen or not) can beat. That bound is the larger of:
+            //   - capacity floor: demand that simply exceeds total capacity, and
+            //   - degree floor: per-LoRA demand beyond the worker count, since
+            //     each LoRA→worker edge has capacity 1 (a LoRA cannot occupy a
+            //     worker twice).
+            // Gating on this floor prevents a permanently degree-bound overflow
+            // (e.g. one LoRA needing more replicas than there are workers) from
+            // re-running the global solve every tick. Adopt the retry only if it
             // strictly reduces overflow.
             Ok((f, s, ov)) => {
                 let total_full_demand: usize = loras
@@ -561,7 +570,14 @@ impl McfPlacementSolver {
                 let live_capacity: usize = workers
                     .iter()
                     .fold(0usize, |a, w| a.saturating_add(w.capacity));
-                if ov > 0 && froze_some && live_capacity > total_full_demand.saturating_sub(ov) {
+                let num_workers = workers.len();
+                let degree_floor: usize = loras.iter().fold(0usize, |a, l| {
+                    a.saturating_add(l.replicas.saturating_sub(num_workers))
+                });
+                let capacity_floor = total_full_demand.saturating_sub(live_capacity);
+                let overflow_floor = degree_floor.max(capacity_floor);
+
+                if ov > overflow_floor && froze_some {
                     match place(&all_impacted()) {
                         Ok((f2, s2, ov2)) if ov2 < ov => (f2, s2, ov2),
                         _ => (f, s, ov),
