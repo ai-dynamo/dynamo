@@ -262,7 +262,10 @@ DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${NODE0}:${ETCD_PORT} && \
 export NATS_SERVER=nats://${NODE0}:${NATS_PORT} && \
 export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && \
 export DYN_TCP_WORKER_POOL_SIZE=${DYN_TCP_WORKER_POOL_SIZE} && \
-export DYN_TCP_WORK_QUEUE_SIZE=${DYN_TCP_QUEUE_SIZE}"
+export DYN_TCP_WORK_QUEUE_SIZE=${DYN_TCP_QUEUE_SIZE} && \
+export UCX_LOG_LEVEL=info && \
+export UCX_TLS=cuda_ipc,cuda_copy,self,tcp && \
+export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1,mlx5_8:1,mlx5_9:1,mlx5_10:1,mlx5_11:1"
 
 # ==============================================================================
 # Stage 1: Start infrastructure services (etcd + nats) on NODE0
