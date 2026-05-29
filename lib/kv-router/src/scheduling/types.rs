@@ -93,6 +93,9 @@ pub enum WorkerEligibilityError {
         end: DpRank,
     },
 
+    #[error("worker {worker_id} is overloaded")]
+    WorkerOverloaded { worker_id: WorkerId },
+
     #[error("worker {worker_id} does not satisfy routing constraints")]
     RoutingConstraintsUnsatisfied { worker_id: WorkerId },
 }
@@ -233,6 +236,81 @@ impl<'a> RoutingEligibility<'a> {
         }
 
         false
+    }
+
+    #[inline]
+    pub fn validate_worker_rank<'w, C: WorkerConfigLike>(
+        &self,
+        workers: &'w HashMap<WorkerId, C>,
+        worker: WorkerWithDpRank,
+    ) -> Result<&'w C, WorkerEligibilityError> {
+        if !self.caller_allows_worker_id(worker.worker_id) {
+            return Err(WorkerEligibilityError::WorkerNotAllowed {
+                worker_id: worker.worker_id,
+            });
+        }
+
+        let config = worker_config_for_rank(workers, worker)?;
+        if !self
+            .routing_constraints
+            .is_compatible_with_worker_taints(config.taints())
+        {
+            return Err(WorkerEligibilityError::RoutingConstraintsUnsatisfied {
+                worker_id: worker.worker_id,
+            });
+        }
+
+        if self.is_worker_overloaded(worker.worker_id) {
+            return Err(WorkerEligibilityError::WorkerOverloaded {
+                worker_id: worker.worker_id,
+            });
+        }
+
+        Ok(config)
+    }
+
+    pub fn any_eligible_worker_rank<C, F>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        mut predicate: F,
+    ) -> bool
+    where
+        C: WorkerConfigLike,
+        F: FnMut(WorkerWithDpRank, &C) -> bool,
+    {
+        if let Some(worker) = self.pinned_worker {
+            let Ok(config) = self.validate_worker_rank(workers, worker) else {
+                return false;
+            };
+            return predicate(worker, config);
+        }
+
+        for (&worker_id, config) in workers {
+            if !self.allows_worker(worker_id, config) {
+                continue;
+            }
+
+            let dp_start = config.data_parallel_start_rank();
+            let dp_end = dp_start + config.data_parallel_size();
+            for dp_rank in dp_start..dp_end {
+                if predicate(WorkerWithDpRank::new(worker_id, dp_rank), config) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    pub fn for_each_eligible_worker_rank<C, F>(&self, workers: &HashMap<WorkerId, C>, mut visit: F)
+    where
+        C: WorkerConfigLike,
+        F: FnMut(WorkerWithDpRank, &C),
+    {
+        self.any_eligible_worker_rank(workers, |worker, config| {
+            visit(worker, config);
+            false
+        });
     }
 
     #[inline]
@@ -422,35 +500,6 @@ fn worker_config_for_rank<C: WorkerConfigLike>(
     Ok(config)
 }
 
-pub fn validate_worker_eligibility<C: WorkerConfigLike>(
-    workers: &HashMap<WorkerId, C>,
-    worker: WorkerWithDpRank,
-    allowed_worker_ids: Option<&HashSet<WorkerId>>,
-    routing_constraints: &RoutingConstraints,
-) -> Result<(), WorkerEligibilityError> {
-    if allowed_worker_ids.is_some_and(|worker_ids| !worker_ids.contains(&worker.worker_id)) {
-        return Err(WorkerEligibilityError::WorkerNotAllowed {
-            worker_id: worker.worker_id,
-        });
-    }
-
-    let config = worker_config_for_rank(workers, worker)?;
-    if !routing_constraints.is_compatible_with_worker_taints(config.taints()) {
-        return Err(WorkerEligibilityError::RoutingConstraintsUnsatisfied {
-            worker_id: worker.worker_id,
-        });
-    }
-
-    Ok(())
-}
-
-pub fn pinned_worker_config<C: WorkerConfigLike>(
-    workers: &HashMap<WorkerId, C>,
-    worker: WorkerWithDpRank,
-) -> Result<&C, KvSchedulerError> {
-    worker_config_for_rank(workers, worker).map_err(|_| KvSchedulerError::NoEndpoints)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,56 +555,78 @@ mod tests {
     }
 
     #[test]
-    fn validate_worker_eligibility_accepts_allowed_rank_matching_constraints() {
+    fn routing_eligibility_accepts_allowed_rank_matching_constraints() {
         let workers = workers();
         let allowed = HashSet::from([7]);
         let constraints = RoutingConstraints {
             required_taints: HashSet::from(["zone-a".to_string()]),
             preferred_taints: HashMap::new(),
         };
+        let eligibility = RoutingEligibility::new(Some(&allowed), None, None, &constraints);
 
-        let result = validate_worker_eligibility(
-            &workers,
-            WorkerWithDpRank::new(7, 3),
-            Some(&allowed),
-            &constraints,
-        );
+        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 3));
 
-        assert_eq!(result, Ok(()));
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn validate_worker_eligibility_rejects_disallowed_worker() {
+    fn routing_eligibility_rejects_disallowed_worker() {
         let workers = workers();
         let allowed = HashSet::from([8]);
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(Some(&allowed), None, None, &constraints);
 
-        let result = validate_worker_eligibility(
-            &workers,
-            WorkerWithDpRank::new(7, 3),
-            Some(&allowed),
-            &RoutingConstraints::default(),
-        );
+        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 3));
 
         assert_eq!(
-            result,
-            Err(WorkerEligibilityError::WorkerNotAllowed { worker_id: 7 })
+            result.err(),
+            Some(WorkerEligibilityError::WorkerNotAllowed { worker_id: 7 })
         );
     }
 
     #[test]
-    fn validate_worker_eligibility_rejects_out_of_range_dp_rank() {
+    fn routing_eligibility_rejects_overloaded_worker() {
         let workers = workers();
+        let overloaded = HashSet::from([7]);
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, Some(&overloaded), None, &constraints);
 
-        let result = validate_worker_eligibility(
-            &workers,
-            WorkerWithDpRank::new(7, 5),
-            None,
-            &RoutingConstraints::default(),
-        );
+        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 3));
 
         assert_eq!(
-            result,
-            Err(WorkerEligibilityError::DpRankUnavailable {
+            result.err(),
+            Some(WorkerEligibilityError::WorkerOverloaded { worker_id: 7 })
+        );
+    }
+
+    #[test]
+    fn routing_eligibility_prefers_allow_list_error_before_overload() {
+        let workers = workers();
+        let allowed = HashSet::from([8]);
+        let overloaded = HashSet::from([7]);
+        let constraints = RoutingConstraints::default();
+        let eligibility =
+            RoutingEligibility::new(Some(&allowed), Some(&overloaded), None, &constraints);
+
+        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 3));
+
+        assert_eq!(
+            result.err(),
+            Some(WorkerEligibilityError::WorkerNotAllowed { worker_id: 7 })
+        );
+    }
+
+    #[test]
+    fn routing_eligibility_rejects_out_of_range_dp_rank() {
+        let workers = workers();
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints);
+
+        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 5));
+
+        assert_eq!(
+            result.err(),
+            Some(WorkerEligibilityError::DpRankUnavailable {
                 worker_id: 7,
                 dp_rank: 5,
                 start: 2,
@@ -565,19 +636,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_worker_eligibility_rejects_unsatisfied_required_taints() {
+    fn routing_eligibility_rejects_unsatisfied_required_taints() {
         let workers = workers();
         let constraints = RoutingConstraints {
             required_taints: HashSet::from(["zone-b".to_string()]),
             preferred_taints: HashMap::new(),
         };
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints);
 
-        let result =
-            validate_worker_eligibility(&workers, WorkerWithDpRank::new(7, 3), None, &constraints);
+        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 3));
 
         assert_eq!(
-            result,
-            Err(WorkerEligibilityError::RoutingConstraintsUnsatisfied { worker_id: 7 })
+            result.err(),
+            Some(WorkerEligibilityError::RoutingConstraintsUnsatisfied { worker_id: 7 })
         );
     }
 
@@ -615,5 +686,108 @@ mod tests {
         assert!(
             eligibility.has_eligible_worker_ignoring_overload([(1, &compatible), (2, &compatible)])
         );
+    }
+
+    #[test]
+    fn routing_eligibility_expands_all_eligible_dp_ranks() {
+        let workers = HashMap::from([
+            (
+                7,
+                TestWorkerConfig {
+                    dp_start: 2,
+                    dp_size: 3,
+                    taints: HashSet::from(["zone-a".to_string()]),
+                },
+            ),
+            (
+                8,
+                TestWorkerConfig {
+                    dp_start: 0,
+                    dp_size: 2,
+                    taints: HashSet::from(["zone-b".to_string()]),
+                },
+            ),
+        ]);
+        let allowed = HashSet::from([7]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from(["zone-a".to_string()]),
+            preferred_taints: HashMap::new(),
+        };
+        let eligibility = RoutingEligibility::new(Some(&allowed), None, None, &constraints);
+        let mut ranks = Vec::new();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
+
+        assert_eq!(
+            ranks,
+            vec![
+                WorkerWithDpRank::new(7, 2),
+                WorkerWithDpRank::new(7, 3),
+                WorkerWithDpRank::new(7, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn routing_eligibility_rank_expansion_skips_overloaded_workers() {
+        let workers = HashMap::from([
+            (
+                7,
+                TestWorkerConfig {
+                    dp_start: 2,
+                    dp_size: 2,
+                    taints: HashSet::from(["zone-a".to_string()]),
+                },
+            ),
+            (
+                8,
+                TestWorkerConfig {
+                    dp_start: 4,
+                    dp_size: 2,
+                    taints: HashSet::from(["zone-a".to_string()]),
+                },
+            ),
+        ]);
+        let overloaded = HashSet::from([7]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from(["zone-a".to_string()]),
+            preferred_taints: HashMap::new(),
+        };
+        let eligibility = RoutingEligibility::new(None, Some(&overloaded), None, &constraints);
+        let mut ranks = Vec::new();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
+        ranks.sort_by_key(|worker| (worker.worker_id, worker.dp_rank));
+
+        assert_eq!(
+            ranks,
+            vec![WorkerWithDpRank::new(8, 4), WorkerWithDpRank::new(8, 5)]
+        );
+    }
+
+    #[test]
+    fn routing_eligibility_pinned_expansion_yields_exact_rank() {
+        let workers = workers();
+        let constraints = RoutingConstraints::default();
+        let eligibility =
+            RoutingEligibility::new(None, None, Some(WorkerWithDpRank::new(7, 3)), &constraints);
+        let mut ranks = Vec::new();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
+
+        assert_eq!(ranks, vec![WorkerWithDpRank::new(7, 3)]);
+    }
+
+    #[test]
+    fn routing_eligibility_pinned_expansion_rejects_bad_rank() {
+        let workers = workers();
+        let constraints = RoutingConstraints::default();
+        let eligibility =
+            RoutingEligibility::new(None, None, Some(WorkerWithDpRank::new(7, 5)), &constraints);
+        let mut ranks = Vec::new();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
+
+        assert!(ranks.is_empty());
     }
 }
