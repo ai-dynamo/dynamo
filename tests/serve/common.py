@@ -252,6 +252,15 @@ def run_serve_deployment(
                 # Default: devices 0 and 1
                 merged_env.setdefault("CUDA_VISIBLE_DEVICES", "0,1")
 
+            # Log which device IDs will be used by vLLM workers
+            _ze = merged_env.get("ZE_AFFINITY_MASK", "")
+            _cvd = merged_env.get("CUDA_VISIBLE_DEVICES", "")
+            logger.info(
+                "2-card device assignment: ZE_AFFINITY_MASK=%s, CUDA_VISIBLE_DEVICES=%s",
+                _ze or "(unset)",
+                _cvd or "(unset)",
+            )
+
             # Allocate unique NIXL side channel port for worker 2
             nixl_port = allocate_port(20097)
             _extra_allocated_ports.append(nixl_port)
@@ -288,6 +297,13 @@ def run_serve_deployment(
         merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
 
     try:
+        # Log device-related env vars for debugging card assignment
+        logger.info(
+            "Launching engine: script=%s, ZE_AFFINITY_MASK=%s, CUDA_VISIBLE_DEVICES=%s",
+            config.script_name,
+            merged_env.get("ZE_AFFINITY_MASK", "(unset)"),
+            merged_env.get("CUDA_VISIBLE_DEVICES", "(unset)"),
+        )
         with EngineProcess.from_script(
             config, request, extra_env=merged_env
         ) as server_process:
