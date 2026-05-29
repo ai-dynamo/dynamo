@@ -208,10 +208,7 @@ What to look for:
   divergence is not classified. If vLLM/SGLang appears more correct,
   keep it red until Dynamo is fixed or the contract is explicitly
   decided.
-- `↯` — Dynamo leaked parser-owned syntax into the wrong user-visible
-  field. For tool calling, this means tool call markup leaked into
-  `normal_text`; for reasoning, this means reasoning markup or final
-  answer text landed in the wrong split field.
+- `↯` — Dynamo leaks parser-owned syntax into user-visible output. For tool calling, this means tool call markup leaked into `normal_text`; for reasoning, this means Dynamo leaks reasoning markup or final-answer text.
 - `V` / `S` — documented divergence. Re-audit these when an upstream
   version changes or when the reason says the peer preserves text that
   Dynamo loses. If the peer now looks like the better target, delete
@@ -683,11 +680,9 @@ A case with `description` and `reason` but no `expected` block is an
 explicit not-applicable/table-only stub. The harness skips it rather
 than treating it as missing coverage.
 
-`dynamo_leak: true` is a temporary table annotation for a known Dynamo
-reasoning split bug. Use it only when Dynamo leaks reasoning-owned
-syntax or final-answer text into the wrong reasoning field. Do not use
-it when valid downstream tool call text is preserved in `normal_text`;
-that is the intended handoff to the tool call parser.
+`dynamo_leak: true` is a temporary table annotation for a known Dynamo reasoning split bug. Use it only when Dynamo leaks reasoning markup or final-answer text. Do not use it when valid downstream tool call text is preserved in `normal_text`; that is the intended handoff to the tool call parser.
+
+GPT-OSS/Harmony is the case that can look like a leak at the reasoning layer but is normal: directed `commentary to=functions.*` blocks are tool-call protocol text, and Dynamo feeds reasoning `normal_text` to the Harmony tool-call parser. The final OpenAI response should contain structured `tool_calls`, not this markup in user-visible `content`; stripping it in the reasoning parser would silently drop the tool call before the tool parser sees it.
 
 The `ref` field is required on per-sub-case files
 (`TOOLCALLING.<mode>.<n>.yaml`) and takes one of three forms:

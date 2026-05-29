@@ -16,8 +16,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>plain answer
       vllm: *d_0
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_0
   REASONING.batch.2.a:
     description: MiniMax appends a synthetic think opener and leaves content inline
     ref: *upstream_ref
@@ -27,8 +26,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>reasoning content
       vllm: *d_1
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_1
   REASONING.batch.3.a:
     description: Reasoning-shaped text followed by downstream MiniMax tool-call text
     ref: *upstream_ref
@@ -48,8 +46,7 @@ cases:
           </invoke>
           </minimax:tool_call>
       vllm: *d_2
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_2
   REASONING.batch.2.c:
     description: Reasoning-shaped text followed by normal answer text
     ref: *upstream_ref
@@ -59,8 +56,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>reasoning</think>answer
       vllm: *d_3
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_3
   REASONING.batch.4:
     description: Dangling end marker is left inline
     ref: *upstream_ref
@@ -70,8 +66,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>normal</think>answer
       vllm: *d_4
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_4
   REASONING.batch.5:
     description: Missing end marker is left inline
     ref: *upstream_ref
@@ -81,8 +76,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>partial reasoning
       vllm: *d_5
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_5
   REASONING.batch.2.e:
     description: Empty input still emits the synthetic think opener
     ref: *upstream_ref
@@ -92,8 +86,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>
       vllm: *d_6
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_6
   REASONING.batch.2.f:
     description: Complex content remains inline after the synthetic opener
     ref: *upstream_ref
@@ -109,8 +102,7 @@ cases:
           Unicode: café
           JSON-ish: {"x": [1, true]}
       vllm: *d_7
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_7
   REASONING.batch.1.a:
     description: Empty input variant
     ref: *upstream_ref
@@ -120,8 +112,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>
       vllm: *d_8
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_8
   REASONING.batch.6.a:
     description: Multiple think-looking spans remain inline
     ref: *upstream_ref
@@ -131,8 +122,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>first</think> middle <think>second</think> done
       vllm: *d_9
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_9
   REASONING.batch.2.d:
     description: Normal text around think-looking markup remains inline after the synthetic opener
     ref: *upstream_ref
@@ -142,8 +132,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>before <think>thinking</think> after
       vllm: *d_10
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_10
   REASONING.batch.3.b:
     description: Open reasoning interrupted by downstream tool-call text is not configured for MiniMax append-think
     ref: *upstream_ref
