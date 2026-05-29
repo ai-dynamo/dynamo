@@ -12,9 +12,9 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 
 ## Features
 
-- EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml), following the checked-in GAIE/EPP configuration layout used by this repository.
+- EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration is embedded in the recipe-based GAIE deploy YAMLs under [`recipes/llama-3-70b/vllm/agg/gaie/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/gaie) and [`recipes/llama-3-70b/vllm/disagg-single-node/gaie/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/gaie), following the GAIE/EPP configuration layout used by this repository.
 
-- Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The standalone [`epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) currently only defines a `decode` profile, while the recipe examples use separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
+- Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The recipe examples provide separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
 
 - GAIE integration supports Data Parallelism.
 
@@ -107,12 +107,6 @@ make info # Check image tag
 
 ### 5. Deploy
 
-We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
-you could deploy it as a standalone pod.
-Note that when deploying Dynamo with the Inference Gateway Extension each worker must have the FrontEnd as a sidecar.
-
-#### 5.a. Deploy as a DGD component (recommended)
-
 We provide an example for the Qwen vLLM below.
 You have to deploy the Dynamo Graph and the `HTTPRoute`.
 The example `http-route.yaml` resolves the `Gateway` in the same namespace as
@@ -200,44 +194,6 @@ The example `http-route.yaml` resolves the `Gateway` in the same namespace as
 the route. If you install the `Gateway` in one namespace and apply the route in
 another, add `parentRefs[].namespace: <gateway-namespace>` to `http-route.yaml`.
 
-#### 5.b. Deploy as a standalone pod
-
-We do not recommend this method but there are hints on how to do this here.
-
-##### 5.b.1 Deploy Your Model ###
-
-##### 5.b.2 Install Dynamo GIE helm chart ###
-
-```bash
-cd deploy/inference-gateway/standalone
-
-# Export the EPP image - use the Dynamo FrontEnd image or build your own EPP image (see section 4)
-export EPP_IMAGE=<the-epp-image>
-```
-Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
-
-```bash
-helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
-```
-
-By default, the Kubernetes discovery mechanism is used. If you prefer etcd, please use the `--set epp.dynamo.useEtcd=true` flag below.
-
-```bash
-helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE --set epp.dynamo.useEtcd=true
-```
-
-Key configurations include:
-
-- An InferenceModel resource for the Qwen model
-- A service for the inference gateway
-- Required RBAC roles and bindings
-- RBAC permissions
-- dynamoGraphDeploymentName - the name of the Dynamo Graph where your model is deployed.
-
-
-**Configuration**
-You can configure the plugin by setting environment variables in the EPP component of your DGD in case of the operator-managed installation or in your [values.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/values.yaml).
-
 Common Vars for Routing Configuration:
 
 **Enabling KV-Aware Routing (most precise)**
@@ -271,8 +227,6 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
 - See the [KV cache routing design](../design-docs/router-design.md) for details.
 
-Stand-Alone installation only:
-- Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
 
 **Service Mesh Integration (Istio)**
 
@@ -484,7 +438,8 @@ use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE use the namespace where the Gateway service was created, for example my-model
+kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE}
+# for NAMESPACE use the namespace where the Gateway service was created, for example agentgateway-system
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000

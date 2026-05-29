@@ -35,6 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
+    metadata::extract_metadata_from_http,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
         process_response_and_observe_metrics,
@@ -135,6 +136,22 @@ fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     classify_error_for_metrics(response.0, &response.1.message)
 }
 
+fn find_dynamo_error_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+    error_type: dynamo_runtime::error::ErrorType,
+) -> Option<&'a dynamo_runtime::error::DynamoError> {
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && dynamo_err.error_type() == error_type
+        {
+            return Some(dynamo_err);
+        }
+        current = e.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -223,6 +240,19 @@ impl ErrorMessage {
         )
     }
 
+    pub fn request_headers_too_large(msg: &str) -> ErrorResponse {
+        let code = StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
@@ -230,20 +260,32 @@ impl ErrorMessage {
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
         // Check for ResourceExhausted anywhere in the error chain → HTTP 503
         if super::metrics::request_was_rejected(err.as_ref()) {
+            let message = find_dynamo_error_in_chain(
+                err.as_ref(),
+                dynamo_runtime::error::ErrorType::ResourceExhausted,
+            )
+            .map(|dynamo_err| dynamo_err.message().to_string())
+            .unwrap_or_else(|| err.to_string());
+
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorMessage {
-                    message: format!("{}. {}", err, ADMISSION_CONTROL_REJECTION_HINT),
+                    message: format!("{}. {}", message, ADMISSION_CONTROL_REJECTION_HINT),
                     error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
                     code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 }),
             );
         }
 
-        // Check for DynamoError with InvalidArgument → HTTP 400
-        if let Some(dynamo_err) = err.downcast_ref::<dynamo_runtime::error::DynamoError>()
-            && dynamo_err.error_type() == dynamo_runtime::error::ErrorType::InvalidArgument
-        {
+        // Check for DynamoError with InvalidArgument anywhere in the chain → HTTP 400.
+        // This matches *any* nested InvalidArgument DynamoError, not only the NATS
+        // oversized-payload case, so previously-opaque nested InvalidArgument errors
+        // now surface as 400 instead of 500. Intentional: 400 is the correct class
+        // for a malformed/invalid request.
+        if let Some(dynamo_err) = find_dynamo_error_in_chain(
+            err.as_ref(),
+            dynamo_runtime::error::ErrorType::InvalidArgument,
+        ) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
@@ -400,6 +442,18 @@ fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, heade
     }
 }
 
+fn context_from_headers<T: Send + Sync + 'static>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+) -> Result<Context<T>, ErrorResponse> {
+    let metadata = extract_metadata_from_http(headers)
+        .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
+    let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    attach_x_request_id(&mut request, headers);
+    Ok(request)
+}
+
 fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
@@ -445,8 +499,7 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -714,7 +767,11 @@ async fn completions_batch(
 
         // Generate unique request_id for each prompt: original_id-{prompt_idx}
         let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
-        let mut single_request_context = Context::with_id(single_request, unique_request_id);
+        let mut single_request_context = Context::with_id_and_metadata(
+            single_request,
+            unique_request_id,
+            request.metadata().clone(),
+        );
         copy_x_request_id(&request, &mut single_request_context);
 
         // Generate stream for this prompt
@@ -857,7 +914,7 @@ async fn embeddings(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // Embeddings are typically not streamed, so we default to non-streaming
@@ -963,8 +1020,7 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -1639,8 +1695,7 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -2233,7 +2288,7 @@ async fn images(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // Images are typically not streamed, so we default to non-streaming
@@ -2365,7 +2420,7 @@ async fn videos(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     let streaming = request.stream.unwrap_or(false);
@@ -2485,7 +2540,7 @@ async fn video_stream(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let model = request.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -2649,7 +2704,7 @@ async fn audio_speech(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     let streaming = false;
@@ -2849,10 +2904,46 @@ mod tests {
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.1.message,
-            format!(
-                "ResourceExhausted: All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}"
-            )
+            format!("All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}")
         );
+    }
+
+    #[test]
+    fn test_nested_invalid_argument_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        #[derive(Debug)]
+        struct WrappedError {
+            source: DynamoError,
+        }
+
+        impl std::fmt::Display for WrappedError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "outer routing failure")
+            }
+        }
+
+        impl std::error::Error for WrappedError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        let source = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message(
+                "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.",
+            )
+            .build();
+        let err: anyhow::Error = WrappedError { source }.into();
+
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(response.1.message.contains("Request payload is too large"));
+        assert!(!response.1.message.contains("NATS"));
+        assert!(!response.1.message.contains("payload_bytes"));
     }
 
     #[test]
