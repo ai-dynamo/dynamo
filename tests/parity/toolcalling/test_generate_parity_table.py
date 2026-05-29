@@ -58,6 +58,10 @@ def test_generate_parser_parity_table_html() -> None:
     assert "generate_parity_table.py toolcalling --html" in html
     assert "TOOLCALLING.batch.*" in html
     assert "TOOLCALLING.stream.*" in html
+    assert 'id="case-descriptions-batch"' in html
+    assert 'id="case-descriptions-stream"' in html
+    assert "TOOLCALLING.batch.1</td><td>Single tool call" in html
+    assert "TOOLCALLING.stream.1.a</td><td>Single complete tool-call payload" in html
     assert fixture_links
     assert len(fixture_families) > 10
     assert "deepseek_v3" in fixture_families
@@ -95,6 +99,10 @@ def test_generate_combined_parity_table_html() -> None:
     assert "url.searchParams.set('tab', id)" in html
     assert "TOOLCALLING.batch." in html
     assert "TOOLCALLING.stream." in html
+    assert 'id="case-descriptions-toolcalling-batch"' in html
+    assert 'id="case-descriptions-toolcalling-stream"' in html
+    assert "TOOLCALLING.batch.1</td><td>Single tool call" in html
+    assert "TOOLCALLING.stream.1.a</td><td>Single complete tool-call payload" in html
     assert "REASONING.batch." in html
     assert "REASONING.stream." in html
     assert "toolcalling/fixtures/" in "".join(links.hrefs)
