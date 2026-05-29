@@ -24,10 +24,7 @@ import argparse
 import logging
 import sys
 
-from gpu_memory_service.snapshot.backends.sharded_ssd import (
-    DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
-    parse_sharded_ssd_roots,
-)
+from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.transfer import (
     DEFAULT_TRANSFER_BACKEND,
     TRANSFER_BACKEND_CHOICES,
@@ -59,10 +56,6 @@ def _resolve_socket(device: int, socket_path) -> str:
     return get_socket_path(device)
 
 
-def _parse_sharded_ssd_roots(value) -> list[str]:
-    return parse_sharded_ssd_roots(value or "")
-
-
 # ---------------------------------------------------------------------------
 # Subcommand implementations
 # ---------------------------------------------------------------------------
@@ -91,7 +84,7 @@ def _run_save(args) -> None:
         device=args.device,
         timeout_ms=args.timeout_ms,
         shard_size_bytes=args.shard_size_bytes,
-        sharded_ssd_roots=_parse_sharded_ssd_roots(args.sharded_ssd_roots),
+        sharded_ssd_roots=parse_sharded_ssd_roots(args.sharded_ssd_roots or ""),
     )
 
     manifest = client.save(max_workers=args.save_workers)
@@ -128,7 +121,7 @@ def _run_load(args) -> None:
         device=args.device,
         timeout_ms=args.timeout_ms,
         transfer_backend=args.transfer_backend,
-        sharded_ssd_roots=_parse_sharded_ssd_roots(args.sharded_ssd_roots),
+        sharded_ssd_roots=parse_sharded_ssd_roots(args.sharded_ssd_roots or ""),
         sharded_ssd_queues_per_root=args.sharded_ssd_queues_per_root,
     )
 
@@ -285,10 +278,10 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p.add_argument(
         "--sharded-ssd-queues-per-root",
         type=int,
-        default=DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
+        default=2,
         help=(
             "Number of independent sharded-ssd restore queues per SSD root "
-            f"(default: {DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT}). Increase this "
+            "(default: 2). Increase this "
             "to use multiple NIXL/POSIX workers per local SSD root."
         ),
     )
@@ -324,6 +317,8 @@ def main() -> None:
     if args.subcommand is None:
         parser.print_help()
         sys.exit(1)
+    if args.subcommand == "load" and args.sharded_ssd_queues_per_root <= 0:
+        parser.error("--sharded-ssd-queues-per-root must be a positive integer")
 
     if args.subcommand == "save":
         _run_save(args)

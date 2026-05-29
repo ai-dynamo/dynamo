@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Sequence
+from typing import List, Mapping, Sequence
 
 from gpu_memory_service.snapshot.backends.nixl_staging import (
     NixlFileGroup,
@@ -22,10 +22,6 @@ from gpu_memory_service.snapshot.transfer import (
 )
 
 logger = logging.getLogger(__name__)
-
-SHARDED_SSD_ROOTS_CONFIG_KEY = "sharded_ssd_roots"
-SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY = "sharded_ssd_queues_per_root"
-DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT = 2
 
 
 def parse_sharded_ssd_roots(value: str | None) -> List[str]:
@@ -58,58 +54,6 @@ def _normalize_roots(values: Sequence[str]) -> List[str]:
     ]
 
 
-def _roots_from_config(config: Mapping[str, Any]) -> List[str]:
-    configured = config.get(SHARDED_SSD_ROOTS_CONFIG_KEY)
-    if configured is None:
-        return []
-    if isinstance(configured, str):
-        return parse_sharded_ssd_roots(configured)
-    return _normalize_roots(configured)
-
-
-def _positive_int_config(
-    config: Mapping[str, Any],
-    key: str,
-    default: int,
-) -> int:
-    raw_value = config.get(key)
-    if raw_value is None or raw_value == "":
-        return default
-
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{key} must be a positive integer, got {raw_value!r}"
-        ) from exc
-    if value <= 0:
-        raise ValueError(f"{key} must be a positive integer, got {raw_value!r}")
-    return value
-
-
-def _queues_per_root_from_config(config: Mapping[str, Any]) -> int:
-    return _positive_int_config(
-        config,
-        SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY,
-        DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
-    )
-
-
-def _match_root(file_path: str, roots: Sequence[str]) -> Optional[str]:
-    abs_path = os.path.abspath(file_path)
-    for root in roots:
-        try:
-            if os.path.commonpath([root, abs_path]) == root:
-                return root
-        except ValueError:
-            continue
-    return None
-
-
-def _file_group_size(file_group: NixlFileGroup) -> int:
-    return sum(source.byte_count for source in file_group[1])
-
-
 def _split_root_file_groups(
     file_groups: Sequence[NixlFileGroup],
     queues_per_root: int,
@@ -124,7 +68,7 @@ def _split_root_file_groups(
     bucket_file_groups: List[List[NixlFileGroup]] = [[] for _ in range(queue_count)]
     bucket_bytes = [0] * queue_count
     sized_groups = [
-        (_file_group_size(file_group), index, file_group)
+        (sum(source.byte_count for source in file_group[1]), index, file_group)
         for index, file_group in enumerate(file_groups)
     ]
     sized_groups.sort(key=lambda item: (-item[0], item[1]))
@@ -144,12 +88,20 @@ def _split_root_file_groups(
 def _group_sources_by_root(
     sources: Sequence[FileTransferSource],
     roots: Sequence[str],
-    queues_per_root: int = DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
+    queues_per_root: int = 2,
 ) -> Mapping[str, List[NixlFileGroup]]:
     groups_by_path = group_sources_by_path(sources)
     groups_by_root: dict[str, List[NixlFileGroup]] = {}
     for file_path, grouped_sources in groups_by_path.items():
-        root = _match_root(file_path, roots)
+        abs_path = os.path.abspath(file_path)
+        root = None
+        for candidate in roots:
+            try:
+                if os.path.commonpath([candidate, abs_path]) == candidate:
+                    root = candidate
+                    break
+            except ValueError:
+                continue
         if root is None:
             raise RuntimeError(
                 f"{SHARDED_SSD_TRANSFER_BACKEND} source path {file_path!r} is not "
@@ -179,12 +131,20 @@ class ShardedSSDTransferBackend(NixlPosixStagingTransferBackend):
         *,
         config: GMSSnapshotConfig,
     ) -> None:
-        self._roots = _roots_from_config(config.backend_config)
-        self._queues_per_root = _queues_per_root_from_config(config.backend_config)
+        configured_roots = config.backend_config.get("sharded_ssd_roots")
+        if configured_roots is None:
+            self._roots = []
+        elif isinstance(configured_roots, str):
+            self._roots = parse_sharded_ssd_roots(configured_roots)
+        else:
+            self._roots = _normalize_roots(configured_roots)
+        self._queues_per_root = int(
+            config.backend_config.get("sharded_ssd_queues_per_root") or 2
+        )
         if not self._roots:
             raise RuntimeError(
                 f"{SHARDED_SSD_TRANSFER_BACKEND} requires "
-                f"{SHARDED_SSD_ROOTS_CONFIG_KEY}=<root0>,<root1>,..."
+                "sharded_ssd_roots=<root0>,<root1>,..."
             )
         logger.info(
             "%s initialized with %d root(s), %d queue(s)/root using NIXL POSIX staging",

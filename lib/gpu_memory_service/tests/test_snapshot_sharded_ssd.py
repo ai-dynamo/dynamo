@@ -6,12 +6,7 @@
 import pytest
 
 try:
-    from gpu_memory_service.snapshot.backends.sharded_ssd import (
-        DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
-        SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY,
-        _group_sources_by_root,
-        _queues_per_root_from_config,
-    )
+    from gpu_memory_service.snapshot.backends.sharded_ssd import _group_sources_by_root
     from gpu_memory_service.snapshot.transfer import FileTransferSource
 except ModuleNotFoundError:
     pytest.skip(
@@ -88,28 +83,3 @@ def test_group_sources_by_root_rejects_paths_outside_configured_roots():
 
     with pytest.raises(RuntimeError, match="not.*under.*sharded SSD root"):
         _group_sources_by_root([source], ["/mnt/nvme0/gms"], queues_per_root=2)
-
-
-@pytest.mark.parametrize(
-    ("raw_value", "expected"),
-    [
-        (None, DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT),
-        ("", DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT),
-        ("2", 2),
-        (4, 4),
-    ],
-)
-def test_queues_per_root_from_config(raw_value, expected):
-    config = {}
-    if raw_value is not None:
-        config[SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY] = raw_value
-
-    assert _queues_per_root_from_config(config) == expected
-
-
-@pytest.mark.parametrize("raw_value", ["0", "-1", "not-an-int"])
-def test_queues_per_root_from_config_rejects_invalid_values(raw_value):
-    with pytest.raises(ValueError, match=SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY):
-        _queues_per_root_from_config(
-            {SHARDED_SSD_QUEUES_PER_ROOT_CONFIG_KEY: raw_value}
-        )

@@ -41,10 +41,6 @@ from gpu_memory_service.snapshot.transfer import (
 logger = logging.getLogger(__name__)
 
 _PINNED_COPY_BUFFERS_PER_WORKER = 2
-POSIX_IOS_POOL_SIZE_CONFIG_KEY = "nixl_posix_ios_pool_size"
-POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY = "nixl_posix_kernel_queue_size"
-DEFAULT_POSIX_IOS_POOL_SIZE = 1024
-DEFAULT_POSIX_KERNEL_QUEUE_SIZE = 128
 
 NixlFileGroup = Tuple[str, Sequence[FileTransferSource]]
 NixlWorkGroup = Tuple[str, Sequence[NixlFileGroup]]
@@ -62,58 +58,6 @@ class _PreparedNixlGroup:
     slots: List[PinnedCopySlot]
     prep_elapsed_s: float
     closed: bool = False
-
-
-def _positive_int_config(
-    config: Mapping[str, object],
-    key: str,
-    default: int,
-) -> int:
-    raw_value = config.get(key)
-    if raw_value is None or raw_value == "":
-        return default
-
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{key} must be a positive integer, got {raw_value!r}"
-        ) from exc
-    if value <= 0:
-        raise ValueError(f"{key} must be a positive integer, got {raw_value!r}")
-    return value
-
-
-def _posix_backend_params_from_config(
-    config: Mapping[str, object],
-) -> Mapping[str, str]:
-    """Return bounded NIXL POSIX backend params for GMS staging agents.
-
-    NIXL's POSIX backend default preallocates a large I/O pool.  GMS staging
-    workers issue one POSIX NIXL transfer at a time, so a smaller explicit
-    pool is sufficient and avoids spending agent startup time building an
-    oversized default pool.
-    """
-    return {
-        "ios_pool_size": str(
-            _positive_int_config(
-                config,
-                POSIX_IOS_POOL_SIZE_CONFIG_KEY,
-                DEFAULT_POSIX_IOS_POOL_SIZE,
-            )
-        ),
-        "kernel_queue_size": str(
-            _positive_int_config(
-                config,
-                POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY,
-                DEFAULT_POSIX_KERNEL_QUEUE_SIZE,
-            )
-        ),
-    }
-
-
-def _file_group_size(file_group: NixlFileGroup) -> int:
-    return sum(source.byte_count for source in file_group[1])
 
 
 def _split_work_groups(
@@ -145,7 +89,11 @@ def _split_work_groups(
     # staying deterministic for equal-sized groups.
     sized_groups = [
         (
-            sum(_file_group_size(file_group) for file_group in file_groups),
+            sum(
+                source.byte_count
+                for _path, sources in file_groups
+                for source in sources
+            ),
             index,
             group_name,
             file_groups,
@@ -186,9 +134,13 @@ class NixlPosixStagingTransferBackend:
         self._max_workers = config.max_workers
         self._api_pool = ThreadPoolExecutor(max_workers=1)
         self._api_future = self._api_pool.submit(load_nixl_api)
-        self._posix_backend_params = _posix_backend_params_from_config(
-            config.backend_config
-        )
+        # NIXL's POSIX backend default preallocates a large I/O pool. GMS
+        # staging workers issue one POSIX NIXL transfer at a time, so smaller
+        # explicit defaults are enough and avoid oversized agent startup work.
+        self._posix_backend_params = {
+            "ios_pool_size": "1024",
+            "kernel_queue_size": "128",
+        }
         self._group_sources = group_sources
         self._group_kind = group_kind
         self._warn_under_parallelized = warn_under_parallelized
