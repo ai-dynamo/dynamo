@@ -65,7 +65,7 @@ text into `reasoning_content` and normal `content` instead of `tool_calls`.
 ```
                                                   ┌─ engine ──────────┐
                                                   │                   │
-   client ─request→ chat-template ─→ tokenize ─→ engine ─→ detokenize ─→ text ─→ PARSER ─→ structured output ─→ client
+   client ─request→ chat-template ─→ tokenize ─→ engine ─→ detokenize ─→ text ─→ parser ─→ structured output ─→ client
               ↑                                                              ↑
               └── M1 / M3 exercise this (real)                               └── M2 starts here (skips everything left)
                   M2 skips it (substituted by direct call)
