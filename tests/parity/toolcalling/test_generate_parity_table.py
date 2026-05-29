@@ -58,6 +58,10 @@ def test_generate_parser_parity_table_html() -> None:
     assert "generate_parity_table.py toolcalling --html" in html
     assert "TOOLCALLING.batch.*" in html
     assert "TOOLCALLING.stream.*" in html
+    assert 'id="case-descriptions-batch"' in html
+    assert 'id="case-descriptions-stream"' in html
+    assert "TOOLCALLING.batch.1</td><td>Single tool call" in html
+    assert "TOOLCALLING.stream.1.a</td><td>Single complete tool-call payload" in html
     assert fixture_links
     assert len(fixture_families) > 10
     assert "deepseek_v3" in fixture_families
@@ -76,6 +80,38 @@ def test_generate_parser_parity_table_batch_mode_excludes_stream_links() -> None
     assert fixture_links
     assert all("/TOOLCALLING.batch" in href for href in fixture_links)
     assert all("TOOLCALLING.stream." not in href for href in fixture_links)
+
+
+@pytest.mark.timeout(60)
+def test_generate_combined_parity_table_html() -> None:
+    html = _render_html_for("all")
+    links = LinkCollector()
+    links.feed(html)
+
+    assert "Dynamo Parser Parity Table" in html
+    assert "generate_parity_table.py all --html" in html
+    assert 'data-tab-target="tab-toolcalling-batch">TC batch</button>' in html
+    assert 'title="Tool Calling batch"' in html
+    assert 'aria-label="Tool Calling stream"' in html
+    assert 'data-tab-target="tab-reasoning-batch">Reasoning batch</button>' in html
+    assert 'data-tab-target="tab-reasoning-stream">Reasoning stream</button>' in html
+    assert "params.get('tab')" in html
+    assert "validTargets.has(requested)" in html
+    assert "document.getElementById(requested)" not in html
+    assert "url.searchParams.set('tab', id)" in html
+    assert "TOOLCALLING.batch." in html
+    assert "TOOLCALLING.stream." in html
+    assert 'id="case-descriptions-toolcalling-batch"' in html
+    assert 'id="case-descriptions-toolcalling-stream"' in html
+    assert "TOOLCALLING.batch.1</td><td>Single tool call" in html
+    assert "TOOLCALLING.stream.1.a</td><td>Single complete tool-call payload" in html
+    assert "REASONING.batch." in html
+    assert "REASONING.stream." in html
+    assert "toolcalling/fixtures/" in "".join(links.hrefs)
+    assert "reasoning/fixtures/" in "".join(links.hrefs)
+    assert "../../lib/parsers/TOOLCALLING_CASES.md" in links.hrefs
+    assert "../../lib/parsers/REASONING_CASES.md" in links.hrefs
+    assert "../../pyproject.toml" in links.hrefs
 
 
 @pytest.mark.timeout(60)

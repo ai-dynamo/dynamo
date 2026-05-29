@@ -57,7 +57,7 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     MultimodalModelProfile(
-        name="Qwen/Qwen3-VL-2B-Instruct",
+        name="Qwen/Qwen3-VL-2B-Instruct-FP8",
         short_name="qwen3-vl-2b",
         topologies={
             "agg": TopologyConfig(
@@ -100,40 +100,31 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
-            # `agg_router` exercises agg_multimodal_router.sh: Rust frontend
-            # with the `lightseek-mm` feature, MM-aware KV routing, multi-worker.
-            # Smoke-level on post_merge so regressions to the script's plumbing
-            # (worker boot order, ZMQ KV events, MM-routing build) surface in
-            # CI. The fine-grained routing-correctness assertions live in
-            # tests/mm_router/test_router_rust_mm_router_e2e.py.
-            #
-            # The payload sends two identical MM requests and asserts the
-            # second sees cached_tokens > 0 — proves the warm worker reused
-            # its KV cache, which only happens if the router routed both
-            # requests to the same worker. If routing silently regressed to
-            # text-prefix only, both requests would still succeed but the
-            # second's cached_tokens would be 0 and this case would fail.
+            # Pre_merge gater for the lightseek MM-routing path. Fine-grained
+            # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
+            # (post_merge).
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=400,
-                profiled_vram_gib=18.7,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
                 tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
             # The chat-processor variant of the MM-aware router: same routing
             # architecture, but the frontend uses --dyn-chat-processor=vllm
             # (Python preprocessor) instead of the Rust+lightseek path. Kept
-            # on post_merge alongside the default so both entry points stay
-            # covered by CI; the routing assertions are equivalent.
+            # on post_merge — the lightseek variant above (`agg_router`) is
+            # the pre_merge gate; adding chat_processor doubles the GPU0
+            # queue time at 4-worker scale without catching distinct bugs
+            # (both paths share the kv_router downstream).
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
-            # single-GPU CI environment (the chat-processor script's own
-            # default is false for production multi-GPU usage).
+            # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
-                profiled_vram_gib=18.7,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
@@ -149,8 +140,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router_frontend_decode": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
-                profiled_vram_gib=18.7,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={
                     "SINGLE_GPU": "true",
                     "VLLM_EXTRA_ARGS": "--frontend-decoding",
