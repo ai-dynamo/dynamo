@@ -31,9 +31,15 @@ impl PrefillRouter {
         preselected_worker: Option<u64>,
     ) -> PrefillResolveDecision {
         let Some(endpoint_id) = self.endpoint_id.get() else {
+            tracing::warn!(target: "task67", "Task #67: NotActivated — endpoint_id not set");
             return PrefillResolveDecision::NotActivated;
         };
         if self.prefill_router.get().is_none() {
+            tracing::warn!(
+                target: "task67",
+                endpoint_id = %endpoint_id.as_url(),
+                "Task #67: NotActivated — prefill_router not set"
+            );
             return PrefillResolveDecision::NotActivated;
         }
 
@@ -75,21 +81,56 @@ impl PrefillRouter {
                 .await
             {
                 Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
-                Err(_) => return PrefillResolveDecision::Unavailable,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "task67",
+                        endpoint_id = %endpoint_id.as_url(),
+                        error = %e,
+                        "Task #67: Unavailable — query_prefill_worker errored"
+                    );
+                    return PrefillResolveDecision::Unavailable;
+                }
             }
         };
 
-        // Get bootstrap info from ModelManager (works for ANY mode)
+        // Get bootstrap info from ModelManager (works for ANY mode).
+        // Task #67 diagnostic warnings: distinguish (A) runtime_configs miss,
+        // (B) registered endpoint with bootstrap_host=None, and (C) registered
+        // endpoint with bootstrap_port=None. These let post-hoc log analysis
+        // identify exactly which check makes the FE fall back to the
+        // "original prefill path" — needed because the mocker confirmed it
+        // publishes disaggregated_endpoint correctly in the DynamoWorkerMetadata
+        // CR (bootstrap_host + bootstrap_port both populated), yet the FE never
+        // takes the bootstrap path under LL routing.
         let Some(endpoint) = self
             .model_manager
             .get_disaggregated_endpoint(endpoint_id, worker_id)
         else {
+            tracing::warn!(
+                target: "task67",
+                endpoint_id = %endpoint_id.as_url(),
+                worker_id,
+                "Task #67 (A): get_disaggregated_endpoint returned None — runtime_configs has no entry for (endpoint_id, worker_id)"
+            );
             return PrefillResolveDecision::NoBootstrapEndpoint;
         };
         let Some(host) = endpoint.bootstrap_host else {
+            tracing::warn!(
+                target: "task67",
+                endpoint_id = %endpoint_id.as_url(),
+                worker_id,
+                "Task #67 (B): registered DisaggregatedEndpoint has bootstrap_host=None"
+            );
             return PrefillResolveDecision::NoBootstrapEndpoint;
         };
         let Some(port) = endpoint.bootstrap_port else {
+            tracing::warn!(
+                target: "task67",
+                endpoint_id = %endpoint_id.as_url(),
+                worker_id,
+                bootstrap_host = %host,
+                "Task #67 (C): registered DisaggregatedEndpoint has bootstrap_port=None"
+            );
             return PrefillResolveDecision::NoBootstrapEndpoint;
         };
 
