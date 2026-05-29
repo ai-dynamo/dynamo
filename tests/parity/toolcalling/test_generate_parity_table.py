@@ -79,6 +79,32 @@ def test_generate_parser_parity_table_batch_mode_excludes_stream_links() -> None
 
 
 @pytest.mark.timeout(60)
+def test_generate_combined_parity_table_html() -> None:
+    html = _render_html_for("all")
+    links = LinkCollector()
+    links.feed(html)
+
+    assert "Dynamo Parser Parity Table" in html
+    assert "generate_parity_table.py all --html" in html
+    assert 'data-tab-target="tab-toolcalling-batch">TC batch</button>' in html
+    assert 'title="Tool Calling batch"' in html
+    assert 'aria-label="Tool Calling stream"' in html
+    assert 'data-tab-target="tab-reasoning-batch">Reasoning batch</button>' in html
+    assert 'data-tab-target="tab-reasoning-stream">Reasoning stream</button>' in html
+    assert "params.get('tab')" in html
+    assert "url.searchParams.set('tab', id)" in html
+    assert "TOOLCALLING.batch." in html
+    assert "TOOLCALLING.stream." in html
+    assert "REASONING.batch." in html
+    assert "REASONING.stream." in html
+    assert "toolcalling/fixtures/" in "".join(links.hrefs)
+    assert "reasoning/fixtures/" in "".join(links.hrefs)
+    assert "../../lib/parsers/TOOLCALLING_CASES.md" in links.hrefs
+    assert "../../lib/parsers/REASONING_CASES.md" in links.hrefs
+    assert "../../pyproject.toml" in links.hrefs
+
+
+@pytest.mark.timeout(60)
 def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> None:
     html = _render_html_for("reasoning")
 
