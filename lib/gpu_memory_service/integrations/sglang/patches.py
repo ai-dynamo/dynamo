@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import inspect
 import logging
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Optional
 
 import gpu_memory_service.integrations.sglang as gms_sglang
 import torch
 from gpu_memory_service.integrations.sglang.memory_saver import (
     GMSMemorySaverImpl,
+    disable_gms_weight_region,
     get_gms_memory_saver_impl,
 )
 
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 _torch_memory_saver_patched = False
 _model_runner_patched = False
+_scheduler_patched = False
 _static_state_patched = False
 
 
@@ -162,6 +164,7 @@ def patch_model_runner() -> None:
         return
 
     original_init_memory_pool = ModelRunner.init_memory_pool
+    original_load_model = ModelRunner.load_model
     memory_arg_name = next(
         (
             name
@@ -212,10 +215,68 @@ def patch_model_runner() -> None:
 
         return original_init_memory_pool(self, *args, **kwargs)
 
+    def patched_load_model(self, *args, **kwargs):
+        """Bypass GMS weight allocation for non-GMS draft model loads."""
+        is_draft_worker = getattr(self, "is_draft_worker", False)
+        load_format = getattr(getattr(self, "load_config", None), "load_format", None)
+        use_gms_loader = isinstance(load_format, type) and load_format.__name__ == (
+            "GMSModelLoader"
+        )
+        context = (
+            disable_gms_weight_region()
+            if is_draft_worker and not use_gms_loader
+            else nullcontext()
+        )
+        with context:
+            return original_load_model(self, *args, **kwargs)
+
     ModelRunner.init_memory_pool = patched_init_memory_pool
+    ModelRunner.load_model = patched_load_model
     ModelRunner._gms_patched = True
     _model_runner_patched = True
     logger.info("[GMS] Patched ModelRunner.init_memory_pool")
+
+
+def patch_scheduler() -> None:
+    """Patch SGLang scheduler to publish staged GMS weights after model init.
+
+    SGLang constructs the target worker first and then constructs any draft
+    worker from Scheduler.init_model_worker(). GMS keeps the single "weights"
+    layout writable during those individual model loads; this patch commits the
+    staged target/draft models once that engine-level initialization succeeds.
+    """
+    global _scheduler_patched
+
+    if _scheduler_patched:
+        return
+
+    try:
+        from sglang.srt.managers.scheduler import Scheduler
+    except ImportError:
+        logger.warning("[GMS] Could not import Scheduler, skipping patch")
+        return
+
+    if hasattr(Scheduler, "_gms_scheduler_patched"):
+        return
+
+    original_init_model_worker = Scheduler.init_model_worker
+
+    def patched_init_model_worker(self, *args, **kwargs):
+        result = original_init_model_worker(self, *args, **kwargs)
+        impl = get_gms_memory_saver_impl()
+        if impl is not None:
+            finalized_bytes = impl.finalize_write_mode()
+            if finalized_bytes > 0:
+                logger.info(
+                    "[GMS] Published staged SGLang weights: %.2f GiB",
+                    finalized_bytes / (1 << 30),
+                )
+        return result
+
+    Scheduler.init_model_worker = patched_init_model_worker
+    Scheduler._gms_scheduler_patched = True
+    _scheduler_patched = True
+    logger.info("[GMS] Patched Scheduler.init_model_worker")
 
 
 def patch_static_state_for_gms() -> None:

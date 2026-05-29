@@ -201,6 +201,77 @@ def test_gms_tensor_matches_plain_torch_ops(running_gms):
     reader.close()
 
 
+def test_materialized_module_uses_requested_namespace(running_gms):
+    socket_path = running_gms
+    torch.manual_seed(17)
+    target = _TinyModule().cuda()
+    draft = _TinyModule().cuda()
+    gms_target = _TinyModule().cuda()
+    gms_draft = _TinyModule().cuda()
+    gms_target.load_state_dict(target.state_dict())
+    gms_draft.load_state_dict(draft.state_dict())
+    inputs = torch.randn(2, 8, device="cuda", dtype=torch.float32)
+    expected_target = target(inputs).detach().clone()
+    expected_draft = draft(inputs).detach().clone()
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+
+    for plain_model, gms_model in ((target, gms_target), (draft, gms_draft)):
+        baseline_weight = cast(torch.Tensor, plain_model.linear.weight)
+        baseline_scale = cast(torch.Tensor, plain_model.scale)
+        baseline_extra = cast(torch.Tensor, plain_model.extra)
+        _, gms_weight = _make_gms_tensor(writer, baseline_weight, tag="weights")
+        gms_model.linear.weight = torch.nn.Parameter(
+            gms_weight, requires_grad=baseline_weight.requires_grad
+        )
+        _, gms_scale = _make_gms_tensor(writer, baseline_scale, tag="weights")
+        gms_model._buffers["scale"] = gms_scale
+        _, gms_extra = _make_gms_tensor(writer, baseline_extra, tag="weights")
+        gms_model.extra = gms_extra
+
+    register_module_tensors(writer, gms_target, namespace="target")
+    register_module_tensors(writer, gms_draft, namespace="draft")
+    metadata_keys = set(writer.metadata_list())
+    assert "target/linear.weight" in metadata_keys
+    assert "draft/linear.weight" in metadata_keys
+    assert writer.commit()
+    del gms_target
+    del gms_draft
+    writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+
+    target_materialized = _TinyModule().cuda()
+    materialize_module_from_gms(
+        reader,
+        target_materialized,
+        device_index=0,
+        namespace="target",
+    )
+    draft_materialized = _TinyModule().cuda()
+    materialize_module_from_gms(
+        reader,
+        draft_materialized,
+        device_index=0,
+        namespace="draft",
+    )
+
+    _assert_exact_tensor_equal(expected_target, target_materialized(inputs))
+    _assert_exact_tensor_equal(expected_draft, draft_materialized(inputs))
+    _assert_exact_tensor_equal(
+        cast(torch.Tensor, target.linear.weight),
+        cast(torch.Tensor, target_materialized.linear.weight),
+    )
+    _assert_exact_tensor_equal(
+        cast(torch.Tensor, draft.linear.weight),
+        cast(torch.Tensor, draft_materialized.linear.weight),
+    )
+
+    reader.close()
+
+
 def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     socket_path = running_gms
     baseline = torch.arange(64, device="cuda", dtype=torch.float32).reshape(8, 8)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import gc
 import logging
+from contextvars import ContextVar
 from contextlib import contextmanager
 from typing import Optional
 
@@ -28,13 +29,21 @@ from gpu_memory_service.client.torch.allocator import (
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_write
+from gpu_memory_service.integrations.common.utils import (
+    GMS_TAGS,
+    finalize_staged_gms_write,
+    stage_gms_write_model,
+)
 
 logger = logging.getLogger(__name__)
 
 # Published weights must come back RO, while KV cache always resumes in a fresh
 # RW epoch so the restored engine can rebuild mutable cache state.
 _TAG_LOCK_TYPES = {"weights": RequestedLockType.RO, "kv_cache": RequestedLockType.RW}
+_disable_gms_weight_region: ContextVar[bool] = ContextVar(
+    "disable_gms_weight_region",
+    default=False,
+)
 
 
 def _pause_resume_tags(tag: Optional[str]) -> tuple[str, ...]:
@@ -58,6 +67,16 @@ def get_gms_memory_saver_impl() -> Optional["GMSMemorySaverImpl"]:
         return torch_memory_saver.torch_memory_saver.gms_impl
     except (ImportError, AttributeError):
         return None
+
+
+@contextmanager
+def disable_gms_weight_region():
+    """Temporarily bypass the GMS mempool for SGLang weight allocations."""
+    token = _disable_gms_weight_region.set(True)
+    try:
+        yield
+    finally:
+        _disable_gms_weight_region.reset(token)
 
 
 class GMSMemorySaverImpl:
@@ -107,6 +126,10 @@ class GMSMemorySaverImpl:
                 tag,
                 list(GMS_TAGS),
             )
+            yield
+            return
+
+        if tag == "weights" and _disable_gms_weight_region.get():
             yield
             return
 
@@ -182,12 +205,31 @@ class GMSMemorySaverImpl:
                 self.allocators[target_tag].reallocate_all_handles(tag=target_tag)
             self.allocators[target_tag].remap_all_vas()
 
-    def finalize_write_mode(self, model: torch.nn.Module) -> None:
-        """Finalize write mode: register tensors, commit, and switch to read."""
+    def stage_write_model(
+        self,
+        model: torch.nn.Module,
+        *,
+        namespace: str,
+    ) -> None:
+        """Stage a weight model for a later engine-level commit."""
         if self.allocators["weights"].granted_lock_type != GrantedLockType.RW:
             # Read-only import mode never republishes weights.
             return
 
-        self.imported_weights_bytes = finalize_gms_write(
-            self.allocators["weights"], model
+        stage_gms_write_model(
+            self.allocators["weights"],
+            model,
+            namespace=namespace,
         )
+        self.imported_weights_bytes = int(self.allocators["weights"].total_bytes)
+
+    def finalize_write_mode(self) -> int:
+        """Publish staged weight models and switch the layout to read mode."""
+        if self.allocators["weights"].granted_lock_type != GrantedLockType.RW:
+            # Read-only import mode never republishes weights.
+            return 0
+
+        finalized_bytes = finalize_staged_gms_write(self.allocators["weights"])
+        if finalized_bytes > 0:
+            self.imported_weights_bytes = finalized_bytes
+        return finalized_bytes

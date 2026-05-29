@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import torch
-from gpu_memory_service.client.torch.module import register_module_tensors
+from gpu_memory_service.client.torch.module import (
+    collect_module_tensor_names,
+    register_module_tensors,
+)
 from gpu_memory_service.common.locks import RequestedLockType
 
 if TYPE_CHECKING:
@@ -18,6 +21,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 GMS_TAGS = ("weights", "kv_cache")
+
+
+@dataclass
+class _StagedGMSWrite:
+    allocator: "GMSClientMemoryManager"
+    models: list[tuple[str | None, torch.nn.Module, frozenset[str]]] = field(
+        default_factory=list
+    )
+
+
+_staged_gms_writes: dict[int, _StagedGMSWrite] = {}
 
 
 def get_gms_lock_mode(extra_config: dict):
@@ -68,21 +82,77 @@ def setup_meta_tensor_workaround() -> None:
         pass
 
 
-def finalize_gms_write(
-    allocator: "GMSClientMemoryManager", model: torch.nn.Module
-) -> int:
-    """Finalize GMS write mode: register tensors, commit, reconnect in read mode.
+def stage_gms_write_model(
+    allocator: "GMSClientMemoryManager",
+    model: torch.nn.Module,
+    *,
+    namespace: str | None = None,
+) -> None:
+    """Stage a model for a later GMS weight publish.
 
-    Flow: register tensors -> sync -> unmap + commit -> connect(RO) -> remap
+    The model object is intentionally stored by reference so engine-level
+    post-load mutations, such as target/draft embedding sharing, are visible
+    when metadata is registered just before the final commit.
 
     Args:
         allocator: The GMS client memory manager in write mode.
-        model: The loaded model with weights to register.
+        model: The loaded model whose tensors should be registered later.
+        namespace: Optional metadata namespace for this model.
+    """
+    staged = _staged_gms_writes.setdefault(
+        id(allocator), _StagedGMSWrite(allocator=allocator)
+    )
+    for staged_namespace, _, _ in staged.models:
+        if staged_namespace == namespace:
+            raise RuntimeError(f"GMS write namespace {namespace!r} is already staged")
+    tensor_names = collect_module_tensor_names(model)
+    staged.models.append((namespace, model, tensor_names))
+    logger.info(
+        "[GMS] Staged model for write publish "
+        "(namespace=%r, tensors=%d, staged=%d)",
+        namespace,
+        len(tensor_names),
+        len(staged.models),
+    )
+
+
+def has_staged_gms_write(allocator: "GMSClientMemoryManager") -> bool:
+    """Return whether there are models staged for this allocator."""
+    staged = _staged_gms_writes.get(id(allocator))
+    return bool(staged is not None and staged.models)
+
+
+def finalize_staged_gms_write(allocator: "GMSClientMemoryManager") -> int:
+    """Register all staged model tensors, then finalize one GMS write layout.
+
+    Returns 0 when nothing is staged for the allocator.
+    """
+    staged = _staged_gms_writes.pop(id(allocator), None)
+    if staged is None or not staged.models:
+        return 0
+
+    for namespace, model, tensor_names in staged.models:
+        register_module_tensors(
+            allocator,
+            model,
+            namespace=namespace,
+            tensor_names=tensor_names,
+        )
+
+    return finalize_gms_write(allocator)
+
+
+def finalize_gms_write(allocator: "GMSClientMemoryManager") -> int:
+    """Commit the current GMS write layout, then reconnect and remap read-only.
+
+    Flow: sync -> unmap + commit -> connect(RO) -> remap
+
+    Args:
+        allocator: The GMS client memory manager in write mode.
 
     Returns:
         Total bytes committed.
     """
-    register_module_tensors(allocator, model)
     total_bytes = allocator.total_bytes
 
     # Synchronize before commit — caller's writes must be visible
@@ -96,7 +166,7 @@ def finalize_gms_write(
     logger.info(
         "[GMS] Committed %.2f GiB, switched to read mode with %d mappings",
         total_bytes / (1 << 30),
-        len(allocator._mappings),
+        len(allocator.mappings),
     )
 
     return int(total_bytes)

@@ -179,28 +179,39 @@ class GMSTensorSpec:
 
     @classmethod
     def load_all(
-        cls, gms_client_memory_manager: "GMSClientMemoryManager"
+        cls,
+        gms_client_memory_manager: "GMSClientMemoryManager",
+        *,
+        namespace: str | None = None,
     ) -> Dict[str, "GMSTensorSpec"]:
         """Load all metadata entries.
+
+        Args:
+            gms_client_memory_manager: GMS client memory manager.
+            namespace: Optional model namespace. When set, only metadata keys
+                under ``"{namespace}/"`` are loaded and the returned spec names
+                have that prefix stripped.
 
         Returns:
             Mapping of tensor name -> GMSTensorSpec.
         """
         specs: Dict[str, GMSTensorSpec] = {}
+        metadata_prefix = f"{namespace}/" if namespace is not None else ""
 
-        for key in gms_client_memory_manager.metadata_list():
+        for key in gms_client_memory_manager.metadata_list(prefix=metadata_prefix):
             got = gms_client_memory_manager.metadata_get(key)
             if got is None:
                 raise RuntimeError(f"Metadata key disappeared: {key}")
 
             allocation_id, offset_bytes, value = got
+            name = key[len(metadata_prefix) :] if metadata_prefix else key
 
-            if key in specs:
-                raise RuntimeError(f"Duplicate tensor name: {key}")
+            if name in specs:
+                raise RuntimeError(f"Duplicate tensor name: {name}")
 
-            specs[key] = cls(
+            specs[name] = cls(
                 key=key,
-                name=key,
+                name=name,
                 allocation_id=str(allocation_id),
                 offset_bytes=int(offset_bytes),
                 meta=TensorMetadata.from_bytes(value),
