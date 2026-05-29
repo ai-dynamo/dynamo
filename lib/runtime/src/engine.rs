@@ -180,16 +180,9 @@ pub trait AsyncEngineUnary<Resp: Data>:
 ///
 /// This trait combines `Stream` semantics with context provider capabilities,
 /// representing a continuous async operation that produces multiple messages over time.
-///
-/// - **Output side:** wrapped as [`EngineStream<T>`] = `crate::pipeline::ManyOut<T>`
-///   — the stream of response chunks an engine emits.
-/// - **Input side:** a separate concrete type, `crate::pipeline::RequestStream<T>`
-///   (aliased as `crate::pipeline::ManyIn<T>`), which carries a `Context<()>`
-///   sidecar alongside the inner stream so engines can reach the caller's
-///   metadata / registry / stages.
-///
-/// [`ResponseStream`] is the canonical concrete implementor on the response
-/// side; `RequestStream<T>` plays the analogous role on the request side.
+/// The canonical boxed form is [`EngineStream<T>`] (= `crate::pipeline::ManyOut<T>`),
+/// the stream of response chunks an engine emits; [`ResponseStream`] is the
+/// canonical concrete implementor.
 pub trait AsyncEngineStream<T: Data>: Stream<Item = T> + AsyncEngineContextProvider + Send {}
 
 /// Engine is a trait that defines the interface for a streaming engine.
