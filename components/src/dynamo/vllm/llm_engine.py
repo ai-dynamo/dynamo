@@ -13,7 +13,7 @@ import asyncio
 import logging
 import os
 import tempfile
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from vllm.config import VllmConfig
@@ -433,8 +433,16 @@ class VllmLLMEngine(LLMEngine):
                 multiproc_only_prefixes=["lmcache:"],
             )
 
-    async def engine_routes(self) -> dict[str, Callable[[dict], Any]]:
-        routes: dict[str, Callable[[dict], Any]] = {
+    def supported_controls(self) -> set[str]:
+        controls = {"start_profile", "stop_profile", "sleep", "wake_up"}
+        if self.engine_client is not None and hasattr(
+            self.engine_client, "scale_elastic_ep"
+        ):
+            controls.add("scale_elastic_ep")
+        return controls
+
+    async def engine_control(self, control: str, body: dict) -> dict:
+        handlers = {
             "start_profile": self.start_profile,
             "stop_profile": self.stop_profile,
             "sleep": self.sleep,
@@ -443,8 +451,15 @@ class VllmLLMEngine(LLMEngine):
         if self.engine_client is not None and hasattr(
             self.engine_client, "scale_elastic_ep"
         ):
-            routes["scale_elastic_ep"] = self.scale_elastic_ep
-        return routes
+            handlers["scale_elastic_ep"] = self.scale_elastic_ep
+
+        handler = handlers.get(control)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine control: {control}",
+            }
+        return await handler(body or {})
 
     async def sleep(self, body: dict) -> dict:
         body = body or {}

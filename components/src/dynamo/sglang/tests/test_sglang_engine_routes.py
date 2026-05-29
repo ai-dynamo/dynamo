@@ -97,10 +97,10 @@ def _make_engine() -> SglangLLMEngine:
 
 
 @pytest.mark.asyncio
-async def test_engine_routes_expose_sglang_management_callbacks():
-    routes = await _make_engine().engine_routes()
+async def test_engine_controls_expose_sglang_management_capabilities():
+    controls = _make_engine().supported_controls()
 
-    assert set(routes) == {
+    assert controls == {
         "start_profile",
         "stop_profile",
         "release_memory_occupation",
@@ -117,8 +117,12 @@ async def test_engine_routes_expose_sglang_management_callbacks():
 async def test_memory_routes_delegate_to_tokenizer_manager():
     engine = _make_engine()
 
-    release_result = await engine.release_memory_occupation({"tags": ["weights"]})
-    resume_result = await engine.resume_memory_occupation({"tags": ["weights"]})
+    release_result = await engine.engine_control(
+        "release_memory_occupation", {"tags": ["weights"]}
+    )
+    resume_result = await engine.engine_control(
+        "resume_memory_occupation", {"tags": ["weights"]}
+    )
 
     assert release_result["status"] == "ok"
     assert resume_result["status"] == "ok"

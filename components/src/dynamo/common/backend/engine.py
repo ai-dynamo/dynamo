@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional, Required, TypedDict
 
@@ -285,10 +285,23 @@ class LLMEngine(ABC):
         on top."""
         return None
 
-    async def engine_routes(self) -> dict[str, Callable[[dict], Awaitable[dict]]]:
-        """Engine-management routes exposed as ``/engine/{route}``. Default
-        opts out. ``Worker`` calls once after :meth:`start`."""
-        return {}
+    def supported_controls(self) -> set[str]:
+        """Engine-control capability keys this engine supports.
+
+        The unified backend maps these keys to runtime endpoints. Engines only
+        advertise and implement semantic controls; they do not own transport or
+        route registration details.
+        """
+        return set()
+
+    async def engine_control(
+        self, control: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Handle one advertised engine-control request."""
+        return {
+            "status": "error",
+            "message": f"unsupported engine control: {control}",
+        }
 
 
 # ---------------------------------------------------------------------------

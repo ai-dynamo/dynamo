@@ -62,10 +62,10 @@ def _make_engine() -> TrtllmLLMEngine:
 
 
 @pytest.mark.asyncio
-async def test_engine_routes_expose_trtllm_management_callbacks():
-    routes = await _make_engine().engine_routes()
+async def test_engine_controls_expose_trtllm_management_capabilities():
+    controls = _make_engine().supported_controls()
 
-    assert set(routes) == {
+    assert controls == {
         "release_memory_occupation",
         "resume_memory_occupation",
     }
@@ -75,8 +75,12 @@ async def test_engine_routes_expose_trtllm_management_callbacks():
 async def test_release_and_resume_delegate_to_quiesce_controller():
     engine = _make_engine()
 
-    release_result = await engine.release_memory_occupation({"tags": ["kv_cache"]})
-    resume_result = await engine.resume_memory_occupation({"tags": ["kv_cache"]})
+    release_result = await engine.engine_control(
+        "release_memory_occupation", {"tags": ["kv_cache"]}
+    )
+    resume_result = await engine.engine_control(
+        "resume_memory_occupation", {"tags": ["kv_cache"]}
+    )
 
     assert release_result["status"] == "ok"
     assert resume_result["status"] == "ok"

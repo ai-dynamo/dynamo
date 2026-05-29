@@ -20,6 +20,7 @@ use dynamo_llm::local_model::runtime_config::{
 };
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_llm::worker_type::WorkerType;
+use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -27,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapter::EngineAdapter;
 use crate::disagg::DisaggregationMode;
-use crate::engine::{EngineConfig, EngineRouteCallback, LLMEngine};
+use crate::engine::{EngineConfig, LLMEngine};
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
 
@@ -504,26 +505,26 @@ impl Worker {
         Ok(())
     }
 
-    /// Register engine-management routes on the runtime system server.
-    async fn register_engine_routes(
+    /// Register advertised engine controls on the runtime system server.
+    async fn register_engine_controls(
         &self,
         endpoint: &dynamo_runtime::component::Endpoint,
     ) -> Result<(), DynamoError> {
-        let routes = self.engine.engine_routes().await?;
-        if routes.is_empty() {
-            tracing::debug!("engine returned no management routes");
+        let controls = self.engine.supported_controls().await?;
+        if controls.is_empty() {
+            tracing::debug!("engine returned no management controls");
             return Ok(());
         }
 
         let registry = endpoint.drt().engine_routes();
-        let route_count = routes.len();
-        for route in routes {
-            let route_name = route.route;
+        let control_count = controls.len();
+        for control_name in controls {
+            let callback = engine_control_callback(control_name.clone(), self.engine.clone());
             let callback =
-                wrap_engine_route_callback(route_name.clone(), route.callback, endpoint.clone());
-            registry.register(&route_name, callback);
+                wrap_engine_control_callback(control_name.clone(), callback, endpoint.clone());
+            registry.register(&control_name, callback);
         }
-        tracing::info!(route_count, "registered engine management routes");
+        tracing::info!(control_count, "registered engine management controls");
         Ok(())
     }
 
@@ -632,7 +633,7 @@ impl Worker {
                 )
             })?;
         tracing::debug!("model registered with discovery");
-        self.register_engine_routes(&endpoint).await?;
+        self.register_engine_controls(&endpoint).await?;
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -895,21 +896,21 @@ fn grace_period_secs() -> f64 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EngineRoutePolicy {
+enum EngineControlPolicy {
     Direct,
     UnregisterBefore,
     RegisterAfter,
 }
 
-fn engine_route_policy(route: &str) -> EngineRoutePolicy {
-    match route {
-        "sleep" | "release_memory_occupation" => EngineRoutePolicy::UnregisterBefore,
-        "wake_up" | "resume_memory_occupation" => EngineRoutePolicy::RegisterAfter,
-        _ => EngineRoutePolicy::Direct,
+fn engine_control_policy(control: &str) -> EngineControlPolicy {
+    match control {
+        "sleep" | "release_memory_occupation" => EngineControlPolicy::UnregisterBefore,
+        "wake_up" | "resume_memory_occupation" => EngineControlPolicy::RegisterAfter,
+        _ => EngineControlPolicy::Direct,
     }
 }
 
-fn route_response_is_error(value: &serde_json::Value) -> bool {
+fn control_response_is_error(value: &serde_json::Value) -> bool {
     value
         .get("status")
         .and_then(|v| v.as_str())
@@ -920,57 +921,73 @@ fn route_response_is_error(value: &serde_json::Value) -> bool {
             .is_some_and(|success| !success)
 }
 
-fn route_error_response(message: impl Into<String>) -> serde_json::Value {
+fn control_error_response(message: impl Into<String>) -> serde_json::Value {
     serde_json::json!({"status": "error", "message": message.into()})
 }
 
-fn wrap_engine_route_callback(
-    route_name: String,
+fn engine_control_callback(
+    control_name: String,
+    engine: Arc<dyn LLMEngine>,
+) -> EngineRouteCallback {
+    Arc::new(move |body| {
+        let engine = engine.clone();
+        let control_name = control_name.clone();
+        Box::pin(async move {
+            engine
+                .engine_control(control_name, body)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        })
+    })
+}
+
+fn wrap_engine_control_callback(
+    control_name: String,
     callback: EngineRouteCallback,
     endpoint: dynamo_runtime::component::Endpoint,
 ) -> EngineRouteCallback {
-    let policy = engine_route_policy(&route_name);
+    let policy = engine_control_policy(&control_name);
     Arc::new(move |body| {
         let callback = callback.clone();
         let endpoint = endpoint.clone();
-        let route_name = route_name.clone();
+        let control_name = control_name.clone();
         Box::pin(async move {
             match policy {
-                EngineRoutePolicy::Direct => callback(body).await,
-                EngineRoutePolicy::UnregisterBefore => {
+                EngineControlPolicy::Direct => callback(body).await,
+                EngineControlPolicy::UnregisterBefore => {
                     if let Err(e) = endpoint.unregister_endpoint_instance().await {
-                        return Ok(route_error_response(format!(
-                            "failed to unregister endpoint before /engine/{route_name}: {e}"
+                        return Ok(control_error_response(format!(
+                            "failed to unregister endpoint before /engine/{control_name}: {e}"
                         )));
                     }
 
                     match callback(body).await {
                         Ok(response) => {
-                            if route_response_is_error(&response) {
+                            if control_response_is_error(&response) {
                                 tracing::warn!(
-                                    route = %route_name,
-                                    "route returned an error after endpoint unregister; leaving endpoint unregistered"
+                                    control = %control_name,
+                                    "engine control returned an error after endpoint unregister; leaving endpoint unregistered"
                                 );
                             }
                             Ok(response)
                         }
                         Err(e) => {
                             tracing::warn!(
-                                route = %route_name,
+                                control = %control_name,
                                 error = %e,
-                                "route callback failed after endpoint unregister; leaving endpoint unregistered"
+                                "engine control callback failed after endpoint unregister; leaving endpoint unregistered"
                             );
                             Err(e)
                         }
                     }
                 }
-                EngineRoutePolicy::RegisterAfter => {
+                EngineControlPolicy::RegisterAfter => {
                     let response = callback(body).await?;
-                    if !route_response_is_error(&response)
+                    if !control_response_is_error(&response)
                         && let Err(e) = endpoint.register_endpoint_instance().await
                     {
-                        return Ok(route_error_response(format!(
-                            "failed to register endpoint after /engine/{route_name}: {e}"
+                        return Ok(control_error_response(format!(
+                            "failed to register endpoint after /engine/{control_name}: {e}"
                         )));
                     }
                     Ok(response)
@@ -1219,56 +1236,56 @@ mod tests {
     }
 
     #[test]
-    fn engine_route_policy_wraps_discovery_mutating_routes() {
+    fn engine_control_policy_wraps_discovery_mutating_controls() {
         assert_eq!(
-            engine_route_policy("start_profile"),
-            EngineRoutePolicy::Direct
+            engine_control_policy("start_profile"),
+            EngineControlPolicy::Direct
         );
         assert_eq!(
-            engine_route_policy("stop_profile"),
-            EngineRoutePolicy::Direct
+            engine_control_policy("stop_profile"),
+            EngineControlPolicy::Direct
         );
         assert_eq!(
-            engine_route_policy("update_weights_from_disk"),
-            EngineRoutePolicy::Direct
+            engine_control_policy("update_weights_from_disk"),
+            EngineControlPolicy::Direct
         );
         assert_eq!(
-            engine_route_policy("sleep"),
-            EngineRoutePolicy::UnregisterBefore
+            engine_control_policy("sleep"),
+            EngineControlPolicy::UnregisterBefore
         );
         assert_eq!(
-            engine_route_policy("release_memory_occupation"),
-            EngineRoutePolicy::UnregisterBefore
+            engine_control_policy("release_memory_occupation"),
+            EngineControlPolicy::UnregisterBefore
         );
         assert_eq!(
-            engine_route_policy("wake_up"),
-            EngineRoutePolicy::RegisterAfter
+            engine_control_policy("wake_up"),
+            EngineControlPolicy::RegisterAfter
         );
         assert_eq!(
-            engine_route_policy("resume_memory_occupation"),
-            EngineRoutePolicy::RegisterAfter
+            engine_control_policy("resume_memory_occupation"),
+            EngineControlPolicy::RegisterAfter
         );
     }
 
     #[test]
-    fn route_response_error_detection_matches_backend_conventions() {
-        assert!(route_response_is_error(&serde_json::json!({
+    fn control_response_error_detection_matches_backend_conventions() {
+        assert!(control_response_is_error(&serde_json::json!({
             "status": "error"
         })));
-        assert!(route_response_is_error(&serde_json::json!({
+        assert!(control_response_is_error(&serde_json::json!({
             "status": "ERROR"
         })));
-        assert!(route_response_is_error(&serde_json::json!({
+        assert!(control_response_is_error(&serde_json::json!({
             "success": false
         })));
 
-        assert!(!route_response_is_error(&serde_json::json!({
+        assert!(!control_response_is_error(&serde_json::json!({
             "status": "ok"
         })));
-        assert!(!route_response_is_error(&serde_json::json!({
+        assert!(!control_response_is_error(&serde_json::json!({
             "success": true
         })));
-        assert!(!route_response_is_error(&serde_json::json!({
+        assert!(!control_response_is_error(&serde_json::json!({
             "message": "ok"
         })));
     }

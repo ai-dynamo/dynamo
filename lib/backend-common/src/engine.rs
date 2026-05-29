@@ -31,7 +31,6 @@ pub use dynamo_llm::protocols::common::{
 };
 pub use dynamo_protocols::types::CompletionUsage;
 pub use dynamo_runtime::engine::AsyncEngineContext;
-pub use dynamo_runtime::engine_routes::EngineRouteCallback;
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
 /// `dyn AsyncEngineContext` so engine code uses it transparently.
@@ -325,17 +324,26 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(None)
     }
 
-    /// Engine-management routes exposed under `/engine/{route}` by the
-    /// runtime system server. Empty by default.
-    async fn engine_routes(&self) -> Result<Vec<EngineRoute>, DynamoError> {
+    /// Semantic engine controls this engine supports. Empty by default.
+    ///
+    /// Engines advertise control keys and implement them via
+    /// [`LLMEngine::engine_control`]. Mapping those keys onto runtime routes is
+    /// owned by the unified backend layer.
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
         Ok(Vec::new())
     }
-}
 
-/// One `/engine/{route}` callback supplied by an engine.
-pub struct EngineRoute {
-    pub route: String,
-    pub callback: EngineRouteCallback,
+    /// Handle one semantic engine-control request.
+    async fn engine_control(
+        &self,
+        control: String,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        Ok(serde_json::json!({
+            "status": "error",
+            "message": format!("unsupported engine control: {control}"),
+        }))
+    }
 }
 
 /// Marker key stamped on canary payloads. Handlers may inspect it to branch

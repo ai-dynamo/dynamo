@@ -42,21 +42,21 @@ def _make_engine(include_scale: bool = False) -> VllmLLMEngine:
 
 
 @pytest.mark.asyncio
-async def test_engine_routes_expose_vllm_management_callbacks():
-    routes = await _make_engine().engine_routes()
+async def test_engine_controls_expose_vllm_management_capabilities():
+    controls = _make_engine().supported_controls()
 
-    assert set(routes) == {"start_profile", "stop_profile", "sleep", "wake_up"}
+    assert controls == {"start_profile", "stop_profile", "sleep", "wake_up"}
 
-    scaled_routes = await _make_engine(include_scale=True).engine_routes()
-    assert "scale_elastic_ep" in scaled_routes
+    scaled_controls = _make_engine(include_scale=True).supported_controls()
+    assert "scale_elastic_ep" in scaled_controls
 
 
 @pytest.mark.asyncio
 async def test_sleep_and_wake_delegate_to_engine_client():
     engine = _make_engine()
 
-    sleep_result = await engine.sleep({"level": 2})
-    wake_result = await engine.wake_up({"tags": ["weights"]})
+    sleep_result = await engine.engine_control("sleep", {"level": 2})
+    wake_result = await engine.engine_control("wake_up", {"tags": ["weights"]})
 
     assert sleep_result["status"] == "ok"
     assert wake_result["status"] == "ok"
@@ -70,8 +70,10 @@ async def test_sleep_and_wake_delegate_to_engine_client():
 async def test_profile_routes_delegate_to_engine_client():
     engine = _make_engine()
 
-    start_result = await engine.start_profile({"profile_prefix": "pref"})
-    stop_result = await engine.stop_profile({})
+    start_result = await engine.engine_control(
+        "start_profile", {"profile_prefix": "pref"}
+    )
+    stop_result = await engine.engine_control("stop_profile", {})
 
     assert start_result["status"] == "ok"
     assert stop_result["status"] == "ok"
@@ -83,7 +85,7 @@ async def test_profile_routes_delegate_to_engine_client():
 async def test_scale_elastic_ep_validates_required_size_before_ray_import():
     engine = _make_engine(include_scale=True)
 
-    result = await engine.scale_elastic_ep({})
+    result = await engine.engine_control("scale_elastic_ep", {})
 
     assert result == {
         "status": "error",

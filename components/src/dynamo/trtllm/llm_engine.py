@@ -578,11 +578,21 @@ class TrtllmLLMEngine(LLMEngine):
             if removed:
                 publisher.publish_removed(removed)
 
-    async def engine_routes(self) -> dict[str, Callable[[dict], Any]]:
-        return {
+    def supported_controls(self) -> set[str]:
+        return {"release_memory_occupation", "resume_memory_occupation"}
+
+    async def engine_control(self, control: str, body: dict) -> dict:
+        handlers = {
             "release_memory_occupation": self.release_memory_occupation,
             "resume_memory_occupation": self.resume_memory_occupation,
         }
+        handler = handlers.get(control)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine control: {control}",
+            }
+        return await handler(body or {})
 
     async def _set_reject_new_requests(self, reject: bool) -> None:
         async with self._inflight_lock:

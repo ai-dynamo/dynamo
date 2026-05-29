@@ -15,7 +15,7 @@ import logging
 import os
 import random
 import sys
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional
 
 import sglang as sgl
@@ -416,8 +416,21 @@ class SglangLLMEngine(LLMEngine):
 
             yield out
 
-    async def engine_routes(self) -> dict[str, Callable[[dict], Any]]:
+    def supported_controls(self) -> set[str]:
         return {
+            "start_profile",
+            "stop_profile",
+            "release_memory_occupation",
+            "resume_memory_occupation",
+            "update_weights_from_disk",
+            "update_weights_from_tensor",
+            "update_weights_from_distributed",
+            "update_weights_from_ipc",
+            "update_weight_version",
+        }
+
+    async def engine_control(self, control: str, body: dict) -> dict:
+        handlers = {
             "start_profile": self.start_profile,
             "stop_profile": self.stop_profile,
             "release_memory_occupation": self.release_memory_occupation,
@@ -428,6 +441,13 @@ class SglangLLMEngine(LLMEngine):
             "update_weights_from_ipc": self.update_weights_from_ipc,
             "update_weight_version": self.update_weight_version,
         }
+        handler = handlers.get(control)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine control: {control}",
+            }
+        return await handler(body or {})
 
     async def release_memory_occupation(self, body: dict) -> dict:
         controller = self._quiesce_controller

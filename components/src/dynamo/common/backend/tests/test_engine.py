@@ -379,7 +379,11 @@ def test_python_processor_spec_is_carried_through():
     assert activation == [desc]
 
 
-async def test_default_engine_routes_is_empty():
-    """Engines opt into system-server management routes explicitly."""
+async def test_default_engine_controls_are_empty():
+    """Engines opt into management controls explicitly."""
     engine = _Complete()
-    assert await engine.engine_routes() == {}
+    assert engine.supported_controls() == set()
+    assert await engine.engine_control("sleep", {}) == {
+        "status": "error",
+        "message": "unsupported engine control: sleep",
+    }
