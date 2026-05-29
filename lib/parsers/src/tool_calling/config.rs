@@ -84,9 +84,9 @@ pub struct XmlParserConfig {
 
     /// When true, the function- and parameter-regex omit the `|$` end-of-block
     /// fallback (so missing `</function>` / `</parameter>` causes the match to
-    /// fail rather than being silently recovered), AND `detect_and_parse_tool_
-    /// call_with_recovery` does not flip `allow_eof_recovery=true` for this
-    /// config. Used by families whose official reference parser is
+    /// fail rather than being silently recovered). Finalize recovery may still
+    /// accept a missing outer wrapper end marker if the inner blocks are
+    /// complete. Used by families whose official reference parser is
     /// strict-match (e.g. MiniMax-M2 — see
     /// https://huggingface.co/MiniMaxAI/MiniMax-M2/blob/main/docs/tool_calling_guide.md).
     #[serde(default)]
@@ -102,11 +102,10 @@ pub struct XmlParserConfig {
 
     /// When true, if `tool_call_start_token` is absent but `function_start_
     /// token` is present, parse the entire input as a single tool-call block
-    /// (back-off strategy). Matches the `if len(raw_tool_calls) == 0:
-    /// raw_tool_calls = [model_output]` back-off in Qwen3-Coder's reference
-    /// parser. Independent of `passthrough_when_no_function` (different
-    /// trigger: this one fires when function tags exist but the outer wrapper
-    /// does not).
+    /// (back-off strategy). Used by XML families that can recover a complete
+    /// function/invoke body even when the outer wrapper opener is missing.
+    /// Independent of `passthrough_when_no_function` (different trigger: this
+    /// one fires when function tags exist but the outer wrapper does not).
     #[serde(default)]
     pub backoff_when_no_wrapper: bool,
 }
@@ -576,12 +575,9 @@ impl ToolCallConfig {
         // </minimax:tool_call>
         // Reference: https://huggingface.co/MiniMaxAI/MiniMax-M2.1/blob/main/docs/tool_calling_guide.md
         //
-        // MiniMax's official reference parser is strict-match — its three
-        // regexes (outer/invoke/parameter) all require paired fences and
-        // return [] on any mismatch. `strict_match=true` enforces that:
-        // it drops the `|$` end-of-block fallback from the function- and
-        // parameter-regex AND prevents the PyO3 `with_recovery` shim from
-        // flipping `allow_eof_recovery=true`.
+        // MiniMax uses strict inner invoke/parameter fences. Dynamo still
+        // recovers complete inner invokes when only the outer wrapper is
+        // missing or truncated so valid tool calls do not disappear.
         Self {
             parser_config: ParserConfig::Xml(XmlParserConfig {
                 tool_call_start_token: "<minimax:tool_call>".to_string(),
@@ -593,7 +589,7 @@ impl ToolCallConfig {
                 allow_eof_recovery: false,
                 strict_match: true,
                 passthrough_when_no_function: false,
-                backoff_when_no_wrapper: false,
+                backoff_when_no_wrapper: true,
             }),
             structural_tag_builder: None,
         }

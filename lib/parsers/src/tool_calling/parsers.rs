@@ -169,11 +169,7 @@ async fn detect_and_parse_tool_call_with_recovery_options(
         }
         ParserConfig::Xml(c) => {
             let mut c = c.clone();
-            // Strict-match families opt out — flipping recovery here would
-            // contradict their per-spec strictness.
-            if !c.strict_match {
-                c.allow_eof_recovery = true;
-            }
+            c.allow_eof_recovery = true;
             ParserConfig::Xml(c)
         }
         ParserConfig::Dsml(c) if recover_dsml_eof => {

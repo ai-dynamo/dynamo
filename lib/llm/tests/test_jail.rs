@@ -3580,11 +3580,11 @@ fahrenheit
         }
     }
 
-    /// MiniMax uses a strict reference parser: incomplete paired XML fences do
-    /// not recover a call. At stream end, the jail must still avoid surfacing
-    /// the raw `<minimax:tool_call>` protocol block as assistant content.
+    /// MiniMax recovers complete inner invokes even when the outer wrapper is
+    /// damaged. Incomplete paired XML fences still do not recover a call, and
+    /// the jail must not surface raw MiniMax protocol markers as content.
     #[tokio::test]
-    async fn test_minimax_m2_stream_finalize_zero_call_truncation_drops_markup() {
+    async fn test_minimax_m2_stream_finalize_recovers_complete_inner_invokes() {
         // These are jail/finalize regression checks for existing parser parity cases:
         // the first and prefix-preservation rows cover TOOLCALLING.stream.4.a, and
         // the mid-call body truncation row covers TOOLCALLING.stream.4.b.
@@ -3596,6 +3596,7 @@ fahrenheit
                  <parameter name=\"location\">NYC</parameter>\n\
                  </invoke>",
                 "",
+                1,
             ),
             (
                 "mid-call body truncation",
@@ -3603,6 +3604,7 @@ fahrenheit
                  <invoke name=\"get_weather\">\n\
                  <parameter name=\"location\">NY",
                 "",
+                0,
             ),
             (
                 "pre-marker prose before truncated call",
@@ -3611,10 +3613,11 @@ fahrenheit
                  <parameter name=\"location\">NYC</parameter>\n\
                  </invoke>",
                 "I will check that. ",
+                1,
             ),
         ];
 
-        for (label, partial_tool_call, expected_content) in cases {
+        for (label, partial_tool_call, expected_content, expected_tool_call_count) in cases {
             let input_chunks = vec![
                 test_utils::create_mock_response_chunk(partial_tool_call.to_string(), 0),
                 test_utils::create_final_response_chunk(0),
@@ -3643,8 +3646,8 @@ fahrenheit
                 })
                 .sum();
             assert_eq!(
-                tool_call_count, 0,
-                "{label}: strict MiniMax must not recover a call"
+                tool_call_count, expected_tool_call_count,
+                "{label}: unexpected recovered MiniMax tool call count"
             );
 
             let content = test_utils::reconstruct_content(&results);

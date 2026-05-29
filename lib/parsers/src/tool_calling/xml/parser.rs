@@ -155,9 +155,8 @@ pub fn try_tool_call_parse_xml(
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     // Qwen3-Coder-style passthrough: if the function-start token is absent
     // anywhere in the input, the reference parser returns the raw input as
-    // content with no tool calls. Gated so it only fires for parsers that
-    // opt in (e.g. qwen3_coder, nemotron_nano); other XML-style families
-    // (minimax_m2, kimi_k2 alias paths) keep their stricter behavior.
+    // content with no tool calls. Gated so it only fires for parsers that opt
+    // in (e.g. qwen3_coder, nemotron_nano).
     if config.passthrough_when_no_function
         && !message.contains(config.function_start_token.as_str())
         && !message.contains(config.tool_call_start_token.as_str())
@@ -165,9 +164,10 @@ pub fn try_tool_call_parse_xml(
         return Ok((vec![], Some(message.to_string())));
     }
 
-    // Qwen3-Coder-style back-off: outer wrapper missing but `<function=...>`
-    // tags are present — parse the whole input as a single tool-call block
-    // (mirrors `qwen3coder_tool_parser._get_function_calls`'s fallback).
+    // Back-off: outer wrapper missing but function/invoke tags are present —
+    // parse the whole input as a single tool-call block. Qwen3-Coder uses this
+    // in its reference parser. MiniMax uses the same path to recover complete
+    // inner invokes when the outer wrapper opener is missing.
     //
     // Gated on `function_end_token` being present OR `allow_eof_recovery` set,
     // mirroring the wrapped path's recovery gate in `extract_tool_calls`. The
@@ -247,16 +247,17 @@ fn extract_tool_calls(
             } else {
                 // Recovery: outer end token absent (max_tokens / EOS truncation).
                 // Gated on `allow_eof_recovery` so streaming early-exit doesn't
-                // fire mid-stream. Recovery also requires the trailing slice
-                // to contain a function-start opener — structural signal that
-                // a real tool call was emitted, so plain text starting with
-                // `<tool_call>` is preserved verbatim.
+                // fire mid-stream. Strict XML families still require paired
+                // inner invoke/parameter fences before a call is recovered.
+                // Recovery also requires the trailing slice to contain a
+                // function-start opener — structural signal that a real tool
+                // call was emitted, so plain text starting with `<tool_call>`
+                // is preserved verbatim.
                 let block = &text[abs_start..];
                 let function_start = &config.function_start_token;
                 let looks_like_tool_call = block.contains(function_start.as_str())
                     || block.contains(config.parameter_start_token.as_str());
                 if config.allow_eof_recovery
-                    && !config.strict_match
                     && looks_like_tool_call
                     && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
                     && !parsed_calls.is_empty()
@@ -1198,14 +1199,11 @@ NYC
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test] // TOOLCALLING.batch.5.a — minimax_m2 spec-strict
-    fn test_parse_minimax_m2_no_outer_close_drops_call() {
-        // MiniMax-M2's reference parser (huggingface.co/MiniMaxAI/MiniMax-M2)
-        // requires both outer fences — missing `</minimax:tool_call>` means
-        // the regex does not match and zero calls are recovered. Strict-match
-        // mode opts into that behavior even when `allow_eof_recovery=true`
-        // would otherwise apply (and the binding-layer override is also
-        // suppressed for strict configs).
+    #[test] // TOOLCALLING.batch.5.a — minimax_m2
+    fn test_parse_minimax_m2_no_outer_close_recovers_complete_inner_call() {
+        // Finalize recovery may accept a missing outer MiniMax wrapper close,
+        // but strict_match still requires complete inner invoke/parameter
+        // fences before surfacing a call.
         let config = XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
             tool_call_end_token: "</minimax:tool_call>".to_string(),
@@ -1216,15 +1214,15 @@ NYC
             allow_eof_recovery: true,
             strict_match: true,
             passthrough_when_no_function: false,
-            backoff_when_no_wrapper: false,
+            backoff_when_no_wrapper: true,
         };
         let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke>"#;
 
         let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
-        assert!(
-            calls.is_empty(),
-            "strict_match config must not recover when outer </minimax:tool_call> is absent"
-        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
     }
 
     #[test] // helper
@@ -1414,7 +1412,7 @@ NYC
 
     /// Helper for the new corner-case tests below (TOOLCALLING.batch.6 / PIPELINE.finish_reason / TOOLCALLING.batch.9
     /// / TOOLCALLING.batch.10) — matches the production `ToolCallConfig::minimax_m2()`
-    /// factory: strict-match per MiniMax's reference parser.
+    /// factory: strict inner blocks plus bare-invoke recovery.
     fn minimax_m2_config() -> XmlParserConfig {
         XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
@@ -1426,7 +1424,7 @@ NYC
             allow_eof_recovery: false,
             strict_match: true,
             passthrough_when_no_function: false,
-            backoff_when_no_wrapper: false,
+            backoff_when_no_wrapper: true,
         }
     }
 
