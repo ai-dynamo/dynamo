@@ -31,7 +31,7 @@
 //! never happen with a correctly-configured worker.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 
@@ -44,6 +44,17 @@ const DEFAULT_MAX_GPU_LORA_COUNT: u32 = 4;
 ///
 /// Concurrent data structure updated from MDC discovery events and read from
 /// the allocation controller and filter.
+///
+/// ## Cross-map consistency
+///
+/// State is spread across four `DashMap`s that must stay mutually consistent
+/// (e.g. `loaded_locations` and `worker_to_loras` are inverse indexes of the
+/// same fact). Per-map atomicity is not enough: a concurrent addition and
+/// removal touching the same `(worker, lora)` could interleave their
+/// individual map writes and leave the indexes disagreeing. All three mutating
+/// handlers therefore serialize on `write_lock` for the duration of their
+/// multi-map update, so writers observe a consistent snapshot relative to one
+/// another. Readers stay lock-free on the individual `DashMap`s.
 #[derive(Clone)]
 pub struct LoraStateTracker {
     /// LoRA name -> set of workers where it is loaded
@@ -54,6 +65,10 @@ pub struct LoraStateTracker {
     worker_to_loras: Arc<DashMap<WorkerWithDpRank, HashSet<String>>>,
     /// Worker -> max_gpu_lora_count capacity
     worker_capacity: Arc<DashMap<WorkerWithDpRank, u32>>,
+    /// Serializes the multi-map mutations in the `handle_*` methods so the four
+    /// indexes above can never be left mutually inconsistent by interleaved
+    /// writers. Reads do not take this lock.
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl LoraStateTracker {
@@ -63,7 +78,14 @@ impl LoraStateTracker {
             lora_info: Arc::new(DashMap::new()),
             worker_to_loras: Arc::new(DashMap::new()),
             worker_capacity: Arc::new(DashMap::new()),
+            write_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Acquire the writer-serialization lock, tolerating poisoning (a prior
+    /// writer panic must not wedge all future updates).
+    fn lock_writes(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Handle an MDC addition event: a worker registered (or re-published) a LoRA adapter.
@@ -79,6 +101,7 @@ impl LoraStateTracker {
     /// previously-recorded capacity for the same worker is logged at warn level
     /// and the latest value is adopted.
     pub fn handle_mdc_addition(&self, worker: WorkerWithDpRank, lora: &LoraInfo) {
+        let _guard = self.lock_writes();
         let lora_name = lora.name.clone();
 
         self.loaded_locations
@@ -122,6 +145,7 @@ impl LoraStateTracker {
 
     /// Handle an MDC removal event: a worker unregistered a LoRA adapter.
     pub fn handle_mdc_removal(&self, worker: WorkerWithDpRank, lora_name: &str) {
+        let _guard = self.lock_writes();
         let became_empty = if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
             workers.remove(&worker);
             workers.is_empty()
@@ -161,6 +185,7 @@ impl LoraStateTracker {
 
     /// Handle a worker being completely removed.
     pub fn handle_worker_removal(&self, worker: WorkerWithDpRank) {
+        let _guard = self.lock_writes();
         if let Some((_, loras)) = self.worker_to_loras.remove(&worker) {
             for lora_name in &loras {
                 let became_empty =
@@ -395,5 +420,67 @@ mod tests {
         let free = tracker.workers_with_free_slots();
         assert_eq!(free.len(), 1);
         assert!(free.contains(&w2));
+    }
+
+    #[test]
+    fn test_concurrent_add_remove_keeps_indexes_consistent() {
+        // Hammer the tracker with concurrent additions and removals across many
+        // (worker, lora) pairs, then assert the two inverse indexes
+        // (loaded_locations and worker_to_loras) agree. Without writer
+        // serialization, interleaved multi-map updates could leave them
+        // disagreeing; the write_lock prevents that.
+        use std::thread;
+
+        let tracker = LoraStateTracker::new();
+        let workers = 8u64;
+        let loras = 8u64;
+        let iters = 200;
+
+        let mut handles = Vec::new();
+        for t in 0..workers {
+            let tk = tracker.clone();
+            handles.push(thread::spawn(move || {
+                let w = make_worker(t);
+                for i in 0..iters {
+                    let lname = format!("lora-{}", i % loras);
+                    let info = make_lora_info(&lname, Some(loras as u32));
+                    tk.handle_mdc_addition(w, &info);
+                    if i % 3 == 0 {
+                        tk.handle_mdc_removal(w, &lname);
+                    }
+                    if i % 50 == 49 {
+                        tk.handle_worker_removal(w);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        // Invariant: every (lora -> worker) entry in loaded_locations has a
+        // matching (worker -> lora) entry in worker_to_loras, and vice versa.
+        for lora in tracker.list_loras() {
+            for w in tracker.get_loaded_workers(&lora) {
+                let loras_on_w = tracker
+                    .worker_to_loras
+                    .get(&w)
+                    .map(|s| s.contains(&lora))
+                    .unwrap_or(false);
+                assert!(
+                    loras_on_w,
+                    "loaded_locations says {lora} on {w:?} but worker_to_loras disagrees"
+                );
+            }
+        }
+        for entry in tracker.worker_to_loras.iter() {
+            let w = *entry.key();
+            for lora in entry.value() {
+                assert!(
+                    tracker.is_loaded(lora, &w),
+                    "worker_to_loras says {lora} on {w:?} but loaded_locations disagrees"
+                );
+            }
+        }
     }
 }
