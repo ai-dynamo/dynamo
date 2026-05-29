@@ -493,10 +493,10 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
         &self,
         input: ManyIn<serde_json::Value>,
     ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
-        let request_id = input.context().id().to_string();
-        let ctx = input.context();
-        let metadata = input.metadata().clone();
         let (request_stream, ctx_unit) = input.into_parts();
+        let ctx = ctx_unit.context();
+        let request_id = ctx_unit.id().to_string();
+        let metadata = ctx_unit.metadata().clone();
         let mut inbound = request_stream
             .take()
             .ok_or_else(|| anyhow::anyhow!("RequestStream::take returned None"))?;
@@ -539,15 +539,13 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
 
         let py_request_stream = PyAsyncRequestStream::new(frame_rx);
 
-        let ctx_python = ctx_unit.context();
-
         // The positional argument is the `PyAsyncRequestStream` handle, wrapped
         // inside the GIL.
         let stream = invoke_generator(
             self.generator.clone(),
             self.event_loop.clone(),
             self.has_context,
-            ctx_python,
+            ctx.clone(),
             current_trace_context,
             metadata,
             move |py| Ok(Py::new(py, py_request_stream)?.into_any()),
