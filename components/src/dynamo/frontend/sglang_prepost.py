@@ -354,9 +354,16 @@ def _render_deepseek_v4_prompt_token_ids(
             encoding_messages.insert(0, {"role": "system", "content": ""})
         encoding_messages[0]["tools"] = template_tools
 
-    chat_template_kwargs = (
+    chat_template_kwargs = dict(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
+    thinking = request.get("thinking")
+    if "thinking" not in chat_template_kwargs and isinstance(thinking, dict):
+        thinking_type = thinking.get("type")
+        if thinking_type == "enabled":
+            chat_template_kwargs["thinking"] = True
+        elif thinking_type == "disabled":
+            chat_template_kwargs["thinking"] = False
     thinking_mode = "thinking" if chat_template_kwargs.get("thinking") else "chat"
     reasoning_effort = (
         request.get("reasoning_effort")

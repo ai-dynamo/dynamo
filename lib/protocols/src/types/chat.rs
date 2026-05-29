@@ -64,7 +64,6 @@ pub use async_openai::types::chat::{
     PredictionContentContent,
     Prompt,
     PromptTokensDetails,
-    ReasoningEffort,
     ResponseFormat,
     ResponseFormatJsonSchema,
     Role,
@@ -150,6 +149,23 @@ pub use async_openai::types::chat::FinishReason;
 // Upstream uses FunctionType where we used ChatCompletionToolType.
 // Re-export both names for compatibility.
 pub use async_openai::types::chat::FunctionType;
+
+/// Reasoning effort values accepted by OpenAI-compatible clients.
+///
+/// async-openai versions used by some Dynamo builds do not include `max`, but
+/// DeepSeek-V4 compatible clients may send it by default. Keep this local enum
+/// wire-compatible with upstream values and include `max`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
 
 // ---------------------------------------------------------------------------
 // Flexible `arguments` deserialisation helpers

@@ -1330,7 +1330,6 @@ async fn chat_completions(
             request.inner.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
-
     // Capture the resolved model after template application for metrics and engine lookup
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -1347,6 +1346,15 @@ async fn chat_completions(
         streaming,
         &request_id,
     );
+
+    if let Err(err) = request.normalize_reasoning_template_args() {
+        let err_response = ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &err.to_string(),
+        });
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
@@ -3018,6 +3026,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3051,6 +3060,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3275,6 +3285,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3306,6 +3317,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3336,6 +3348,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3366,6 +3379,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3398,6 +3412,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3428,6 +3443,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
