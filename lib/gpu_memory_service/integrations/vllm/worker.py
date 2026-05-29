@@ -268,16 +268,27 @@ class GMSWorker(Worker):
                 get_model_memory_usage_offset_bytes,
             )
 
+            imported_weights_bytes = get_imported_weights_bytes()
+            memory_usage_offset_bytes = get_model_memory_usage_offset_bytes()
+            # The offset is not committed/restored GMS weight state. It is the
+            # load-time allocation footprint pruned before commit. vLLM uses
+            # model_memory_usage for KV-cache sizing, not only as a literal
+            # live-weight counter; reporting committed GMS bytes only can
+            # overestimate safe KV capacity and allocate an oversized cache.
             model_memory_usage_bytes = int(
-                get_imported_weights_bytes() + get_model_memory_usage_offset_bytes()
+                imported_weights_bytes + memory_usage_offset_bytes
             )
             if model_memory_usage_bytes > 0 and self.model_runner is not None:
                 old_usage = getattr(self.model_runner, "model_memory_usage", 0)
                 self.model_runner.model_memory_usage = model_memory_usage_bytes
                 logger.info(
-                    "[GMS] Corrected model_memory_usage: %.2f GiB -> %.2f GiB",
+                    "[GMS] Corrected vLLM model_memory_usage for KV sizing: "
+                    "%.2f GiB -> %.2f GiB "
+                    "(weights %.2f GiB + offset %.2f GiB)",
                     old_usage / (1 << 30),
                     model_memory_usage_bytes / (1 << 30),
+                    imported_weights_bytes / (1 << 30),
+                    memory_usage_offset_bytes / (1 << 30),
                 )
         except Exception as e:
             logger.debug("[GMS] Could not correct memory accounting: %s", e)
