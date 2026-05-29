@@ -351,24 +351,40 @@ def create_kv_events_config(
     return None
 
 
+# Names recognized as NIXL-based connectors (direct vLLM class + Dynamo
+# subclasses that inherit from NixlConnector and thus need the same side-
+# channel host setup).
+_NIXL_CONNECTOR_NAMES = frozenset(
+    {
+        "NixlConnector",
+        # Dynamo subclass that adds pending-send/in-process Prometheus gauges.
+        "NixlConnectorWithPendingMetrics",
+    }
+)
+
+
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses NixlConnector.
 
     Handles both direct usage (kv_connector="NixlConnector") and nested usage
     inside PdConnector (kv_connector_extra_config.connectors contains
-    "NixlConnector").
+    "NixlConnector"). Also recognizes Dynamo-side subclasses of NixlConnector
+    listed in _NIXL_CONNECTOR_NAMES.
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:
         return False
-    if kv_cfg.kv_connector == "NixlConnector":
+    if kv_cfg.kv_connector in _NIXL_CONNECTOR_NAMES:
         return True
     # PdConnector wraps multiple connectors in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
     if kv_cfg.kv_connector == "PdConnector":
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
-            if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
+            if (
+                isinstance(entry, dict)
+                and entry.get("kv_connector") in _NIXL_CONNECTOR_NAMES
+            ):
                 return True
     return False
 
