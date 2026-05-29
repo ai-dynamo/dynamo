@@ -774,13 +774,20 @@ class TrtllmLLMEngine(LLMEngine):
         )
 
         # TRT-LLM's `logprobs` is the top-k count; 0 disables logprob
-        # computation entirely. Floor it at 1 so a caller asking for
-        # `logprobs=0` (chosen-token only) still gets that back.
-        logprobs_count, prompt_logprobs_count = _shared_logprobs.parse_logprob_options(
+        # computation entirely. Floor at 1 so a caller asking for
+        # `logprobs=0` (chosen-token only) still gets the chosen logprob;
+        # keep the raw requested count to suppress top_logprobs below
+        # when the user did NOT ask for alternatives.
+        (
+            requested_logprobs_count,
+            prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
             request.get("output_options", {}) or {}
         )
-        if logprobs_count is not None and hasattr(sampling_params, "logprobs"):
-            sampling_params.logprobs = max(1, logprobs_count)
+        if requested_logprobs_count is not None and hasattr(
+            sampling_params, "logprobs"
+        ):
+            sampling_params.logprobs = max(1, requested_logprobs_count)
         if prompt_logprobs_count is not None and hasattr(
             sampling_params, "prompt_logprobs"
         ):
@@ -882,7 +889,14 @@ class TrtllmLLMEngine(LLMEngine):
                     )
                     if log_probs is not None:
                         out["log_probs"] = log_probs
-                    if top_logprobs is not None:
+                    # `requested_logprobs_count == 0` means chosen-token
+                    # only — suppress the top-k that the engine floor
+                    # forced TRT-LLM to compute.
+                    if (
+                        top_logprobs is not None
+                        and requested_logprobs_count is not None
+                        and requested_logprobs_count > 0
+                    ):
                         out["top_logprobs"] = top_logprobs
 
                     if output.finish_reason:

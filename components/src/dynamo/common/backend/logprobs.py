@@ -115,6 +115,11 @@ def extract_from_completion_output(
                 try:
                     token_str = tokenizer.decode([tok_id])
                 except Exception:
+                    logger.debug(
+                        "tokenizer.decode failed for token_id=%s",
+                        tok_id,
+                        exc_info=True,
+                    )
                     token_str = None
             entry: dict[str, Any] = {
                 "rank": info.rank if hasattr(info, "rank") else 0,
