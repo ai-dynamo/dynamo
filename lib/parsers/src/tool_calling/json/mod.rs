@@ -222,6 +222,8 @@ mod tests {
         JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            // Mirror the production nemotron_deci config (Config::nemotron_deci).
+            strip_markup_on_recovery: true,
             ..Default::default()
         }
     }

@@ -18,9 +18,9 @@ cases:
             type: string
     expected:
       dynamo:
-        reason: "Dynamo's nemotron_deci parser leaves <TOOLCALL> envelope in normal_text on malformed input (impl-defined recovery)"
+        reason: Unparseable TOOLCALL content (not a JSON tool-call array); Dynamo strips the wrapper markers and drops the content instead of leaking them into normal_text, and records the drop via tracing::warn
         calls: []
-        normal_text: <TOOLCALL>not a json array</TOOLCALL>
+        normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
@@ -50,6 +50,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: The array element has no name key, so it is not a valid tool call; Dynamo drops it and emits empty normal_text without leaking the wrapper markers
         calls: []
         normal_text: ''
       vllm:

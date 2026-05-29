@@ -492,10 +492,103 @@ pub fn try_tool_call_parse_basic_json(
     // If we found a start token but no valid JSON, return empty content
     // to avoid leaking the token and invalid JSON content
     if found_start_token_with_no_valid_json {
-        Ok((vec![], Some(String::new())))
-    } else {
-        Ok((vec![], Some(trimmed.to_string())))
+        return Ok((vec![], Some(String::new())));
     }
+
+    // Strict recovery (opt-in via `strip_markup_on_recovery`, e.g. nemotron_deci):
+    // every parse above failed, so the fall-through below would return the raw
+    // text verbatim — which leaks the wrapper markers (`<TOOLCALL>` /
+    // `</TOOLCALL>`) into `normal_text`. Instead, strip all configured markers
+    // and retry a strict parse of the remaining payload: recover any well-formed
+    // call (this is what salvages orphan-close framing like
+    // `[{...}]</TOOLCALL>`), otherwise drop the content. Markers never reach the
+    // user either way; `tracing::warn!` records what was recovered or dropped.
+    // Gated on `allow_eof_recovery` so this only runs on finalize / non-streaming
+    // aggregate paths — never on a mid-stream chunk. Firing mid-stream would
+    // claim a "complete" call before the end token arrives (same hazard as
+    // `allow_eof_recovery` itself), which strands the trailing `</TOOLCALL>` as
+    // leaked normal_text on the next chunk.
+    if config.strip_markup_on_recovery && config.allow_eof_recovery {
+        // Only intervene when a wrapper marker is actually present. Plain text
+        // with no tool-call marker is a normal (non-tool) response and MUST
+        // pass through unchanged — it must never be dropped or treated as a
+        // failed tool call.
+        let has_marker = config
+            .tool_call_start_tokens
+            .iter()
+            .chain(config.tool_call_end_tokens.iter())
+            .any(|token| !token.is_empty() && trimmed.contains(token.as_str()));
+
+        if has_marker {
+            // Strip wrapper markers only at the boundaries — start tokens from
+            // the front, end tokens from the end — never globally. A global
+            // replace would corrupt literal marker text inside a JSON string
+            // value (e.g. an argument that mentions "</TOOLCALL>"); boundary
+            // stripping leaves the JSON bytes handed to serde untouched.
+            let mut payload = trimmed;
+            loop {
+                payload = payload.trim();
+                match config
+                    .tool_call_start_tokens
+                    .iter()
+                    .filter(|token| !token.is_empty())
+                    .find_map(|token| payload.strip_prefix(token.as_str()))
+                {
+                    Some(rest) => payload = rest,
+                    None => break,
+                }
+            }
+            loop {
+                payload = payload.trim();
+                match config
+                    .tool_call_end_tokens
+                    .iter()
+                    .filter(|token| !token.is_empty())
+                    .find_map(|token| payload.strip_suffix(token.as_str()))
+                {
+                    Some(rest) => payload = rest,
+                    None => break,
+                }
+            }
+            let payload = payload.trim();
+
+            let mut calls = Vec::new();
+            if let Ok(array) = serde_json::from_str::<Vec<Box<RawValue>>>(payload) {
+                for item in array {
+                    let item_str = item.get();
+                    if let Ok(func_args) = serde_json::from_str::<CalledFunctionArguments>(item_str)
+                    {
+                        calls.push(parse(func_args.name, &func_args.arguments)?);
+                    } else if let Ok(func_params) =
+                        serde_json::from_str::<CalledFunctionParameters>(item_str)
+                    {
+                        calls.push(parse(func_params.name, &func_params.parameters)?);
+                    }
+                }
+            } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(payload) {
+                calls.push(parse(single.name, &single.arguments)?);
+            } else if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(payload) {
+                calls.push(parse(single.name, &single.parameters)?);
+            }
+
+            if !calls.is_empty() {
+                tracing::warn!(
+                    recovered_calls = calls.len(),
+                    "Recovered {} tool call(s) from malformed tool-call framing; stripped wrapper markers instead of leaking them into normal_text",
+                    calls.len()
+                );
+                return Ok((calls, Some(String::new())));
+            }
+
+            tracing::warn!(
+                dropped_content = %trimmed,
+                "Dropping unparseable tool-call content; wrapper markers stripped, no valid tool call recovered"
+            );
+            return Ok((vec![], Some(String::new())));
+        }
+    }
+
+    Ok((vec![], Some(trimmed.to_string())))
 }
 
 pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig) -> bool {
