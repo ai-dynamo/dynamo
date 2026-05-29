@@ -53,7 +53,17 @@ CASE_GROUPS = [
             "batch.2.f",
         ),
     ),
-    ("Tool call boundary", ("batch.3.a", "batch.3.b")),
+    (
+        "Tool call boundary",
+        (
+            "batch.3.a",
+            "batch.3.b",
+            "batch.3.c",
+            "batch.3.d",
+            "batch.3.e",
+            "batch.3.f",
+        ),
+    ),
     ("Malformed / recovery", ("batch.4", "batch.5")),
     ("Multi-span", ("batch.6.a", "batch.6.b")),
     (
@@ -461,6 +471,15 @@ def _reasoning_markup_re(family: str | None) -> re.Pattern[str]:
     return _REASONING_MARKUP_BY_FAMILY.get(family or "", _DEFAULT_REASONING_MARKUP_RE)
 
 
+def _is_gpt_oss_tool_handoff(family: str | None, field: str, value: str) -> bool:
+    return (
+        family == "gpt_oss"
+        and field == "normal_text"
+        and "<|channel|>commentary to=functions." in value
+        and "<|call|>" in value
+    )
+
+
 def _dynamo_leak_reason(expected: dict[str, Any], family: str | None) -> str | None:
     dynamo = expected.get("dynamo", {})
     if not isinstance(dynamo, dict):
@@ -468,10 +487,14 @@ def _dynamo_leak_reason(expected: dict[str, Any], family: str | None) -> str | N
     marker_re = _reasoning_markup_re(family)
     for field in ("reasoning_text", "normal_text"):
         value = dynamo.get(field)
-        if isinstance(value, str) and marker_re.search(value):
+        if (
+            isinstance(value, str)
+            and marker_re.search(value)
+            and not _is_gpt_oss_tool_handoff(family, field, value)
+        ):
             return str(
                 dynamo.get("reason")
-                or f"Dynamo {field} contains reasoning parser markup."
+                or "Dynamo leaks reasoning markup or final-answer text."
             )
     return None
 
@@ -1391,6 +1414,20 @@ def _tooltip_for(
     return "\n".join(parts)
 
 
+def _explanations_for(
+    case: dict[str, Any],
+    dyn: dict[str, Any],
+    family: str | None,
+) -> str:
+    parts = []
+    peer_reasons = _tooltip_for(case, dyn, family)
+    if peer_reasons:
+        parts.append(peer_reasons)
+    if isinstance(dyn.get("reason"), str) and not _has_dynamo_leak(case, family):
+        parts.append(f"Dynamo: {dyn['reason']}")
+    return "\n".join(parts)
+
+
 def _tooltip_html(
     case_id: str,
     family: str,
@@ -1401,17 +1438,7 @@ def _tooltip_html(
     head_family = display_family or family
     head = f"{case_id} — {head_family}"
     description = case.get("description")
-    extra_sections: list[tuple[str, str]] = [
-        (
-            "Harness flags",
-            _harness_flags_html(
-                case_id,
-                family,
-                case,
-                display_family=display_family,
-            ),
-        )
-    ]
+    extra_sections: list[tuple[str, str]] = []
     if display_family and display_family != family:
         extra_sections.append(
             (
@@ -1435,6 +1462,20 @@ def _tooltip_html(
 
     expected = case["expected"]
     dyn = expected.get("dynamo")
+    explanations = _explanations_for(case, dyn, family) if isinstance(dyn, dict) else ""
+    if explanations:
+        extra_sections.append(("Explanations", linkify_text_html(explanations)))
+    extra_sections.append(
+        (
+            "Harness flags",
+            _harness_flags_html(
+                case_id,
+                family,
+                case,
+                display_family=display_family,
+            ),
+        )
+    )
     all_engines_parity = isinstance(dyn, dict) and all(
         isinstance(expected.get(i), dict)
         and not expected[i].get("unavailable")
@@ -1479,10 +1520,8 @@ def _tooltip_html(
         input_label="Input chunks" if "chunks" in case else "Input",
         input_html=_input_text_html(case, family),
         output_sections=output_sections,
-        divergent_reasons=_tooltip_for(case, dyn, family)
-        if isinstance(dyn, dict)
-        else None,
-        leak_label="↯ Dynamo reasoning leaks",
+        divergent_reasons=None,
+        leak_label="↯ Dynamo leaks",
         leak_text=dynamo_leak
         or ("unresolved" if _has_dynamo_leak(case, family) else None),
         extra_sections=extra_sections,
@@ -1936,7 +1975,7 @@ def _legend_html(rows: dict[str, dict[str, Any]], columns: list[str]) -> str:
         '<span style="color:#b00">?</span> more research needed '
         "(e.g. V?, S? — diverges with no <code>reason:</code> yet) · "
         '<span style="color:#b00">↯</span> Dynamo leaks reasoning markup '
-        "or final-answer text into the wrong field · "
+        "or final-answer text · "
         '<span style="color:#b00">!</span> expected-error suffix '
         "(e.g. V!, S! — engine crashes by design) · "
         '<span style="color:#aaa">n/a</span> not applicable'
