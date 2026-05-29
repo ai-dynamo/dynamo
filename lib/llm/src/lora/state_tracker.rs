@@ -186,6 +186,16 @@ impl LoraStateTracker {
     /// Handle a worker being completely removed.
     pub fn handle_worker_removal(&self, worker: WorkerWithDpRank) {
         let _guard = self.lock_writes();
+
+        // Remove the capacity entry FIRST. `worker_capacity` is the enumeration
+        // spine for every slot/capacity reader (`workers_with_free_slots`,
+        // `list_workers`, `get_worker_slot_usage`, `slot_info`), so dropping it
+        // first makes the worker vanish from those snapshots atomically. If we
+        // cleared `worker_to_loras` first instead, a concurrent reader could
+        // momentarily see the worker as capacity-present with zero loaded LoRAs
+        // and wrongly report it as having free slots.
+        self.worker_capacity.remove(&worker);
+
         if let Some((_, loras)) = self.worker_to_loras.remove(&worker) {
             for lora_name in &loras {
                 let became_empty =
@@ -202,7 +212,6 @@ impl LoraStateTracker {
                 self.lora_info.remove(&(lora_name.clone(), worker));
             }
         }
-        self.worker_capacity.remove(&worker);
 
         tracing::debug!(
             worker_id = worker.worker_id,

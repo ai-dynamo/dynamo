@@ -41,6 +41,12 @@ struct LoraMeta {
     rank_map: HashMap<WorkerWithDpRank, usize>,
     /// Workers that hosted this LoRA on the previous tick.
     prev_hosts: HashSet<WorkerWithDpRank>,
+    /// Workers already frozen as hosts of this LoRA on this tick. These must be
+    /// excluded from residual candidate edges: a LoRA cannot occupy a worker
+    /// twice, and routing a residual replica back to a frozen host would be
+    /// silently deduplicated by the final merge, losing a replica without
+    /// counting it as overflow.
+    frozen: HashSet<WorkerWithDpRank>,
     /// Replicas still to be placed after freezing (`replicas - frozen`).
     rem_rep: usize,
 }
@@ -393,8 +399,8 @@ impl McfPlacementSolver {
         let metas: Vec<LoraMeta> = active_loras
             .iter()
             .map(|l| {
-                let frozen_count = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
-                let rem_rep = l.replicas.saturating_sub(frozen_count);
+                let frozen = frozen_hosts.get(&l.name).cloned().unwrap_or_default();
+                let rem_rep = l.replicas.saturating_sub(frozen.len());
                 let prev_hosts = prev_assignment.get(&l.name).cloned().unwrap_or_default();
                 let ranked_pairs = RendezvousHasher::rank_workers(&l.name, &all_workers_sorted);
                 let rank_map: HashMap<WorkerWithDpRank, usize> = ranked_pairs
@@ -408,6 +414,7 @@ impl McfPlacementSolver {
                     ranked,
                     rank_map,
                     prev_hosts,
+                    frozen,
                     rem_rep,
                 }
             })
@@ -426,23 +433,25 @@ impl McfPlacementSolver {
         // from triggering a pointless full dense solve on every tick.
         let active_worker_set: HashSet<WorkerWithDpRank> =
             active_workers.iter().map(|w| w.worker).collect();
-        let n_active_workers = active_worker_set.len();
         let sparse_covers_all = metas.iter().all(|m| {
+            // A LoRA's usable workers are the active workers it does not already
+            // occupy (frozen hosts are excluded — see LoraMeta::frozen).
+            let usable = active_worker_set.difference(&m.frozen).count();
             let take_n = self.params.candidate_m.max(m.rem_rep);
-            // Active workers reached = active workers in the top-`take_n` HRW
-            // window plus any active prior hosts beyond it.
+            // Usable workers reached = usable workers in the top-`take_n` HRW
+            // window plus any usable prior hosts beyond it.
             let mut reached: HashSet<WorkerWithDpRank> = HashSet::new();
             for w in m.ranked.iter().take(take_n) {
-                if active_worker_set.contains(w) {
+                if active_worker_set.contains(w) && !m.frozen.contains(w) {
                     reached.insert(*w);
                 }
             }
             for w in &m.prev_hosts {
-                if active_worker_set.contains(w) {
+                if active_worker_set.contains(w) && !m.frozen.contains(w) {
                     reached.insert(*w);
                 }
             }
-            reached.len() >= n_active_workers
+            reached.len() >= usable
         });
 
         let sparse = self.build_and_solve(
@@ -613,23 +622,29 @@ impl McfPlacementSolver {
         let mut lora_edge_info: HashMap<&str, Vec<(usize, EdgeTarget)>> = HashMap::new();
         for (l, m) in active_loras.iter().zip(metas) {
             // Sparse keeps the HRW top-`max(candidate_m, rem_rep)`; dense takes
-            // every active worker. Prior hosts are always included.
+            // every active worker. Prior hosts are always included. Frozen hosts
+            // are always excluded: the LoRA already occupies them, so a residual
+            // edge there would either waste capacity or be silently deduplicated
+            // by the final merge (losing a replica without counting overflow).
             let take_n = match strategy {
                 CandStrategy::Sparse => self.params.candidate_m.max(m.rem_rep),
                 CandStrategy::Dense => usize::MAX,
             };
 
+            let usable =
+                |w: &WorkerWithDpRank| worker_node.contains_key(w) && !m.frozen.contains(w);
+
             let mut seen: HashSet<WorkerWithDpRank> = HashSet::new();
             let mut cand: Vec<WorkerWithDpRank> = Vec::new();
             for w in m.ranked.iter().take(take_n) {
-                if worker_node.contains_key(w) && seen.insert(*w) {
+                if usable(w) && seen.insert(*w) {
                     cand.push(*w);
                 }
             }
             let mut prev_sorted: Vec<WorkerWithDpRank> = m.prev_hosts.iter().copied().collect();
             prev_sorted.sort();
             for w in prev_sorted {
-                if worker_node.contains_key(&w) && seen.insert(w) {
+                if usable(&w) && seen.insert(w) {
                     cand.push(w);
                 }
             }
@@ -1163,6 +1178,39 @@ mod tests {
             .solve(&workers, &loras, &HashMap::new(), None, None)
             .expect("solve must succeed with sanitized params");
         assert_eq!(result.overflow_count, 0);
+    }
+
+    #[test]
+    fn test_frozen_host_not_reused_for_residual_replica() {
+        // A is frozen on its single prior host w0 (cap=2) and needs a 2nd
+        // replica. The only other worker option does not exist, so the residual
+        // replica must NOT be routed back onto w0 (a LoRA cannot occupy a
+        // worker twice). Expected: 1 placed on w0 + 1 overflow — not a silent
+        // dedup to {w0} with overflow_count==0.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let w0 = WorkerWithDpRank::new(0, 0);
+        let workers = vec![WorkerInput {
+            worker: w0,
+            capacity: 2,
+        }];
+        let loras = vec![make_lora("A", 2)];
+        let mut prev: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
+        prev.insert("A".to_string(), HashSet::from([w0]));
+
+        // Freeze A on w0 (mark nothing as changed so the prior host is kept).
+        let result = solver
+            .solve(&workers, &loras, &prev, Some(&HashSet::new()), None)
+            .expect("solve should succeed");
+
+        assert_eq!(
+            result.assignment["A"],
+            HashSet::from([w0]),
+            "A stays on its single frozen host"
+        );
+        assert_eq!(
+            result.overflow_count, 1,
+            "the 2nd replica must overflow, not be silently merged onto w0"
+        );
     }
 
     #[test]
