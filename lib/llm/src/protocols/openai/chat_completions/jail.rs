@@ -455,7 +455,7 @@ impl PoolsideV1StreamState {
             return None;
         }
 
-        let value = poolside_deserialize(raw_value);
+        let value = dynamo_parsers::tool_calling::xml::deserialize_poolside_literal(raw_value);
         let key_json = serde_json::to_string(key).ok()?;
         let value_json = serde_json::to_string(&value).ok()?;
         let index = self.current_index();
@@ -514,19 +514,6 @@ fn json_escape_string_content(value: &str) -> String {
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_default()
-}
-
-fn poolside_deserialize(raw_value: &str) -> serde_json::Value {
-    let trimmed = raw_value.trim();
-    if let Ok(value) = serde_json::from_str(trimmed) {
-        return value;
-    }
-    match trimmed {
-        "True" => serde_json::Value::Bool(true),
-        "False" => serde_json::Value::Bool(false),
-        "None" => serde_json::Value::Null,
-        _ => serde_json::Value::String(trimmed.to_string()),
-    }
 }
 
 fn is_poolside_string_type(

@@ -7,6 +7,10 @@ use super::structural_tag::{
     DsmlToolCallsConfig, StructuralTagBuilder, TOOL_NAME_PLACEHOLDER, TriggeredTagsConfig,
 };
 
+fn default_decode_xml_entities() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JsonParserConfig {
     /// Start token for individual tool calls (e.g., `<TOOLCALL>`)
@@ -212,6 +216,11 @@ pub struct Glm47ParserConfig {
     /// to `None`. Poolside/vLLM emits null content for tool-only messages.
     #[serde(default)]
     pub empty_tool_content_as_none: bool,
+
+    /// Decode XML entities in argument values before type coercion. GLM-4.7
+    /// keeps this legacy behavior; Poolside/vLLM leaves string arg bytes raw.
+    #[serde(default = "default_decode_xml_entities")]
+    pub decode_xml_entities: bool,
 }
 
 impl Default for Glm47ParserConfig {
@@ -226,6 +235,7 @@ impl Default for Glm47ParserConfig {
             allow_eof_recovery: false,
             preserve_string_schema_values: false,
             empty_tool_content_as_none: false,
+            decode_xml_entities: true,
         }
     }
 }
@@ -633,6 +643,7 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Glm47(Glm47ParserConfig {
                 preserve_string_schema_values: true,
                 empty_tool_content_as_none: true,
+                decode_xml_entities: false,
                 ..Default::default()
             }),
             structural_tag_builder: None,

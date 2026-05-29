@@ -3672,8 +3672,65 @@ weather forecasting
         assert_eq!(content, None);
         assert_eq!(result.len(), 1);
         let (_, args) = extract_name_and_args(result[0].clone());
-        let expected = payload.replace("&lt;", "<").replace("&gt;", ">");
-        assert_eq!(args["content"], expected);
+        assert_eq!(args["content"], payload);
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_preserves_xml_entities_in_string_args() {
+        let input = r#"<tool_call>write_file
+<arg_key>content</arg_key><arg_value>&lt;div&gt;hi&lt;/div&gt;</arg_value></tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "write_file".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"}
+                }
+            })),
+            strict: None,
+        }];
+
+        let (result, content) =
+            detect_and_parse_tool_call(input, Some("poolside_v1"), Some(&tools))
+                .await
+                .unwrap();
+
+        assert_eq!(content, None);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(args["content"], "&lt;div&gt;hi&lt;/div&gt;");
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_deserializes_python_literal_non_string_args() {
+        let input = r#"<tool_call>configure
+<arg_key>meta</arg_key><arg_value>{'x': 1}</arg_value><arg_key>paths</arg_key><arg_value>['a.py', 'b.py']</arg_value><arg_key>tuple_paths</arg_key><arg_value>('c.py', 'd.py')</arg_value><arg_key>dry_run</arg_key><arg_value>True</arg_value><arg_key>optional</arg_key><arg_value>None</arg_value></tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "configure".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "meta": {"type": "object"},
+                    "paths": {"type": "array"},
+                    "tuple_paths": {"type": "array"},
+                    "dry_run": {"type": "boolean"},
+                    "optional": {"type": "null"}
+                }
+            })),
+            strict: None,
+        }];
+
+        let (result, content) =
+            detect_and_parse_tool_call(input, Some("poolside_v1"), Some(&tools))
+                .await
+                .unwrap();
+
+        assert_eq!(content, None);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(args["meta"], serde_json::json!({"x": 1}));
+        assert_eq!(args["paths"], serde_json::json!(["a.py", "b.py"]));
+        assert_eq!(args["tuple_paths"], serde_json::json!(["c.py", "d.py"]));
+        assert_eq!(args["dry_run"], true);
+        assert!(args["optional"].is_null());
     }
 
     #[tokio::test]

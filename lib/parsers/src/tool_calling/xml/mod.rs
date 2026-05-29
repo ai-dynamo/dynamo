@@ -7,7 +7,8 @@ mod parser;
 
 pub use super::response;
 pub use glm47_parser::{
-    detect_tool_call_start_glm47, find_tool_call_end_position_glm47, try_tool_call_parse_glm47,
+    deserialize_poolside_literal, detect_tool_call_start_glm47, find_tool_call_end_position_glm47,
+    try_tool_call_parse_glm47,
 };
 pub use kimi_k2_parser::{
     detect_tool_call_start_kimi_k2, find_tool_call_end_position_kimi_k2,

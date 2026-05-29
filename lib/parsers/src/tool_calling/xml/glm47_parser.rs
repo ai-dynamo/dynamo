@@ -247,6 +247,147 @@ fn decode_xml_entities(s: &str) -> String {
         .replace("&apos;", "'")
 }
 
+/// Deserialize Poolside/vLLM-style argument text. vLLM tries JSON first,
+/// then Python literal syntax, then falls back to the stripped raw string.
+pub fn deserialize_poolside_literal(raw_value: &str) -> Value {
+    let trimmed = raw_value.trim();
+    parse_json_or_python_literal(trimmed).unwrap_or_else(|| Value::String(trimmed.to_string()))
+}
+
+fn parse_json_or_python_literal(trimmed: &str) -> Option<Value> {
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return Some(value);
+    }
+
+    let jsonish = python_literal_to_jsonish(trimmed)?;
+    serde_json::from_str::<Value>(&jsonish).ok()
+}
+
+fn python_literal_to_jsonish(input: &str) -> Option<String> {
+    let first = input.chars().next()?;
+    if !matches!(first, '\'' | '"' | '[' | '{' | '(') && !matches!(input, "True" | "False" | "None")
+    {
+        return None;
+    }
+
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((_, ch)) = chars.next() {
+        match ch {
+            '\'' | '"' => {
+                let value = read_python_string(&mut chars, ch)?;
+                output.push_str(&serde_json::to_string(&value).ok()?);
+            }
+            '(' => output.push('['),
+            ')' => output.push(']'),
+            c if is_identifier_start(c) => {
+                let mut ident = c.to_string();
+                while let Some((_, next)) = chars.peek().copied() {
+                    if is_identifier_continue(next) {
+                        ident.push(next);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                match ident.as_str() {
+                    "True" => output.push_str("true"),
+                    "False" => output.push_str("false"),
+                    "None" => output.push_str("null"),
+                    _ => output.push_str(&ident),
+                }
+            }
+            _ => output.push(ch),
+        }
+    }
+
+    Some(remove_json_trailing_commas(&output))
+}
+
+fn read_python_string<I>(chars: &mut std::iter::Peekable<I>, quote: char) -> Option<String>
+where
+    I: Iterator<Item = (usize, char)>,
+{
+    let mut value = String::new();
+    while let Some((_, ch)) = chars.next() {
+        if ch == quote {
+            return Some(value);
+        }
+        if ch != '\\' {
+            value.push(ch);
+            continue;
+        }
+
+        let (_, escaped) = chars.next()?;
+        match escaped {
+            '\\' => value.push('\\'),
+            '\'' => value.push('\''),
+            '"' => value.push('"'),
+            'n' => value.push('\n'),
+            'r' => value.push('\r'),
+            't' => value.push('\t'),
+            'b' => value.push('\u{0008}'),
+            'f' => value.push('\u{000c}'),
+            other => value.push(other),
+        }
+    }
+    None
+}
+
+fn is_identifier_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_identifier_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn remove_json_trailing_commas(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while let Some(ch) = chars.next() {
+        if in_string {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            output.push(ch);
+            continue;
+        }
+
+        if ch == ',' {
+            let mut lookahead = chars.clone();
+            while matches!(lookahead.peek(), Some(next) if next.is_whitespace()) {
+                lookahead.next();
+            }
+            if matches!(lookahead.peek(), Some(']' | '}')) {
+                continue;
+            }
+        }
+
+        output.push(ch);
+    }
+
+    output
+}
+
 /// Coerce a raw string value to a JSON Value using the tool's parameter schema.
 /// Falls back to string if no schema is available or the type is unrecognized.
 fn coerce_value(
@@ -260,8 +401,12 @@ fn coerce_value(
         return Value::String(trimmed.to_string());
     }
 
-    // If the value already looks like JSON (object, array, or quoted string), parse it directly
-    if (trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"'))
+    if preserve_string_schema_values {
+        // Poolside/vLLM accepts both JSON and Python-literal-ish argument values.
+        if let Some(value) = parse_json_or_python_literal(trimmed) {
+            return value;
+        }
+    } else if (trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"'))
         && let Ok(v) = serde_json::from_str(trimmed)
     {
         return v;
@@ -381,13 +526,19 @@ fn parse_tool_call_block(
         let raw_value = cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
         if !key.is_empty() {
-            // Decode XML entities (e.g. &lt; → <, &amp; → &) before parsing
-            let decoded = decode_xml_entities(raw_value);
+            let value_text = if config.decode_xml_entities {
+                decode_xml_entities(raw_value)
+            } else {
+                raw_value.to_string()
+            };
 
             // Look up the expected type from the tool's parameter schema
             let schema_type = get_param_schema_type(tools, &function_name, key);
-            let json_value =
-                coerce_value(&decoded, schema_type, config.preserve_string_schema_values);
+            let json_value = coerce_value(
+                &value_text,
+                schema_type,
+                config.preserve_string_schema_values,
+            );
 
             arguments.insert(key.to_string(), json_value);
         }

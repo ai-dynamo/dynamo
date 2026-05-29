@@ -1280,6 +1280,53 @@ async fn drain_stream(
     }
 }
 
+#[tokio::test]
+async fn poolside_v1_postprocessor_ignores_prior_history_think_markers() {
+    let preprocessor = build_preprocessor(Some("poolside_v1"), None);
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "messages": [
+            {"role": "system", "content": "Tool docs mention a literal </think> marker."},
+            {
+                "role": "assistant",
+                "reasoning_content": "old reasoning",
+                "content": "old answer with a preserved </think> marker"
+            },
+            {"role": "user", "content": "what does </think> mean?"}
+        ],
+        "stream": true,
+        "temperature": 0.0
+    }))
+    .unwrap();
+
+    let input_stream = stream::iter(
+        vec![
+            mock_content_chunk("<think>new "),
+            mock_content_chunk("reasoning</thi"),
+            mock_content_chunk("nk>answer"),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        ..
+    } = drain_stream(output_stream).await;
+
+    assert_eq!(reasoning, "new reasoning");
+    assert_eq!(content, "answer");
+    assert!(tool_calls.is_empty());
+    assert!(!content.contains("<think>"));
+    assert!(!content.contains("</think>"));
+}
+
 /// Assert the standard "tool call extracted, nothing leaks" success shape
 /// shared by every matrix row that expects a successful extraction.
 fn assert_clean_tool_call(

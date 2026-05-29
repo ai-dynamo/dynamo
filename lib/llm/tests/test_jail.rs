@@ -3883,7 +3883,24 @@ fahrenheit
                 "type": "object",
                 "properties": {
                     "content": {"type": "string"},
-                    "meta": {"type": "object"}
+                    "meta": {"type": "object"},
+                    "paths": {"type": "array"},
+                    "tuple_paths": {"type": "array"},
+                    "dry_run": {"type": "boolean"},
+                    "optional": {"type": "null"}
+                }
+            })),
+            strict: None,
+        }]
+    }
+
+    fn poolside_read_file_tool_defs() -> Vec<dynamo_parsers::tool_calling::ToolDefinition> {
+        vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "read_file".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
                 }
             })),
             strict: None,
@@ -3916,6 +3933,26 @@ fahrenheit
             .filter_map(|tc| tc.function.as_ref())
             .filter_map(|f| f.name.clone())
             .collect()
+    }
+
+    fn collect_tool_ids_by_index(
+        results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> std::collections::BTreeMap<u32, std::collections::BTreeSet<String>> {
+        let mut ids_by_index = std::collections::BTreeMap::new();
+        for tool_call in results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .flat_map(|c| c.delta.tool_calls.iter().flatten())
+        {
+            if let Some(id) = &tool_call.id {
+                ids_by_index
+                    .entry(tool_call.index)
+                    .or_insert_with(std::collections::BTreeSet::new)
+                    .insert(id.clone());
+            }
+        }
+        ids_by_index
     }
 
     #[tokio::test]
@@ -3980,6 +4017,35 @@ fahrenheit
     }
 
     #[tokio::test]
+    async fn test_poolside_v1_stream_preserves_xml_entities_in_string_args() {
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "<tool_call>write_file\n<arg_key>content</arg_key><arg_value>&lt;di".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "v&gt;hi&lt;/div&gt;</arg_value></tool_call>".to_string(),
+                0,
+            ),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("poolside_v1".to_string()),
+            None,
+            Some(poolside_write_file_tool_defs()),
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let arguments = collect_tool_arg_fragments(&results, 0).join("");
+        let parsed: serde_json::Value = serde_json::from_str(&arguments).unwrap();
+        assert_eq!(parsed["content"], "&lt;div&gt;hi&lt;/div&gt;");
+    }
+
+    #[tokio::test]
     async fn test_poolside_v1_waits_for_complete_non_string_args() {
         let input_chunks = vec![
             test_utils::create_mock_response_chunk(
@@ -4015,6 +4081,50 @@ fahrenheit
     }
 
     #[tokio::test]
+    async fn test_poolside_v1_streaming_python_literal_non_string_args() {
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "<tool_call>write_file\n<arg_key>meta</arg_key><arg_value>{'x': ".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "1}</arg_value><arg_key>paths</arg_key><arg_value>['a.py', 'b.py']</arg_value>"
+                    .to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "<arg_key>tuple_paths</arg_key><arg_value>('c.py', 'd.py')</arg_value>"
+                    .to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "<arg_key>dry_run</arg_key><arg_value>True</arg_value><arg_key>optional</arg_key><arg_value>None</arg_value></tool_call>"
+                    .to_string(),
+                0,
+            ),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("poolside_v1".to_string()),
+            None,
+            Some(poolside_write_file_tool_defs()),
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&collect_tool_arg_fragments(&results, 0).join("")).unwrap();
+        assert_eq!(parsed["meta"], serde_json::json!({"x": 1}));
+        assert_eq!(parsed["paths"], serde_json::json!(["a.py", "b.py"]));
+        assert_eq!(parsed["tuple_paths"], serde_json::json!(["c.py", "d.py"]));
+        assert_eq!(parsed["dry_run"], true);
+        assert!(parsed["optional"].is_null());
+    }
+
+    #[tokio::test]
     async fn test_poolside_v1_tool_only_stream_omits_empty_content() {
         let input_chunks = vec![
             test_utils::create_mock_response_chunk(
@@ -4047,6 +4157,62 @@ fahrenheit
                 "tool-only Poolside deltas should not serialize content as an empty string"
             );
         }
+
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter_map(|choice| choice.finish_reason)
+            .collect();
+        assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+    }
+
+    #[tokio::test]
+    async fn test_poolside_v1_streaming_parallel_tool_calls_keep_stable_indexes() {
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk("<too".to_string(), 0),
+            test_utils::create_mock_response_chunk(
+                "l_call>read_file\n<arg_key>path</arg_key><arg_value>a.".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk("py</arg_value></tool".to_string(), 0),
+            test_utils::create_mock_response_chunk(
+                "_call><tool_call>read_file\n<arg_".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "key>path</arg_key><arg_value>b.py</arg_value></tool_call>".to_string(),
+                0,
+            ),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("poolside_v1".to_string()),
+            None,
+            Some(poolside_read_file_tool_defs()),
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        assert_eq!(
+            collect_tool_names(&results),
+            vec!["read_file".to_string(), "read_file".to_string()]
+        );
+
+        let first_args: serde_json::Value =
+            serde_json::from_str(&collect_tool_arg_fragments(&results, 0).join("")).unwrap();
+        let second_args: serde_json::Value =
+            serde_json::from_str(&collect_tool_arg_fragments(&results, 1).join("")).unwrap();
+        assert_eq!(first_args["path"], "a.py");
+        assert_eq!(second_args["path"], "b.py");
+
+        let ids_by_index = collect_tool_ids_by_index(&results);
+        assert_eq!(ids_by_index.len(), 2);
+        assert_eq!(ids_by_index.get(&0).map(|ids| ids.len()), Some(1));
+        assert_eq!(ids_by_index.get(&1).map(|ids| ids.len()), Some(1));
 
         let finish_reasons: Vec<_> = results
             .iter()

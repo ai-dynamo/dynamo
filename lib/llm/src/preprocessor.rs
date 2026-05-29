@@ -2245,9 +2245,15 @@ impl OpenAIPreprocessor {
         // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
         // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
         // - kimi_k25: `</think>` (special token id 163607).
+        // - poolside_v1: mirrors vLLM's Poolside parser adjust_request hook
+        //   so model-native tool-call markers are visible to the parser.
         matches!(
             tool_call_parser,
-            Some("gemma4") | Some("gemma-4") | Some("harmony") | Some("kimi_k2")
+            Some("gemma4")
+                | Some("gemma-4")
+                | Some("harmony")
+                | Some("kimi_k2")
+                | Some("poolside_v1")
         ) || matches!(
             reasoning_parser,
             Some("gemma4") | Some("gemma-4") | Some("gpt_oss") | Some("kimi_k25")
@@ -3031,6 +3037,12 @@ mod tests {
                 true,
                 "kimi_k2 tool-call only → required \
                  (`<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>` are special)",
+            ),
+            (
+                Some("poolside_v1"),
+                None,
+                true,
+                "poolside_v1 tool-call only -> required to mirror vLLM adjust_request",
             ),
             (None, None, false, "no parsers → not required"),
         ];
