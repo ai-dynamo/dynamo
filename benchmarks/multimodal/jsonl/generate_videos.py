@@ -110,14 +110,17 @@ def sample_video_slots(
     """
     pool_size = len(pool)
     total_slots = num_requests * videos_per_request
-    assert (
-        pool_size >= videos_per_request
-    ), f"videos-pool ({pool_size}) must be >= videos-per-request ({videos_per_request})"
-    assert total_slots >= pool_size, (
-        f"total slots ({num_requests}×{videos_per_request}={total_slots}) < "
-        f"videos-pool ({pool_size}). Increase --num-requests or --videos-per-request, "
-        f"or reduce --videos-pool."
-    )
+    if pool_size < videos_per_request:
+        raise ValueError(
+            f"videos-pool ({pool_size}) must be >= "
+            f"videos-per-request ({videos_per_request})"
+        )
+    if total_slots < pool_size:
+        raise ValueError(
+            f"total slots ({num_requests}x{videos_per_request}={total_slots}) < "
+            f"videos-pool ({pool_size}). Increase --num-requests or "
+            f"--videos-per-request, or reduce --videos-pool."
+        )
 
     # Round-robin every pool video into requests so each appears at least once
     shuffled = list(pool)
