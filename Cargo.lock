@@ -2843,10 +2843,12 @@ dependencies = [
  "futures",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-managed-engine",
+ "vllm-metrics",
 ]
 
 [[package]]

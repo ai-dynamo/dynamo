@@ -4,22 +4,25 @@
 //! Rust-based native vLLM backend using the backend-common [`LLMEngine`] contract.
 
 use std::ffi::OsString;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
-use dynamo_backend_common::ModelInput;
 use dynamo_backend_common::{
-    CommonArgs, DynamoError, EngineConfig, GenerateContext, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, usage,
+    CommonArgs, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
+    LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx, ModelInput,
+    PreprocessedRequest, SnapshotPublisher, WorkerConfig, usage,
 };
 use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::Llm;
 use vllm_managed_engine::ManagedEngineHandle;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
+use vllm_metrics::{EngineLabels, F64Gauge, METRICS as VLLM_METRICS, U64Counter};
 
 use crate::convert::{lower_request, map_output};
 use crate::error::{backend_unknown, cannot_connect, clap_error, engine_shutdown, invalid_arg};
@@ -84,9 +87,12 @@ fn default_engine_ready_timeout_secs() -> u64 {
 /// through the backend-common worker runtime.
 pub struct VllmBackend {
     model: String,
+    served_model_name: Option<String>,
+    disaggregation_mode: DisaggregationMode,
     engine_ready_timeout_secs: u64,
     managed_engine: ManagedEngineArgs,
     extra: ExtraEngineArgs,
+    cancel: CancellationToken,
     inner: RwLock<Option<Inner>>,
 }
 
@@ -98,15 +104,20 @@ struct Inner {
 impl VllmBackend {
     fn new(
         model: String,
+        served_model_name: Option<String>,
+        disaggregation_mode: DisaggregationMode,
         engine_ready_timeout_secs: u64,
         managed_engine: ManagedEngineArgs,
         extra: ExtraEngineArgs,
     ) -> Self {
         Self {
             model,
+            served_model_name,
+            disaggregation_mode,
             engine_ready_timeout_secs,
             managed_engine,
             extra,
+            cancel: CancellationToken::new(),
             inner: RwLock::new(None),
         }
     }
@@ -126,13 +137,16 @@ impl VllmBackend {
         let args =
             Args::try_parse_from(repartitioned_args).map_err(|e| invalid_arg(e.to_string()))?;
 
+        let disaggregation_mode = args.common.disaggregation_mode;
+
         let engine = Self::new(
             args.model.clone(),
+            args.served_model_name.clone(),
+            disaggregation_mode,
             args.engine_ready_timeout_secs,
             args.managed_engine,
             args.extra.clone(),
         );
-        let disaggregation_mode = args.common.disaggregation_mode;
         let (tool_call_parser, reasoning_parser) = if disaggregation_mode.is_prefill() {
             (None, None)
         } else {
@@ -237,7 +251,7 @@ impl LLMEngine for VllmBackend {
             0 => None,
             blocks => Some(blocks),
         };
-        let llm = Llm::new(client);
+        let llm = Llm::new(client).with_log_stats(true);
 
         *inner = Some(Inner { engine_handle, llm });
 
@@ -251,7 +265,11 @@ impl LLMEngine for VllmBackend {
 
         Ok(EngineConfig {
             model: self.model.clone(),
-            served_model_name: Some(self.model.clone()),
+            served_model_name: Some(
+                self.served_model_name
+                    .clone()
+                    .unwrap_or_else(|| self.model.clone()),
+            ),
             context_length: Some(context_length),
             kv_cache_block_size: self.extra.block_size,
             total_kv_blocks,
@@ -273,13 +291,15 @@ impl LLMEngine for VllmBackend {
         let request_id = ctx.id().to_string();
         let prompt_tokens = request.token_ids.len() as u32;
 
+        // TODO(PD): mirror Python vLLM's prefill/decode kv_transfer_params
+        // handling once this native backend advertises disaggregated serving.
         let mut output_stream = {
             let inner = self.inner.read().await;
             let inner = inner
                 .as_ref()
                 .ok_or_else(|| engine_shutdown("vLLM backend has not been started"))?;
             let max_model_len = inner.llm.engine_core_client().max_model_len();
-            let generate_request = lower_request(request_id, request, Some(max_model_len))?;
+            let generate_request = lower_request(request_id, request, max_model_len)?;
 
             inner
                 .llm
@@ -334,9 +354,12 @@ impl LLMEngine for VllmBackend {
         let Some(Inner { engine_handle, llm }) = self.inner.write().await.take() else {
             return Ok(());
         };
-
         info!(model = %self.model, "shutting down vLLM backend");
 
+        // Cancel the background metrics snapshot loop.
+        self.cancel.cancel();
+
+        // Shutdown the engine and the engine client.
         let llm_result = llm.shutdown().await;
         let engine_result = engine_handle.shutdown(Duration::from_secs(0)).await;
 
@@ -353,6 +376,121 @@ impl LLMEngine for VllmBackend {
         info!(model = %self.model, "vLLM backend cleanup complete");
         Ok(())
     }
+
+    async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        let inner = self.inner.read().await;
+        let inner = inner
+            .as_ref()
+            .ok_or_else(|| engine_shutdown("vLLM backend has not been started"))?;
+
+        ctx.metrics.add_expfmt_callback(Arc::new(|| {
+            VLLM_METRICS
+                .render()
+                .map_err(|error| anyhow::anyhow!("failed to render vLLM metrics: {error}"))
+        }));
+
+        let client = inner.llm.engine_core_client();
+        let model_name = client.model_name().to_string();
+        let ranks = client
+            .ready_responses()
+            .into_iter()
+            .enumerate()
+            .map(|(engine_index, ready)| {
+                MetricsRank::new(engine_index, model_name.clone(), ready.num_gpu_blocks)
+            })
+            .collect::<Vec<_>>();
+        let dp_ranks = ranks.iter().map(|rank| rank.dp_rank).collect::<Vec<_>>();
+        let cancel = self.cancel.clone();
+
+        Ok(MetricsBindings {
+            dp_ranks,
+            on_publisher_ready: Some(Box::new(move |publisher| {
+                spawn_metrics_snapshot_loop(publisher, ranks, cancel);
+                Ok(())
+            })),
+        })
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        if self.disaggregation_mode.is_decode() {
+            // TODO(PD): add a decode canary once native vLLM wires
+            // prefill_result/kv_transfer_params like the Python integration.
+            return Ok(None);
+        }
+
+        Ok(Some(serde_json::json!({
+            "token_ids": [1],
+            "stop_conditions": {"max_tokens": 1, "ignore_eos": true},
+            "sampling_options": {"temperature": 0.0},
+        })))
+    }
+}
+
+#[derive(Clone)]
+struct MetricsRank {
+    dp_rank: u32,
+    total_kv_blocks: u64,
+    usage: F64Gauge,
+    queries: U64Counter,
+    hits: U64Counter,
+}
+
+impl MetricsRank {
+    fn new(engine_index: usize, model_name: String, total_kv_blocks: u64) -> Self {
+        let metrics = &VLLM_METRICS.scheduler;
+        let labels = EngineLabels {
+            model_name,
+            engine: engine_index as u32,
+        };
+        Self {
+            // TODO: currently vLLM's Rust frontend only supports local data-parallel engines,
+            // so we use the engine index as the DP rank here.
+            dp_rank: engine_index as u32,
+            total_kv_blocks,
+            usage: metrics.kv_cache_usage.get_or_create_owned(&labels),
+            queries: metrics.prefix_cache_queries.get_or_create_owned(&labels),
+            hits: metrics.prefix_cache_hits.get_or_create_owned(&labels),
+        }
+    }
+
+    fn publish(&self, publisher: &SnapshotPublisher) {
+        let usage = self.usage.get();
+        let queries = self.queries.get();
+        let hits = self.hits.get();
+        let kv_cache_hit_rate = (queries > 0).then_some((hits as f64 / queries as f64) as f32);
+        let kv_used_blocks = (self.total_kv_blocks as f64 * usage).round() as u64;
+
+        publisher.publish(
+            self.dp_rank,
+            dynamo_backend_common::ComponentSnapshot {
+                kv_used_blocks,
+                kv_total_blocks: self.total_kv_blocks,
+                gpu_cache_usage: usage as f32,
+                kv_cache_hit_rate,
+                dp_rank: self.dp_rank,
+            },
+        );
+    }
+}
+
+fn spawn_metrics_snapshot_loop(
+    publisher: Arc<SnapshotPublisher>,
+    ranks: Vec<MetricsRank>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = ticker.tick() => {
+                    for rank in &ranks {
+                        rank.publish(&publisher);
+                    }
+                }
+            }
+        }
+    });
 }
 
 impl ExtraEngineArgs {
@@ -408,6 +546,7 @@ mod tests {
         assert_eq!(config.namespace, "ns");
         assert_eq!(config.model_name, "Qwen/Qwen3-0.6B");
         assert_eq!(config.served_model_name.as_deref(), Some("served-qwen"));
+        assert_eq!(engine.served_model_name.as_deref(), Some("served-qwen"));
         assert_eq!(config.model_input, ModelInput::Tokens);
         assert_eq!(config.tool_call_parser.as_deref(), Some("hermes"));
         assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
@@ -421,6 +560,7 @@ mod tests {
         assert_eq!(engine.extra.block_size, Some(32));
         assert_eq!(engine.extra.max_num_seqs, Some(128));
         assert_eq!(engine.extra.max_num_batched_tokens, Some(4096));
+        assert!(!engine.disaggregation_mode.is_decode());
     }
 
     #[test]
@@ -465,6 +605,42 @@ mod tests {
                 "4096"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn health_check_payload_matches_python_token_canary_shape() {
+        let (engine, _config) = VllmBackend::from_args(Some(vec![
+            "dynamo-vllm-backend".to_string(),
+            "Qwen/Qwen3-0.6B".to_string(),
+        ]))
+        .unwrap();
+
+        let payload = dynamo_backend_common::LLMEngine::health_check_payload(&engine)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(payload["token_ids"], serde_json::json!([1]));
+        assert_eq!(payload["stop_conditions"]["max_tokens"], 1);
+        assert_eq!(payload["stop_conditions"]["ignore_eos"], true);
+        assert_eq!(payload["sampling_options"]["temperature"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn decode_health_check_is_disabled_until_pd_wiring_exists() {
+        let (engine, _config) = VllmBackend::from_args(Some(vec![
+            "dynamo-vllm-backend".to_string(),
+            "Qwen/Qwen3-0.6B".to_string(),
+            "--disaggregation-mode".to_string(),
+            "decode".to_string(),
+        ]))
+        .unwrap();
+
+        let payload = dynamo_backend_common::LLMEngine::health_check_payload(&engine)
+            .await
+            .unwrap();
+
+        assert!(payload.is_none());
     }
 
     #[tokio::test]
