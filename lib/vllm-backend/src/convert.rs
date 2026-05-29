@@ -26,16 +26,15 @@ use crate::error::invalid_arg;
 pub(crate) fn lower_request(
     request_id: String,
     request: PreprocessedRequest,
-    max_model_len: Option<u32>,
+    max_model_len: u32,
 ) -> Result<GenerateRequest, DynamoError> {
     validate_request(&request)?;
 
     let prompt_len = request.token_ids.len() as u32;
-    let max_tokens = request.stop_conditions.max_tokens.unwrap_or_else(|| {
-        max_model_len
-            .map(|limit| limit.saturating_sub(prompt_len).max(1))
-            .unwrap_or(u32::MAX)
-    });
+    let max_tokens = request
+        .stop_conditions
+        .max_tokens
+        .unwrap_or_else(|| max_model_len.saturating_sub(prompt_len).max(1));
     let ignore_eos = request.stop_conditions.ignore_eos.unwrap_or(false);
     let eos_token_id = if ignore_eos {
         None
@@ -102,6 +101,7 @@ pub(crate) fn lower_request(
         request_id,
         prompt_token_ids: request.token_ids,
         sampling_params,
+        // TODO: multimodal data is unhandled by this backend for now
         mm_features: None,
         arrival_time: request.request_timestamp_ms.map(|ms| ms / 1000.0),
         cache_salt: request.mdc_sum,
@@ -332,7 +332,7 @@ mod tests {
         request.mdc_sum = Some("cache-salt".to_string());
         request.extra_args = Some(json!({"custom": true}));
 
-        let generate = lower_request("req-1".to_string(), request, Some(1024)).unwrap();
+        let generate = lower_request("req-1".to_string(), request, 1024).unwrap();
 
         assert_eq!(generate.request_id, "req-1");
         assert_eq!(generate.prompt_token_ids, vec![11, 22, 33]);
@@ -365,7 +365,7 @@ mod tests {
     fn lower_request_defaults_max_tokens_from_context_length() {
         let request = sample_request();
 
-        let generate = lower_request("req-1".to_string(), request, Some(10)).unwrap();
+        let generate = lower_request("req-1".to_string(), request, 10).unwrap();
 
         assert_eq!(generate.sampling_params.max_tokens, 7);
     }
@@ -377,7 +377,7 @@ mod tests {
         request.stop_conditions.stop_token_ids_hidden = Some(vec![99]);
         request.eos_token_ids = vec![2, 3];
 
-        let generate = lower_request("req-1".to_string(), request, Some(10)).unwrap();
+        let generate = lower_request("req-1".to_string(), request, 10).unwrap();
 
         assert_eq!(generate.sampling_params.stop_token_ids, vec![99]);
         assert_eq!(generate.sampling_params.eos_token_id, None);
@@ -388,45 +388,45 @@ mod tests {
     fn lower_request_rejects_currently_unsupported_payloads() {
         let mut request = sample_request();
         request.prompt_embeds = Some("base64".to_string());
-        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+        assert_invalid(lower_request("req-1".to_string(), request, 10));
 
         let mut request = sample_request();
         request.multi_modal_data = Some(HashMap::new());
-        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+        assert_invalid(lower_request("req-1".to_string(), request, 10));
 
         let mut request = sample_request();
         request.mm_processor_kwargs = Some(json!({"use_audio_in_video": true}));
-        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+        assert_invalid(lower_request("req-1".to_string(), request, 10));
     }
 
     #[test]
     fn lower_request_rejects_multi_choice_and_beam_fields() {
         let mut request = sample_request();
         request.sampling_options.n = Some(2);
-        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+        assert_invalid(lower_request("req-1".to_string(), request, 10));
 
         let mut request = sample_request();
         request.sampling_options.best_of = Some(2);
-        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+        assert_invalid(lower_request("req-1".to_string(), request, 10));
 
         let mut request = sample_request();
         request.sampling_options.use_beam_search = Some(true);
-        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+        assert_invalid(lower_request("req-1".to_string(), request, 10));
 
         let mut request = sample_request();
         request.sampling_options.length_penalty = Some(0.7);
-        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+        assert_invalid(lower_request("req-1".to_string(), request, 10));
     }
 
     #[test]
     fn lower_request_rejects_oversized_logprobs() {
         let mut request = sample_request();
         request.output_options.logprobs = Some(i32::MAX as u32 + 1);
-        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+        assert_invalid(lower_request("req-1".to_string(), request, 10));
 
         let mut request = sample_request();
         request.output_options.prompt_logprobs = Some(i32::MAX as u32 + 1);
-        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+        assert_invalid(lower_request("req-1".to_string(), request, 10));
     }
 
     #[test]
