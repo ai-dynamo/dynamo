@@ -3,12 +3,13 @@ Start or patch Dynamo router modes and run router endpoint smoke checks. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
-## Owner: NVIDIA <br>
+## Owner
+NVIDIA <br>
 
 ### License/Terms of Use: <br>
 Apache-2.0 <br>
 ## Use Case: <br>
-Developers and infrastructure engineers use this skill to configure Dynamo routing modes (round-robin, KV-aware, least-loaded, device-aware) and verify endpoint health via smoke tests during cluster bring-up. <br>
+Developers and engineers configuring Dynamo routing modes (round-robin, KV-aware, least-loaded, or device-aware) and verifying endpoint health via smoke tests. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -19,6 +20,7 @@ Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
 - [Router Modes Reference](references/router-modes.md) <br>
+- [Dynamo Releases](https://github.com/ai-dynamo/dynamo/releases/latest) <br>
 
 
 ## Skill Output: <br>
@@ -26,6 +28,16 @@ Mitigation: Review and scan skill before deployment. <br>
 **Output Format:** [Markdown with inline bash code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
+
+## Evaluation Metrics Used: <br>
+Reported benchmark dimensions: <br>
+- Security: Checks whether skill-assisted execution avoids unsafe behavior such as secret leakage, destructive commands, or unauthorized access. <br>
+- Correctness: Checks whether the agent follows the expected workflow and produces the correct final output. <br>
+- Discoverability: Checks whether the agent loads the skill when relevant and avoids using it when irrelevant. <br>
+- Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
+- Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
+
+
 
 ## Skill Version(s): <br>
 1.2.0 (source: pyproject.toml) <br>

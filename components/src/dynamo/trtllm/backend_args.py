@@ -332,22 +332,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             diffusion_group,
-            flag_name="--dit-dp-size",
-            env_var="DYN_TRTLLM_DIT_DP_SIZE",
-            default=1,
-            arg_type=int,
-            help="Data parallel size for DiT.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--dit-tp-size",
-            env_var="DYN_TRTLLM_DIT_TP_SIZE",
-            default=1,
-            arg_type=int,
-            help="Tensor parallel size for DiT.",
-        )
-        add_argument(
-            diffusion_group,
             flag_name="--dit-ulysses-size",
             env_var="DYN_TRTLLM_DIT_ULYSSES_SIZE",
             default=1,
@@ -370,21 +354,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="CFG parallel size for DiT.",
         )
-        add_argument(
-            diffusion_group,
-            flag_name="--dit-fsdp-size",
-            env_var="DYN_TRTLLM_DIT_FSDP_SIZE",
-            default=1,
-            arg_type=int,
-            help="FSDP size for DiT.",
-        )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--fuse-qkv",
-            env_var="DYN_TRTLLM_FUSE_QKV",
-            default=True,
-            help="Enable QKV fusion for transformer attention layers.",
-        )
         add_negatable_bool_argument(
             diffusion_group,
             flag_name="--enable-layerwise-nvtx-marker",
@@ -399,29 +368,11 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="Skip warmup inference during initialization.",
         )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--enable-async-cpu-offload",
-            env_var="DYN_TRTLLM_ENABLE_ASYNC_CPU_OFFLOAD",
-            default=False,
-            help="Enable async CPU offload for memory efficiency.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--skip-components",
-            env_var="DYN_TRTLLM_SKIP_COMPONENTS",
-            default="",
-            help=(
-                "Comma-separated list of pipeline components to skip loading. "
-                "Valid values: transformer, vae, text_encoder, tokenizer, scheduler, "
-                "image_encoder, image_processor."
-            ),
-        )
 
     def _add_diffusion_request_arguments(self, parser: argparse.ArgumentParser) -> None:
-        # Check TRTLLM's DiffusionRequest for list of fields, note that
+        # Check TRT-LLM's public VisualGenParams for the list of fields. Note that
         # we only add the fields that can be set in request, otherwise we use
-        # TRTLLM's default values by not setting them at all.
+        # TRT-LLM's default values by not setting them at all.
         diffusion_request_group = parser.add_argument_group(
             "Diffusion Request Options [Experimental]",
             "Options to set default values for video/image generation requests",
@@ -525,18 +476,12 @@ class DynamoTrtllmConfig(ConfigBase):
     quant_dynamic: bool
     disable_torch_compile: bool
     enable_fullgraph: bool
-    fuse_qkv: bool
     enable_cuda_graph: bool
     enable_layerwise_nvtx_marker: bool
     skip_warmup: bool
-    dit_dp_size: int
-    dit_tp_size: int
     dit_ulysses_size: int
     dit_ring_size: int
     dit_cfg_size: int
-    dit_fsdp_size: int
-    enable_async_cpu_offload: bool
-    skip_components: str
 
     def validate(self) -> None:
         if isinstance(self.disaggregation_mode, str):

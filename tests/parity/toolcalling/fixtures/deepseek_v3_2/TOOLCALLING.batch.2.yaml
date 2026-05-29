@@ -84,6 +84,7 @@ cases:
 
         reason: "preserves inter-fence newline between back-to-back function_calls wrappers"
       sglang:
+        reason: SGLang stops after the first DeepSeek V3.2 DSML function_calls wrapper when wrappers are back-to-back.
         calls:
         - arguments:
             location: NYC

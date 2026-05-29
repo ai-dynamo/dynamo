@@ -31,6 +31,37 @@ TOP_N_TOOL_CALLING_FAMILIES = [
     "qwen3_coder",
 ]
 
+# Dynamo reasoning-parser family -> peer parser name. Kept here (a dependency-free
+# module) so the parity table generator can read them without importing the sglang
+# or vllm wrapper modules, which pull in the heavy engine packages at import time.
+_FAMILY_TO_SGLANG_REASONING = {
+    "deepseek_r1": "deepseek-r1",
+    "deepseek_v3": "deepseek-v3",
+    "deepseek_v4": "deepseek-v4",
+    "gemma4": "gemma4",
+    "gpt_oss": "gpt-oss",
+    "kimi": "kimi",
+    "kimi_k25": "kimi_k2",
+    "minimax_append_think": "minimax-append-think",
+    "mistral": "mistral",
+    "nemotron_deci": "glm45",
+    "qwen3": "qwen3",
+}
+
+_FAMILY_TO_VLLM_REASONING = {
+    "deepseek_r1": "deepseek_r1",
+    "deepseek_v3": "deepseek_v3",
+    "deepseek_v4": "deepseek_v4",
+    "gemma4": "gemma4",
+    "gpt_oss": "openai_gptoss",
+    "granite": "granite",
+    "kimi_k25": "kimi_k2",
+    "mistral": "mistral",
+    "minimax_append_think": "minimax_m2_append_think",
+    "nemotron_deci": "glm45",
+    "qwen3": "qwen3",
+}
+
 
 @dataclass
 class ParseResult:
