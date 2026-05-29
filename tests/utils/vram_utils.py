@@ -25,8 +25,6 @@ import logging
 import os
 import tempfile
 
-import pynvml
-
 _logger = logging.getLogger(__name__)
 
 # When 2+ tests run concurrently, reserve 15% of GPU VRAM for CUDA context
@@ -42,6 +40,10 @@ def detect_gpus() -> list[dict]:
     Uses pynvml (already a dependency via profile_pytest.py).
     Returns empty list if no GPUs or pynvml is unavailable.
     """
+    try:
+        import pynvml
+    except ImportError:
+        return []
     try:
         pynvml.nvmlInit()
     except pynvml.NVMLError:

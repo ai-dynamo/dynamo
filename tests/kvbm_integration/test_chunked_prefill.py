@@ -120,7 +120,9 @@ def tester(llm_server_kvbm):  # noqa: F811
 )
 @pytest.mark.profiled_vram_gib(3.8)
 @pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
-@pytest.mark.timeout(140)  # 4x measured (~34s), rounded up
+@pytest.mark.timeout(
+    300
+)  # 3x observed 100s under GPU-parallel load (job-log 2026-05-29)
 def test_chunked_prefill_offload(tester, llm_server_kvbm):  # noqa: F811
     """
     Validate that chunked prefill blocks are offloaded.

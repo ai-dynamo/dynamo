@@ -112,8 +112,8 @@ vllm_configs = {
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(
-                480
-            ),  # vLLM 0.20.x startup can exceed 360s on contended CI runners
+                510
+            ),  # 3x observed 168s under GPU-parallel load (job-log 2026-05-29)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -163,7 +163,7 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
-            pytest.mark.timeout(480),
+            pytest.mark.timeout(510),  # 3x observed 170s (job-log 2026-05-29)
             pytest.mark.pre_merge,
             pytest.mark.unified,
         ],
@@ -218,7 +218,9 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
+            pytest.mark.timeout(
+                550
+            ),  # 3x observed 182s under GPU-parallel load (job-log 2026-05-29)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -242,7 +244,9 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
+            pytest.mark.timeout(
+                540
+            ),  # 3x observed 177s under GPU-parallel load (job-log 2026-05-29)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -268,7 +272,9 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(360),
+            pytest.mark.timeout(
+                570
+            ),  # 3x observed 187s under GPU-parallel load (job-log 2026-05-29)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -291,8 +297,8 @@ vllm_configs = {
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(
-                360
-            ),  # ~8x observed 43.0s; bumped for GPU-parallel headroom
+                500
+            ),  # 3x observed 165s under GPU-parallel load (job-log 2026-05-29)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -592,7 +598,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(180),  # vLLM 0.20.x needs more CI headroom
+            pytest.mark.timeout(210),  # 3x observed 67s (job-log 2026-05-29)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -647,6 +653,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(559_693_824),
             # Cold model load + vLLM startup + warmup for embedding pooling.
             # Mirrors SGLang's 300s embedding-test timeout; refine after profiling.
+            # 360 already >= 3x observed 92s (job-log 2026-05-29); left as headroom.
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
