@@ -3011,9 +3011,7 @@ class EmbeddingWorkerHandler:
         # ``_encode_one`` raises, we cancel siblings still in flight instead
         # of leaving them running -- otherwise vLLM keeps consuming engine
         # capacity for output that this handler will discard.
-        tasks = [
-            asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)
-        ]
+        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
         try:
             outputs = await asyncio.gather(*tasks)
         finally:
