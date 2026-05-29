@@ -44,7 +44,6 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::Disconnected,
         ErrorType::ConnectionTimeout,
         ErrorType::ResponseTimeout,
-        ErrorType::ResourceExhausted,
         ErrorType::Backend(BackendError::EngineShutdown),
     ];
     match_error_chain(err, INHIBITED, &[])
