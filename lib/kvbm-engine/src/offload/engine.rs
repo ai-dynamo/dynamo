@@ -633,9 +633,10 @@ async fn remote_g4_offload_task(
     tracing::info!("Remote G4 offload task started");
 
     while let Some(request) = rx.recv().await {
+        let transfer_id = request.transfer_id;
         let num_blocks = request.keys.len();
         tracing::debug!(
-            %request.transfer_id,
+            %transfer_id,
             num_blocks,
             "Processing remote G4 offload request"
         );
@@ -644,10 +645,8 @@ async fn remote_g4_offload_task(
         // This coordinates all workers to upload from their local G2 to object storage
         let result = leader.execute_remote_offload(
             LogicalLayoutHandle::G2, // Source is G2 (host memory)
-            RemoteDescriptor::Object {
-                keys: request.keys.clone(),
-            },
-            request.block_ids.clone(),
+            RemoteDescriptor::Object { keys: request.keys },
+            request.block_ids,
             TransferOptions::default(),
         );
 
@@ -657,14 +656,14 @@ async fn remote_g4_offload_task(
                 match notification.await {
                     Ok(()) => {
                         tracing::info!(
-                            %request.transfer_id,
+                            %transfer_id,
                             num_blocks,
                             "Remote G4 offload completed successfully"
                         );
                     }
                     Err(e) => {
                         tracing::warn!(
-                            %request.transfer_id,
+                            %transfer_id,
                             num_blocks,
                             error = %e,
                             "Remote G4 offload failed"
@@ -674,7 +673,7 @@ async fn remote_g4_offload_task(
             }
             Err(e) => {
                 tracing::warn!(
-                    %request.transfer_id,
+                    %transfer_id,
                     num_blocks,
                     error = %e,
                     "Failed to initiate remote G4 offload"

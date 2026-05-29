@@ -395,7 +395,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
         for (block_set_idx, block_set_layout) in block_sets {
             // Deserialize the individual layout and create RemoteBlocks
             let remote_blocks =
-                RemoteBlocks::from_serialized(block_set_layout.clone(), block_set_idx, worker_id)?;
+                RemoteBlocks::from_serialized(block_set_layout, block_set_idx, worker_id)?;
 
             // check the storage type of the remote blocks
             let layout = remote_blocks.layout();

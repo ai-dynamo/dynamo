@@ -656,7 +656,7 @@ impl KvbmWorker {
 
         let scheduler_client = config.scheduler_client.clone();
 
-        let worker_config = config.clone();
+        let worker_config = config;
         // start background worker task to do layout allocation for host or disk
         let task = CriticalTaskExecutionHandle::new(
             move |cancel_token| {
@@ -707,7 +707,7 @@ impl KvbmWorker {
         let layout_ready_tx_cell = Mutex::new(Some(layout_ready_tx));
 
         // clone what we need inside the orchestrator
-        let worker_config = config.clone();
+        let worker_config = config;
         let cancel_token_for_task = cancel_token.clone();
 
         // Single task that orchestrates everything in-order.
