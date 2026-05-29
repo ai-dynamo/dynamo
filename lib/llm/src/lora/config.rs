@@ -86,7 +86,11 @@ impl LoraAllocationConfig {
 
     /// Compute the effective rate window (seconds) for the load estimator.
     pub fn effective_rate_window_secs(&self) -> u64 {
-        (self.timestep_secs * self.rate_window_multiplier).max(MIN_RATE_WINDOW_SECS)
+        // saturating_mul: large timestep_secs * rate_window_multiplier (both
+        // operator-supplied) would otherwise overflow u64.
+        self.timestep_secs
+            .saturating_mul(self.rate_window_multiplier)
+            .max(MIN_RATE_WINDOW_SECS)
     }
 
     /// Create config from environment variables, falling back to defaults.

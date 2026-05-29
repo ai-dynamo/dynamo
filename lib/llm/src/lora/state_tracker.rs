@@ -278,24 +278,34 @@ impl LoraStateTracker {
     }
 
     pub fn get_worker_slot_usage(&self) -> HashMap<WorkerWithDpRank, (usize, usize)> {
-        self.worker_capacity
+        // Snapshot capacities first, releasing all worker_capacity shard guards
+        // before touching worker_to_loras. Reading a second DashMap while
+        // holding an iterator guard risks a lock-order deadlock against a
+        // writer that locks the two maps in the opposite order.
+        let caps: Vec<(WorkerWithDpRank, u32)> = self
+            .worker_capacity
             .iter()
-            .map(|entry| {
-                let worker = *entry.key();
-                let (loaded, cap) = self.slot_info(&worker);
-                (worker, (loaded as usize, cap as usize))
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        caps.into_iter()
+            .map(|(worker, cap)| {
+                let loaded = self.loaded_count(&worker);
+                (worker, (loaded, cap as usize))
             })
             .collect()
     }
 
     pub fn workers_with_free_slots(&self) -> Vec<WorkerWithDpRank> {
-        self.worker_capacity
+        // Snapshot first (see get_worker_slot_usage) to avoid holding a
+        // worker_capacity iterator guard while reading worker_to_loras.
+        let caps: Vec<(WorkerWithDpRank, u32)> = self
+            .worker_capacity
             .iter()
-            .filter(|entry| {
-                let (loaded, capacity) = self.slot_info(entry.key());
-                loaded < capacity
-            })
-            .map(|entry| *entry.key())
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        caps.into_iter()
+            .filter(|(worker, capacity)| (self.loaded_count(worker) as u32) < *capacity)
+            .map(|(worker, _)| worker)
             .collect()
     }
 

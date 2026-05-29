@@ -225,6 +225,28 @@ impl McfPlacementSolver {
             }
         }
 
+        // Guard against pathological magnitudes: capacities, replica counts, and
+        // their sums are cast to i64 at the flow-graph boundary. A value above
+        // i64::MAX would wrap negative and could make the solver see a negative
+        // max_flow (returning a bogus empty solve). Reject such inputs.
+        const MAX_MAGNITUDE: usize = i64::MAX as usize;
+        if let Some(w) = workers.iter().find(|w| w.capacity > MAX_MAGNITUDE) {
+            return Err(format!(
+                "MCF solver: worker {:?} capacity {} exceeds i64 range",
+                w.worker, w.capacity
+            ));
+        }
+        // saturating_add so a pathological per-LoRA value can't wrap the sum
+        // below the threshold and slip past this guard.
+        let total_replicas: usize = loras
+            .iter()
+            .fold(0usize, |acc, l| acc.saturating_add(l.replicas));
+        if total_replicas > MAX_MAGNITUDE {
+            return Err(format!(
+                "MCF solver: total replica demand {total_replicas} exceeds i64 range"
+            ));
+        }
+
         // No LoRAs desired. Compute unloads for any prior placements that
         // are still on live workers (workers that have since left handle
         // their own cleanup via handle_worker_removal / changed_workers).
@@ -1212,6 +1234,24 @@ mod tests {
             .solve(&workers, &loras, &HashMap::new(), None, None)
             .expect("solve must succeed with sanitized params");
         assert_eq!(result.overflow_count, 0);
+    }
+
+    #[test]
+    fn test_oversized_input_rejected() {
+        // Replica demand above i64::MAX must be rejected, not silently wrapped
+        // into a negative max_flow.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let workers = make_workers(1, 4);
+        let loras = vec![LoraInput {
+            name: "A".to_string(),
+            replicas: usize::MAX,
+            churn_weight: 1,
+        }];
+        let result = solver.solve(&workers, &loras, &HashMap::new(), None, None);
+        assert!(
+            result.is_err_and(|e| e.contains("exceeds i64 range")),
+            "oversized replica demand must be rejected"
+        );
     }
 
     #[test]
