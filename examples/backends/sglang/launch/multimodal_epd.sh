@@ -84,6 +84,12 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
     SERVED_MODEL_ARG="--served-model-name $SERVED_MODEL_NAME"
 fi
 
+# TODO: Switch back to nixl-write once Dynamo embedding transfer can share a
+# NIXL/UCX backend with SGLang NIXL KV transfer in the same worker process.
+if [[ "$TRANSFER_BACKEND" == "nixl" && -z "${DYN_SGL_EMBEDDING_TRANSFER_MODE:-}" ]]; then
+    export DYN_SGL_EMBEDDING_TRANSFER_MODE="nixl-read"
+fi
+
 # GPU assignments (override via environment variables)
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
