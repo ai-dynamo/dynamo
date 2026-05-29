@@ -590,6 +590,18 @@ where
         };
 
         if !found {
+            // Symmetric with the three existing inhibited-error call sites
+            // (response-stream item, inactivity timeout, initial-dispatch
+            // error): a request whose target is no longer reachable is
+            // enough evidence to quarantine. Without this, a stale id can
+            // linger in instance_free across a discovery-propagation race
+            // window; the intersection-on-read in instance_ids_free() still
+            // strips it once discovery updates instance_avail, but this
+            // proactive call closes the window from "first failure →
+            // discovery time" to "first failure → next request".
+            if self.fault_detection_enabled {
+                self.client.report_instance_down(instance_id);
+            }
             return Err(anyhow::anyhow!(
                 "instance_id={instance_id} not found for endpoint {}",
                 self.client.endpoint.id()
