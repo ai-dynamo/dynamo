@@ -55,8 +55,9 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 @pytest.hookimpl(trylast=True)
 def pytest_collection_finish(session: pytest.Session) -> None:
-    if collection_env_guard_disabled():
-        return
+    # Gate solely on snapshot presence (taken at session start). Re-reading the
+    # disable flag here would let an import-time mutation switch the guard off
+    # mid-run and mask other mutations.
     before = session.config.stash.get(_collection_env_snapshot_key, None)
     if before is None:
         return

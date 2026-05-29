@@ -30,7 +30,7 @@ def test_snapshot_collection_env_filters_to_watched_prefixes():
         "VLLM_NO_USAGE_STATS": "1",
         "NCCL_DEBUG": "INFO",
         "CUDA_VISIBLE_DEVICES": "0",
-        "HF_HOME": "/tmp/hf",
+        "HF_HOME": "/example/hf-home",
         "TORCH_LOGS": "dynamic",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "PATH": "/usr/bin",
@@ -43,7 +43,7 @@ def test_snapshot_collection_env_filters_to_watched_prefixes():
         "VLLM_NO_USAGE_STATS": "1",
         "NCCL_DEBUG": "INFO",
         "CUDA_VISIBLE_DEVICES": "0",
-        "HF_HOME": "/tmp/hf",
+        "HF_HOME": "/example/hf-home",
         "TORCH_LOGS": "dynamic",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     }
@@ -59,12 +59,12 @@ def test_watched_prefixes_cover_backend_env_without_long_dynamo_prefix():
 def test_diff_collection_env_reports_added_changed_and_removed_values():
     before = {
         "DYN_SKIP_PYTHON_LOG_INIT": "1",
-        "SGLANG_LOGGING_CONFIG_PATH": "/tmp/old.json",
+        "SGLANG_LOGGING_CONFIG_PATH": "/example/old.json",
         "VLLM_NO_USAGE_STATS": "1",
         "CUDA_VISIBLE_DEVICES": "0",
     }
     after = {
-        "SGLANG_LOGGING_CONFIG_PATH": "/tmp/new.json",
+        "SGLANG_LOGGING_CONFIG_PATH": "/example/new.json",
         "VLLM_NO_USAGE_STATS": "0",
         "CUDA_VISIBLE_DEVICES": "0",
         "NCCL_DEBUG": "INFO",
@@ -84,7 +84,7 @@ def test_diff_collection_env_ignores_narrow_logging_allowlist():
         diff_collection_env(
             {},
             {
-                "SGLANG_LOGGING_CONFIG_PATH": "/tmp/sglang.json",
+                "SGLANG_LOGGING_CONFIG_PATH": "/example/sglang.json",
                 "VLLM_CONFIGURE_LOGGING": "1",
             },
         )
