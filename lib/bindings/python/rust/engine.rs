@@ -38,6 +38,17 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 // - [ ] other `AsyncEngine` implementations will have a similar pattern, i.e. one AsyncEngine
 //       implementation per struct
 
+/// Detect whether the Python `generate` callable accepts a `context`
+/// keyword argument. Both engines pass the per-request [`Context`] as a
+/// `context=` kwarg when the callable opts in, and otherwise fall back to
+/// the legacy positional-only call.
+fn detect_has_context(generator: &PyObject) -> bool {
+    Python::with_gil(|py| {
+        let callable = generator.bind(py);
+        callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
+    })
+}
+
 /// Rust/Python bridge that maps to the [`AsyncEngine`] trait
 ///
 /// Currently this is only implemented for the [`SingleIn`] and [`ManyOut`] types; however,
@@ -117,10 +128,7 @@ impl PythonServerStreamingEngine {
         generator: Arc<PyObject>,
         event_loop: Arc<PyObject>,
     ) -> Self {
-        let has_context = Python::with_gil(|py| {
-            let callable = generator.bind(py);
-            callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
-        });
+        let has_context = detect_has_context(&generator);
 
         PythonServerStreamingEngine {
             _cancel_token: cancel_token,
@@ -414,10 +422,7 @@ impl PythonBidirectionalEngine {
     /// `async def generate(request_stream, context)` returning an async
     /// generator of JSON-shaped response frames.
     pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
-        let has_context = Python::with_gil(|py| {
-            let callable = generator.bind(py);
-            callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
-        });
+        let has_context = detect_has_context(&generator);
         Ok(Self {
             generator: Arc::new(generator),
             event_loop: Arc::new(event_loop),
