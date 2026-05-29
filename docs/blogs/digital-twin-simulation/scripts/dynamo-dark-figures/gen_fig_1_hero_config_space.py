@@ -102,8 +102,8 @@ def main() -> None:
             x=x,
             y=y,
             mode="markers",
-            name="DynoSim · 3,000 configs/min",
-            legendrank=2,
+            name="DynoSim Explored Configs",
+            legendrank=1,
             marker=dict(size=5, color=NV_GREEN, opacity=0.85, line=dict(width=0)),
             hoverinfo="skip",
             showlegend=True,
@@ -134,8 +134,8 @@ def main() -> None:
             x=rx,
             y=ry,
             mode="markers",
-            name="GPU Measured · 8 configs/hr",
-            legendrank=1,
+            name="GPU Verified Configs",
+            legendrank=2,
             marker=dict(
                 size=16,
                 color=GPU_BLUE,
@@ -148,24 +148,36 @@ def main() -> None:
         )
     )
 
-    # --- Editorial punchline as a single line floating in the open
-    # upper wedge above the Pareto ceiling. White italic serif against
-    # the dark canvas — headline voice, not chart chrome.
+    # --- Editorial punchline: two clauses staggered diagonally so each
+    # lands as its own beat. White italic serif against the dark canvas —
+    # headline voice, sentence case, not chart chrome.
+    EDITORIAL_FONT = dict(
+        family="Iowan Old Style, Georgia, 'Times New Roman', serif",
+        size=30,
+        color=TEXT_PRIMARY,
+        weight=300,
+    )
     fig.add_annotation(
-        x=78,
-        y=900,
+        x=30,
+        y=1150,
         xref="x",
         yref="y",
-        xanchor="center",
+        xanchor="left",
         yanchor="middle",
-        text="<i>What GPUs Run in Hours… DynoSim Runs in Seconds.</i>",
+        text="<i>Sweep the configuration space in minutes.</i>",
         showarrow=False,
-        font=dict(
-            family="Iowan Old Style, Georgia, 'Times New Roman', serif",
-            size=30,
-            color=TEXT_PRIMARY,
-            weight=300,
-        ),
+        font=EDITORIAL_FONT,
+    )
+    fig.add_annotation(
+        x=60,
+        y=890,
+        xref="x",
+        yref="y",
+        xanchor="left",
+        yanchor="middle",
+        text="<i>Deploy your inference workload with confidence.</i>",
+        showarrow=False,
+        font=EDITORIAL_FONT,
     )
 
     # --- Title (paper-coord annotation, not layout.title). Pinned hard
@@ -182,6 +194,7 @@ def main() -> None:
         yref="paper",
         xanchor="left",
         yanchor="top",
+        align="left",
         text="DynoSim: Simulating the Pareto Frontier",
         showarrow=False,
         font=dict(
@@ -203,9 +216,10 @@ def main() -> None:
         yref="paper",
         xanchor="left",
         yanchor="top",
+        align="left",
         text=(
             "Discrete-event simulation of the full Dynamo inference stack — "
-            "1000s of configs/min on a single CPU thread."
+            "thousands of configs in minutes."
         ),
         showarrow=False,
         font=dict(

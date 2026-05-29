@@ -204,19 +204,8 @@ def main() -> None:
 
     fig.update_layout(
         template=dynamo_template,
-        title=dict(
-            text="Round-Robin vs KV Router: Concurrency Sweep and Pareto Curve",
-            x=0.02,
-            xanchor="left",
-            y=0.96,
-            yanchor="top",
-            font=dict(
-                family="Helvetica Neue, HelveticaNeue, sans-serif",
-                size=42,
-                color=TEXT_PRIMARY,
-                weight=300,
-            ),
-        ),
+        # Title is a paper-coord annotation below (not layout.title) so its
+        # left edge aligns with the subtitle pixel-for-pixel.
         legend=dict(
             orientation="h",
             x=1.0,
@@ -236,19 +225,38 @@ def main() -> None:
 
     # Subtitle parked 5px below the title's bottom edge. Derived from
     # the standard formula in plotting.md:
-    #   title_top    = (1 - 0.96) * 560 = 22.4
+    #   title_top    = 22.4 px from figure top
     #   title_bottom = 22.4 + 42 * 1.00 = 64.4   # 1.00 = cap + descender
-    #   subtitle_top = 64.4 + 2         = 66.4   # +2 px = snug
+    #   subtitle_top = 64.4 + 30        = 94.4   # +30 px = clear vertical gap
     #   plot_h       = 560 - 180 - 120  = 260
-    #   paper_y      = 1 + (180 - 66.4) / 260 = 1.437
+    #   title paper_y    = 1 + (180 - 22.4) / 260 = 1.606
+    #   subtitle paper_y = 1 + (180 - 94.4) / 260 = 1.329
     fig.add_annotation(
         x=-0.049,
-        y=1.437,
+        y=1.606,
         xref="paper",
         yref="paper",
         xanchor="left",
         yanchor="top",
-        text="B200 / MiniMax-M2.5 / TP=4 / 8 workers / Mooncake trace — KV Router reduces TTFT across all concurrencies and lifts throughput/GPU.",
+        align="left",
+        text="Round-Robin vs KV Router: Concurrency Sweep and Pareto Curve",
+        showarrow=False,
+        font=dict(
+            family="Helvetica Neue, HelveticaNeue, sans-serif",
+            size=42,
+            color=TEXT_PRIMARY,
+            weight=300,
+        ),
+    )
+    fig.add_annotation(
+        x=-0.049,
+        y=1.329,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
+        align="left",
+        text="B200 / MiniMax-M2.5 / TP=4 / Mooncake trace — KV Router cuts TTFT and lifts throughput.",
         showarrow=False,
         font=dict(
             family="Helvetica Neue, HelveticaNeue, sans-serif",
@@ -299,7 +307,7 @@ def main() -> None:
         showgrid=True,
         gridcolor=BORDER_SUBTLE,
         gridwidth=0.5,
-        range=[2.15, 3.85],
+        range=[2.15, 3.778],  # log10: ~141 .. 6000
         row=1,
         col=1,
     )
