@@ -58,6 +58,10 @@ def test_generate_parser_parity_table_html() -> None:
     assert "generate_parity_table.py toolcalling --html" in html
     assert "TOOLCALLING.batch.*" in html
     assert "TOOLCALLING.stream.*" in html
+    assert 'id="case-descriptions-batch"' in html
+    assert 'id="case-descriptions-stream"' in html
+    assert "TOOLCALLING.batch.1</td><td>Single tool call" in html
+    assert "TOOLCALLING.stream.1.a</td><td>Single complete tool-call payload" in html
     assert fixture_links
     assert len(fixture_families) > 10
     assert "deepseek_v3" in fixture_families
@@ -79,6 +83,38 @@ def test_generate_parser_parity_table_batch_mode_excludes_stream_links() -> None
 
 
 @pytest.mark.timeout(60)
+def test_generate_combined_parity_table_html() -> None:
+    html = _render_html_for("all")
+    links = LinkCollector()
+    links.feed(html)
+
+    assert "Dynamo Parser Parity Table" in html
+    assert "generate_parity_table.py all --html" in html
+    assert 'data-tab-target="tab-toolcalling-batch">TC batch</button>' in html
+    assert 'title="Tool Calling batch"' in html
+    assert 'aria-label="Tool Calling stream"' in html
+    assert 'data-tab-target="tab-reasoning-batch">Reasoning batch</button>' in html
+    assert 'data-tab-target="tab-reasoning-stream">Reasoning stream</button>' in html
+    assert "params.get('tab')" in html
+    assert "validTargets.has(requested)" in html
+    assert "document.getElementById(requested)" not in html
+    assert "url.searchParams.set('tab', id)" in html
+    assert "TOOLCALLING.batch." in html
+    assert "TOOLCALLING.stream." in html
+    assert 'id="case-descriptions-toolcalling-batch"' in html
+    assert 'id="case-descriptions-toolcalling-stream"' in html
+    assert "TOOLCALLING.batch.1</td><td>Single tool call" in html
+    assert "TOOLCALLING.stream.1.a</td><td>Single complete tool-call payload" in html
+    assert "REASONING.batch." in html
+    assert "REASONING.stream." in html
+    assert "toolcalling/fixtures/" in "".join(links.hrefs)
+    assert "reasoning/fixtures/" in "".join(links.hrefs)
+    assert "../../lib/parsers/TOOLCALLING_CASES.md" in links.hrefs
+    assert "../../lib/parsers/REASONING_CASES.md" in links.hrefs
+    assert "../../pyproject.toml" in links.hrefs
+
+
+@pytest.mark.timeout(60)
 def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> None:
     html = _render_html_for("reasoning")
 
@@ -95,15 +131,16 @@ def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> N
     )
     split_end_cell = _cell_for(html, "REASONING.stream.3.b — gpt_oss")
     assert re.search(
-        r'<td class="cell research[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">S\?</a>',
+        r'<td class="cell documented[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">S</a>',
         split_end_cell,
     )
     handoff_cell = _cell_for(html, "REASONING.stream.4.b — gpt_oss")
     assert re.search(
-        r'<td class="cell leak[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">↯V</a>',
+        r'<td class="cell documented[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">V</a>',
         handoff_cell,
     )
-    assert "↯ Dynamo reasoning leaks" in handoff_cell
+    assert "↯ Dynamo leaks" not in handoff_cell
+    assert "Dynamo: Unlike vLLM streaming reasoning" in handoff_cell
     assert "Divergent reasons" not in handoff_cell
     assert re.search(
         r'<td class="cell ok[^"]*"[^>]*><a href="fixtures/kimi_k25/REASONING\.batch\.yaml">=</a>'

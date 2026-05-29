@@ -49,6 +49,7 @@ cases:
       sglang:
         reasoning_text: firstsecond
         normal_text: done
+        reason: SGLang concatenates multiple Harmony analysis spans without an inserted separator, while Dynamo/vLLM preserve the span boundary with a newline.
   REASONING.stream.3.a:
     description: Harmony start marker split across chunks
     ref: *upstream_ref
@@ -76,6 +77,7 @@ cases:
       sglang:
         reasoning_text: thinking<|end|><|start|>assistant<|channel|>final<|message|>answer
         normal_text: ''
+        reason: SGLang does not recognize the split Harmony end marker in text-only streaming chunks, so the final-channel text remains in reasoning_text instead of being emitted as normal_text.
   REASONING.stream.3.c:
     description: Partial Harmony channel marker prefix later becomes non-channel text
     ref: *upstream_ref
@@ -106,6 +108,7 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: I will check that.Done.
+        reason: SGLang drops the Harmony block boundary between recipientless commentary and final content, so two visible text blocks concatenate without the separator Dynamo/vLLM insert.
   REASONING.stream.4.b:
     description: Directed Harmony commentary tool recipient split across chunks
     ref: *upstream_ref
@@ -116,10 +119,11 @@ cases:
       dynamo: &id002
         reasoning_text: ''
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
-        reason: 'This is expected in Dynamo today because streaming reasoning parsing and tool-call parsing are separate stages, and `normal_text` is the only handoff path between them. Confirmed that the `normal_text` handoff to the tool-call parser is processed properly: the downstream Harmony parser emits the tool call and leaves no final `normal_text` leak. If the reasoning parser removed the directed commentary envelope here, the downstream Harmony tool-call parser would never see the call. Matching vLLM''s reasoning-layer output would require an architectural change to carry tool-call candidates through a structured side channel instead of reusing `normal_text`.'
+        reason: Unlike vLLM streaming reasoning, Dynamo parses reasoning before tool calling. For GPT-OSS/Harmony, directed commentary is tool-call text, so Dynamo passes it in normal_text for the Harmony tool parser to emit structured tool_calls and remove the markup from final content.
       vllm:
         reasoning_text: ''
         normal_text: ''
+        reason: vLLM streaming reasoning suppresses directed Harmony commentary at the reasoning layer; Dynamo keeps it because normal_text is the handoff to the Harmony tool parser.
       sglang: *id002
   REASONING.stream.4.c:
     description: Two directed Harmony commentary tool calls in one stream
@@ -131,10 +135,11 @@ cases:
       dynamo: &id003
         reasoning_text: ''
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{"tz":"PST"}<|call|>
-        reason: 'This is expected in Dynamo today because streaming reasoning parsing and tool-call parsing are separate stages, and `normal_text` is the only handoff path between them. Confirmed that the `normal_text` handoff to the tool-call parser is processed properly: the downstream Harmony parser emits the tool calls and leaves no final `normal_text` leak. If the reasoning parser removed the directed commentary envelopes here, the downstream Harmony tool-call parser would never see the calls. Matching vLLM''s reasoning-layer output would require an architectural change to carry tool-call candidates through a structured side channel instead of reusing `normal_text`.'
+        reason: Unlike vLLM streaming reasoning, Dynamo parses reasoning before tool calling. For GPT-OSS/Harmony, directed commentary is tool-call text, so Dynamo passes it in normal_text for the Harmony tool parser to emit structured tool_calls and remove the markup from final content.
       vllm:
         reasoning_text: ''
         normal_text: ''
+        reason: vLLM streaming reasoning suppresses directed Harmony commentary at the reasoning layer; Dynamo keeps it because normal_text is the handoff to the Harmony tool parser.
       sglang: *id003
   REASONING.stream.1.b:
     description: Plain text without Harmony channel markers

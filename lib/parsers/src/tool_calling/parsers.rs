@@ -2123,7 +2123,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =============================================================================
-    // 1. NEMOTRON/DECI TOOL PARSER FORMAT (JSON Array in XML tags)
+    // 1. NEMOTRON/DECI TOOL-CALL FORMAT (JSON Array in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -2179,7 +2179,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =================================================
-    // 2. QWEN3CODER TOOL PARSER FORMAT (XML-style tags)
+    // 2. QWEN3CODER TOOL-CALL FORMAT (XML-style tags)
     // =================================================
 
     #[tokio::test]
@@ -2220,7 +2220,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 3. xLAM TOOL PARSER FORMAT (Pure JSON Array) - Testing via mistral parser
+    // 3. xLAM TOOL-CALL FORMAT (Pure JSON Array) - Testing via mistral parser
     // =============================================================================
 
     #[tokio::test]
@@ -2251,7 +2251,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 4. MINIMAX TOOL PARSER FORMAT (Multi-line JSON in XML tags)
+    // 4. MINIMAX TOOL-CALL FORMAT (Multi-line JSON in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -2278,7 +2278,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 5. HARMONY TOOL PARSER FORMAT (Multiple Tool Calls with Harmony Encoding)
+    // 5. HARMONY TOOL-CALL FORMAT (Multiple Tool Calls with Harmony Encoding)
     // =============================================================================
 
     #[tokio::test]
