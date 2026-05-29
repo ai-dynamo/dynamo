@@ -114,7 +114,10 @@ python -m dynamo.vllm \
     --enforce-eager --max-model-len 512 --max-num-seqs 4 \
     --gpu-memory-utilization 0.30 \
     --disaggregation-mode prefill \
-    --kv-transfer-config '...same as above...' &
+    --kv-transfer-config '{"kv_connector":"NixlConnectorWithPendingMetrics",
+                           "kv_role":"kv_both",
+                           "kv_connector_module_path":
+                             "dynamo.vllm.custom_connectors.nixl_with_pending_metrics"}'
 
 # 4. Wait for both workers' vLLM engines to load (Dynamo /metrics responds
 #    with 0 lines before vLLM is up; wait until vllm: lines appear)
