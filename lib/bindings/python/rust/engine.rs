@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Error, Result};
@@ -11,13 +13,16 @@ use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
 pub use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
-use dynamo_runtime::logging::get_distributed_tracing_context;
+use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
 pub use dynamo_runtime::{
-    pipeline::{AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn},
+    pipeline::{
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
+        SingleIn,
+    },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
@@ -47,6 +52,66 @@ fn detect_has_context(generator: &PyObject) -> bool {
         let callable = generator.bind(py);
         callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
     })
+}
+
+/// Boxed Rust stream of items yielded by a Python async generator. Each
+/// item is either a `PyObject` frame or the `PyErr` the generator raised.
+type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
+
+/// Invoke the Python `generate` callable and convert the async generator it
+/// returns into a Rust [`Stream`] of `PyObject` items.
+///
+/// Shared by the unary and bidirectional engines. Both build a per-request
+/// [`Context`], call the user callable with a single positional argument
+/// plus an optional `context=` kwarg, and wrap the result with
+/// [`pyo3_async_runtimes::tokio::into_stream_with_locals_v1`]. The only
+/// thing that differs is the positional argument — a pythonized request for
+/// the unary engine, a [`PyAsyncRequestStream`] handle for the bidirectional
+/// engine — so the caller supplies it via `make_first_arg`, which runs
+/// inside the GIL because building either value needs `py`.
+///
+/// The GIL is acquired on a blocking task so the tokio reactor is not parked
+/// while contending for it.
+async fn invoke_generator<F>(
+    generator: Arc<PyObject>,
+    event_loop: Arc<PyObject>,
+    has_context: bool,
+    ctx: Arc<dyn AsyncEngineContext>,
+    trace_context: Option<DistributedTraceContext>,
+    metadata: BTreeMap<String, String>,
+    make_first_arg: F,
+) -> Result<PyItemStream>
+where
+    F: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
+{
+    let stream = tokio::task::spawn_blocking(move || {
+        Python::with_gil(|py| {
+            let first_arg = make_first_arg(py)?;
+
+            // Build the per-request context handle, carrying the captured
+            // trace context and metadata.
+            let py_ctx = Py::new(py, Context::new(ctx.clone(), trace_context, None, metadata))?;
+
+            let gen_result = if has_context {
+                let kwarg = PyDict::new(py);
+                kwarg.set_item("context", &py_ctx)?;
+                generator.call(py, (first_arg,), Some(&kwarg))
+            } else {
+                // Legacy: no `context` arg.
+                generator.call1(py, (first_arg,))
+            }?;
+
+            let locals = TaskLocals::new(event_loop.bind(py).clone());
+            pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
+                locals,
+                gen_result.into_bound(py),
+            )
+        })
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to offload python call to blocking task: {e}"))??;
+
+    Ok(Box::pin(stream))
 }
 
 /// Rust/Python bridge that maps to the [`AsyncEngine`] trait
@@ -168,58 +233,26 @@ where
 
         // Capture current trace context
         let current_trace_context = get_distributed_tracing_context();
+        let metadata = context.metadata().clone();
 
-        // Clone the PyObject to move into the thread
+        // Acquiring the GIL is similar to acquiring a standard lock/mutex.
+        // Performing this in a tokio async task could block the thread for an
+        // undefined amount of time, so `invoke_generator` offloads the call to
+        // a blocking task. The Python GIL is the gift that keeps on giving --
+        // performance hits...
+        let stream = invoke_generator(
+            self.generator.clone(),
+            self.event_loop.clone(),
+            self.has_context,
+            ctx.clone(),
+            current_trace_context,
+            metadata,
+            move |py| Ok(pythonize(py, &request)?.unbind()),
+        )
+        .await?;
 
         // Create a channel to communicate between the Python thread and the Rust async context
         let (tx, rx) = mpsc::channel::<Annotated<Resp>>(128);
-
-        let generator = self.generator.clone();
-        let event_loop = self.event_loop.clone();
-        let ctx_python = ctx.clone();
-        let has_context = self.has_context;
-        let metadata = context.metadata().clone();
-
-        // Acquiring the GIL is similar to acquiring a standard lock/mutex
-        // Performing this in an tokio async task could block the thread for an undefined amount of time
-        // To avoid this, we spawn a blocking task to acquire the GIL and perform the operations needed
-        // while holding the GIL.
-        //
-        // Under low GIL contention, we wouldn't need to do this.
-        // However, under high GIL contention, this can lead to significant performance degradation.
-        //
-        // Since we cannot predict the GIL contention, we will always use the blocking task and pay the
-        // cost. The Python GIL is the gift that keeps on giving -- performance hits...
-        let stream = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
-                let py_request = pythonize(py, &request)?;
-
-                // Create context with trace information
-                let py_ctx = Py::new(
-                    py,
-                    Context::new(ctx_python.clone(), current_trace_context, None, metadata),
-                )?;
-
-                let gen_result = if has_context {
-                    // Pass context as a kwarg
-                    let kwarg = PyDict::new(py);
-                    kwarg.set_item("context", &py_ctx)?;
-                    generator.call(py, (py_request,), Some(&kwarg))
-                } else {
-                    // Legacy: No `context` arg
-                    generator.call1(py, (py_request,))
-                }?;
-
-                let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
-                    locals,
-                    gen_result.into_bound(py),
-                )
-            })
-        })
-        .await??;
-
-        let stream = Box::pin(stream);
 
         // process the stream
         // any error thrown in the stream will be caught and complete the processing task
@@ -485,41 +518,23 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
 
         let py_request_stream = PyAsyncRequestStream::new(frame_rx);
 
-        let generator = self.generator.clone();
-        let event_loop = self.event_loop.clone();
-        let has_context = self.has_context;
         let ctx_python = ctx_unit.context();
 
         // Acquire the GIL on a blocking task so the tokio reactor is not
-        // parked while waiting on it. Once inside the GIL: build the
-        // Python `Context`, build the `PyAsyncRequestStream` py handle,
-        // call the user callable, then convert the returned async
-        // generator into a Rust stream of `PyObject`.
-        let stream = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
-                let py_request_stream_obj = Py::new(py, py_request_stream)?;
-                let py_ctx = Py::new(
-                    py,
-                    Context::new(ctx_python.clone(), current_trace_context, None, metadata),
-                )?;
-                let gen_result = if has_context {
-                    let kwarg = PyDict::new(py);
-                    kwarg.set_item("context", &py_ctx)?;
-                    generator.call(py, (py_request_stream_obj,), Some(&kwarg))
-                } else {
-                    generator.call1(py, (py_request_stream_obj,))
-                }?;
-                let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
-                    locals,
-                    gen_result.into_bound(py),
-                )
-            })
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to offload python call to blocking task: {e}"))??;
-
-        let stream = Box::pin(stream);
+        // parked while waiting on it; build the Python `Context`, wrap the
+        // `PyAsyncRequestStream` handle as the positional argument, call the
+        // user callable, and convert the returned async generator into a Rust
+        // stream of `PyObject`.
+        let stream = invoke_generator(
+            self.generator.clone(),
+            self.event_loop.clone(),
+            self.has_context,
+            ctx_python,
+            current_trace_context,
+            metadata,
+            move |py| Ok(Py::new(py, py_request_stream)?.into_any()),
+        )
+        .await?;
 
         let (resp_tx, resp_rx) = mpsc::channel::<Annotated<serde_json::Value>>(128);
         let response_request_id = request_id.clone();
