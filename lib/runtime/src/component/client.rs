@@ -224,21 +224,8 @@ impl Client {
         self.instance_avail.load()
     }
 
-    /// Returns the set of instances eligible for routing decisions.
-    ///
-    /// Defined as ``instance_free ∩ instance_avail`` (computed on every read).
-    /// The intersection ensures that quarantine via [`Self::report_instance_down`]
-    /// (which only updates ``instance_avail``) is immediately reflected here
-    /// without waiting for the next ``update_free_instances`` call —
-    /// ``update_free_instances`` is gated on ``kv_metrics`` events, which stop
-    /// arriving when a worker is sick/restarting, so without the intersection
-    /// ``instance_free`` would stay frozen with stale ids. See the TODO at
-    /// ``monitor_instance_source`` for the same divergence concern.
-    pub fn instance_ids_free(&self) -> Vec<u64> {
-        let free = self.instance_free.load();
-        let avail: std::collections::HashSet<u64> =
-            self.instance_avail.load().iter().copied().collect();
-        free.iter().copied().filter(|id| avail.contains(id)).collect()
+    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
+        self.instance_free.load()
     }
 
     /// Get a watcher for available instance IDs
