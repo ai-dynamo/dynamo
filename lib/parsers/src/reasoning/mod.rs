@@ -86,15 +86,18 @@ pub fn get_available_reasoning_parsers() -> Vec<&'static str> {
 /// Whether this parser should be bypassed for forced/named guided JSON when
 /// the chat template has already injected the reasoning start token.
 ///
-/// DeepSeek V4 uses the same `<think>` parser mechanics as Qwen, but its V4
-/// chat formatter normally seeds `<think>` before generation. If guided
+/// DeepSeek V4 and GLM use the same `<think>` parser mechanics as Qwen, but
+/// their chat formatters can seed `<think>` before generation. If guided
 /// decoding then returns a bare JSON tool-call payload without first closing
 /// `</think>`, the reasoning parser would consume that payload before the
 /// immediate tool-call jail can parse it.
 pub fn skips_guided_json_when_prompt_injected(parser_name: Option<&str>) -> bool {
-    parser_name
-        .and_then(ReasoningParserType::from_name)
-        .is_some_and(ReasoningParserType::skips_guided_json_when_prompt_injected)
+    parser_name.is_some_and(|parser_name| {
+        let normalized_name = parser_name.to_lowercase();
+        matches!(normalized_name.as_str(), "glm45")
+            || ReasoningParserType::from_name(&normalized_name)
+                .is_some_and(ReasoningParserType::skips_guided_json_when_prompt_injected)
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -378,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deepseek_v4_skips_guided_json_when_prompt_injected() {
+    fn test_skips_guided_json_when_prompt_injected() {
         for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
             assert!(
                 skips_guided_json_when_prompt_injected(Some(parser_name)),
@@ -386,7 +389,12 @@ mod tests {
             );
         }
 
-        for parser_name in ["qwen3", "glm45", "nemotron_deci", "basic"] {
+        assert!(
+            skips_guided_json_when_prompt_injected(Some("glm45")),
+            "glm45 should skip prompt-injected guided JSON without changing the shared nemotron_deci parser type"
+        );
+
+        for parser_name in ["qwen3", "nemotron_deci", "basic"] {
             assert!(
                 !skips_guided_json_when_prompt_injected(Some(parser_name)),
                 "{parser_name} should keep the generic non-force parser behavior"

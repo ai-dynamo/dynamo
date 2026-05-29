@@ -1578,6 +1578,78 @@ async fn tool_choice_deepseek_v4_named_prompt_injected_bare_params_recovers() {
     );
 }
 
+/// GLM + required + `prompt_injected_reasoning=true` + bare JSON.
+///
+/// Mirrors the DeepSeek V4 guided-decoding failure shape for the `glm45`
+/// reasoning parser paired with the `glm47` tool-call parser used by GLM-5.1.
+#[tokio::test]
+async fn tool_choice_glm45_required_prompt_injected_bare_json_recovers() {
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("glm45"), Some("glm47"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "GLM45 required + prompt_injected=true + bare JSON";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not be classified as reasoning_content, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// GLM + named tool_choice + `prompt_injected_reasoning=true` + bare
+/// parameters object. Exercises the named SingleObject immediate-jail path.
+#[tokio::test]
+async fn tool_choice_glm45_named_prompt_injected_bare_params_recovers() {
+    let bare_params = r#"{"location":"San Francisco"}"#;
+    let preprocessor = build_preprocessor(Some("glm45"), Some("glm47"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Named(
+        "get_weather".to_string().into(),
+    ));
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_params), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "GLM45 named + prompt_injected=true + bare params";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not be classified as reasoning_content, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
 /// CASE 6 — Immediate jail mode + first chunk has only `reasoning_content`
 /// (no text delta) + JSON arrives in a later chunk. Regression for the
 /// `jail.rs:678` fix: before the fix, the else branch hardcoded
