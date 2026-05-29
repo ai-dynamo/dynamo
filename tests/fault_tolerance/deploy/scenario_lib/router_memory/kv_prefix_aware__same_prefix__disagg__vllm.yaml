@@ -1,0 +1,76 @@
+# S-N2 — single shared system prompt for every request, maximum prefix
+# sharing, minimum radix tree node growth.
+
+kind: router_memory
+name: kv_prefix_aware__same_prefix__disagg__vllm
+description: |
+  Same router config as the leak-positive baseline, but with
+  shared_system_prompt_length=2000 prepended to every request →
+  ~100% prefix overlap → minimum tree node growth.
+  H1 prediction: leak << 27 (near 3 MB/min baseline). H2/H3: still ~27.
+
+labels:
+  router_mode: kv_prefix_aware
+  traffic_shape: same_prefix
+  deployment: disagg
+  backend: vllm
+  leak_signal: positive_h1_lever
+  hypothesis: H1_radix_tree_retention
+
+deployment:
+  backend: vllm
+  topology: disagg
+  units: 2
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-afa8f7b7
+  model_cache_pvc: shared-model-cache
+
+router:
+  mode: kv
+  knobs:
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "1.0"
+    DYN_ROUTER_ASSUME_KV_REUSE: "false"
+    DYN_ROUTER_REPLICA_SYNC: "true"
+    DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
+    DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
+
+load:
+  shape:
+    type: same_prefix
+    shared_system_prompt_length: 2000
+  rungs:
+    - name: warmup
+      concurrency: 12
+      duration_minutes: 2.0
+    - name: steady
+      concurrency: 48
+      duration_minutes: 45.0
+  common:
+    request_timeout_seconds: 30
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+reports:
+  - FaultToleranceReport
+  - ErrorBreakdownReport
+  - PerWorkerLatencyReport
+
+checks:
+  - kind: LoadApplied
+    load_name: steady
+    min_requests: 5000
+  - kind: WorkloadShapeVerified
+    load_name: steady
+    max_unique_prompts: 5        # shared_system_prompt_length=2000 should collapse to ~1
+    isl_mean_min: 1500
+    isl_mean_max: 2500           # slightly wider since shared prefix adds tokens
+
+expectations:
+  fe_memory_growth_mb_per_min:
+    expected_range: [2, 28]
+    notes: |
+      H1 (radix-tree retention): << 27 (≤ 5 MB/min — near no-leak baseline)
+      H2/H3 (per-request or per-worker): ≈ 27 MB/min
+      Wide range until first measurement; narrows the H1 vs H2 question.
+    observed_history: []

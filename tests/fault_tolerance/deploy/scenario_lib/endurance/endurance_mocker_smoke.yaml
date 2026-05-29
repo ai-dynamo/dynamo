@@ -1,0 +1,87 @@
+# Endurance SMOKE — ~30 min mocker-backed scenario for validating the
+# endurance machinery itself: single-unit mocker, kv-prefix routing at
+# production default, a single long rung, periodic 5-min snapshots.
+#
+# Goal: confirm PeriodicSnapshot fires the expected number of times,
+# snapshot dirs land on disk, AIPerf in-progress files copy cleanly,
+# and the long load completes. Run this before committing to the
+# multi-hour endurance_mocker_long scenario.
+
+kind: endurance
+name: endurance_mocker_smoke
+description: |
+  Short endurance smoke test (~30 min) — same recipe as the long
+  variant but compressed so framework wiring can be validated in a
+  single coffee break. Mocker-backed; ~1 GPU equivalent of compute.
+
+labels:
+  router_mode: kv_prefix_aware
+  traffic_shape: partial_prefix
+  deployment: agg
+  backend: mocker
+  duration_class: smoke
+  pairable: "yes"
+
+deployment:
+  backend: mocker
+  topology: agg
+  units: 1
+
+router:
+  mode: kv
+  knobs:
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "1.0"      # production default
+    DYN_ROUTER_ASSUME_KV_REUSE: "false"
+    DYN_ROUTER_REPLICA_SYNC: "true"
+
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 15
+    prefix_prompt_length: 600
+  rungs:
+    - name: warmup
+      concurrency: 8
+      duration_minutes: 2.0
+    - name: long
+      concurrency: 24
+      duration_minutes: 28.0
+  common:
+    request_timeout_seconds: 30
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+events:
+  - kind: WaitForModelReady
+    timeout: 1800
+  - kind: PodMemoryPoller
+    services: [Frontend, decode]
+    interval_s: 10
+  - kind: PeriodicSnapshot
+    interval_minutes: 5
+  - kind: StartLoad
+    load_ref: warmup
+  - kind: WaitForLoadCompletion
+    name: warmup
+  - kind: StartLoad
+    load_ref: long
+  - kind: WaitForLoadCompletion
+    name: long
+
+reports:
+  - FaultToleranceReport
+  - PerWorkerLatencyReport
+
+checks:
+  - kind: LoadApplied
+    load_name: long
+    min_requests: 1000
+
+expectations:
+  snapshots_emitted_count:
+    expected_range: [5, 7]      # ~30 min / 5 min interval = 5-6 snapshots
+    notes: |
+      Sanity-check that PeriodicSnapshot ticked the expected number of
+      times. Count snapshots/ subdirs after the run completes.

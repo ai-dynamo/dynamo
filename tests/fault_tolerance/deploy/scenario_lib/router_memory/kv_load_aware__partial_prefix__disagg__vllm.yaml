@@ -1,0 +1,69 @@
+# Leak-NEGATIVE reference cell. KV-aware routing with prefix scoring OFF
+# (OVERLAP_SCORE_WEIGHT=0.0). Measured slope ≈ 2.9 MB/min on release/1.2.0.
+# Use as the comparison baseline for every other router_memory scenario.
+
+kind: router_memory
+name: kv_load_aware__partial_prefix__disagg__vllm
+description: |
+  KV-aware load steering with prefix scoring OFF, replica-sync ON.
+  The leak-negative reference — slope ≈ 3 MB/min is the unrelated
+  residual that's NOT in the prefix-scoring path.
+
+labels:
+  router_mode: kv_load_aware
+  traffic_shape: partial_prefix
+  deployment: disagg
+  backend: vllm
+  leak_signal: negative_reference
+
+deployment:
+  backend: vllm
+  topology: disagg
+  units: 2
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-afa8f7b7
+  model_cache_pvc: shared-model-cache
+
+router:
+  mode: kv
+  knobs:
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "0.0"
+    DYN_ROUTER_ASSUME_KV_REUSE: "false"
+    DYN_ROUTER_REPLICA_SYNC: "true"
+    DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
+    DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
+
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 15
+    prefix_prompt_length: 600
+  rungs:
+    - name: warmup
+      concurrency: 12
+      duration_minutes: 2.0
+    - name: steady
+      concurrency: 48
+      duration_minutes: 37.0
+  common:
+    request_timeout_seconds: 30
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+reports:
+  - FaultToleranceReport
+  - ErrorBreakdownReport
+  - PerWorkerLatencyReport
+
+checks:
+  - kind: LoadApplied
+    load_name: steady
+    min_requests: 5000
+
+expectations:
+  fe_memory_growth_mb_per_min:
+    expected_range: [1.5, 4.5]
+    notes: "release/1.2.0 a4-recommended baseline measured 2.9 MB/min (2026-05-22)"
+    observed_history:
+      - {date: "2026-05-22", value: 2.90, run_id: "test_kv_router_memory_stability[a4-recommended-2-2.0-3.0-18.0-3.0-2.0]"}

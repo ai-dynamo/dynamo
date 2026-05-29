@@ -511,6 +511,35 @@ class Wait(Event):
 
 
 @dataclass
+class CaptureMetrics(Event):
+    """Scrape ``/metrics`` from every pod and write raw text per pod.
+
+    Thin YAML wrapper around ``ManagedDeployment._capture_metrics``.
+    Output lands at ``<log_dir>/<service>/<pod>.metrics<suffix>.log`` —
+    raw Prometheus text, no parsing. Downstream verifiers / observe
+    tooling pull the metric names they care about.
+
+    The framework also auto-fires this at end-of-test (``__aexit__``,
+    suffix ``.final``) and on pod-kill (``DeletePod`` event, suffix
+    ``.before_delete``). Use this event when a scenario needs a named
+    mid-test snapshot (e.g. just before a load step-up, just after a
+    threshold change).
+    """
+
+    suffix: str = ".snapshot"
+    name: str = ""
+    results: dict[str, Any] | None = field(default=None, init=False)
+
+    async def execute(self, ctx: "ScenarioContext") -> None:
+        ctx.logger.info(f"CaptureMetrics: scraping all pods (suffix={self.suffix!r})")
+        await ctx.deployment._capture_metrics(suffix=self.suffix)
+
+    @property
+    def description(self) -> str:
+        return f"CaptureMetrics(suffix={self.suffix})"
+
+
+@dataclass
 class SetBusyThreshold(Event):
     """POST /busy_threshold to the Frontend service. Affects only the named
     model. Subsequent requests will receive 503 once *all* workers for the
@@ -589,9 +618,7 @@ class DeletePod(Event):
             for pod in pods_to_delete:
                 ctx.logger.info(f"Deleting pod {pod.name} (service: {service_name})")
                 ctx.deployment._get_pod_manifest(pod, service_name, ".before_delete")
-                await ctx.deployment._get_pod_metrics(
-                    pod, service_name, ".before_delete"
-                )
+                ctx.deployment._get_pod_metrics(pod, service_name, ".before_delete")
                 pod.delete(force=self.force)
                 deleted_names.append(pod.name)
         self._baseline_names = baseline_names
@@ -2248,13 +2275,25 @@ class PodMemoryPoller(Event):
             ctx.logger.warning("PodMemoryPoller: no ctx.log_dir; skipping")
             return
         os.makedirs(log_dir, exist_ok=True)
-        out = os.path.join(log_dir, "pod_memory_growth.tsv")
-        with open(out, "w") as fh:
-            fh.write(
-                "epoch_s\tservice\tpod\tcontainer\t"
-                "working_set_bytes\tpid1_rss_bytes\n"
-            )
+        # Per-pod memory files written to ``<log_dir>/<service>/<pod>_memory.tsv``
+        # — parallel construction with the per-pod ``<pod>_<ts>.log`` files
+        # written by the framework's log-collection pipeline. Removes the
+        # single-file contention that caused the 14s stutter on sanity Run 1
+        # and matches the canonical layout used by downstream verifier
+        # scripts. A union TSV at <log_dir>/pod_memory_growth.tsv is kept
+        # for backward compatibility — written at stop time.
+        TSV_HEADER = (
+            "epoch_s\tservice\tpod\tcontainer\t" "working_set_bytes\tpid1_rss_bytes\n"
+        )
+        # Initialize the legacy flat file too (for tooling that still reads it)
+        legacy_out = os.path.join(log_dir, "pod_memory_growth.tsv")
+        with open(legacy_out, "w") as fh:
+            fh.write(TSV_HEADER)
         self._stop = asyncio.Event()
+        self._per_pod_files: set[str] = set()  # type: ignore[name-defined]
+        self._tsv_header = TSV_HEADER
+        self._log_dir = log_dir
+        self._legacy_out = legacy_out
 
         custom = client.CustomObjectsApi()
 
@@ -2311,12 +2350,24 @@ class PodMemoryPoller(Event):
                             ts = time.time()
                             if not ws_by_container:
                                 ws_by_container = {"?": 0}
+                            # Per-pod file: <log_dir>/<service>/<pod>_memory.tsv
+                            pod_dir = os.path.join(self._log_dir, svc)
+                            os.makedirs(pod_dir, exist_ok=True)
+                            pod_file = os.path.join(pod_dir, f"{pod.name}_memory.tsv")
+                            if pod_file not in self._per_pod_files:
+                                with open(pod_file, "w") as fh:
+                                    fh.write(self._tsv_header)
+                                self._per_pod_files.add(pod_file)
                             for cname, ws_bytes in ws_by_container.items():
-                                with open(out, "a") as fh:
-                                    fh.write(
-                                        f"{ts:.0f}\t{svc}\t{pod.name}\t"
-                                        f"{cname}\t{ws_bytes}\t{pid1_rss}\n"
-                                    )
+                                row = (
+                                    f"{ts:.0f}\t{svc}\t{pod.name}\t"
+                                    f"{cname}\t{ws_bytes}\t{pid1_rss}\n"
+                                )
+                                with open(pod_file, "a") as fh:
+                                    fh.write(row)
+                                # Legacy flat file for backward compat
+                                with open(self._legacy_out, "a") as fh:
+                                    fh.write(row)
                 except Exception as e:
                     ctx.logger.warning(f"PodMemoryPoller loop err: {e}")
                 try:

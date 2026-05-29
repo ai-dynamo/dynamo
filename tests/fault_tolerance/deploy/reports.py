@@ -12,6 +12,7 @@ Reports are run after all checks pass and can generate
 additional artifacts (HTML reports, metrics summaries, etc.)
 """
 
+import glob
 import json
 import os
 from abc import ABC, abstractmethod
@@ -20,6 +21,40 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from tests.fault_tolerance.deploy.scenario import ScenarioContext
+
+
+def _resolve_load_dir(ctx, load_event) -> Optional[str]:
+    """Resolve the actual on-disk dir for a StartLoad event's artifacts.
+
+    Source order:
+      1. ``load_event._managed_load.local_output_dir`` — the live path the
+         load Job extractor wrote files to. Set during StartLoad.execute,
+         cleared at StopLoad teardown.
+      2. Glob ``<ctx.log_dir>/load/load-<name>-*`` (the
+         RFC-1123-compliant directory that the framework's load Job uses)
+         and return the newest match. Necessary because StopLoad clears
+         the ``_managed_load`` attribute by the time reports run.
+
+    Returns None if neither source resolves to an existing directory.
+    """
+    ml = getattr(load_event, "_managed_load", None)
+    if ml is not None:
+        local = getattr(ml, "local_output_dir", None)
+        if local and os.path.isdir(local):
+            return local
+    log_dir = getattr(ctx, "log_dir", None)
+    if not log_dir:
+        return None
+    name = getattr(load_event, "name", None) or "default"
+    # pytest parametrize ids like ``test_x[128-6000-5]`` embed ``[``/``]``
+    # in ``log_dir`` — glob.escape on the parent prevents them from
+    # being parsed as a character class.
+    pattern = os.path.join(glob.escape(log_dir), "load", f"load-{name}-*")
+    candidates = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return None
 
 
 # =============================================================================
@@ -93,14 +128,16 @@ class FaultToleranceReport(Report):
 
         # Most fault scenarios run a single load; if there are several, use
         # the first as the per-request source. (Per-load reports could be a
-        # future extension.) Fall back to the deterministic
-        # ``<log_dir>/load/`` path because StopLoad clears the
-        # ``_managed_load`` reference before reports run.
+        # future extension.) ``_resolve_load_dir`` handles the case where
+        # StopLoad has cleared the ``_managed_load`` reference by globbing
+        # for ``load-<name>-*`` subdirs.
         load = load_events[0]
-        ml = getattr(load, "_managed_load", None)
-        local_dir = (
-            getattr(ml, "local_output_dir", None) if ml else None
-        ) or os.path.join(ctx.log_dir, "load")
+        local_dir = _resolve_load_dir(ctx, load)
+        if local_dir is None:
+            ctx.logger.warning(
+                f"FaultToleranceReport: no load dir found for load {load.name!r}"
+            )
+            return
         jsonl_path = os.path.join(local_dir, "profile_export.jsonl")
         if not os.path.exists(jsonl_path):
             ctx.logger.warning(
@@ -382,10 +419,12 @@ class ErrorBreakdownReport(Report):
 
         sections: list[str] = []
         for load in load_events:
-            ml = getattr(load, "_managed_load", None)
-            local_dir = (
-                getattr(ml, "local_output_dir", None) if ml else None
-            ) or os.path.join(ctx.log_dir, "load")
+            local_dir = _resolve_load_dir(ctx, load)
+            if local_dir is None:
+                ctx.logger.warning(
+                    f"ErrorBreakdownReport: no load dir for {load.name!r}"
+                )
+                continue
             summary_path = os.path.join(local_dir, "profile_export_aiperf.json")
             if not os.path.exists(summary_path):
                 ctx.logger.warning(f"ErrorBreakdownReport: {summary_path} not found")
@@ -494,10 +533,12 @@ class PerWorkerLatencyReport(Report):
         sections_screen: list[str] = []
         sections_file: list[str] = []
         for load in load_events:
-            ml = getattr(load, "_managed_load", None)
-            local_dir = (
-                getattr(ml, "local_output_dir", None) if ml else None
-            ) or os.path.join(ctx.log_dir, "load")
+            local_dir = _resolve_load_dir(ctx, load)
+            if local_dir is None:
+                ctx.logger.warning(
+                    f"PerWorkerLatencyReport: no load dir for {load.name!r}"
+                )
+                continue
             jsonl = os.path.join(local_dir, "server_metrics_export.jsonl")
             if not os.path.exists(jsonl):
                 ctx.logger.warning(
@@ -882,10 +923,12 @@ class ErrorTrackingReport(Report):
 
         rows = []
         for load in load_events:
-            ml = getattr(load, "_managed_load", None)
-            local_dir = (
-                getattr(ml, "local_output_dir", None) if ml else None
-            ) or os.path.join(ctx.log_dir, "load")
+            local_dir = _resolve_load_dir(ctx, load)
+            if local_dir is None:
+                ctx.logger.warning(
+                    f"errors-per-rung: no load dir for {load.name!r}; skipping"
+                )
+                continue
             row = {"rung": load.name}
 
             # aiperf error count + breakdown

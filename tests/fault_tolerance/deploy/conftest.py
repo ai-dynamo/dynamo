@@ -348,6 +348,12 @@ def pytest_addoption(parser):
         _endurance_mod.add_cli_options(parser)
     except Exception:
         pass
+    try:
+        from tests.fault_tolerance.deploy import test_saturation_discovery as _sat_mod
+
+        _sat_mod.add_cli_options(parser)
+    except Exception:
+        pass
 
     # ---- fault_tolerance-specific options ----
     parser.addoption(

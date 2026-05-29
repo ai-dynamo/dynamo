@@ -2078,3 +2078,682 @@ async def test_overload_natural_overload(runtime_env, request, arm_label):
         test_name=request.node.name,
         runtime_env=runtime_env,
     )
+
+
+# ─── 3-arm 2-hour A/B vs production-current baseline ───────────────────
+#
+# Per the 2026-05-27 proposal for observe review:
+#   ~/dynamo-dev/dgh-703-cascade-repro-tests/findings/
+#       2026-05-27-3arm-test-proposal-for-observe.md
+#
+# Goal: compare production-current (v1.1.1 + LL) against the cascade-test
+# image in two routing modes (LL with the full DIS-2105 / 7d8eaa70a9 /
+# 30s-NIXL stack, and KV-pure-load with the same stack). 10-phase 2-hour
+# workload from observe's 2026-05-27 handoff: warmup → light → spike →
+# moderate → wave → spike → heavy → clustered-spikes → recovery →
+# cooldown.
+#
+#   A0-true-baseline     v1.1.1 upstream        LL stock + no admission
+#   A4-LL-prod           cascade-test           LL + 503 gate (pool=256,
+#                                                q=5) + threshold=0.85 +
+#                                                30s NIXL + 30s exec
+#   R-KV-recommended     cascade-test           KV-pure-load (zero-weight,
+#                                                no kv-events, replica-
+#                                                sync) + 503 gate + thresh
+#                                                + 30s NIXL + 30s exec
+#
+# Topology: N=3 (3 FE / 6 PF TP=2 / 3 DE TP=2 = 18 GPU per arm; 3 arms =
+# 54 GPU, fits cluster's 64).
+
+
+_A0_BASELINE_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
+_CASCADE_TEST_IMAGE = (
+    "nvcr.io/nvidian/dynamo-dev/vllm-runtime:"
+    "release-1.2.0-cascade-test-7d8eaa70a9-neelays"
+)
+
+
+def _common_fe_knobs(router_mode: str) -> dict[str, str]:
+    """FE knobs that are identical across all 3 arms (only DYN_ROUTER_MODE
+    differs). Settings on KV-only knobs are inert on LL arms; setting them
+    everywhere keeps the configuration vector symmetric, so the arm-to-arm
+    diff is exactly (image, router-mode, presence-of-503-gate)."""
+    return {
+        "DYN_ROUTER_MODE": router_mode,
+        "DYN_ROUTER_USE_KV_EVENTS": "false",
+        "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD": "0.85",
+        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT": "0.0",
+        "DYN_ROUTER_PREFILL_LOAD_SCALE": "0.0",
+        "DYN_ROUTER_QUEUE_THRESHOLD": "4.0",
+        "DYN_ROUTER_QUEUE_POLICY": "fcfs",
+        "DYN_ROUTER_REPLICA_SYNC": "true",
+    }
+
+
+@pytest.mark.k8s
+@pytest.mark.e2e
+@pytest.mark.weekly
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize(
+    "arm_label",
+    ["A0-true-baseline", "A4-LL-prod", "R-KV-recommended", "A4-tight-pool"],
+)
+async def test_overload_2hr_realistic(runtime_env, request, arm_label):
+    """2-hour A/B/R — production-current v1.1.1 vs cascade-test image in LL
+    and KV-pure-load modes, under a realistic 10-phase varying workload.
+
+    Workload (120 min total, per observe 2026-05-27 handoff):
+      P0 — warmup            5 min   ramp 0 → 80
+      P1 — light steady     25 min   c=80 (low safe band)
+      P2 — first spike       3 min   80 → 220 → 80 (above-cliff #1)
+      P3 — moderate steady  25 min   c=130 (mid safe band)
+      P4 — wave             10 min   80 ↔ 200 oscillation (5 segments)
+      P5 — second spike      3 min   130 → 260 → 130 (above-cliff #2)
+      P6 — heavy steady     25 min   c=170 (high band, sub-cliff)
+      P7 — clustered spikes  5 min   5 × c=280 spike-on-c=170 background
+      P8 — recovery         10 min   drop to c=20
+      P9 — cooldown          9 min   c=20 → 0 ramp (steady c=10)
+
+    Per-arm differences are only in (image, router-mode, 503-gate presence);
+    every other env / arg is identical across arms to isolate those three
+    variables. See the proposal doc for the full configuration table.
+
+    Pass criteria for R (per observe): goodput ≥ 95 %, decode CV < 0.05,
+    0 pods at KV ≥ 99 % for > 30 s, NIXL kv_expired_reqs < 500, FE memory
+    slope < 5 MB/min, 0 pod restarts. A0 is expected to fail several of
+    these — it's the comparison reference. A4 measured against the same
+    criteria as R to isolate routing-mode contribution.
+    """
+    cfg = request.config
+
+    # ── per-arm: image + 503-gate envs + KV-vs-LL routing mode ──
+    if arm_label == "A0-true-baseline":
+        image = _A0_BASELINE_IMAGE
+        os.environ["DYN_TEST_WORKER_KNOBS"] = ""  # no 503 gate (image lacks)
+        fe_knobs = _common_fe_knobs(router_mode="least-loaded")
+    elif arm_label == "A4-LL-prod":
+        image = _CASCADE_TEST_IMAGE
+        os.environ[
+            "DYN_TEST_WORKER_KNOBS"
+        ] = "DYN_TCP_WORKER_POOL_SIZE=256;DYN_TCP_WORK_QUEUE_SIZE=5"
+        fe_knobs = _common_fe_knobs(router_mode="least-loaded")
+    elif arm_label == "R-KV-recommended":
+        image = _CASCADE_TEST_IMAGE
+        os.environ[
+            "DYN_TEST_WORKER_KNOBS"
+        ] = "DYN_TCP_WORKER_POOL_SIZE=256;DYN_TCP_WORK_QUEUE_SIZE=5"
+        fe_knobs = _common_fe_knobs(router_mode="kv")
+    elif arm_label == "A4-tight-pool":
+        # Same as A4-LL-prod but with tightened admission gate to prevent
+        # the NIXL-stall cascade observed at Event 24/40 in the
+        # 2026-05-27 3-arm run (pool=256 == max-num-seqs filled engine,
+        # ~256 stranded sequences blocked forward progress).
+        #
+        # Sizing rationale (cycle 11 empirical: ~35 inflight per pod at
+        # c=104 steady): pool=64 ≈ 2× steady, leaves 192 of forward-progress
+        # headroom in the engine. Threshold lowered to 0.75 so mitigation 1
+        # fires before NIXL stall fills the cache.
+        image = _CASCADE_TEST_IMAGE
+        os.environ[
+            "DYN_TEST_WORKER_KNOBS"
+        ] = "DYN_TCP_WORKER_POOL_SIZE=64;DYN_TCP_WORK_QUEUE_SIZE=5"
+        fe_knobs = _common_fe_knobs(router_mode="least-loaded")
+        fe_knobs["DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD"] = "0.75"
+    else:
+        raise ValueError(f"unknown arm_label: {arm_label!r}")
+
+    spec = _load_dgd("disagg_qwen3_30b_unit_prod")
+    _apply_cascade_dgd(
+        spec,
+        image=image,
+        units=3,  # N=3 disagg
+        abort_timeout_s=30,  # VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+        vllm_extra_args=None,  # engine args identical across arms
+    )
+    _apply_cluster_portability(spec)
+
+    # Apply FE knobs
+    for k, v in fe_knobs.items():
+        spec["Frontend"].set_env_var(k, v)
+
+    # VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS = 30s on both worker types (already
+    # in the template via _apply_cluster_portability if the cascade-test
+    # image is used; on A0 it's set but won't be honoured by 1.1.1's vLLM).
+    for svc in ("VllmPrefillWorker", "VllmDecodeWorker"):
+        spec[svc].set_env_var("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "30")
+
+    # Wire model cache
+    model_cache_pvc = cfg.getoption("--model-cache-pvc")
+    if model_cache_pvc:
+        spec.enable_model_cache(model_cache_pvc)
+
+    served_model = spec["VllmDecodeWorker"].model
+
+    # Production-shape ISL/OSL distribution (matches observe handoff
+    # _PROD_SEQ_DIST: p50 ~1600, p99 ~7000, OSL ~200). 6 buckets with the
+    # lognormal-ish shape production traffic actually follows. Reuses the
+    # module-level constant defined above.
+    def _load(
+        name,
+        concurrency,
+        duration_minutes,
+        *,
+        warmup_concurrency=None,
+        ramp_seconds=None,
+        bursty=False,
+    ):
+        """LoadConfig with production-shape seq_dist and optional ramp /
+        bursty-arrival shaping. Wraps `_cascade_load` then overrides
+        seq_dist + ramp fields."""
+        cfg = _cascade_load(
+            served_model=served_model,
+            concurrency=concurrency,
+            duration_minutes=duration_minutes,
+            name=name,
+        )
+        cfg.seq_dist = _PROD_SEQ_DIST
+        if warmup_concurrency is not None:
+            cfg.warmup_concurrency = warmup_concurrency
+        if ramp_seconds is not None:
+            cfg.concurrency_ramp_duration = float(ramp_seconds)
+        if bursty:
+            cfg.arrival_pattern = "concurrency_burst"
+            cfg.arrival_smoothness = 0.2  # sharp peaks
+        return cfg
+
+    # ── 10-phase event list. Sequential StartLoad / WaitForLoadCompletion
+    # pairs. AIPerf has ~15-30 s setup per Job, factored into total wall.
+    events = [
+        WaitForModelReady(timeout=2400),
+        PodMemoryPoller(
+            services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
+            interval_s=10,
+        ),
+        # P0 — warmup: 5 min ramp 0 → 80 using AIPerf's built-in linear
+        # ramp. Real ramp shape, not flat-c approximation.
+        StartLoad(
+            load_config=_load(
+                "p0-warmup",
+                80,
+                5.0,
+                warmup_concurrency=10,
+                ramp_seconds=240,
+            ),
+            name="p0-warmup",
+        ),
+        WaitForLoadCompletion(name="p0-warmup"),
+        # P1 — light steady: 25 min at c=80
+        StartLoad(
+            load_config=_load("p1-light-steady", 80, 25.0), name="p1-light-steady"
+        ),
+        WaitForLoadCompletion(name="p1-light-steady"),
+        # P2 — first spike: 3 min at c=220 with bursty arrivals
+        # (production cliff events are bursty, not uniform).
+        StartLoad(
+            load_config=_load("p2-first-spike", 220, 3.0, bursty=True),
+            name="p2-first-spike",
+        ),
+        WaitForLoadCompletion(name="p2-first-spike"),
+        # P3 — moderate steady: 25 min at c=130
+        StartLoad(
+            load_config=_load("p3-moderate-steady", 130, 25.0),
+            name="p3-moderate-steady",
+        ),
+        WaitForLoadCompletion(name="p3-moderate-steady"),
+        # P4 — wave: 10 min oscillation approximated as 5 × 2 min segments
+        # peaks-troughs (140 → 200 → 140 → 80 → 140) instead of continuous
+        # sine. Implementation limitation: ManagedLoad single-concurrency.
+        StartLoad(load_config=_load("p4-wave-1", 140, 2.0), name="p4-wave-1"),
+        WaitForLoadCompletion(name="p4-wave-1"),
+        StartLoad(load_config=_load("p4-wave-2", 200, 2.0), name="p4-wave-2"),
+        WaitForLoadCompletion(name="p4-wave-2"),
+        StartLoad(load_config=_load("p4-wave-3", 140, 2.0), name="p4-wave-3"),
+        WaitForLoadCompletion(name="p4-wave-3"),
+        StartLoad(load_config=_load("p4-wave-4", 80, 2.0), name="p4-wave-4"),
+        WaitForLoadCompletion(name="p4-wave-4"),
+        StartLoad(load_config=_load("p4-wave-5", 140, 2.0), name="p4-wave-5"),
+        WaitForLoadCompletion(name="p4-wave-5"),
+        # P5 — second spike: 3 min at c=260 with bursty arrivals.
+        StartLoad(
+            load_config=_load("p5-second-spike", 260, 3.0, bursty=True),
+            name="p5-second-spike",
+        ),
+        WaitForLoadCompletion(name="p5-second-spike"),
+        # P6 — heavy steady: 25 min at c=170 (high band, sub-cliff)
+        StartLoad(
+            load_config=_load("p6-heavy-steady", 170, 25.0), name="p6-heavy-steady"
+        ),
+        WaitForLoadCompletion(name="p6-heavy-steady"),
+        # P7 — clustered spikes: long-background at c=170 + 5 additive
+        # bursty spikes at c=110 (so total = 280 during spikes), each 60 s.
+        # Total wall ~5 min (5 spikes, no gap between them — back-to-back).
+        StartLoad(load_config=_load("p7-bg-170", 170, 5.0), name="p7-bg-170"),
+        StartLoad(
+            load_config=_load("p7-spike-1", 110, 1.0, bursty=True),
+            name="p7-spike-1",
+        ),
+        WaitForLoadCompletion(name="p7-spike-1"),
+        StartLoad(
+            load_config=_load("p7-spike-2", 110, 1.0, bursty=True), name="p7-spike-2"
+        ),
+        WaitForLoadCompletion(name="p7-spike-2"),
+        StartLoad(
+            load_config=_load("p7-spike-3", 110, 1.0, bursty=True), name="p7-spike-3"
+        ),
+        WaitForLoadCompletion(name="p7-spike-3"),
+        StartLoad(
+            load_config=_load("p7-spike-4", 110, 1.0, bursty=True), name="p7-spike-4"
+        ),
+        WaitForLoadCompletion(name="p7-spike-4"),
+        StartLoad(
+            load_config=_load("p7-spike-5", 110, 1.0, bursty=True), name="p7-spike-5"
+        ),
+        WaitForLoadCompletion(name="p7-spike-5"),
+        WaitForLoadCompletion(name="p7-bg-170"),
+        # P8 — recovery: 10 min at c=20 (sharp drop)
+        StartLoad(load_config=_load("p8-recovery", 20, 10.0), name="p8-recovery"),
+        WaitForLoadCompletion(name="p8-recovery"),
+        # P9 — cooldown: 9 min at c=10 (approximating ramp 20 → 0; framework
+        # doesn't support ramp-down within a single load).
+        StartLoad(load_config=_load("p9-cooldown", 10, 9.0), name="p9-cooldown"),
+        WaitForLoadCompletion(name="p9-cooldown"),
+    ]
+
+    # Pass criteria — observe's full set for R; A4 measured against same;
+    # A0 captures all metrics but expected-to-fail (no gates).
+    checks = [
+        # Framework health
+        LoadApplied(load_name="p1-light-steady", min_requests=200),
+        LoadApplied(load_name="p3-moderate-steady", min_requests=500),
+        LoadApplied(load_name="p6-heavy-steady", min_requests=500),
+        # Cascade signature gates (informational; observe analyses post-hoc)
+        WorkerPanics(
+            services=["VllmDecodeWorker", "VllmPrefillWorker", "Frontend"],
+            acceptable=True,
+        ),
+        RestartCountIncreased(
+            services=["VllmDecodeWorker", "Frontend"],
+            expect_min_increment=0,
+        ),
+    ]
+
+    await run_scenario(
+        deployment_spec=spec,
+        events=events,
+        checks=checks,
+        reports=[
+            FaultToleranceReport(),
+            ErrorBreakdownReport(),
+            PerWorkerLatencyReport(),
+        ],
+        test_name=request.node.name,
+        runtime_env=runtime_env,
+    )
+
+
+# ─── Sanity test for the 3-arm 2hr matrix ──────────────────────────────
+#
+# Short (~15 min) version of test_overload_2hr_realistic using the A4-LL-prod
+# arm config. Validates the full code path end-to-end before committing 2-3
+# hours of cluster time to the real run:
+#   - PV-rebind binding works
+#   - AIPerf job sequencing works for all 10 phase types (warmup-ramp,
+#     steady, spike, wave-segment, clustered-spike, recovery, cooldown)
+#   - Production-shape seq_dist + bursty arrivals + concurrency-ramp all
+#     produce data
+#   - Extracts complete (every load dir gets aiperf data)
+#   - Reports generate
+#
+# Run as:
+#   pytest test_overload.py::test_overload_2hr_sanity \
+#       --namespace neelays-2hr-sanity \
+#       --image nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-cascade-test-7d8eaa70a9-neelays \
+#       -s -v --storage-class dgxc-enterprise-file \
+#       --log-pvc dynamo-ft-logs --model-cache-pvc shared-model-cache \
+#       --skip-service-restart --prefetch-model
+
+
+@pytest.mark.k8s
+@pytest.mark.e2e
+@pytest.mark.sanity
+@pytest.mark.weekly
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+async def test_overload_2hr_sanity(runtime_env, request):
+    """Short (~15 min) sanity for the 3-arm 2hr matrix. Same arm config as
+    A4-LL-prod (cascade-test image + LL + 503 gate + threshold + 30s
+    timeouts). Compressed to one short load per phase type so the full
+    code path runs end-to-end in ~15 min wall.
+
+    Pass = framework health (PVC binds, all 10 phase types run, extracts
+    succeed, reports generate). NOT a workload-correctness test — that's
+    what the full 2hr test_overload_2hr_realistic does.
+    """
+    cfg = request.config
+    image = cfg.getoption("--image") or _CASCADE_TEST_IMAGE
+
+    # A4-LL-prod config: cascade-test image + LL + 503 gate + threshold + 30s
+    os.environ[
+        "DYN_TEST_WORKER_KNOBS"
+    ] = "DYN_TCP_WORKER_POOL_SIZE=256;DYN_TCP_WORK_QUEUE_SIZE=5"
+    fe_knobs = _common_fe_knobs(router_mode="least-loaded")
+
+    spec = _load_dgd("disagg_qwen3_30b_unit_prod")
+    _apply_cascade_dgd(spec, image=image, units=3, abort_timeout_s=30)
+    _apply_cluster_portability(spec)
+    for k, v in fe_knobs.items():
+        spec["Frontend"].set_env_var(k, v)
+    for svc in ("VllmPrefillWorker", "VllmDecodeWorker"):
+        spec[svc].set_env_var("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "30")
+
+    model_cache_pvc = cfg.getoption("--model-cache-pvc")
+    if model_cache_pvc:
+        spec.enable_model_cache(model_cache_pvc)
+
+    served_model = spec["VllmDecodeWorker"].model
+
+    def _load(
+        name,
+        concurrency,
+        duration_minutes,
+        *,
+        warmup_concurrency=None,
+        ramp_seconds=None,
+        bursty=False,
+    ):
+        cfg = _cascade_load(
+            served_model=served_model,
+            concurrency=concurrency,
+            duration_minutes=duration_minutes,
+            name=name,
+        )
+        cfg.seq_dist = _PROD_SEQ_DIST
+        if warmup_concurrency is not None:
+            cfg.warmup_concurrency = warmup_concurrency
+        if ramp_seconds is not None:
+            cfg.concurrency_ramp_duration = float(ramp_seconds)
+        if bursty:
+            cfg.arrival_pattern = "concurrency_burst"
+            cfg.arrival_smoothness = 0.2
+        return cfg
+
+    # Compressed workload: one short instance of each phase type.
+    # Total ~15 min: 1.5 (warmup-ramp) + 2 (steady) + 1 (spike) + 2 (wave-step)
+    #              + 2 (wave-step) + 1 (spike) + 2 (heavy) + 2 (bg+spike)
+    #              + 1 (recovery) + 1 (cooldown) ≈ 14.5 min + AIPerf overhead.
+    events = [
+        WaitForModelReady(timeout=2400),
+        PodMemoryPoller(
+            services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
+            interval_s=10,
+        ),
+        # Phase-type coverage:
+        StartLoad(
+            load_config=_load(
+                "p0-warmup", 80, 1.5, warmup_concurrency=10, ramp_seconds=60
+            ),
+            name="p0-warmup",
+        ),
+        WaitForLoadCompletion(name="p0-warmup"),
+        StartLoad(
+            load_config=_load("p1-light-steady", 80, 2.0), name="p1-light-steady"
+        ),
+        WaitForLoadCompletion(name="p1-light-steady"),
+        StartLoad(
+            load_config=_load("p2-first-spike", 220, 1.0, bursty=True),
+            name="p2-first-spike",
+        ),
+        WaitForLoadCompletion(name="p2-first-spike"),
+        # Single 2-segment wave (vs 5 in full test)
+        StartLoad(load_config=_load("p4-wave-up", 200, 1.0), name="p4-wave-up"),
+        WaitForLoadCompletion(name="p4-wave-up"),
+        StartLoad(load_config=_load("p4-wave-down", 80, 1.0), name="p4-wave-down"),
+        WaitForLoadCompletion(name="p4-wave-down"),
+        StartLoad(
+            load_config=_load("p5-second-spike", 260, 1.0, bursty=True),
+            name="p5-second-spike",
+        ),
+        WaitForLoadCompletion(name="p5-second-spike"),
+        # Clustered-spike pattern: bg + 1 additive spike (vs 5 in full)
+        StartLoad(load_config=_load("p7-bg-170", 170, 2.0), name="p7-bg-170"),
+        StartLoad(
+            load_config=_load("p7-spike-1", 110, 1.0, bursty=True),
+            name="p7-spike-1",
+        ),
+        WaitForLoadCompletion(name="p7-spike-1"),
+        WaitForLoadCompletion(name="p7-bg-170"),
+        StartLoad(load_config=_load("p8-recovery", 20, 1.0), name="p8-recovery"),
+        WaitForLoadCompletion(name="p8-recovery"),
+        StartLoad(load_config=_load("p9-cooldown", 10, 1.0), name="p9-cooldown"),
+        WaitForLoadCompletion(name="p9-cooldown"),
+    ]
+
+    # Framework-health checks only — short loads, low request counts.
+    checks = [
+        LoadApplied(load_name="p1-light-steady", min_requests=50),
+        LoadApplied(load_name="p7-bg-170", min_requests=50),
+        WorkerPanics(
+            services=["VllmDecodeWorker", "VllmPrefillWorker", "Frontend"],
+            acceptable=True,
+        ),
+        RestartCountIncreased(
+            services=["VllmDecodeWorker", "Frontend"],
+            expect_min_increment=0,
+        ),
+    ]
+
+    await run_scenario(
+        deployment_spec=spec,
+        events=events,
+        checks=checks,
+        reports=[
+            FaultToleranceReport(),
+            ErrorBreakdownReport(),
+            PerWorkerLatencyReport(),
+        ],
+        test_name=request.node.name,
+        runtime_env=runtime_env,
+    )
+
+
+# ── 30-min compressed prod-config A/B/R test ────────────────────────────
+#
+# Per observe 2026-05-27-final-prod-config-test handoff (compressed from
+# their 40 min cliff to 30 min for cert-budget). Tests whether restoring
+# the prefix-scoring router signal on the 1.2 cascade-test image
+# reintroduces the cycle-6 FE memory leak. A0 is the true baseline.
+#
+# Workload: production-shape ISL/OSL (_PROD_SEQ_DIST close to prod
+# p50=2000/p95=7500) with above/below-steady stress:
+#   P0 warmup 2m → P1 c=80 4m (BELOW) → P2 c=220 bursty 1m (ABOVE cliff)
+#   → P3 c=130 4m (MID) → P4 wave 80↔200 4m → P5 c=260 bursty 1m
+#   (HARDER) → P6 c=170 6m (HIGH sub-cliff) → P7 3× c=280 spikes on
+#   170 bg 3m → P8 c=20 3m (BELOW) → P9 c=10 2m. Total 30 min.
+#
+# Engine knobs (R-cons + R-agg only — A0 stays stock 1.1.1 defaults):
+#   Prefill: --max-num-batched-tokens=65536 (THE key knob), --max-num-seqs=64,
+#            --gpu-memory-utilization=0.90
+#   Decode:  --max-num-batched-tokens=256, --max-num-seqs=256, gpu-mem=0.90
+#   Pool=256 (engine-matched), queue=32.
+
+
+@pytest.mark.k8s
+@pytest.mark.e2e
+@pytest.mark.weekly
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize(
+    "arm_label",
+    ["A0-baseline", "R-cons", "R-agg"],
+)
+async def test_overload_30min_prod_config(runtime_env, request, arm_label):
+    """30-min A/B/R: A0 baseline vs R-cons (current recommendation) vs
+    R-agg (scoring restored). See module-level comment for the workload."""
+    cfg = request.config
+
+    if arm_label == "A0-baseline":
+        image = _A0_BASELINE_IMAGE
+        os.environ["DYN_TEST_WORKER_KNOBS"] = ""
+        fe_knobs = _common_fe_knobs(router_mode="least-loaded")
+        kv_events_engine = None
+        production_tuned_engine = False
+    elif arm_label == "R-cons":
+        image = _CASCADE_TEST_IMAGE
+        os.environ[
+            "DYN_TEST_WORKER_KNOBS"
+        ] = "DYN_TCP_WORKER_POOL_SIZE=256;DYN_TCP_WORK_QUEUE_SIZE=32"
+        fe_knobs = _common_fe_knobs(router_mode="kv")
+        fe_knobs["DYN_ROUTER_USE_KV_EVENTS"] = "false"
+        fe_knobs["DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT"] = "0.0"
+        fe_knobs["DYN_ROUTER_PREFILL_LOAD_SCALE"] = "0.0"
+        kv_events_engine = "false"
+        production_tuned_engine = True
+    elif arm_label == "R-agg":
+        image = _CASCADE_TEST_IMAGE
+        os.environ[
+            "DYN_TEST_WORKER_KNOBS"
+        ] = "DYN_TCP_WORKER_POOL_SIZE=256;DYN_TCP_WORK_QUEUE_SIZE=32"
+        fe_knobs = _common_fe_knobs(router_mode="kv")
+        fe_knobs["DYN_ROUTER_USE_KV_EVENTS"] = "true"
+        fe_knobs["DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT"] = "0.4"
+        fe_knobs["DYN_ROUTER_PREFILL_LOAD_SCALE"] = "1.5"
+        kv_events_engine = "true"
+        production_tuned_engine = True
+    else:
+        raise ValueError(f"unknown arm_label: {arm_label!r}")
+
+    spec = _load_dgd("disagg_qwen3_30b_unit_prod")
+    _apply_cascade_dgd(spec, image=image, units=3, abort_timeout_s=30)
+    _apply_cluster_portability(spec)
+
+    for k, v in fe_knobs.items():
+        spec["Frontend"].set_env_var(k, v)
+
+    for svc in ("VllmPrefillWorker", "VllmDecodeWorker"):
+        spec[svc].set_env_var("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "30")
+
+    if production_tuned_engine:
+        spec["VllmPrefillWorker"].set_arg("--max-num-batched-tokens", "65536")
+        spec["VllmPrefillWorker"].set_arg("--max-num-seqs", "64")
+        spec["VllmPrefillWorker"].set_arg("--gpu-memory-utilization", "0.90")
+        spec["VllmDecodeWorker"].set_arg("--max-num-batched-tokens", "256")
+        spec["VllmDecodeWorker"].set_arg("--max-num-seqs", "256")
+        spec["VllmDecodeWorker"].set_arg("--gpu-memory-utilization", "0.90")
+        if kv_events_engine is not None:
+            kv_events_arg = f'{{"enable_kv_cache_events":{kv_events_engine}}}'
+            for svc in ("VllmPrefillWorker", "VllmDecodeWorker"):
+                spec[svc].set_arg("--kv-events-config", kv_events_arg)
+
+    model_cache_pvc = cfg.getoption("--model-cache-pvc")
+    if model_cache_pvc:
+        spec.enable_model_cache(model_cache_pvc)
+
+    served_model = spec["VllmDecodeWorker"].model
+
+    def _load(
+        name,
+        concurrency,
+        duration_minutes,
+        *,
+        warmup_concurrency=None,
+        ramp_seconds=None,
+        bursty=False,
+    ):
+        c = _cascade_load(
+            served_model=served_model,
+            concurrency=concurrency,
+            duration_minutes=duration_minutes,
+            name=name,
+        )
+        c.seq_dist = _PROD_SEQ_DIST
+        if warmup_concurrency is not None:
+            c.warmup_concurrency = warmup_concurrency
+        if ramp_seconds is not None:
+            c.concurrency_ramp_duration = float(ramp_seconds)
+        if bursty:
+            c.arrival_pattern = "concurrency_burst"
+            c.arrival_smoothness = 0.2
+        return c
+
+    events = [
+        WaitForModelReady(timeout=2400),
+        PodMemoryPoller(
+            services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
+            interval_s=10,
+        ),
+        StartLoad(
+            load_config=_load(
+                "p0-warmup", 80, 2.0, warmup_concurrency=10, ramp_seconds=90
+            ),
+            name="p0-warmup",
+        ),
+        WaitForLoadCompletion(name="p0-warmup"),
+        StartLoad(
+            load_config=_load("p1-light-steady", 80, 4.0), name="p1-light-steady"
+        ),
+        WaitForLoadCompletion(name="p1-light-steady"),
+        StartLoad(
+            load_config=_load("p2-first-spike", 220, 1.0, bursty=True),
+            name="p2-first-spike",
+        ),
+        WaitForLoadCompletion(name="p2-first-spike"),
+        StartLoad(
+            load_config=_load("p3-moderate-steady", 130, 4.0), name="p3-moderate-steady"
+        ),
+        WaitForLoadCompletion(name="p3-moderate-steady"),
+        StartLoad(load_config=_load("p4-wave-up", 200, 2.0), name="p4-wave-up"),
+        WaitForLoadCompletion(name="p4-wave-up"),
+        StartLoad(load_config=_load("p4-wave-down", 80, 2.0), name="p4-wave-down"),
+        WaitForLoadCompletion(name="p4-wave-down"),
+        StartLoad(
+            load_config=_load("p5-second-spike", 260, 1.0, bursty=True),
+            name="p5-second-spike",
+        ),
+        WaitForLoadCompletion(name="p5-second-spike"),
+        StartLoad(
+            load_config=_load("p6-heavy-steady", 170, 6.0), name="p6-heavy-steady"
+        ),
+        WaitForLoadCompletion(name="p6-heavy-steady"),
+        StartLoad(load_config=_load("p7-bg-170", 170, 3.0), name="p7-bg-170"),
+        StartLoad(
+            load_config=_load("p7-spike-1", 110, 1.0, bursty=True), name="p7-spike-1"
+        ),
+        WaitForLoadCompletion(name="p7-spike-1"),
+        StartLoad(
+            load_config=_load("p7-spike-2", 110, 1.0, bursty=True), name="p7-spike-2"
+        ),
+        WaitForLoadCompletion(name="p7-spike-2"),
+        StartLoad(
+            load_config=_load("p7-spike-3", 110, 1.0, bursty=True), name="p7-spike-3"
+        ),
+        WaitForLoadCompletion(name="p7-spike-3"),
+        WaitForLoadCompletion(name="p7-bg-170"),
+        StartLoad(load_config=_load("p8-recovery", 20, 3.0), name="p8-recovery"),
+        WaitForLoadCompletion(name="p8-recovery"),
+        StartLoad(load_config=_load("p9-cooldown", 10, 2.0), name="p9-cooldown"),
+        WaitForLoadCompletion(name="p9-cooldown"),
+    ]
+
+    checks = [
+        LoadApplied(load_name="p1-light-steady", min_requests=100),
+        LoadApplied(load_name="p6-heavy-steady", min_requests=200),
+        WorkerPanics(
+            services=["VllmDecodeWorker", "VllmPrefillWorker", "Frontend"],
+            acceptable=True,
+        ),
+        RestartCountIncreased(
+            services=["VllmDecodeWorker", "Frontend"],
+            expect_min_increment=0,
+        ),
+    ]
+
+    await run_scenario(
+        deployment_spec=spec,
+        events=events,
+        checks=checks,
+        reports=[
+            FaultToleranceReport(),
+            ErrorBreakdownReport(),
+            PerWorkerLatencyReport(),
+        ],
+        test_name=request.node.name,
+        runtime_env=runtime_env,
+    )

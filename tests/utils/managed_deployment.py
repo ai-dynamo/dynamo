@@ -1418,6 +1418,10 @@ class ManagedDeployment:
             )
             self._logger.info(self.deployment_spec.spec())
             self._logger.info(f"Deployment Started {self._deployment_name}")
+            # Capture the as-applied DGD spec + an env snapshot at the canonical
+            # location so post-hoc analysis has a single, durable record of
+            # what actually deployed.
+            self._write_deployment_provenance()
         except exceptions.ApiException as e:
             if e.status == 409:  # Already exists
                 self._logger.info(f"Deployment {self._deployment_name} already exists")
@@ -1426,6 +1430,88 @@ class ManagedDeployment:
                     f"Failed to create deployment {self._deployment_name}: {e}"
                 )
                 raise
+
+    def _write_deployment_provenance(self) -> None:
+        """Write ``dgd_spec.yaml`` + ``env_snapshot.json`` at the test's
+        canonical log_dir.
+
+        Why: the per-pod ``<pod>.yaml`` files capture pod-level specs, but the
+        full DGD as-applied (with all top-level envs + image tags resolved) is
+        not separately persisted. ``env_snapshot.json`` adds the framework
+        version + the dgh-703 test repo SHA + run timestamp so a run can be
+        replayed deterministically months later. Single-source-of-truth for
+        "what actually ran"."""
+        import json
+        import os
+        import subprocess
+        import time
+
+        try:
+            import yaml
+        except Exception:
+            yaml = None
+
+        log_dir = getattr(self, "log_dir", None)
+        if not log_dir:
+            return
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            spec = self.deployment_spec.spec()
+            if yaml is not None:
+                spec_path = os.path.join(log_dir, "dgd_spec.yaml")
+                with open(spec_path, "w") as fh:
+                    yaml.safe_dump(spec, fh, default_flow_style=False, sort_keys=False)
+            else:
+                spec_path = os.path.join(log_dir, "dgd_spec.json")
+                with open(spec_path, "w") as fh:
+                    json.dump(spec, fh, indent=2)
+
+            # Best-effort git SHA from the framework checkout
+            framework_sha = ""
+            try:
+                framework_sha = (
+                    subprocess.check_output(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=os.path.dirname(os.path.abspath(__file__)),
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                    )
+                    .decode()
+                    .strip()
+                )
+            except Exception:
+                pass
+
+            # Collect image tags per service for quick provenance
+            images = {}
+            try:
+                for svc_name, svc in (self.deployment_spec.services or {}).items():
+                    img = (
+                        (svc or {})
+                        .get("extraPodSpec", {})
+                        .get("mainContainer", {})
+                        .get("image")
+                    )
+                    if img:
+                        images[svc_name] = img
+            except Exception:
+                pass
+
+            snap = {
+                "test_name": getattr(self, "_test_name", "")
+                or getattr(self, "test_name", ""),
+                "deployment_name": self._deployment_name,
+                "namespace": self.namespace,
+                "log_dir": log_dir,
+                "framework_sha": framework_sha,
+                "deploy_started_epoch_s": int(time.time()),
+                "deploy_started_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "images_per_service": images,
+            }
+            with open(os.path.join(log_dir, "env_snapshot.json"), "w") as fh:
+                json.dump(snap, fh, indent=2)
+        except Exception as e:
+            self._logger.warning(f"_write_deployment_provenance: {e}")
 
     async def trigger_rolling_upgrade(self, service_names: list[str]):
         """Trigger a rolling upgrade by stamping a unique env var on each
@@ -1575,8 +1661,18 @@ class ManagedDeployment:
     def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
         """Capture per-pod artifacts at a point in time.
 
-        Writes the pod manifest and an HTTP-metrics scrape only. The
-        container's stdout/stderr is already captured continuously to
+        Writes:
+          - ``<pod><suffix>.yaml``         — pod object (spec + status)
+          - ``<pod><suffix>.events.yaml``  — Kubernetes Event resources
+            referencing this pod (probe failures, kill reasons, scheduling
+            transitions, etc.). Events are a separate API resource from
+            the pod object, so we fetch them explicitly. Diagnosing
+            probe-restart cascades requires these — the pod's
+            ``status.containerStatuses[*].lastState`` only tells us THAT
+            a restart happened, not WHY.
+          - ``<pod><suffix>.metrics<suffix>.log`` — HTTP /metrics scrape
+
+        The container's stdout/stderr is already captured continuously to
         the log-collection PVC by the tee wrapper, so we don't grab
         ``pod.logs()`` here — it would just duplicate what the PVC has.
         That also avoids empty ``.previous.log`` files (the kubectl
@@ -1591,7 +1687,57 @@ class ManagedDeployment:
                 f.write(pod.to_yaml())
         except Exception as e:
             self._logger.error(e)
+        self._write_pod_events_yaml(pod, directory, suffix)
         self._get_pod_metrics(pod, service_name, suffix)
+
+    def _write_pod_events_yaml(
+        self, pod: Pod, directory: str, suffix: str = ""
+    ) -> None:
+        """Dump Kubernetes Event resources referencing this pod.
+
+        Field-selector ``involvedObject.name=<pod>`` narrows to the events
+        attached to this pod. Output is a YAML list of Event objects, one
+        per event, sorted by ``lastTimestamp``. This is the data behind
+        kubectl describe's Events table — probe failures, kill reasons,
+        schedule events.
+        """
+        try:
+            events = list(
+                kr8s.get(
+                    "events",
+                    namespace=pod.namespace,
+                    field_selector=f"involvedObject.name={pod.name}",
+                )
+            )
+        except Exception as e:
+            self._logger.warning(
+                f"_write_pod_events_yaml: failed to fetch events for {pod.name}: {e}"
+            )
+            return
+
+        if not events:
+            return
+
+        try:
+            # Render each event as its raw API object (a dict). Sorted by
+            # lastTimestamp so the file reads chronologically.
+            payload = sorted(
+                (ev.raw for ev in events),
+                key=lambda e: (
+                    e.get("lastTimestamp")
+                    or e.get("eventTime")
+                    or e.get("metadata", {}).get("creationTimestamp", "")
+                ),
+            )
+            out_path = os.path.join(directory, f"{pod.name}{suffix}.events.yaml")
+            with open(out_path, "w") as fh:
+                yaml.safe_dump_all(
+                    payload, fh, default_flow_style=False, sort_keys=False
+                )
+        except Exception as e:
+            self._logger.warning(
+                f"_write_pod_events_yaml: failed to write events for {pod.name}: {e}"
+            )
 
     def _get_service_logs(self, service_name=None, suffix=""):
         service_names = None
@@ -1605,32 +1751,30 @@ class ManagedDeployment:
                 self.get_pod_manifest_logs_metrics(service, pod, suffix)
 
     def _get_pod_metrics(self, pod: Pod, service_name: str, suffix=""):
-        directory = os.path.join(self.log_dir, service_name)
+        """Fetch HTTP /metrics from a pod and write under the lowercased
+        per-service dir so all per-pod artifacts (manifest, metrics,
+        stdout) cluster under one path.
+        """
+        directory = os.path.join(self.log_dir, service_name.lower())
         os.makedirs(directory, exist_ok=True)
-        port = None
-        if service_name == self.frontend_service_name:
-            port = self.deployment_spec.port
-        else:
-            port = self.deployment_spec.system_port
+
+        port = (
+            self.deployment_spec.port
+            if service_name == self.frontend_service_name
+            else self.deployment_spec.system_port
+        )
 
         pf = self.port_forward(pod, port)
-
         if not pf:
             self._logger.error(f"Unable to get metrics for {service_name}")
             return
 
         content = None
-
         try:
-            url = f"http://localhost:{pf.local_port}/metrics"
-
-            response = requests.get(url, timeout=30)
-            content = None
-            try:
-                content = response.text
-            except ValueError:
-                pass
-
+            response = requests.get(
+                f"http://localhost:{pf.local_port}/metrics", timeout=30
+            )
+            content = response.text
         except Exception as e:
             self._logger.error(str(e))
 
@@ -2000,6 +2144,15 @@ class ManagedDeployment:
                 await self._extract_logs_from_pvc()
             except Exception as e:
                 self._logger.warning(f"log extraction failed: {e}")
+            # Capture the FINAL /metrics scrape of every pod (raw, no parsing).
+            # Each pod's full metric text lands at
+            # ``<log_dir>/<service>/<pod>_<ts>.metrics.final.log`` —
+            # downstream verifiers / observe tooling pull the metric names
+            # they care about.
+            try:
+                await self._capture_metrics(suffix=".final")
+            except Exception as e:
+                self._logger.warning(f"final metrics scrape failed: {e}")
             try:
                 await self._cleanup_orphaned_jobs()
             except Exception as e:
@@ -2517,44 +2670,34 @@ class ManagedDeployment:
         with open(template_path, "r") as f:
             return f.read()
 
-    async def _get_pod_metrics(
-        self, pod: Pod, service_name: str, suffix="", use_services_dir: bool = False
-    ):
-        """Fetch HTTP metrics. Async - needs exec for timestamp.
+    async def _capture_metrics(self, suffix: str = ".final") -> None:
+        """Scrape ``/metrics`` of every pod across every service.
 
-        Writes alongside the per-pod manifest in the lowercased service
-        dir so all per-pod artifacts (manifest, metrics, stdout) are
-        under one dir per pod. ``use_services_dir`` is kept for back-
-        compat callers but the result is the same path either way.
+        Reuses ``_get_pod_metrics`` so output paths match the per-pod manifest
+        layout: ``<log_dir>/<service>/<pod>_<ts>.metrics<suffix>.log``.
+
+        Default suffix ``.final`` means "end-of-test snapshot." Downstream
+        verifiers / observe tooling parse opinions out of these raw dumps —
+        the framework does not pick favorite metric names.
         """
-        directory = os.path.join(self.log_dir, service_name.lower())
-        os.makedirs(directory, exist_ok=True)
-
-        port = (
-            self.deployment_spec.port
-            if service_name == self.frontend_service_name
-            else self.deployment_spec.system_port
-        )
-
-        pf = self.port_forward(pod, port)
-        if not pf:
-            self._logger.error(f"Unable to get metrics for {service_name}")
+        try:
+            service_pods = self.get_pods()
+        except Exception as e:
+            self._logger.warning(f"_capture_metrics: get_pods() failed: {e}")
             return
 
-        content = None
-        try:
-            response = requests.get(
-                f"http://localhost:{pf.local_port}/metrics", timeout=30
-            )
-            content = response.text
-        except Exception as e:
-            self._logger.error(str(e))
+        scraped = 0
+        for service, pods in (service_pods or {}).items():
+            for pod in pods or []:
+                try:
+                    self._get_pod_metrics(pod, service, suffix=suffix)
+                    scraped += 1
+                except Exception as e:
+                    self._logger.warning(f"_capture_metrics: {service}/{pod.name}: {e}")
 
-        if content:
-            timestamp = await self._get_container_timestamp(pod)
-            filename = f"{pod.name}_{timestamp}.metrics{suffix}.log"
-            with open(os.path.join(directory, filename), "w") as f:
-                f.write(content)
+        self._logger.info(
+            f"_capture_metrics: scraped {scraped} pods (suffix={suffix!r})"
+        )
 
     async def _exec_in_pod(
         self, pod: Pod, command: List[str], timeout: float = 10.0

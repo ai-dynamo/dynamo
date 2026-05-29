@@ -1,0 +1,117 @@
+# Matrix arm — leak investigation (image × routing-mode matrix)
+# Image: release-1.2.0 | Routing: kv_prefix
+# Leak-POSITIVE — production-default KV+prefix on newer image
+
+kind: router_memory
+name: release_1_2_0__kv_prefix__disagg__mocker
+description: |
+  Matrix arm: kv_prefix routing on release-1.2.0 mocker-disagg.
+  2 FE × 2 prefill × 2 decode mocker workers, trapezoid load ~30 min.
+  Production ISL/OSL/prefix shape (partial_prefix, ~37% prefix-hit).
+
+labels:
+  image_label: release-1.2.0
+  router_mode: kv_prefix
+  traffic_shape: partial_prefix
+  deployment: disagg
+  backend: mocker
+
+deployment:
+  backend: mocker
+  topology: disagg
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-afa8f7b7
+  replicas:
+    Frontend: 10
+    prefill: 20
+    decode: 10
+
+router:
+  mode: kv
+  knobs:
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "1.0"
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ROUTER_REPLICA_SYNC: "true"
+    DYN_ROUTER_TEMPERATURE: "0.0"
+    DYN_ROUTER_TRACK_ACTIVE_BLOCKS: "true"
+
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 15
+    prefix_prompt_length: 600
+  rungs:
+    - name: warmup
+      concurrency: 40
+      duration_minutes: 1.0
+    - name: ramp1
+      concurrency: 120
+      duration_minutes: 2.5
+    - name: ramp2
+      concurrency: 180
+      duration_minutes: 2.5
+    - name: steady
+      concurrency: 120
+      duration_minutes: 18.0
+    - name: rampdown1
+      concurrency: 180
+      duration_minutes: 2.5
+    - name: rampdown2
+      concurrency: 120
+      duration_minutes: 2.5
+    - name: final
+      concurrency: 40
+      duration_minutes: 1.0
+  common:
+    request_timeout_seconds: 30
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+events:
+  - kind: WaitForModelReady
+    timeout: 900
+  - kind: PodMemoryPoller
+    services: [Frontend, prefill, decode]
+    interval_s: 15
+  - kind: StartLoad
+    load_ref: warmup
+  - kind: WaitForLoadCompletion
+    name: warmup
+  - kind: StartLoad
+    load_ref: ramp1
+  - kind: WaitForLoadCompletion
+    name: ramp1
+  - kind: StartLoad
+    load_ref: ramp2
+  - kind: WaitForLoadCompletion
+    name: ramp2
+  - kind: StartLoad
+    load_ref: steady
+  - kind: WaitForLoadCompletion
+    name: steady
+  - kind: StartLoad
+    load_ref: rampdown1
+  - kind: WaitForLoadCompletion
+    name: rampdown1
+  - kind: StartLoad
+    load_ref: rampdown2
+  - kind: WaitForLoadCompletion
+    name: rampdown2
+  - kind: StartLoad
+    load_ref: final
+  - kind: WaitForLoadCompletion
+    name: final
+
+reports:
+  - PerWorkerLatencyReport
+
+checks:
+  - kind: LoadApplied
+    load_name: steady
+    min_requests: 1000
+
+expectations:
+  fe_memory_growth_mb_per_min:
+    expected_range: [20, 35]
+    notes: |
+      Leak-POSITIVE — production-default KV+prefix on newer image.

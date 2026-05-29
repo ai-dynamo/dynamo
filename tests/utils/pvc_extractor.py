@@ -72,7 +72,7 @@ class PvcExtractor:
         local_output_dir: str,
         job_prefix: str = "pvc-extract",
         ready_timeout: int = 60,
-        tar_timeout: int = 600,
+        tar_timeout: int = 1800,
         cat_timeout: int = 120,
     ) -> dict:
         """Extract files from a PVC to a local directory.

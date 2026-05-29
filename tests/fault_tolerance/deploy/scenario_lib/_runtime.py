@@ -247,12 +247,38 @@ def apply_pull_secrets(spec, secrets: list[str] = None) -> None:
                 ips.append({"name": sec})
 
 
+# Transport-level env vars that must be consistent across FE + every worker.
+# Listed here so that ``apply_router`` propagates them to ALL services, not
+# just Frontend — otherwise the FE-only setting causes the EventPublisher on
+# each worker to silently fall back to the default transport (NATS), which
+# the FE (configured for ZMQ) then ignores → 0 kv_metrics events flow worker
+# → FE → busy-detection dies → routing layer's threshold-based exclusion
+# becomes a no-op. Add new transport-level envs here, not to a worker-only
+# block.
+_TRANSPORT_LEVEL_ENVS = frozenset(
+    {
+        "DYN_EVENT_PLANE",
+        "DYN_DISCOVERY_BACKEND",
+        "DYN_STORE_KV",
+    }
+)
+
+
 def apply_router(spec, router: Router) -> None:
-    """Apply DYN_ROUTER_MODE + DYN_ROUTER_* knobs to the Frontend."""
+    """Apply DYN_ROUTER_MODE + DYN_ROUTER_* knobs to the Frontend.
+
+    Transport-level envs (see ``_TRANSPORT_LEVEL_ENVS``) are additionally
+    propagated to every worker service so the event-plane is consistent
+    across the cluster.
+    """
     fe = spec["Frontend"]
     fe.set_env_var("DYN_ROUTER_MODE", router.mode)
     for key, value in router.knobs.items():
         fe.set_env_var(key, value)
+        # Transport-level envs must be on every service, not just FE.
+        if key in _TRANSPORT_LEVEL_ENVS:
+            for svc in spec.worker_services():
+                spec[svc].set_env_var(key, value)
 
 
 def apply_admission(spec, admission: Optional[Admission]) -> None:

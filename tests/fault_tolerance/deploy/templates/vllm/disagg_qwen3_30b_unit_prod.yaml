@@ -92,6 +92,12 @@ spec:
         # NEXT_STEPS_FOR_TEST_AGENT P0.1 (sanity-suite work).
         - name: NIXL_TELEMETRY_ENABLE
           value: "y"
+        # Bound the vLLM execute-model wait so a stalled engine surfaces as
+        # EngineDeadError + worker restart within 30s under cascade pressure
+        # (per memory: reference_vllm_force_engine_death). Without this the
+        # default is effectively unbounded and stalls mask the cascade signal.
+        - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+          value: "30"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
@@ -173,6 +179,12 @@ spec:
         # NEXT_STEPS_FOR_TEST_AGENT P0.1 (sanity-suite work).
         - name: NIXL_TELEMETRY_ENABLE
           value: "y"
+        # Bound the vLLM execute-model wait so a stalled engine surfaces as
+        # EngineDeadError + worker restart within 30s under cascade pressure
+        # (per memory: reference_vllm_force_engine_death). Without this the
+        # default is effectively unbounded and stalls mask the cascade signal.
+        - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+          value: "30"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1

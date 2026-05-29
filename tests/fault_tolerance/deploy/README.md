@@ -398,7 +398,7 @@ What this harness covers today, and what it doesn't:
 - ❌ **SLA assertions** — `MaxErrors=1_000_000` is the practical default for vllm fault tests because aiperf retries 30 k+ on a closed socket. Real per-mode SLA bounds (e.g. "p99 latency ≤ 1.2× baseline within 60 s of recovery") need richer checks.
 - ❌ **Recovery quality assertions** — recovery time is captured but not bounded by mode (target: pod-kill ≤ 90 s, partition recovery ≤ 5 s post-lift).
 - ⚠️ **Misleading metric**: `dynamo_frontend_model_migration_total` increments on the *initial-attempt* migratable failure even when `migration_limit=0` (no retry actually performed). Reported during the May 5 partition validation; needs renaming or a guard upstream.
-- ⚠️ **Framework `_get_pod_metrics` snapshot has a sync/async dual-method bug** — the cleanup-time scrape lands in a capitalized `Frontend/` directory while everything else is lowercased, so the snapshot file is silently lost. aiperf's continuous scrape compensates but the framework's own snapshot is unreliable. Tracked as a follow-up.
+- ✅ **End-of-test `/metrics` snapshot** captured via `_capture_metrics(suffix=".final")` in `ManagedDeployment.__aexit__` for every pod across every service. Files land at `<log_dir>/<service>/<pod>_<ts>.metrics.final.log`. Periodic per-FE distribution data comes from aiperf's server-metrics scrape.
 
 #### Infrastructure constraints
 - ⚠️ **Privileged + hostNetwork pod** required for `NetworkPartition` (the `conntrack -D` flusher). Won't run on clusters with cluster-wide PSA or OPA blocking those. Mitigations: namespace exception, vcluster, or move to the fault-injection-service (which centralises the privileged daemon).

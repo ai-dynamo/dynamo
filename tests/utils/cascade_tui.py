@@ -54,8 +54,10 @@ except ImportError:
     HAVE_TEXTUAL = False
 
 try:
-    from aiperf.common.models import ErrorDetails
-    from aiperf.server_metrics.data_collector import ServerMetricsDataCollector
+    from aiperf.common.models import ErrorDetails  # noqa: F401
+    from aiperf.server_metrics.data_collector import (  # noqa: F401
+        ServerMetricsDataCollector,
+    )
 
     HAVE_AIPERF = True
 except ImportError:
@@ -110,14 +112,31 @@ class Worker:
     running: float = 0.0
     waiting: float = 0.0
     kv_pct: float = 0.0
+    nixl_p50: float = 0.0
     nixl_p99: float = 0.0
     preempt_total: float = 0.0
+    ttft_p50: float = 0.0
+    ttft_p99: float = 0.0
+    itl_p50: float = 0.0
+    itl_p99: float = 0.0
+    e2e_p50: float = 0.0
+    e2e_p99: float = 0.0
+    rps: float = 0.0
+    mem_mib: float = 0.0
     last_update: float = 0.0
+    # Counter-tracking for RPS (delta / time)
+    _last_req_count: float = 0.0
+    _last_req_t: float = 0.0
     # Rolling history for sparklines (1 sample/sec, ~60s)
     history_running: deque = field(default_factory=lambda: deque(maxlen=60))
     history_waiting: deque = field(default_factory=lambda: deque(maxlen=60))
     history_kv: deque = field(default_factory=lambda: deque(maxlen=60))
     history_nixl: deque = field(default_factory=lambda: deque(maxlen=60))
+    history_ttft: deque = field(default_factory=lambda: deque(maxlen=60))
+    history_itl: deque = field(default_factory=lambda: deque(maxlen=60))
+    history_e2e: deque = field(default_factory=lambda: deque(maxlen=60))
+    history_rps: deque = field(default_factory=lambda: deque(maxlen=60))
+    history_mem: deque = field(default_factory=lambda: deque(maxlen=60))
 
 
 async def discover_workers(
@@ -164,13 +183,24 @@ def _free_port() -> int:
     return port
 
 
+def _remote_metrics_port(worker: Worker) -> int:
+    """Frontend pods expose /metrics on :8000 (OpenAI port shared with
+    dynamo_frontend_* gauges); worker pods (Prefill/Decode) publish
+    vllm:* metrics on :9090."""
+    if worker.component == "Frontend":
+        return 8000
+    return 9090
+
+
 def start_port_forward(
     worker: Worker, namespace: str, kube_context: Optional[str]
 ) -> None:
-    """Spawn `kubectl port-forward` from a free local port to pod's :9090."""
+    """Spawn `kubectl port-forward` from a free local port to pod's
+    metrics port (8000 for Frontend, 9090 for workers)."""
     if not shutil.which("kubectl"):
         raise RuntimeError("kubectl not on PATH — needed for port-forward")
     worker.local_port = _free_port()
+    remote_port = _remote_metrics_port(worker)
     cmd = ["kubectl"]
     if kube_context:
         cmd += ["--context", kube_context]
@@ -179,7 +209,7 @@ def start_port_forward(
         namespace,
         "port-forward",
         f"pod/{worker.pod_name}",
-        f"{worker.local_port}:9090",
+        f"{worker.local_port}:{remote_port}",
     ]
     # Discard kubectl's stdout/stderr — chatty; we observe via scraping.
     worker.pf_proc = subprocess.Popen(
@@ -274,6 +304,246 @@ def update_worker_from_record(worker: Worker, record) -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Direct HTTP scrape — replaces aiperf ServerMetricsDataCollector
+# Robust against aiperf API drift; parses Prometheus exposition format inline.
+
+
+def _parse_prom_text(text: str) -> dict:
+    """Minimal Prometheus exposition-format parser.
+
+    Returns ``{metric_name: {(label_tuple): value}}`` for gauges/counters,
+    plus ``{metric_name + "_bucket": {(label_tuple_without_le, le): count}}``
+    for histograms. Skips HELP/TYPE comments and malformed lines.
+
+    Far simpler than pulling in `prometheus_client` — we only need a handful
+    of metric families and don't care about distinguishing gauge from counter.
+    """
+    out: dict = {}
+    for line in text.splitlines():
+        if not line or line[0] == "#":
+            continue
+        # name{labels} value [timestamp]
+        if "{" in line:
+            name, rest = line.split("{", 1)
+            labels_str, val_str = rest.split("}", 1)
+            val_str = val_str.strip().split()[0]
+            try:
+                val = float(val_str)
+            except ValueError:
+                continue
+            labels = {}
+            for kv in labels_str.split(","):
+                if "=" not in kv:
+                    continue
+                k, v = kv.split("=", 1)
+                labels[k.strip()] = v.strip().strip('"')
+            out.setdefault(name, []).append((labels, val))
+        else:
+            try:
+                name, val_str = line.split(maxsplit=1)
+                val = float(val_str.split()[0])
+            except ValueError:
+                continue
+            out.setdefault(name, []).append(({}, val))
+    return out
+
+
+def _sum_gauge(samples: list, **filter_labels) -> Optional[float]:
+    """Sum values across all samples matching the optional label filters."""
+    if not samples:
+        return None
+    total = 0.0
+    seen = False
+    for labels, val in samples:
+        if any(labels.get(k) != v for k, v in filter_labels.items()):
+            continue
+        total += val
+        seen = True
+    return total if seen else None
+
+
+def _histogram_p99(buckets_samples: list) -> Optional[float]:
+    """Compute p99 from Prometheus histogram bucket samples (le-labeled).
+
+    Aggregates across all label sets by summing bucket counts per `le`.
+    """
+    if not buckets_samples:
+        return None
+    agg: dict[float, float] = {}
+    for labels, val in buckets_samples:
+        le = labels.get("le")
+        if le is None:
+            continue
+        try:
+            le_f = float("inf") if le in ("+Inf", "Inf") else float(le)
+        except ValueError:
+            continue
+        agg[le_f] = agg.get(le_f, 0.0) + val
+    if not agg:
+        return None
+    return histogram_quantile(agg, 0.99)
+
+
+def _histogram_quantiles(buckets_samples: list, *quantiles) -> dict:
+    """Compute multiple quantiles from one aggregated bucket-set.
+
+    Avoids re-walking the per-label samples for each quantile. Returns
+    ``{q: value}`` for each requested q (default p50, p99 if none given).
+    """
+    if not buckets_samples:
+        return {}
+    if not quantiles:
+        quantiles = (0.5, 0.99)
+    agg: dict[float, float] = {}
+    for labels, val in buckets_samples:
+        le = labels.get("le")
+        if le is None:
+            continue
+        try:
+            le_f = float("inf") if le in ("+Inf", "Inf") else float(le)
+        except ValueError:
+            continue
+        agg[le_f] = agg.get(le_f, 0.0) + val
+    if not agg:
+        return {}
+    return {q: histogram_quantile(agg, q) for q in quantiles}
+
+
+async def scrape_worker_metrics_http(worker: Worker, session) -> None:
+    """Fetch /metrics from worker.local_port and update the Worker state.
+
+    Handles both worker pods (vllm:* metrics on :9090) and Frontend pods
+    (dynamo_frontend_* + dynamo_component_router_* on :8000). Uses aiohttp
+    for non-blocking I/O so the textual app stays responsive.
+    """
+    import aiohttp
+
+    url = f"http://localhost:{worker.local_port}/metrics"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.0)) as resp:
+            text = await resp.text()
+    except Exception:
+        return  # transient — try again next tick
+    parsed = _parse_prom_text(text)
+
+    now = time.time()
+    if worker.component == "Frontend":
+        # FE columns — running=active, waiting=disconnects, nixl_p99=N/A
+        # (FE has no NIXL but column header reserved for worker-mode).
+        active = _sum_gauge(parsed.get("dynamo_frontend_active_requests", []))
+        if active is not None:
+            worker.running = active
+            worker.history_running.append(active)
+        disc = _sum_gauge(parsed.get("dynamo_frontend_disconnected_clients", []))
+        if disc is not None:
+            worker.waiting = disc
+            worker.history_waiting.append(disc)
+        ttft_q = _histogram_quantiles(
+            parsed.get("dynamo_component_router_time_to_first_token_seconds_bucket", [])
+        )
+        if 0.5 in ttft_q:
+            worker.ttft_p50 = ttft_q[0.5] or 0.0
+        if 0.99 in ttft_q:
+            worker.ttft_p99 = ttft_q[0.99] or 0.0
+            worker.history_ttft.append(worker.ttft_p99)
+        itl_q = _histogram_quantiles(
+            parsed.get("dynamo_component_router_inter_token_latency_seconds_bucket", [])
+        )
+        if 0.5 in itl_q:
+            worker.itl_p50 = itl_q[0.5] or 0.0
+        if 0.99 in itl_q:
+            worker.itl_p99 = itl_q[0.99] or 0.0
+            worker.history_itl.append(worker.itl_p99)
+        e2e_q = _histogram_quantiles(
+            parsed.get("dynamo_frontend_request_duration_seconds_bucket", [])
+        )
+        if 0.5 in e2e_q:
+            worker.e2e_p50 = e2e_q[0.5] or 0.0
+        if 0.99 in e2e_q:
+            worker.e2e_p99 = e2e_q[0.99] or 0.0
+            worker.history_e2e.append(worker.e2e_p99)
+        # RPS: delta of dynamo_frontend_request_duration_seconds_count / dt
+        req_count = _sum_gauge(
+            parsed.get("dynamo_frontend_request_duration_seconds_count", [])
+        )
+        if req_count is not None:
+            if worker._last_req_t > 0:
+                dt = now - worker._last_req_t
+                worker.rps = (
+                    max(0.0, (req_count - worker._last_req_count) / dt)
+                    if dt > 0
+                    else 0.0
+                )
+                worker.history_rps.append(worker.rps)
+            worker._last_req_count = req_count
+            worker._last_req_t = now
+        stalls = _sum_gauge(parsed.get("dynamo_frontend_event_loop_stall_total", []))
+        if stalls is not None:
+            worker.preempt_total = stalls
+    else:
+        # Worker pods — vllm:* gauges + histograms.
+        r = _sum_gauge(parsed.get(METRIC_RUNNING, []))
+        if r is not None:
+            worker.running = r
+            worker.history_running.append(r)
+        w = _sum_gauge(parsed.get(METRIC_WAITING, []))
+        if w is not None:
+            worker.waiting = w
+            worker.history_waiting.append(w)
+        k = _sum_gauge(parsed.get(METRIC_KV, []))
+        if k is not None:
+            worker.kv_pct = k
+            worker.history_kv.append(k)
+        nixl_q = _histogram_quantiles(parsed.get(f"{METRIC_NIXL_HIST}_bucket", []))
+        if 0.5 in nixl_q:
+            worker.nixl_p50 = nixl_q[0.5] or 0.0
+        if 0.99 in nixl_q:
+            worker.nixl_p99 = nixl_q[0.99] or 0.0
+            worker.history_nixl.append(worker.nixl_p99)
+        ttft_q = _histogram_quantiles(
+            parsed.get("vllm:time_to_first_token_seconds_bucket", [])
+        )
+        if 0.5 in ttft_q:
+            worker.ttft_p50 = ttft_q[0.5] or 0.0
+        if 0.99 in ttft_q:
+            worker.ttft_p99 = ttft_q[0.99] or 0.0
+            worker.history_ttft.append(worker.ttft_p99)
+        itl_q = _histogram_quantiles(
+            parsed.get("vllm:inter_token_latency_seconds_bucket", [])
+        )
+        if 0.5 in itl_q:
+            worker.itl_p50 = itl_q[0.5] or 0.0
+        if 0.99 in itl_q:
+            worker.itl_p99 = itl_q[0.99] or 0.0
+            worker.history_itl.append(worker.itl_p99)
+        e2e_q = _histogram_quantiles(
+            parsed.get("vllm:e2e_request_latency_seconds_bucket", [])
+        )
+        if 0.5 in e2e_q:
+            worker.e2e_p50 = e2e_q[0.5] or 0.0
+        if 0.99 in e2e_q:
+            worker.e2e_p99 = e2e_q[0.99] or 0.0
+            worker.history_e2e.append(worker.e2e_p99)
+        # RPS from vllm:request_success_total (sum over finished_reason labels)
+        req_count = _sum_gauge(parsed.get("vllm:request_success_total", []))
+        if req_count is not None:
+            if worker._last_req_t > 0:
+                dt = now - worker._last_req_t
+                worker.rps = (
+                    max(0.0, (req_count - worker._last_req_count) / dt)
+                    if dt > 0
+                    else 0.0
+                )
+                worker.history_rps.append(worker.rps)
+            worker._last_req_count = req_count
+            worker._last_req_t = now
+        p = _sum_gauge(parsed.get(METRIC_PREEMPT, []))
+        if p is not None:
+            worker.preempt_total = p
+    worker.last_update = now
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Sparkline rendering for the table cells
 
 SPARK_CHARS = "▁▂▃▄▅▆▇█"
@@ -333,7 +603,7 @@ if HAVE_TEXTUAL:
             self.dgd = dgd
             self.kube_context = kube_context
             self.event_log_path = event_log_path
-            self.workers: list[Worker] = []
+            self.dgd_workers: list[Worker] = []
             self._poll_task: Optional[asyncio.Task] = None
             self._evtlog_task: Optional[asyncio.Task] = None
             self._evtlog_pos = 0
@@ -346,28 +616,37 @@ if HAVE_TEXTUAL:
 
         async def on_mount(self) -> None:
             tbl = self.query_one("#workers-table", DataTable)
-            tbl.add_column("pod", width=42)
-            tbl.add_column("comp", width=10)
-            tbl.add_column("running", width=24)
-            tbl.add_column("waiting", width=24)
-            tbl.add_column("kv%", width=24)
-            tbl.add_column("nixl_p99 (ms)", width=24)
-            tbl.add_column("preempts", width=10)
+            # Explicit column keys so update_cell(row_key, col_key, ...)
+            # in _refresh_row resolves cleanly. Without `key=` textual
+            # uses internal generated keys and update_cell silently fails.
+            # Slim columns to fit a wider set. p99-latency in ms.
+            tbl.add_column("pod", width=42, key="pod")
+            tbl.add_column("comp", width=8, key="comp")
+            tbl.add_column("run", width=14, key="running")
+            tbl.add_column("wait", width=14, key="waiting")
+            tbl.add_column("kv%", width=14, key="kv%")
+            tbl.add_column("rps", width=10, key="rps")
+            tbl.add_column("ttft 50/99 ms", width=18, key="ttft")
+            tbl.add_column("itl 50/99 ms", width=18, key="itl")
+            tbl.add_column("e2e 50/99 ms", width=18, key="e2e")
+            tbl.add_column("nixl 50/99 ms", width=18, key="nixl")
+            tbl.add_column("mem MiB", width=10, key="mem MiB")
+            tbl.add_column("preempts", width=8, key="preempts")
 
             evt = self.query_one("#event-log", Log)
             evt.write_line(
                 f"discovering pods for DGD={self.dgd} in {self.namespace} ..."
             )
             try:
-                self.workers = await discover_workers(
+                self.dgd_workers = await discover_workers(
                     self.namespace, self.dgd, self.kube_context
                 )
             except Exception as e:
                 evt.write_line(f"ERROR discovering pods: {e}")
-                self.workers = []
+                self.dgd_workers = []
 
-            evt.write_line(f"found {len(self.workers)} running pod(s)")
-            for w in self.workers:
+            evt.write_line(f"found {len(self.dgd_workers)} running pod(s)")
+            for w in self.dgd_workers:
                 tbl.add_row(
                     w.pod_name,
                     w.component,
@@ -376,16 +655,23 @@ if HAVE_TEXTUAL:
                     "—",
                     "—",
                     "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
                     key=w.pod_name,
                 )
 
-            # Establish port-forwards
-            for w in self.workers:
+            # Establish port-forwards. Different remote port per component:
+            # Frontend → :8000 (where dynamo_frontend_* + router metrics
+            # are served), workers → :9090 (vllm:* gauges).
+            for w in self.dgd_workers:
                 try:
                     start_port_forward(w, self.namespace, self.kube_context)
                     evt.write_line(
                         f"port-forward → {w.pod_name} ({w.component}) "
-                        f"localhost:{w.local_port} → :9090"
+                        f"localhost:{w.local_port} → :{_remote_metrics_port(w)}"
                     )
                 except Exception as e:
                     evt.write_line(f"port-forward failed for {w.pod_name}: {e}")
@@ -397,68 +683,139 @@ if HAVE_TEXTUAL:
                 self._evtlog_task = asyncio.create_task(self._tail_event_log())
 
         async def _poll_loop(self) -> None:
-            """1Hz scrape of every worker via aiperf collector."""
-            assert HAVE_AIPERF, "aiperf not importable; cannot scrape"
+            """1 Hz direct HTTP scrape of every worker via aiohttp.
 
-            async def record_cb(records, collector_id: str):
-                # Find the worker by collector_id
-                for w in self.workers:
-                    if str(w.local_port) in collector_id:
-                        for rec in records:
-                            update_worker_from_record(w, rec)
-                        break
+            Replaces the (broken under aiperf 0.8) ServerMetricsDataCollector
+            path with a direct Prometheus-text fetch + parser. Same Worker
+            state objects updated; table refresh tick stays at 1 Hz.
+            """
+            import aiohttp
 
-            async def error_cb(err: "ErrorDetails", collector_id: str):
-                evt = self.query_one("#event-log", Log)
-                evt.write_line(f"scrape error [{collector_id}]: {err}")
-
-            # Init one collector per worker
-            for w in self.workers:
-                if not w.local_port:
-                    continue
-                w.collector = ServerMetricsDataCollector(
-                    endpoint_url=f"http://127.0.0.1:{w.local_port}/metrics",
-                    collection_interval=1.0,
-                    reachability_timeout=5.0,
-                    record_callback=record_cb,
-                    error_callback=error_cb,
-                    collector_id=f"worker_{w.local_port}",
-                )
-                try:
-                    await w.collector.initialize()
-                    await w.collector.start()
-                except Exception as e:
-                    self.query_one("#event-log", Log).write_line(
-                        f"collector start failed [{w.pod_name}]: {e}"
-                    )
-
-            # Periodic refresh of the table from worker state
+            evt = self.query_one("#event-log", Log)
             tbl = self.query_one("#workers-table", DataTable)
-            while not self.is_paused if hasattr(self, "is_paused") else True:
-                for w in self.workers:
-                    self._refresh_row(tbl, w)
-                await asyncio.sleep(1.0)
+
+            session = aiohttp.ClientSession()
+
+            async def poll_memory():
+                """Poll kubectl top every 10s for per-pod RSS."""
+                while True:
+                    try:
+                        cmd = [
+                            "kubectl",
+                            "-n",
+                            self.namespace,
+                            "top",
+                            "pod",
+                            "--no-headers",
+                        ]
+                        if self.kube_context:
+                            cmd[:0] = []  # context lives in kubeconfig already
+                        proc = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        out, _ = await proc.communicate()
+                        for line in out.decode().splitlines():
+                            parts = line.split()
+                            if len(parts) < 3:
+                                continue
+                            pod_name, _, mem_str = parts[0], parts[1], parts[2]
+                            for w in self.dgd_workers:
+                                if w.pod_name != pod_name:
+                                    continue
+                                # mem_str like "1234Mi" or "1Gi"
+                                try:
+                                    if mem_str.endswith("Mi"):
+                                        m = float(mem_str[:-2])
+                                    elif mem_str.endswith("Gi"):
+                                        m = float(mem_str[:-2]) * 1024
+                                    else:
+                                        m = float(mem_str) / 1048576.0
+                                    w.mem_mib = m
+                                    w.history_mem.append(m)
+                                except ValueError:
+                                    pass
+                                break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(10.0)
+
+            mem_task = asyncio.create_task(poll_memory())
+            try:
+                fail_count: dict[str, int] = {}
+                while True:
+                    # Fan-out concurrent scrapes; gather lets one slow pod
+                    # not block the others.
+                    tasks = []
+                    for w in self.dgd_workers:
+                        if not w.local_port:
+                            continue
+                        tasks.append(scrape_worker_metrics_http(w, session))
+                    if tasks:
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        for w, res in zip(self.dgd_workers, results):
+                            if isinstance(res, Exception):
+                                key = w.pod_name
+                                fail_count[key] = fail_count.get(key, 0) + 1
+                                if fail_count[key] == 5:
+                                    evt.write_line(
+                                        f"scrape error [{w.pod_name}]: {res} "
+                                        "(suppressing further reports)"
+                                    )
+                    for w in self.dgd_workers:
+                        self._refresh_row(tbl, w)
+                    await asyncio.sleep(1.0)
+            finally:
+                mem_task.cancel()
+                await session.close()
 
         def _refresh_row(self, tbl, w: Worker) -> None:
-            spark_w = 16
+            spark_w = 8
             running_cell = (
-                f"{w.running:>5.0f}  {render_spark(w.history_running, spark_w)}"
+                f"{w.running:>4.0f} {render_spark(w.history_running, spark_w)}"
             )
             waiting_cell = (
-                f"{w.waiting:>5.0f}  {render_spark(w.history_waiting, spark_w)}"
+                f"{w.waiting:>4.0f} {render_spark(w.history_waiting, spark_w)}"
             )
-            kv_cell = f"{w.kv_pct:>5.1%}  {render_spark(w.history_kv, spark_w)}"
-            nixl_ms = w.nixl_p99 * 1000.0 if w.nixl_p99 else 0.0
-            nixl_cell = f"{nixl_ms:>5.1f}  {render_spark(w.history_nixl, spark_w)}"
+            kv_cell = f"{w.kv_pct:>5.1%} {render_spark(w.history_kv, spark_w)}"
+            rps_cell = f"{w.rps:>5.1f}"
+
+            def _fmt_pair(p50, p99, hist):
+                p50_ms = p50 * 1000.0 if p50 else 0.0
+                p99_ms = p99 * 1000.0 if p99 else 0.0
+                return f"{p50_ms:>4.0f}/{p99_ms:>4.0f} {render_spark(hist, 6)}"
+
+            ttft_cell = _fmt_pair(w.ttft_p50, w.ttft_p99, w.history_ttft)
+            itl_cell = _fmt_pair(w.itl_p50, w.itl_p99, w.history_itl)
+            e2e_cell = _fmt_pair(w.e2e_p50, w.e2e_p99, w.history_e2e)
+            nixl_cell = _fmt_pair(w.nixl_p50, w.nixl_p99, w.history_nixl)
+            mem_cell = f"{w.mem_mib:>5.0f}"
             preempt_cell = f"{int(w.preempt_total)}"
             try:
                 tbl.update_cell(w.pod_name, "running", running_cell)
                 tbl.update_cell(w.pod_name, "waiting", waiting_cell)
                 tbl.update_cell(w.pod_name, "kv%", kv_cell)
-                tbl.update_cell(w.pod_name, "nixl_p99 (ms)", nixl_cell)
+                tbl.update_cell(w.pod_name, "rps", rps_cell)
+                tbl.update_cell(w.pod_name, "ttft", ttft_cell)
+                tbl.update_cell(w.pod_name, "itl", itl_cell)
+                tbl.update_cell(w.pod_name, "e2e", e2e_cell)
+                tbl.update_cell(w.pod_name, "nixl", nixl_cell)
+                tbl.update_cell(w.pod_name, "mem MiB", mem_cell)
                 tbl.update_cell(w.pod_name, "preempts", preempt_cell)
-            except Exception:
-                pass  # row may be transiently unavailable
+            except Exception as e:
+                # Surface the first failure per pod to the event log so we
+                # can debug; subsequent ones swallowed to avoid spam.
+                key = ("_refresh_err", w.pod_name)
+                if not getattr(self, "_seen_refresh_err", set()):
+                    self._seen_refresh_err = set()
+                if key not in self._seen_refresh_err:
+                    self._seen_refresh_err.add(key)
+                    try:
+                        evt = self.query_one("#event-log", Log)
+                        evt.write_line(f"refresh err [{w.pod_name}]: {e}")
+                    except Exception:
+                        pass
 
         async def _tail_event_log(self) -> None:
             """Tail the cascade-inject event log file and stream lines into the Log widget."""
@@ -492,7 +849,7 @@ if HAVE_TEXTUAL:
                 self._poll_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._poll_task
-            for w in self.workers:
+            for w in self.dgd_workers:
                 if w.collector:
                     with contextlib.suppress(Exception):
                         await w.collector.stop()

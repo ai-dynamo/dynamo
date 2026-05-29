@@ -1,0 +1,100 @@
+# Endurance LONG — ~6h mocker-backed scenario for surfacing slow drift
+# (FE memory leak, queue backlog, scheduler accumulation) that doesn't
+# show up in a 30-min steady-state cell. Runs at production-default
+# router knobs so the slope we measure here corresponds to production.
+#
+# Pair two of these in separate namespaces — one with the production-
+# default OVERLAP_SCORE_WEIGHT=1.0 (this file) and one with =0.0 — to
+# get a clean A/B over hours. The framework does NOT pair them
+# automatically; launch dynamo-ft twice with different --namespace and
+# --label values.
+
+kind: endurance
+name: endurance_mocker_long
+description: |
+  Multi-hour endurance scenario. Mocker-backed (cheap), single-unit
+  topology, modest concurrency, prefix-aware routing at the production
+  default. Snapshots every 30 min into snapshots/t{minutes}m_<iso>/
+  so analysis can proceed while the run continues.
+
+  Hard-ceiling on snapshot count is DYN_ENDURANCE_MAX_HOURS (default
+  8h). To extend, set DYN_ENDURANCE_MAX_HOURS=N in the job env.
+
+labels:
+  router_mode: kv_prefix_aware
+  traffic_shape: partial_prefix
+  deployment: agg
+  backend: mocker
+  duration_class: long
+  pairable: "yes"
+
+deployment:
+  backend: mocker
+  topology: agg
+  units: 1
+
+router:
+  mode: kv
+  knobs:
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "1.0"      # production default
+    DYN_ROUTER_ASSUME_KV_REUSE: "false"
+    DYN_ROUTER_REPLICA_SYNC: "true"
+
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 15
+    prefix_prompt_length: 600
+  rungs:
+    - name: warmup
+      concurrency: 8
+      duration_minutes: 5.0
+    - name: long
+      concurrency: 24
+      duration_minutes: 355.0    # ~6h sustained
+  common:
+    request_timeout_seconds: 30
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+events:
+  - kind: WaitForModelReady
+    timeout: 1800
+  - kind: PodMemoryPoller
+    services: [Frontend, decode]
+    interval_s: 15
+  - kind: PeriodicSnapshot
+    interval_minutes: 30
+  - kind: StartLoad
+    load_ref: warmup
+  - kind: WaitForLoadCompletion
+    name: warmup
+  - kind: StartLoad
+    load_ref: long
+  - kind: WaitForLoadCompletion
+    name: long
+
+reports:
+  - FaultToleranceReport
+  - PerWorkerLatencyReport
+
+checks:
+  - kind: LoadApplied
+    load_name: long
+    min_requests: 50000
+
+expectations:
+  fe_memory_growth_mb_per_min:
+    expected_range: [22, 32]
+    notes: |
+      Per the router_memory leak-positive cell, OVERLAP_SCORE_WEIGHT=1.0
+      yields ~27 MB/min. Over 6h that compounds to ~9.7 GB — well above
+      vllm-runtime FE container's default 16Gi limit on modest VMs, so
+      a long run is THE definitive test of whether the leak is bounded.
+      If observed slope flattens after N hours, that flatten point is a
+      data point we don't have today.
+
+  snapshots_emitted_count:
+    expected_range: [11, 13]   # ~6h / 30 min interval = 12 snapshots

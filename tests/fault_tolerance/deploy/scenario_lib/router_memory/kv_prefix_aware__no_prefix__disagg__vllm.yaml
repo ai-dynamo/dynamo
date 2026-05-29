@@ -1,0 +1,76 @@
+# S-N1 — unique prefixes per request, pushes radix tree to max node count.
+# Combined with the leak-positive router config, this tests whether the
+# leak rate scales with prefix uniqueness (H1: radix-tree retention).
+
+kind: router_memory
+name: kv_prefix_aware__no_prefix__disagg__vllm
+description: |
+  Same router config as the leak-positive baseline, but with AIPerf
+  random prompts (~0% block-level prefix hit). H1 prediction: leak >>
+  partial_prefix baseline (>>27 MB/min). H2/H3 prediction: ~28 MB/min.
+
+labels:
+  router_mode: kv_prefix_aware
+  traffic_shape: no_prefix
+  deployment: disagg
+  backend: vllm
+  leak_signal: positive_h1_lever
+  hypothesis: H1_radix_tree_retention
+
+deployment:
+  backend: vllm
+  topology: disagg
+  units: 2
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-afa8f7b7
+  model_cache_pvc: shared-model-cache
+
+router:
+  mode: kv
+  knobs:
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "1.0"
+    DYN_ROUTER_ASSUME_KV_REUSE: "false"
+    DYN_ROUTER_REPLICA_SYNC: "true"
+    DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
+    DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
+
+load:
+  shape:
+    type: no_prefix      # no prefix knobs → AIPerf generates random prompts → ~0% hit
+  rungs:
+    - name: warmup
+      concurrency: 12
+      duration_minutes: 2.0
+    - name: steady
+      concurrency: 48
+      duration_minutes: 45.0
+  common:
+    request_timeout_seconds: 30
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+reports:
+  - FaultToleranceReport
+  - ErrorBreakdownReport
+  - PerWorkerLatencyReport
+
+checks:
+  - kind: LoadApplied
+    load_name: steady
+    min_requests: 5000
+  - kind: WorkloadShapeVerified
+    load_name: steady
+    min_unique_prompts: 5000     # AIPerf random prompts → expect ~6800 unique
+    isl_mean_min: 1500           # ISL distribution should match cycle 6 baseline (~1600)
+    isl_mean_max: 2000
+
+expectations:
+  fe_memory_growth_mb_per_min:
+    expected_range: [25, 80]
+    notes: |
+      H1 (radix-tree retention): >> 27 (≥ 50 MB/min)
+      H2/H3 (per-request or per-worker): ≈ 27 (same as partial_prefix)
+      The width of the expected_range reflects which hypothesis you're
+      testing — narrow it after first measurement.
+    observed_history: []

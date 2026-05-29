@@ -15,17 +15,92 @@ spec:
     Frontend:
       componentType: frontend
       replicas: 1
+      # Bump CPU/memory requests so kai-scheduler spreads pods naturally
+      # (otherwise tiny mocker pods all pack onto one node — exactly the
+      # failure mode from 2026-05-29 arm5 where 372 pods on one node took
+      # the test down when that node died). Grove operator rejects explicit
+      # topologySpreadConstraints in the user-supplied pod spec, so we
+      # achieve spread via resource pressure instead.
       extraPodSpec:
+        # Constrain to CPU-only nodes (no GPU label). Frees expensive GPU nodes
+        # for actual GPU workloads. The label discriminator is
+        # `node.dgxc.nvidia.com/has-gpu` which exists only on GPU hosts.
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node.dgxc.nvidia.com/has-gpu
+                  operator: DoesNotExist
+          podAntiAffinity:
+            # Spread same-DGD pods across hosts. Weight 100 = strong preference,
+            # but kai-scheduler still bin-packs when it has to.
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/component: pcs-podclique
         mainContainer:
           image: my-dynamo-image:my-tag
+          resources:
+            requests:
+              cpu: "2"
+              memory: "6Gi"
+            limits:
+              cpu: "4"
+              memory: "10Gi"
     prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
       replicas: 1
+      # Transport-level envs MUST be set on workers, not just Frontend.
+      # The framework's apply_router() only writes router knobs to FE,
+      # so DYN_EVENT_PLANE etc. don't reach workers unless declared here.
+      # Without DYN_EVENT_PLANE=zmq on the worker, its EventPublisher for
+      # the kv_metrics topic falls back to NATS transport. FE (with
+      # DYN_EVENT_PLANE=zmq) ignores NATS endpoints → 0 ActiveLoad events
+      # flow → worker_monitor busy-detection stays cold (H4 FAIL) and
+      # the routing layer's threshold-based candidate exclusion is dead.
+      envs:
+        - name: DYN_EVENT_PLANE
+          value: "zmq"
+        - name: DYN_DISCOVERY_BACKEND
+          value: "kubernetes"
+        - name: DYN_STORE_KV
+          value: "mem"
       extraPodSpec:
+        # Constrain to CPU-only nodes (no GPU label). Frees expensive GPU nodes
+        # for actual GPU workloads. The label discriminator is
+        # `node.dgxc.nvidia.com/has-gpu` which exists only on GPU hosts.
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node.dgxc.nvidia.com/has-gpu
+                  operator: DoesNotExist
+          podAntiAffinity:
+            # Spread same-DGD pods across hosts. Weight 100 = strong preference,
+            # but kai-scheduler still bin-packs when it has to.
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/component: pcs-podclique
         mainContainer:
           image: my-dynamo-image:my-tag
+          resources:
+            requests:
+              cpu: "2"
+              memory: "6Gi"
+            limits:
+              cpu: "4"
+              memory: "10Gi"
           workingDir: /workspace
           command:
           - python3
@@ -33,23 +108,62 @@ spec:
           - dynamo.mocker
           args:
             - --model-path
-            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
             - --model-name
-            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
             - --speedup-ratio
-            - "1.0"
+            - "5.0"
             - --planner-profile-data
             - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - prefill
+            # DIS-2147 flags removed from this template — they're only recognized
+            # by the mocker-binding-fix-dis2147 branch's mocker binary. The
+            # cascade-test branch (used for backpressure-fix builds) doesn't have
+            # DIS-2147. Re-add for E2/E3 when running on a mocker-branch image.
     decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
       replicas: 1
+      # Same transport-level envs as prefill — see comment there.
+      envs:
+        - name: DYN_EVENT_PLANE
+          value: "zmq"
+        - name: DYN_DISCOVERY_BACKEND
+          value: "kubernetes"
+        - name: DYN_STORE_KV
+          value: "mem"
       extraPodSpec:
+        # Constrain to CPU-only nodes (no GPU label). Frees expensive GPU nodes
+        # for actual GPU workloads. The label discriminator is
+        # `node.dgxc.nvidia.com/has-gpu` which exists only on GPU hosts.
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node.dgxc.nvidia.com/has-gpu
+                  operator: DoesNotExist
+          podAntiAffinity:
+            # Spread same-DGD pods across hosts. Weight 100 = strong preference,
+            # but kai-scheduler still bin-packs when it has to.
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/component: pcs-podclique
         mainContainer:
           image: my-dynamo-image:my-tag
+          resources:
+            requests:
+              cpu: "2"
+              memory: "6Gi"
+            limits:
+              cpu: "4"
+              memory: "10Gi"
           workingDir: /workspace
           command:
           - python3
@@ -57,12 +171,22 @@ spec:
           - dynamo.mocker
           args:
             - --model-path
-            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
             - --model-name
-            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
             - --speedup-ratio
-            - "1.0"
+            - "5.0"
             - --planner-profile-data
             - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - decode
+            # Tight decode batch — forces saturation under c=50 single-set load
+            # (Run 2 DIS-2147 fidelity). c=50 requests → 8-slot decode = guaranteed
+            # saturation → DIS-2147 prefill-stranding triggers.
+            - --max-num-seqs
+            - "8"
+            # Lower KV pool to tighten DECODE_BLOCKS gauge (0.85 of 1024 = 871);
+            # default 16384 is too large for the gauge to reflect saturation.
+            - --num-gpu-blocks-override
+            - "1024"
+            # DIS-2147 flag stripped — only mocker-branch images recognize it.
