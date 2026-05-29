@@ -9,6 +9,20 @@
 //! - Cost function: α·rank + γ·w_l·(new) − β·w_l·(keep)
 //! - Overflow handling via dummy worker
 //!
+//! ## Overflow is a genuine last resort
+//!
+//! `overflow_count` means "replicas that could not be placed on any real
+//! worker." Two properties guarantee this:
+//!
+//! 1. Every real LoRA→worker edge has a cost clamped strictly below
+//!    `overflow_cost`, so the min-cost solver always prefers a real worker
+//!    (even a non-preferred one) over the overflow escape.
+//! 2. The sparse top-M candidate graph is only an optimization. If the sparse
+//!    solve overflows while real capacity is still free (a candidate-matching
+//!    conflict — e.g. several LoRAs contending for the same top-ranked worker),
+//!    the solver retries once with a full bipartite graph over all active
+//!    workers. The dense retry satisfies Hall's condition, so overflow then
+//!    reflects only a true aggregate-capacity shortage.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,6 +30,38 @@ use crate::kv_router::protocols::WorkerWithDpRank;
 use crate::lora::routing::hrw::RendezvousHasher;
 
 use super::min_cost_flow::MinCostFlowGraph;
+
+/// Per-LoRA data shared across graph-build attempts (HRW order, prior hosts,
+/// residual replica demand). Computed once; reused by both the sparse and the
+/// dense fallback solve.
+struct LoraMeta {
+    /// All workers in HRW-preference order (best first).
+    ranked: Vec<WorkerWithDpRank>,
+    /// Worker -> its index in `ranked` (the HRW rank used for edge cost).
+    rank_map: HashMap<WorkerWithDpRank, usize>,
+    /// Workers that hosted this LoRA on the previous tick.
+    prev_hosts: HashSet<WorkerWithDpRank>,
+    /// Replicas still to be placed after freezing (`replicas - frozen`).
+    rem_rep: usize,
+}
+
+/// Candidate-set density for a single graph-build attempt.
+#[derive(Clone, Copy)]
+enum CandStrategy {
+    /// HRW top-`max(candidate_m, rem_rep)` plus prior hosts (sparse fast path).
+    Sparse,
+    /// Every active worker is a candidate (full bipartite). Used only as a
+    /// fallback when the sparse attempt overflowed with real capacity to spare.
+    Dense,
+}
+
+/// Destination of a LoRA's outgoing flow edge. Replaces an in-band sentinel
+/// `WorkerWithDpRank` value so a real worker can never be misread as overflow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EdgeTarget {
+    Worker(WorkerWithDpRank),
+    Overflow,
+}
 
 /// Parameters for the MCF placement solver.
 #[derive(Debug, Clone)]
@@ -155,6 +201,28 @@ impl McfPlacementSolver {
             });
         }
 
+        // Reject duplicate worker or LoRA identities. The flow graph keys nodes
+        // on them; duplicates would silently overwrite a node and double-count
+        // sink capacity, corrupting the solve.
+        let mut seen_workers: HashSet<WorkerWithDpRank> = HashSet::with_capacity(workers.len());
+        for w in workers {
+            if !seen_workers.insert(w.worker) {
+                return Err(format!(
+                    "MCF solver: duplicate worker {:?} in input; workers must be unique",
+                    w.worker
+                ));
+            }
+        }
+        let mut seen_loras: HashSet<&str> = HashSet::with_capacity(loras.len());
+        for l in loras {
+            if !seen_loras.insert(l.name.as_str()) {
+                return Err(format!(
+                    "MCF solver: duplicate LoRA '{}' in input; LoRA names must be unique",
+                    l.name
+                ));
+            }
+        }
+
         let worker_map: HashMap<WorkerWithDpRank, &WorkerInput> =
             workers.iter().map(|w| (w.worker, w)).collect();
 
@@ -261,209 +329,78 @@ impl McfPlacementSolver {
             })
             .sum();
 
-        // ── Candidate pre-computation ────────────────────────────────────────
-        // Build candidate sets for all active LoRAs before constructing the
-        // MCF graph. The HRW window is expanded to max(candidate_m, rem_rep)
-        // so that every LoRA always has enough outgoing edges to place all its
-        // replicas on real workers when the global capacity allows it.
-        //
-        // Note: we do NOT try to pre-compute per-LoRA reach deficits here.
-        // Candidate-graph matching conflicts (two LoRAs competing for the same
-        // top-ranked worker) are invisible to a per-LoRA reachability check
-        // but can still leave the MCF infeasible. The robust solution is to
-        // always attach an overflow escape when allow_overflow=true (see Step 3).
+        // ── Per-LoRA metadata (computed once, reused by both solve attempts) ──
+        // HRW ranking, prior hosts, and residual demand do not depend on the
+        // candidate density, so derive them once here. The candidate list
+        // itself is built inside `build_and_solve` per attempt.
         let all_workers_sorted: Vec<WorkerWithDpRank> = {
             let mut ws: Vec<WorkerWithDpRank> = workers.iter().map(|w| w.worker).collect();
             ws.sort();
             ws
         };
 
-        struct LoraCandInfo {
-            cand: Vec<WorkerWithDpRank>,
-            rank_map: HashMap<WorkerWithDpRank, usize>,
-            prev_hosts: HashSet<WorkerWithDpRank>,
-            rem_rep: usize,
-        }
-
-        // One entry per active LoRA, stored in the same order as `active_loras`.
-        let mut lora_cands: Vec<LoraCandInfo> = Vec::with_capacity(active_loras.len());
-
-        for l in &active_loras {
-            let frozen_count = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
-            let rem_rep = l.replicas.saturating_sub(frozen_count);
-            let prev_hosts = prev_assignment.get(&l.name).cloned().unwrap_or_default();
-
-            let ranked = RendezvousHasher::rank_workers(&l.name, &all_workers_sorted);
-
-            // Expand the HRW window to at least rem_rep so every solvable
-            // placement has a corresponding edge in the flow graph.
-            let take_n = self.params.candidate_m.max(rem_rep);
-
-            let mut cand: Vec<WorkerWithDpRank> = Vec::new();
-            let mut seen: HashSet<WorkerWithDpRank> = HashSet::new();
-            for (w, _) in ranked.iter().take(take_n) {
-                if seen.insert(*w) {
-                    cand.push(*w);
+        // One entry per active LoRA, in the same order as `active_loras`.
+        let metas: Vec<LoraMeta> = active_loras
+            .iter()
+            .map(|l| {
+                let frozen_count = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
+                let rem_rep = l.replicas.saturating_sub(frozen_count);
+                let prev_hosts = prev_assignment.get(&l.name).cloned().unwrap_or_default();
+                let ranked_pairs = RendezvousHasher::rank_workers(&l.name, &all_workers_sorted);
+                let rank_map: HashMap<WorkerWithDpRank, usize> = ranked_pairs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (w, _))| (*w, i))
+                    .collect();
+                let ranked: Vec<WorkerWithDpRank> =
+                    ranked_pairs.into_iter().map(|(w, _)| w).collect();
+                LoraMeta {
+                    ranked,
+                    rank_map,
+                    prev_hosts,
+                    rem_rep,
                 }
+            })
+            .collect();
+
+        // ── Solve: sparse fast path, dense fallback on spurious overflow ──────
+        let total_cap: usize = active_workers
+            .iter()
+            .map(|w| rem_cap.get(&w.worker).copied().unwrap_or(0))
+            .sum();
+
+        let sparse = self.build_and_solve(
+            &active_loras,
+            &active_workers,
+            &rem_cap,
+            &metas,
+            total_demand,
+            CandStrategy::Sparse,
+        );
+
+        // Retry with a full bipartite graph when the sparse attempt either
+        // overflowed while real capacity was still free (a candidate-matching
+        // conflict), or failed outright under allow_overflow=false (a denser
+        // graph is a strict superset and may be feasible).
+        let retry_dense = match &sparse {
+            Ok((_, overflow)) => {
+                *overflow > 0 && total_cap > total_demand.saturating_sub(*overflow)
             }
-            let mut prev_sorted: Vec<WorkerWithDpRank> = prev_hosts.iter().copied().collect();
-            prev_sorted.sort();
-            for w in prev_sorted {
-                if seen.insert(w) {
-                    cand.push(w);
-                }
-            }
-
-            let rank_map: HashMap<WorkerWithDpRank, usize> = ranked
-                .iter()
-                .enumerate()
-                .map(|(i, (w, _))| (*w, i))
-                .collect();
-
-            lora_cands.push(LoraCandInfo {
-                cand,
-                rank_map,
-                prev_hosts,
-                rem_rep,
-            });
-        }
-
-        // ── Step 3: Build MCF graph ──────────────────────────────────────────
-        // Node layout: SRC | lora_0..lora_N | worker_0..worker_M [| overflow] | SNK
-        let src = 0usize;
-        let mut next_id = 1usize;
-
-        let mut lora_node: HashMap<&str, usize> = HashMap::new();
-        for l in &active_loras {
-            lora_node.insert(&l.name, next_id);
-            next_id += 1;
-        }
-
-        let mut worker_node: HashMap<WorkerWithDpRank, usize> = HashMap::new();
-        for w in &active_workers {
-            worker_node.insert(w.worker, next_id);
-            next_id += 1;
-        }
-
-        // Always attach an overflow escape when allow_overflow=true.
-        // A conditional check (total_demand > total_cap, or per-LoRA reach
-        // deficit) is insufficient: candidate-graph matching conflicts — two
-        // LoRAs competing for the same sparsified top-ranked worker — are
-        // invisible to any per-LoRA reachability heuristic. Providing the
-        // escape unconditionally makes overflow the last resort in every
-        // topology, while the high overflow_cost keeps it truly last-resort.
-        let overflow_node = if self.params.allow_overflow && total_demand > 0 {
-            let id = next_id;
-            next_id += 1;
-            Some(id)
-        } else {
-            None
+            Err(_) => true,
         };
 
-        let snk = next_id;
-        let total_nodes = snk + 1;
-
-        let mut mcf = MinCostFlowGraph::new(total_nodes);
-
-        // SRC -> LoRA nodes
-        for l in &active_loras {
-            let frozen_count = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
-            let rem_rep = l.replicas.saturating_sub(frozen_count);
-            if rem_rep > 0 {
-                mcf.add_edge(src, lora_node[l.name.as_str()], rem_rep as i64, 0);
-            }
-        }
-
-        // Worker nodes -> SNK
-        for w in &active_workers {
-            let cap = rem_cap.get(&w.worker).copied().unwrap_or(0);
-            if cap > 0 {
-                mcf.add_edge(worker_node[&w.worker], snk, cap as i64, 0);
-            }
-        }
-
-        // Overflow -> SNK: capacity = total_demand is a safe upper bound
-        // (at most all demand can overflow).
-        if let Some(ov) = overflow_node {
-            mcf.add_edge(ov, snk, total_demand as i64, 0);
-        }
-
-        // ── Step 4: LoRA -> Worker edges (sparsified) ────────────────────────
-        // Candidate sets were pre-computed above; reuse them here to avoid
-        // re-running the HRW ranking.
-        let mut lora_edge_info: HashMap<&str, Vec<(usize, WorkerWithDpRank)>> = HashMap::new();
-
-        for (l, lc) in active_loras.iter().zip(lora_cands.iter()) {
-            let lora_node_id = lora_node[l.name.as_str()];
-            let mut edges = Vec::new();
-
-            for (rnk, w) in lc.cand.iter().enumerate() {
-                if let Some(&w_node) = worker_node.get(w) {
-                    let cost = self.build_edge_cost(
-                        l.churn_weight,
-                        *lc.rank_map.get(w).unwrap_or(&rnk),
-                        lc.prev_hosts.contains(w),
-                    );
-                    let edge_idx = mcf.edge_count(lora_node_id);
-                    mcf.add_edge(lora_node_id, w_node, 1, cost);
-                    edges.push((edge_idx, *w));
-                }
-            }
-
-            // Overflow edge: capacity = rem_rep so a LoRA needing multiple
-            // replicas can route all unplaceable demand through overflow
-            // (cap=1 would silently bound per-LoRA overflow and surface as
-            // InsufficientFlow even when an overflow path exists).
-            if let Some(ov) = overflow_node {
-                let edge_idx = mcf.edge_count(lora_node_id);
-                mcf.add_edge(
-                    lora_node_id,
-                    ov,
-                    lc.rem_rep as i64,
-                    self.params.overflow_cost,
-                );
-                edges.push((edge_idx, WorkerWithDpRank::new(u64::MAX, 0))); // sentinel
-            }
-
-            lora_edge_info.insert(&l.name, edges);
-        }
-
-        // ── Step 5: Solve ────────────────────────────────────────────────────
-        let flow_needed = total_demand as i64;
-        let result = mcf.min_cost_flow(src, snk, flow_needed);
-
-        match result {
-            Err(e) => {
-                return Err(format!(
-                    "MCF solver failed: {e}. Try increasing candidate_m or enabling overflow."
-                ));
-            }
-            Ok((_flow, _cost)) => {}
-        }
-
-        // ── Step 6: Extract assignments ──────────────────────────────────────
-        let overflow_sentinel = WorkerWithDpRank::new(u64::MAX, 0);
-        let mut solved_hosts: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
-        let mut overflow_count = 0usize;
-
-        for l in &active_loras {
-            let lora_node_id = lora_node[l.name.as_str()];
-            let edges = &lora_edge_info[l.name.as_str()];
-            let mut hosts = HashSet::new();
-
-            for &(edge_idx, worker) in edges {
-                let flow = mcf.flow_on_edge(lora_node_id, edge_idx);
-                if flow > 0 {
-                    if worker == overflow_sentinel {
-                        overflow_count += flow as usize;
-                    } else {
-                        hosts.insert(worker);
-                    }
-                }
-            }
-
-            solved_hosts.insert(l.name.clone(), hosts);
-        }
+        let (solved_hosts, overflow_count) = if retry_dense {
+            self.build_and_solve(
+                &active_loras,
+                &active_workers,
+                &rem_cap,
+                &metas,
+                total_demand,
+                CandStrategy::Dense,
+            )?
+        } else {
+            sparse?
+        };
 
         // ── Step 7: Merge frozen + solved ────────────────────────────────────
         let mut assignment: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
@@ -528,17 +465,169 @@ impl McfPlacementSolver {
         })
     }
 
+    /// Build the flow graph for one candidate-density `strategy`, solve it, and
+    /// return `(solved_hosts, overflow_count)`.
+    ///
+    /// `metas` must be parallel to `active_loras`. Saturating/clamped edge costs
+    /// (see [`Self::build_edge_cost`]) guarantee every real worker edge is
+    /// strictly cheaper than the overflow escape, so the min-cost solver only
+    /// routes to overflow when no real worker path exists.
+    fn build_and_solve(
+        &self,
+        active_loras: &[&LoraInput],
+        active_workers: &[&WorkerInput],
+        rem_cap: &HashMap<WorkerWithDpRank, usize>,
+        metas: &[LoraMeta],
+        total_demand: usize,
+        strategy: CandStrategy,
+    ) -> Result<(HashMap<String, HashSet<WorkerWithDpRank>>, usize), String> {
+        // Node layout: SRC | lora_0..lora_N | worker_0..worker_M [| overflow] | SNK
+        let src = 0usize;
+        let mut next_id = 1usize;
+
+        let mut lora_node: HashMap<&str, usize> = HashMap::new();
+        for l in active_loras {
+            lora_node.insert(l.name.as_str(), next_id);
+            next_id += 1;
+        }
+
+        let mut worker_node: HashMap<WorkerWithDpRank, usize> = HashMap::new();
+        for w in active_workers {
+            worker_node.insert(w.worker, next_id);
+            next_id += 1;
+        }
+
+        let overflow_node = if self.params.allow_overflow && total_demand > 0 {
+            let id = next_id;
+            next_id += 1;
+            Some(id)
+        } else {
+            None
+        };
+
+        let snk = next_id;
+        let mut mcf = MinCostFlowGraph::new(snk + 1);
+
+        // SRC -> LoRA
+        for (l, m) in active_loras.iter().zip(metas) {
+            if m.rem_rep > 0 {
+                mcf.add_edge(src, lora_node[l.name.as_str()], m.rem_rep as i64, 0);
+            }
+        }
+
+        // Worker -> SNK
+        for w in active_workers {
+            let cap = rem_cap.get(&w.worker).copied().unwrap_or(0);
+            if cap > 0 {
+                mcf.add_edge(worker_node[&w.worker], snk, cap as i64, 0);
+            }
+        }
+
+        // Overflow -> SNK: capacity = total_demand is a safe upper bound.
+        if let Some(ov) = overflow_node {
+            mcf.add_edge(ov, snk, total_demand as i64, 0);
+        }
+
+        // LoRA -> Worker (+ overflow) edges.
+        let mut lora_edge_info: HashMap<&str, Vec<(usize, EdgeTarget)>> = HashMap::new();
+        for (l, m) in active_loras.iter().zip(metas) {
+            // Sparse keeps the HRW top-`max(candidate_m, rem_rep)`; dense takes
+            // every active worker. Prior hosts are always included.
+            let take_n = match strategy {
+                CandStrategy::Sparse => self.params.candidate_m.max(m.rem_rep),
+                CandStrategy::Dense => usize::MAX,
+            };
+
+            let mut seen: HashSet<WorkerWithDpRank> = HashSet::new();
+            let mut cand: Vec<WorkerWithDpRank> = Vec::new();
+            for w in m.ranked.iter().take(take_n) {
+                if worker_node.contains_key(w) && seen.insert(*w) {
+                    cand.push(*w);
+                }
+            }
+            let mut prev_sorted: Vec<WorkerWithDpRank> = m.prev_hosts.iter().copied().collect();
+            prev_sorted.sort();
+            for w in prev_sorted {
+                if worker_node.contains_key(&w) && seen.insert(w) {
+                    cand.push(w);
+                }
+            }
+
+            let lora_node_id = lora_node[l.name.as_str()];
+            let mut edges = Vec::with_capacity(cand.len() + 1);
+            for (fallback_rnk, w) in cand.iter().enumerate() {
+                let w_node = worker_node[w];
+                let rank = *m.rank_map.get(w).unwrap_or(&fallback_rnk);
+                let cost = self.build_edge_cost(l.churn_weight, rank, m.prev_hosts.contains(w));
+                let edge_idx = mcf.edge_count(lora_node_id);
+                mcf.add_edge(lora_node_id, w_node, 1, cost);
+                edges.push((edge_idx, EdgeTarget::Worker(*w)));
+            }
+
+            // Overflow edge: capacity = rem_rep so a multi-replica LoRA can route
+            // all of its unplaceable demand through overflow (cap=1 would bound
+            // per-LoRA overflow to 1 and surface as a spurious InsufficientFlow).
+            if let Some(ov) = overflow_node {
+                let edge_idx = mcf.edge_count(lora_node_id);
+                mcf.add_edge(
+                    lora_node_id,
+                    ov,
+                    m.rem_rep as i64,
+                    self.params.overflow_cost,
+                );
+                edges.push((edge_idx, EdgeTarget::Overflow));
+            }
+
+            lora_edge_info.insert(l.name.as_str(), edges);
+        }
+
+        // Solve.
+        mcf.min_cost_flow(src, snk, total_demand as i64)
+            .map_err(|e| {
+                format!("MCF solver failed: {e}. Try increasing candidate_m or enabling overflow.")
+            })?;
+
+        // Extract per-LoRA placements + overflow.
+        let mut solved_hosts: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
+        let mut overflow_count = 0usize;
+        for l in active_loras {
+            let lora_node_id = lora_node[l.name.as_str()];
+            let mut hosts = HashSet::new();
+            for &(edge_idx, target) in &lora_edge_info[l.name.as_str()] {
+                let flow = mcf.flow_on_edge(lora_node_id, edge_idx);
+                if flow > 0 {
+                    match target {
+                        EdgeTarget::Worker(w) => {
+                            hosts.insert(w);
+                        }
+                        EdgeTarget::Overflow => overflow_count += flow as usize,
+                    }
+                }
+            }
+            solved_hosts.insert(l.name.clone(), hosts);
+        }
+
+        Ok((solved_hosts, overflow_count))
+    }
+
     /// Compute the cost for placing a LoRA on a worker.
     ///
-    /// cost = α·rank + γ·w_l if new, or α·rank − β·w_l if keeping
+    /// `cost = α·rank + γ·w_l` if new, or `α·rank − β·w_l` if keeping.
+    ///
+    /// All arithmetic is saturating and `churn_weight` is floored at 0 (a
+    /// negative weight would invert the keep/load incentive). The result is
+    /// clamped strictly below `overflow_cost` so that placing on any real
+    /// worker — even a far-down-HRW fallback worker in a dense solve — is always
+    /// cheaper than overflowing.
     fn build_edge_cost(&self, churn_weight: i64, rank_index: usize, is_keep: bool) -> i64 {
-        let mut c = self.params.alpha_pref * rank_index as i64;
-        if is_keep {
-            c -= self.params.beta_keep * churn_weight;
+        let w = churn_weight.max(0);
+        let rank_term = self.params.alpha_pref.saturating_mul(rank_index as i64);
+        let c = if is_keep {
+            rank_term.saturating_sub(self.params.beta_keep.saturating_mul(w))
         } else {
-            c += self.params.gamma_load * churn_weight;
-        }
-        c
+            rank_term.saturating_add(self.params.gamma_load.saturating_mul(w))
+        };
+        c.min(self.params.overflow_cost.saturating_sub(1))
     }
 
     pub fn params(&self) -> &McfSolveParams {
@@ -780,36 +869,101 @@ mod tests {
     }
 
     #[test]
-    fn test_candidate_conflict_with_surplus_cap_does_not_hard_fail() {
-        // Regression: candidate_m=1, two LoRAs needing 1 replica each, two
-        // workers with capacity 1 each. total_cap (2) == total_demand (2) so
-        // a valid placement exists globally, but if both LoRAs' HRW top-1 is
-        // the same worker the old reach-deficit heuristic gave overflow_needed=0
-        // and omitted the overflow node, causing InsufficientFlow.
-        //
-        // With allow_overflow=true the overflow node is always present, so the
-        // solver can route one LoRA to the contested worker and overflow the
-        // other — no hard failure regardless of HRW tiebreaking.
+    fn test_candidate_conflict_resolved_by_dense_fallback() {
+        // candidate_m=1 forces each LoRA's sparse candidate set to a single
+        // HRW-top worker. With many LoRAs and many capacity-1 workers, several
+        // LoRAs inevitably contend for the same top worker, so the sparse solve
+        // overflows even though aggregate capacity is ample. The dense fallback
+        // must then place every replica on a real worker (overflow == 0),
+        // proving overflow is a genuine last resort and not an artifact of
+        // candidate sparsification.
         let solver = McfPlacementSolver::new(McfSolveParams {
             candidate_m: 1,
             ..Default::default()
         });
-        // Three workers give total_cap=3 > total_demand=2 (clear global surplus)
-        // so the old global-deficit guard definitely would not have created overflow.
-        let workers = make_workers(3, 1);
-        let loras = vec![make_lora("A", 1), make_lora("B", 1)];
+        let workers = make_workers(8, 1); // total_cap = 8
+        let loras: Vec<LoraInput> = (0..8).map(|i| make_lora(&format!("L{i}"), 1)).collect();
         let prev = HashMap::new();
 
         let result = solver
             .solve(&workers, &loras, &prev, None, None)
-            .expect("solver must not hard-fail with allow_overflow=true");
+            .expect("dense fallback must yield a feasible solve");
 
-        let total_placed: usize = result.assignment.values().map(|s| s.len()).sum();
         assert_eq!(
-            total_placed + result.overflow_count,
-            2,
-            "placed + overflow must equal total demand"
+            result.overflow_count, 0,
+            "with capacity == demand the dense fallback must place every replica"
         );
+        let total_placed: usize = result.assignment.values().map(|s| s.len()).sum();
+        assert_eq!(total_placed, 8, "all 8 replicas must land on real workers");
+
+        // No worker exceeds its capacity of 1.
+        let mut counts: HashMap<WorkerWithDpRank, usize> = HashMap::new();
+        for hosts in result.assignment.values() {
+            for w in hosts {
+                *counts.entry(*w).or_insert(0) += 1;
+            }
+        }
+        assert!(
+            counts.values().all(|&c| c <= 1),
+            "capacity-1 workers must not be double-assigned"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_worker_rejected() {
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let dup = WorkerWithDpRank::new(1, 0);
+        let workers = vec![
+            WorkerInput {
+                worker: dup,
+                capacity: 4,
+            },
+            WorkerInput {
+                worker: dup,
+                capacity: 4,
+            },
+        ];
+        let loras = vec![make_lora("A", 1)];
+        let result = solver.solve(&workers, &loras, &HashMap::new(), None, None);
+        assert!(
+            result.is_err_and(|e| e.contains("duplicate worker")),
+            "duplicate workers must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_lora_rejected() {
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let workers = make_workers(2, 4);
+        let loras = vec![make_lora("A", 1), make_lora("A", 2)];
+        let result = solver.solve(&workers, &loras, &HashMap::new(), None, None);
+        assert!(
+            result.is_err_and(|e| e.contains("duplicate LoRA")),
+            "duplicate LoRA names must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_extreme_churn_weight_still_prefers_real_worker() {
+        // A churn_weight large enough that gamma_load * weight would overflow
+        // i64 or exceed overflow_cost must NOT cause the LoRA to overflow when
+        // a real worker is free: build_edge_cost clamps real edge cost below
+        // overflow_cost and uses saturating arithmetic.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let workers = make_workers(2, 4);
+        let loras = vec![LoraInput {
+            name: "A".to_string(),
+            replicas: 1,
+            churn_weight: i64::MAX,
+        }];
+        let result = solver
+            .solve(&workers, &loras, &HashMap::new(), None, None)
+            .expect("solve must not panic on extreme churn_weight");
+        assert_eq!(
+            result.overflow_count, 0,
+            "a free real worker must always beat overflow regardless of churn_weight"
+        );
+        assert_eq!(result.assignment["A"].len(), 1);
     }
 
     #[test]
