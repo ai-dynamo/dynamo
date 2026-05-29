@@ -70,8 +70,11 @@ type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 /// engine — so the caller supplies it via `make_first_arg`, which runs
 /// inside the GIL because building either value needs `py`.
 ///
-/// The GIL is acquired on a blocking task so the tokio reactor is not parked
-/// while contending for it.
+/// Acquiring the GIL is similar to acquiring a standard lock/mutex, and doing
+/// so in a tokio async task could block the thread for an undefined amount of
+/// time, so the call is offloaded to a blocking task to keep the reactor from
+/// being parked. The Python GIL is the gift that keeps on giving -- performance
+/// hits...
 async fn invoke_generator<F>(
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
@@ -235,11 +238,6 @@ where
         let current_trace_context = get_distributed_tracing_context();
         let metadata = context.metadata().clone();
 
-        // Acquiring the GIL is similar to acquiring a standard lock/mutex.
-        // Performing this in a tokio async task could block the thread for an
-        // undefined amount of time, so `invoke_generator` offloads the call to
-        // a blocking task. The Python GIL is the gift that keeps on giving --
-        // performance hits...
         let stream = invoke_generator(
             self.generator.clone(),
             self.event_loop.clone(),
@@ -543,11 +541,8 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
 
         let ctx_python = ctx_unit.context();
 
-        // Acquire the GIL on a blocking task so the tokio reactor is not
-        // parked while waiting on it; build the Python `Context`, wrap the
-        // `PyAsyncRequestStream` handle as the positional argument, call the
-        // user callable, and convert the returned async generator into a Rust
-        // stream of `PyObject`.
+        // The positional argument is the `PyAsyncRequestStream` handle, wrapped
+        // inside the GIL.
         let stream = invoke_generator(
             self.generator.clone(),
             self.event_loop.clone(),
