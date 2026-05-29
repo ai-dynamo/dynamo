@@ -36,18 +36,10 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 print_launch_banner --no-curl "Launching vLLM-Omni Cosmos3 Video Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
+# Official Cosmos3 text-to-video payload (prompt verbatim; 1280x720, 192 frames @ 24fps)
 curl -s http://localhost:${HTTP_PORT}/v1/videos \\
   -H 'Content-Type: application/json' \\
-  -d '{
-    "model": "${MODEL}",
-    "prompt": "A waterfall in a green forest, gentle mist",
-    "size": "512x512",
-    "response_format": "url",
-    "nvext": {
-      "num_inference_steps": 20,
-      "num_frames": 17
-    }
-  }' | jq
+  --data-binary @${SCRIPT_DIR}/cosmos3/t2v.json | jq
 CURL
 
 

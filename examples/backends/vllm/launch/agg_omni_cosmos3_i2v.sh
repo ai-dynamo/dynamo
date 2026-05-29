@@ -36,20 +36,11 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 print_launch_banner --no-curl "Launching vLLM-Omni Cosmos3 Image-to-Video (1 GPU)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
-# input_reference must be an http(s) URL or a data: URI (local paths are rejected)
+# Official Cosmos3 image-to-video payload (prompt + vision_path verbatim).
+# input_reference must be an http(s) URL or a data: URI (local paths are rejected).
 curl -s http://localhost:${HTTP_PORT}/v1/videos \\
   -H 'Content-Type: application/json' \\
-  -d '{
-    "model": "${MODEL}",
-    "prompt": "The scene comes alive, gentle camera motion",
-    "input_reference": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/ai2d-demo.jpg",
-    "size": "512x512",
-    "response_format": "url",
-    "nvext": {
-      "num_inference_steps": 20,
-      "num_frames": 17
-    }
-  }' | jq
+  --data-binary @${SCRIPT_DIR}/cosmos3/i2v.json | jq
 CURL
 
 

@@ -34,14 +34,11 @@ done
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --no-curl "Launching vLLM-Omni Cosmos3 Image Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
+# Official Cosmos3 text-to-image payload (prompt verbatim)
 curl -s -X POST http://localhost:${HTTP_PORT}/v1/images/generations \\
   -H 'Content-Type: application/json' \\
-  -d '{
-    "model": "${MODEL}",
-    "prompt": "A robot standing in a bright laboratory",
-    "size": "512x512",
-    "num_inference_steps": 20
-  }' | jq
+  --data-binary @${SCRIPT_DIR}/cosmos3/t2i.json \\
+  | jq -r '.data[0].b64_json' | base64 -d > t2i.png
 CURL
 
 

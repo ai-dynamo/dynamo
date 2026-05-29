@@ -9,15 +9,7 @@ set -euo pipefail
 VLLM_OMNI_PROTECTED_PACKAGES_FILE="${VLLM_OMNI_PROTECTED_PACKAGES_FILE:-/tmp/vllm_omni_protected_packages.txt}"
 
 PROTECTED_CONSTRAINTS="$(mktemp /tmp/vllm-openai-protected.XXXXXX.txt)"
-
-# When VLLM_OMNI_GIT_URL is set, install from a git ref (e.g. an unreleased PR
-# commit); otherwise fall back to the matching PyPI release.
-VLLM_OMNI_GIT_URL="${VLLM_OMNI_GIT_URL:-}"
-if [ -n "${VLLM_OMNI_GIT_URL}" ]; then
-  VLLM_OMNI_SPEC="vllm-omni @ git+${VLLM_OMNI_GIT_URL}@${VLLM_OMNI_REF}"
-else
-  VLLM_OMNI_SPEC="vllm-omni==${VLLM_OMNI_REF#v}"
-fi
+VLLM_OMNI_VERSION="${VLLM_OMNI_REF#v}"
 
 cleanup() {
   rm -rf "${PROTECTED_CONSTRAINTS}"
@@ -49,11 +41,11 @@ if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
   uv pip install --system \
     --prerelease=allow \
     --constraints "${PROTECTED_CONSTRAINTS}" \
-    "${VLLM_OMNI_SPEC}"
+    "vllm-omni==${VLLM_OMNI_VERSION}"
 else
   uv pip install \
     --prerelease=allow \
     --constraints "${PROTECTED_CONSTRAINTS}" \
-    "${VLLM_OMNI_SPEC}"
+    "vllm-omni==${VLLM_OMNI_VERSION}"
 fi
 
