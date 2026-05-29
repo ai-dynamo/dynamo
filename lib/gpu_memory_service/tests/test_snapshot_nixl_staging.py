@@ -9,14 +9,9 @@ import pytest
 
 try:
     from gpu_memory_service.snapshot.backends.nixl_staging import (
-        DEFAULT_POSIX_IOS_POOL_SIZE,
-        DEFAULT_POSIX_KERNEL_QUEUE_SIZE,
-        POSIX_IOS_POOL_SIZE_CONFIG_KEY,
-        POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY,
         NixlFileGroup,
         NixlWorkGroup,
         _NixlPosixStagingTransferSession,
-        _posix_backend_params_from_config,
         _split_work_groups,
     )
     from gpu_memory_service.snapshot.transfer import (
@@ -87,38 +82,6 @@ def test_split_work_groups_balances_by_bytes():
     )
 
     assert bucket_sizes == [12, 12]
-
-
-def test_posix_backend_params_default_to_bounded_pool():
-    assert _posix_backend_params_from_config({}) == {
-        "ios_pool_size": str(DEFAULT_POSIX_IOS_POOL_SIZE),
-        "kernel_queue_size": str(DEFAULT_POSIX_KERNEL_QUEUE_SIZE),
-    }
-
-
-def test_posix_backend_params_allow_override():
-    assert _posix_backend_params_from_config(
-        {
-            POSIX_IOS_POOL_SIZE_CONFIG_KEY: "64",
-            POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY: 16,
-        }
-    ) == {
-        "ios_pool_size": "64",
-        "kernel_queue_size": "16",
-    }
-
-
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        (POSIX_IOS_POOL_SIZE_CONFIG_KEY, "0"),
-        (POSIX_KERNEL_QUEUE_SIZE_CONFIG_KEY, "-1"),
-        (POSIX_IOS_POOL_SIZE_CONFIG_KEY, "not-an-int"),
-    ],
-)
-def test_posix_backend_params_reject_invalid_values(key, value):
-    with pytest.raises(ValueError, match=key):
-        _posix_backend_params_from_config({key: value})
 
 
 def test_posix_backend_params_are_forwarded_to_nixl_agent(monkeypatch):

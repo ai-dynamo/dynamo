@@ -20,10 +20,7 @@ from pathlib import Path
 
 from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.snapshot.backends.sharded_ssd import (
-    DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
-    parse_sharded_ssd_roots,
-)
+from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 from gpu_memory_service.snapshot.transfer import (
     CHECKPOINT_DIR_TRANSFER_BACKENDS,
@@ -38,10 +35,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOAD_WORKERS = 16
-
-
-def _format_devices(devices: list[int]) -> str:
-    return ",".join(str(device) for device in devices) or "-"
 
 
 def _load_device(
@@ -112,10 +105,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sharded-ssd-queues-per-root",
         type=int,
-        default=DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT,
+        default=2,
         help=(
             "Number of independent sharded-ssd restore queues per SSD root. "
-            f"Default is {DEFAULT_SHARDED_SSD_QUEUES_PER_ROOT}."
+            "Default is 2."
         ),
     )
     return parser
@@ -143,16 +136,16 @@ def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
         raise RuntimeError(
             "Checkpoint device directories under "
             f"{checkpoint_path} do not match CUDA/NVML-visible devices: "
-            f"visible={_format_devices(devices)} "
-            f"checkpoint={_format_devices(sorted(checkpoint_devices))} "
-            f"missing={_format_devices(missing_devices)} "
-            f"extra={_format_devices(extra_devices)}"
+            f"visible={devices} "
+            f"checkpoint={sorted(checkpoint_devices)} "
+            f"missing={missing_devices} "
+            f"extra={extra_devices}"
         )
 
     logger.info(
         "Using CUDA/NVML-visible checkpoint devices from %s: %s",
         checkpoint_path,
-        _format_devices(devices),
+        devices,
     )
     return devices
 
@@ -167,11 +160,13 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"
         )
+    if args.sharded_ssd_queues_per_root <= 0:
+        parser.error("--sharded-ssd-queues-per-root must be a positive integer")
     checkpoint_dir = args.checkpoint_dir
     max_workers = args.max_workers
     transfer_backend = args.transfer_backend
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
-    sharded_ssd_queues_per_root = int(args.sharded_ssd_queues_per_root)
+    sharded_ssd_queues_per_root = args.sharded_ssd_queues_per_root
     logger.info(
         "Starting GMS load: transfer_backend=%s max_workers=%d "
         "sharded_ssd_roots=%s sharded_ssd_queues_per_root=%d",

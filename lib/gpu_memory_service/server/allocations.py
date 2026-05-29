@@ -6,12 +6,11 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 from uuid import uuid4
 
 from gpu_memory_service.common.cuda_utils import (
@@ -21,6 +20,7 @@ from gpu_memory_service.common.cuda_utils import (
     cumem_export_to_shareable_handle,
     cumem_get_allocation_granularity,
     cumem_release,
+    device_memory_info,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,11 +102,6 @@ class GMSAllocationManager:
         aligned_size = align_to_granularity(size, self._granularity)
         started_at = time.monotonic()
         reported_oom = False
-        # Intentional local import: torch costs about a second to import in the
-        # benchmark image and is only needed for diagnostics on the uncommon
-        # cuMemCreate OOM retry path.
-        torch_mod: Any = None
-        torch_import_failed = False
         while True:
             if is_connected is not None and not is_connected():
                 raise ConnectionAbortedError(
@@ -134,22 +129,14 @@ class GMSAllocationManager:
             # time + free GPU memory, so a stuck retry loop is observable
             # rather than silent.
             free_b, total_b = -1, -1
-            if not torch_import_failed:
-                if torch_mod is None:
-                    try:
-                        torch_mod = importlib.import_module("torch")
-                    except (ImportError, RuntimeError):
-                        torch_import_failed = True
-                        logger.debug("import torch failed", exc_info=True)
-                if torch_mod is not None:
-                    try:
-                        free_b, total_b = torch_mod.cuda.mem_get_info(self._device)
-                    except RuntimeError:
-                        logger.debug(
-                            "torch.cuda.mem_get_info(%d) failed",
-                            self._device,
-                            exc_info=True,
-                        )
+            try:
+                free_b, total_b = device_memory_info(self._device)
+            except Exception:
+                logger.debug(
+                    "NVML memory info failed for device %d",
+                    self._device,
+                    exc_info=True,
+                )
             elapsed = time.monotonic() - started_at
             logger.warning(
                 "cuMemCreate OOM for aligned_size=%d bytes, tag=%s, "
