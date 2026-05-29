@@ -1186,12 +1186,21 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
     frontend_port = allocate_port(DefaultPort.FRONTEND.value)
     system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
     kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
-    all_ports = [frontend_port, *system_port_list, kv_event_port]
+    # One NIXL side-channel port per worker (avoids collisions under xdist when
+    # multiple disaggregated deployments share a host).
+    nixl_side_channel_ports = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
+    all_ports = [
+        frontend_port,
+        *system_port_list,
+        kv_event_port,
+        *nixl_side_channel_ports,
+    ]
     try:
         yield ServicePorts(
             frontend_port=frontend_port,
             system_ports=system_port_list,
             kv_event_port=kv_event_port,
+            nixl_side_channel_ports=nixl_side_channel_ports,
         )
     finally:
         deallocate_ports(all_ports)
