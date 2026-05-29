@@ -5,12 +5,12 @@ the code under `components/src/dynamo/frontend/` that sits between the
 OpenAI-shaped HTTP request and the backend engine. Tests for this layer
 live under `components/src/dynamo/frontend/tests/`.
 
-This is the **frontend** companion to `lib/parsers/PARSER_CASES.md`. The
+This is the **frontend** companion to `lib/parsers/TOOLCALLING_CASES.md`. The
 two taxonomies cover different surfaces:
 
 | File | Scope | Prefix |
 |---|---|---|
-| `lib/parsers/PARSER_CASES.md` | Tool-call parser behavior on **model output** | `PARSER.batch.*`, `PARSER.stream.*`, `PARSER.fmt.*`, `PARSER.xml.*`, `PARSER.harmony.*` |
+| `lib/parsers/TOOLCALLING_CASES.md` | Tool-call parser behavior on **model output** | `TOOLCALLING.batch.*`, `TOOLCALLING.stream.*`, `TOOLCALLING.fmt.*`, `TOOLCALLING.xml.*`, `TOOLCALLING.harmony.*` |
 | `lib/parsers/REASONING_CASES.md` | Reasoning parser behavior on **model output** | `REASONING.batch.*`, `REASONING.stream.*` |
 | `lib/parsers/PIPELINE_CASES.md` | Pipeline-boundary contracts (parser output independence from upstream metadata) | `PIPELINE.*` |
 | `components/src/dynamo/frontend/tests/FRONTEND_CASES.md` | Chat-processor layer: request preprocessing, output assembly, error surface, worker plumbing | `FRONTEND.*` |

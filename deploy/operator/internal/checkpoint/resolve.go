@@ -90,6 +90,9 @@ func ResolveCheckpointForService(
 		if err := validateResolvedGMSSnapshotGate(info); err != nil {
 			return nil, err
 		}
+		if config.TargetContainerName != "" {
+			info.RestoreTargetContainers = []string{config.TargetContainerName}
+		}
 		return info, nil
 	case config.Identity == nil:
 		return nil, fmt.Errorf("checkpoint enabled but no checkpointRef or identity provided")
@@ -120,6 +123,9 @@ func ResolveCheckpointForService(
 		return nil, err
 	}
 	info.Identity = config.Identity
+	if config.TargetContainerName != "" {
+		info.RestoreTargetContainers = []string{config.TargetContainerName}
+	}
 	return info, nil
 }
 

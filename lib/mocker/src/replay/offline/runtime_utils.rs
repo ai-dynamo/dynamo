@@ -21,12 +21,6 @@ pub(super) struct WorkerCompletionPayload {
     pub kv_events: Vec<RouterEvent>,
 }
 
-impl WorkerCompletionPayload {
-    pub(super) fn has_completion_effects(&self) -> bool {
-        self.completed_requests > 0 || !self.output_signals.is_empty() || !self.kv_events.is_empty()
-    }
-}
-
 pub(super) fn next_timestamp(
     next_arrival_ms: Option<f64>,
     next_event_ms: Option<f64>,

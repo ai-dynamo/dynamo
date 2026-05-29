@@ -26,6 +26,7 @@ def run_trace_replay(
     trace_format="mooncake",
     trace_shared_prefix_ratio=0.0,
     trace_num_prefix_groups=0,
+    report_jsonl_path=None,
     max_sim_time_ms=None,
 ):
     return _run_mocker_trace_replay(
@@ -46,6 +47,7 @@ def run_trace_replay(
         trace_format=trace_format,
         trace_shared_prefix_ratio=trace_shared_prefix_ratio,
         trace_num_prefix_groups=trace_num_prefix_groups,
+        report_jsonl_path=report_jsonl_path,
         max_sim_time_ms=max_sim_time_ms,
     )
 

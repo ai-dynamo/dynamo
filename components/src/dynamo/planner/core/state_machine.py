@@ -107,6 +107,8 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._num_d_workers: int = 0
         self._expected_num_p: Optional[int] = None
         self._expected_num_d: Optional[int] = None
+        self._prefill_scaling_in_progress: bool = False
+        self._decode_scaling_in_progress: bool = False
 
         self._throughput_lower_bound_p: int = 1
         self._throughput_lower_bound_d: int = 1
@@ -319,14 +321,16 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             self._num_d_workers = counts.ready_num_decode
         self._expected_num_p = counts.expected_num_prefill
         self._expected_num_d = counts.expected_num_decode
+        self._prefill_scaling_in_progress = counts.prefill_scaling_in_progress
+        self._decode_scaling_in_progress = counts.decode_scaling_in_progress
 
     def _scaling_in_progress(self, component: str) -> bool:
         if component == "prefill":
-            return (
+            return self._prefill_scaling_in_progress or (
                 self._expected_num_p is not None
                 and self._expected_num_p != self._num_p_workers
             )
-        return (
+        return self._decode_scaling_in_progress or (
             self._expected_num_d is not None
             and self._expected_num_d != self._num_d_workers
         )

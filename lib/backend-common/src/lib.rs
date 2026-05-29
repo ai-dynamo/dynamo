@@ -17,8 +17,11 @@ pub mod args;
 pub mod disagg;
 pub mod engine;
 pub mod error;
+pub mod metrics;
 mod publisher;
 pub mod run;
+pub mod snapshot_publisher;
+pub mod telemetry;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 #[cfg(debug_assertions)]
@@ -28,11 +31,14 @@ pub mod worker;
 pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use engine::{
-    AsyncEngineContext, BootstrapInfo, CompletionUsage, EngineConfig, FinishReason,
-    GenerateContext, KvEventPublisher, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, Metrics, MetricsSource, OnPublisherReady, OutputOptions, PrefillResult,
-    PreprocessedRequest, SamplingOptions, SnapshotFn, StopConditions, chunk, usage,
+    AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
+    FinishReason, GenerateContext, HEALTH_CHECK_KEY, KvEventPublisher, KvEventSource, LLMEngine,
+    LLMEngineOutput, LLMEngineOutputExt, Metrics, MetricsBindings, MetricsCtx, OnPublisherReady,
+    OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions,
+    StopConditions, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
+pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
 pub use run::run;
+pub use snapshot_publisher::SnapshotPublisher;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};

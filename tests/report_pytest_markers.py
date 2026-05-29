@@ -221,6 +221,7 @@ STUB_MODULES = [
     "vllm.tool_parsers",
     "vllm.tool_parsers.hermes_tool_parser",
     "vllm.tool_parsers.mistral_tool_parser",
+    "vllm.tool_parsers.qwen3coder_tool_parser",
     "vllm.utils",
     "vllm.utils.async_utils",
     "vllm.utils.hashing",
