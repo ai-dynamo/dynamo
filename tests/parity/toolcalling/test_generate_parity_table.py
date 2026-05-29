@@ -96,6 +96,8 @@ def test_generate_combined_parity_table_html() -> None:
     assert 'data-tab-target="tab-reasoning-batch">Reasoning batch</button>' in html
     assert 'data-tab-target="tab-reasoning-stream">Reasoning stream</button>' in html
     assert "params.get('tab')" in html
+    assert "validTargets.has(requested)" in html
+    assert "document.getElementById(requested)" not in html
     assert "url.searchParams.set('tab', id)" in html
     assert "TOOLCALLING.batch." in html
     assert "TOOLCALLING.stream." in html

@@ -24,6 +24,9 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from tests.parity.reasoning import table as reasoning_table  # noqa: E402
+from tests.parity.toolcalling import table as toolcalling_table  # noqa: E402
+
 
 def _rewrite_panel_paths(panel: dict[str, Any], stage_dir: str) -> dict[str, Any]:
     """Adjust links from stage-local PARITY.html paths to tests/parity/PARITY.html."""
@@ -57,11 +60,9 @@ def _tab_button(panel: dict[str, Any]) -> str:
 
 
 def _combined_toolcalling_panels() -> list[dict[str, Any]]:
-    from tests.parity.toolcalling import table
-
     panels = []
     for mode in ("batch", "stream"):
-        _mode, panel, _has_cases = table._load_html_panel(mode)
+        _mode, panel, _has_cases = toolcalling_table._load_html_panel(mode)
         panel = _rewrite_panel_paths(panel, "toolcalling")
         panel.update(
             {
@@ -80,14 +81,12 @@ def _combined_toolcalling_panels() -> list[dict[str, Any]]:
 
 
 def _combined_reasoning_panels() -> list[dict[str, Any]]:
-    from tests.parity.reasoning import table
-
-    rows, columns, refs = table._load()
-    no_vllm, no_sglang = table._derive_no_peer_sets(rows)
+    rows, columns, refs = reasoning_table._load()
+    no_vllm, no_sglang = reasoning_table._derive_no_peer_sets(rows)
     panels = []
     for mode in ("batch", "stream"):
-        mode_columns = table._columns_for_mode(columns, mode)
-        panel = table._html_panel(
+        mode_columns = reasoning_table._columns_for_mode(columns, mode)
+        panel = reasoning_table._html_panel(
             rows,
             mode_columns,
             refs,
@@ -106,7 +105,7 @@ def _combined_reasoning_panels() -> list[dict[str, Any]]:
                 "case_docs_label": "lib/parsers/REASONING_CASES.md",
                 "case_prefix": "REASONING.",
                 "case_section_id": f"reasoning-{mode}",
-                "legend_html": table._legend_html(rows, mode_columns),
+                "legend_html": reasoning_table._legend_html(rows, mode_columns),
             }
         )
         panels.append(panel)
@@ -114,17 +113,15 @@ def _combined_reasoning_panels() -> list[dict[str, Any]]:
 
 
 def render_combined_html() -> str:
-    from tests.parity.toolcalling import table
-
     panels = [*_combined_toolcalling_panels(), *_combined_reasoning_panels()]
     panels[0]["active"] = True
 
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
-    sha = table._commit_sha()
+    sha = toolcalling_table._commit_sha()
 
     return (
-        table._make_jinja_env()
+        toolcalling_table._make_jinja_env()
         .get_template("parity_table.html.j2")
         .render(
             title="Dynamo Parser Parity Table",
@@ -135,7 +132,9 @@ def render_combined_html() -> str:
             output="tests/parity/PARITY.html",
             tabs=[_tab_button(panel) for panel in panels],
             panels=panels,
-            peer_versions=table._peer_version_items(table._peer_versions()),
+            peer_versions=toolcalling_table._peer_version_items(
+                toolcalling_table._peer_versions()
+            ),
             peer_versions_href="../../pyproject.toml",
         )
     )
@@ -167,12 +166,8 @@ def main(argv: list[str] | None = None) -> None:
         print(render_combined_html())
         return
 
-    if args.stage == "toolcalling":
-        from tests.parity.toolcalling import table
-    else:
-        from tests.parity.reasoning import table
-
-    table.main(rest)
+    stage_table = toolcalling_table if args.stage == "toolcalling" else reasoning_table
+    stage_table.main(rest)
 
 
 if __name__ == "__main__":

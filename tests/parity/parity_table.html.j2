@@ -375,7 +375,10 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   function readActiveTab() {
     const params = new URLSearchParams(window.location.search);
     const requested = params.get('tab');
-    if (requested && document.getElementById(requested)) {
+    const validTargets = new Set(tabButtons.map(function (button) {
+      return button.dataset.tabTarget;
+    }));
+    if (requested && validTargets.has(requested)) {
       return requested;
     }
     const active = tabButtons.find(function (button) {
