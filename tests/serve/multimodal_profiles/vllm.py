@@ -113,13 +113,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
             # The chat-processor variant of the MM-aware router: same routing
             # architecture, but the frontend uses --dyn-chat-processor=vllm
-            # (Python preprocessor) instead of the Rust+lightseek path.
-            # Promoted to pre_merge alongside `agg_router` so both MM-routing
-            # entry points are gated before merge.
+            # (Python preprocessor) instead of the Rust+lightseek path. Kept
+            # on post_merge — the lightseek variant above (`agg_router`) is
+            # the pre_merge gate; adding chat_processor doubles the GPU0
+            # queue time at 4-worker scale without catching distinct bugs
+            # (both paths share the kv_router downstream).
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
                 requested_vllm_kv_cache_bytes=536_870_912,
