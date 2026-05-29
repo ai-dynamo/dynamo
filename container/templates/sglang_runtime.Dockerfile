@@ -29,21 +29,24 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-{% if context.sglang.enable_media_ffmpeg == "true" %}
-# Copy ffmpeg from wheel_builder: shared libs for the Rust media-ffmpeg decoder,
-# plus the LGPL CLI binary (built with h264_nvenc + libvpx_vp9 encoders) that
-# imageio targets via IMAGEIO_FFMPEG_EXE for video encoding.
+# Copy ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
+# libsw*.so*) for the Rust media-ffmpeg decoder, plus the LGPL CLI binary
+# (built with h264_nvenc + libvpx_vp9 encoders) that imageio targets via
+# IMAGEIO_FFMPEG_EXE for video encoding. Ungated by enable_media_ffmpeg
+# because the upstream lmsysorg/sglang base image always ships
+# imageio-ffmpeg with a GPL-encumbered prebuilt binary that we replace
+# unconditionally below; the LGPL CLI must be present so imageio has
+# something to target.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
     cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
-{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 # Runtime target installs only the prebuilt Dynamo wheels. SGLang and its NIXL
