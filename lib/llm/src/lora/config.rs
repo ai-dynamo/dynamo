@@ -106,7 +106,21 @@ impl LoraAllocationConfig {
 
         let algorithm = std::env::var(llm::DYN_LORA_ALLOCATION_ALGORITHM)
             .ok()
-            .and_then(|v| AllocationAlgorithmType::from_str(&v).ok())
+            .and_then(|v| match AllocationAlgorithmType::from_str(&v) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    // Do not silently fall back to the default: surface the
+                    // rejected value so an operator who set e.g. `mcf` (not yet
+                    // wired) knows their choice was ignored.
+                    tracing::warn!(
+                        value = %v,
+                        error = %e,
+                        default = ?defaults.algorithm,
+                        "Ignoring invalid DYN_LORA_ALLOCATION_ALGORITHM; using default"
+                    );
+                    None
+                }
+            })
             .unwrap_or(defaults.algorithm);
 
         let timestep_secs = std::env::var(llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS)
