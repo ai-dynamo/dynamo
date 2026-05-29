@@ -43,6 +43,7 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
+from dynamo.common.utils.worker_id import make_fpm_worker_id
 from dynamo.llm import (
     KvEventPublisher,
     MediaDecoder,
@@ -585,6 +586,8 @@ async def init_llm_worker(
         logging.debug("DYNAMO_COMPONENT_REGISTRY callback registered successfully")
 
         # publisher will be set later if publishing is enabled.
+        worker_id = int(make_fpm_worker_id(config))
+
         handler_config = RequestHandlerConfig(
             engine=engine,
             default_sampling_params=default_sampling_params,
@@ -601,7 +604,7 @@ async def init_llm_worker(
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
-            disagg_machine_id=int(endpoint.connection_id()) % 1021,
+            disagg_machine_id=worker_id % 1021,
         )
 
         media_decoder = None
@@ -668,13 +671,13 @@ async def init_llm_worker(
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "
-                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
+                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={worker_id}"
                 )
 
             async with get_publisher(
                 endpoint,
                 engine,
-                int(endpoint.connection_id()),
+                worker_id,
                 config.kv_block_size,
                 metrics_labels,
                 component_gauges=component_gauges,

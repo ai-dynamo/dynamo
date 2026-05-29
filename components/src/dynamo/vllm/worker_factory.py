@@ -21,6 +21,7 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
+from dynamo.common.utils.worker_id import make_fpm_worker_id
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 
@@ -268,7 +269,7 @@ class WorkerFactory:
             )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
-        fpm_worker_id = str(generate_endpoint.connection_id())
+        fpm_worker_id = make_fpm_worker_id(config)
         if snapshot_engine is not None:
             (
                 engine_client,
@@ -493,7 +494,7 @@ class WorkerFactory:
         )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
-        fpm_worker_id = str(generate_endpoint.connection_id())
+        fpm_worker_id = make_fpm_worker_id(config)
         if snapshot_engine is not None:
             (
                 engine_client,

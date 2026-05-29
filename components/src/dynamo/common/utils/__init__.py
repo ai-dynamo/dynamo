@@ -23,6 +23,7 @@ from dynamo.common.utils import (
     prometheus,
     runtime,
     time_section,
+    worker_id,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "paths",
     "prometheus",
     "runtime",
+    "worker_id",
 ]

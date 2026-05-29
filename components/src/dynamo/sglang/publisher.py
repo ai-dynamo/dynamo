@@ -22,6 +22,7 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
+from dynamo.common.utils.worker_id import make_fpm_worker_id
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
@@ -55,7 +56,7 @@ def set_forward_pass_metrics_worker_id(
 
     import tempfile
 
-    server_args.forward_pass_metrics_worker_id = str(generate_endpoint.connection_id())
+    server_args.forward_pass_metrics_worker_id = make_fpm_worker_id(server_args)
     ipc_path = tempfile.NamedTemporaryFile(delete=False).name
     server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
 

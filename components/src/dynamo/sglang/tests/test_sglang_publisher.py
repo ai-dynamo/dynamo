@@ -8,6 +8,7 @@ import pytest
 
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.publisher as publisher_mod
+from dynamo.common.utils.worker_id import make_fpm_worker_id
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
@@ -47,14 +48,13 @@ def test_get_local_dp_rank_range_respects_multinode_dp_attention():
 
     assert list(get_local_dp_rank_range(server_args)) == [4, 5, 6, 7]
 
-
-def test_set_forward_pass_metrics_worker_id_uses_endpoint_identity():
+def test_set_forward_pass_metrics_worker_id_uses_deterministic_identity():
     server_args = SimpleNamespace(enable_forward_pass_metrics=True)
     endpoint = SimpleNamespace(connection_id=lambda: "endpoint-9")
 
     set_forward_pass_metrics_worker_id(server_args, endpoint)
 
-    assert server_args.forward_pass_metrics_worker_id == "endpoint-9"
+    assert server_args.forward_pass_metrics_worker_id == make_fpm_worker_id(server_args)
     assert server_args.forward_pass_metrics_ipc_name.startswith("ipc://")
 
 
