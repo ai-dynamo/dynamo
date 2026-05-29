@@ -211,9 +211,7 @@ def run_serve_deployment(
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
 
-        # Unique per-worker vLLM NIXL side-channel ports (avoids xdist collisions
-        # on the otherwise-hardcoded VLLM_NIXL_SIDE_CHANNEL_PORT). Indexed to match
-        # DYN_SYSTEM_PORT{idx} so launch scripts can pair each worker's ports.
+        # Per-worker NIXL side-channel ports, indexed to match DYN_SYSTEM_PORT{idx}.
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 

@@ -39,10 +39,8 @@ class ServicePorts:
     frontend_port: int
     system_ports: list[int]
     kv_event_port: int = 0
-    # Per-worker vLLM NIXL side-channel ports (VLLM_NIXL_SIDE_CHANNEL_PORT).
-    # Like kv_event_port, these must be unique per deployment so that multiple
-    # disaggregated deployments packed onto one host under xdist do not collide
-    # on the hardcoded NIXL side-channel port.
+    # Per-worker VLLM_NIXL_SIDE_CHANNEL_PORT values; unique per deployment so
+    # parallel (xdist) deployments on one host don't collide.
     nixl_side_channel_ports: list[int] = field(default_factory=list)
 
 
