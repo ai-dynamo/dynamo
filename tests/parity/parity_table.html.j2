@@ -161,7 +161,9 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 </tbody>
 </table>
 <p class="legend">
-{% if legend_html is defined and legend_html %}
+{% if panel.legend_html is defined and panel.legend_html %}
+  {{ panel.legend_html|safe }}
+{% elif legend_html is defined and legend_html %}
   {{ legend_html|safe }}
 {% else %}
   <strong>Legend:</strong>
@@ -190,7 +192,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   {% if peer_versions %}
   <br><br>
   <strong>Peer parser versions</strong> pinned in
-  <a href="../../../pyproject.toml">pyproject.toml</a>:
+  <a href="{{ peer_versions_href|default('../../../pyproject.toml') }}">pyproject.toml</a>:
   {% for name, version in peer_versions %}{% if not loop.first %} · {% endif %}{{ name|e }} <code>{{ version|e }}</code>{% endfor %}.
   {% endif %}
 {% endif %}
@@ -208,15 +210,27 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   <span style="color:#b00">{{ panel.stats.errors }} expected-errors</span>.
 </p>
 {% if panel.glossary_groups %}
-<h2 id="case-descriptions-{{ panel.mode|e }}">Case descriptions</h2>
+<h2 id="case-descriptions-{{ panel.case_section_id|default(panel.mode)|e }}">Case descriptions</h2>
 <p>Full case definitions:
-<a href="{{ case_docs_href|default('../../../lib/parsers/TOOLCALLING_CASES.md') }}">{{ case_docs_label|default('lib/parsers/TOOLCALLING_CASES.md') }}</a>.</p>
+{% if panel.case_docs_href is defined %}
+{% set panel_case_docs_href = panel.case_docs_href %}
+{% else %}
+{% set panel_case_docs_href = case_docs_href|default('../../../lib/parsers/TOOLCALLING_CASES.md') %}
+{% endif %}
+{% if panel.case_docs_label is defined %}
+{% set panel_case_docs_label = panel.case_docs_label %}
+{% else %}
+{% set panel_case_docs_label = case_docs_label|default('lib/parsers/TOOLCALLING_CASES.md') %}
+{% endif %}
+<a href="{{ panel_case_docs_href }}">{{ panel_case_docs_label }}</a>.</p>
 <table class="glossary">
 <tbody>
 {% for group in panel.glossary_groups %}
 <tr class="category"><td colspan="2">{{ group.label|e }}</td></tr>
 {% for sub, desc in group.rows %}
-{% if case_prefix is defined and case_prefix %}
+{% if panel.case_prefix is defined and panel.case_prefix %}
+<tr><td class="sub">{{ panel.case_prefix|e }}{{ sub|e }}</td><td>{{ desc|e }}</td></tr>
+{% elif case_prefix is defined and case_prefix %}
 <tr><td class="sub">{{ case_prefix|e }}{{ sub|e }}</td><td>{{ desc|e }}</td></tr>
 {% else %}
 <tr><td class="sub">TOOLCALLING.{{ panel.mode|e }}.{{ sub|e }}</td><td>{{ desc|e }}</td></tr>
@@ -358,7 +372,29 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 
   const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
   const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
-  function activateTab(id) {
+  function readActiveTab() {
+    const params = new URLSearchParams(window.location.search);
+    const requested = params.get('tab');
+    const validTargets = new Set(tabButtons.map(function (button) {
+      return button.dataset.tabTarget;
+    }));
+    if (requested && validTargets.has(requested)) {
+      return requested;
+    }
+    const active = tabButtons.find(function (button) {
+      return button.classList.contains('active');
+    });
+    return active ? active.dataset.tabTarget : (tabButtons[0] && tabButtons[0].dataset.tabTarget);
+  }
+
+  function updateTabUrl(id) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', id);
+    window.history.replaceState(null, '', url.toString());
+  }
+
+  function activateTab(id, shouldUpdateUrl) {
+    if (!id) return;
     tabButtons.forEach(function (button) {
       const selected = button.dataset.tabTarget === id;
       button.classList.toggle('active', selected);
@@ -367,10 +403,14 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
     tabPanels.forEach(function (panel) {
       panel.classList.toggle('active', panel.id === id);
     });
+    if (shouldUpdateUrl) {
+      updateTabUrl(id);
+    }
   }
+  activateTab(readActiveTab(), false);
   tabButtons.forEach(function (button) {
     button.addEventListener('click', function () {
-      activateTab(button.dataset.tabTarget);
+      activateTab(button.dataset.tabTarget, true);
     });
   });
 

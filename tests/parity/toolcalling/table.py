@@ -1141,7 +1141,7 @@ def _parse_subcase_descriptions(mode: str) -> dict[str, str]:
     if not TOOLCALLING_CASES_MD.exists():
         return {}
     pat = re.compile(
-        rf"\*\*`PARSER\.{re.escape(mode)}\.([0-9]+(?:\.[a-z])?)`\*\*\s+(.+)"
+        rf"\*\*`TOOLCALLING\.{re.escape(mode)}" rf"\.([0-9]+(?:\.[a-z])?)`\*\*\s+(.+)"
     )
     out: dict[str, str] = {}
     lines = TOOLCALLING_CASES_MD.read_text(encoding="utf-8").splitlines()
