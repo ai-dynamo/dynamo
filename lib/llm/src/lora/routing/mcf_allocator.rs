@@ -323,196 +323,241 @@ impl McfPlacementSolver {
             loras.iter().map(|l| l.name.clone()).collect()
         };
 
-        // ── Step 2: Freeze unaffected assignments ────────────────────────────
-        let mut frozen_hosts: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
-        let mut used_slots: HashMap<WorkerWithDpRank, usize> = HashMap::new();
+        // `place` runs the freeze → candidate-metadata → two-phase solve
+        // pipeline for a given `impacted` set and returns
+        // (frozen_hosts, solved_hosts, overflow_count). It is invoked once for
+        // the delta-impacted set, then (only if a frozen blocker leaves
+        // spurious overflow) again with every LoRA impacted.
+        type PlaceResult = (
+            HashMap<String, HashSet<WorkerWithDpRank>>,
+            HashMap<String, HashSet<WorkerWithDpRank>>,
+            usize,
+        );
+        let place = |impacted: &HashSet<String>| -> Result<PlaceResult, String> {
+            // ── Step 2: Freeze unaffected assignments ────────────────────────
+            let mut frozen_hosts: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
+            let mut used_slots: HashMap<WorkerWithDpRank, usize> = HashMap::new();
 
-        for lora in loras {
-            if impacted.contains(&lora.name) {
-                continue;
-            }
-            if let Some(prev) = prev_assignment.get(&lora.name) {
-                // Keep prior hosts that are still alive (in worker_map)
-                let keep: HashSet<WorkerWithDpRank> = prev
-                    .iter()
-                    .filter(|w| worker_map.contains_key(w))
-                    .copied()
-                    .take(lora.replicas)
-                    .collect();
-                for w in &keep {
-                    *used_slots.entry(*w).or_insert(0) += 1;
+            for lora in loras {
+                if impacted.contains(&lora.name) {
+                    continue;
                 }
-                frozen_hosts.insert(lora.name.clone(), keep);
+                if let Some(prev) = prev_assignment.get(&lora.name) {
+                    // Keep prior hosts that are still alive (in worker_map)
+                    let keep: HashSet<WorkerWithDpRank> = prev
+                        .iter()
+                        .filter(|w| worker_map.contains_key(w))
+                        .copied()
+                        .take(lora.replicas)
+                        .collect();
+                    for w in &keep {
+                        *used_slots.entry(*w).or_insert(0) += 1;
+                    }
+                    frozen_hosts.insert(lora.name.clone(), keep);
+                }
             }
-        }
 
-        // Belt-and-suspenders guard: if a worker's capacity shrank since
-        // the last tick and frozen assignments now exceed that capacity,
-        // saturating_sub would silently hide the violation. Detect every
-        // over-committed worker and unfreeze all LoRAs touching it so the
-        // MCF solver re-places them within the new capacity bounds.
-        // Callers should already pass changed_workers for such workers,
-        // which adds their LoRAs to `impacted` before the freeze step; this
-        // handles any cases that slip through that path.
-        let over_committed: HashSet<WorkerWithDpRank> = workers
-            .iter()
-            .filter(|w| used_slots.get(&w.worker).copied().unwrap_or(0) > w.capacity)
-            .map(|w| w.worker)
-            .collect();
-
-        if !over_committed.is_empty() {
-            let names_to_unfreeze: Vec<String> = frozen_hosts
+            // Belt-and-suspenders guard: if a worker's capacity shrank since
+            // the last tick and frozen assignments now exceed that capacity,
+            // saturating_sub would silently hide the violation. Detect every
+            // over-committed worker and unfreeze all LoRAs touching it so the
+            // MCF solver re-places them within the new capacity bounds.
+            // Callers should already pass changed_workers for such workers,
+            // which adds their LoRAs to `impacted` before the freeze step; this
+            // handles any cases that slip through that path.
+            let over_committed: HashSet<WorkerWithDpRank> = workers
                 .iter()
-                .filter(|(_, hosts)| hosts.iter().any(|w| over_committed.contains(w)))
-                .map(|(name, _)| name.clone())
+                .filter(|w| used_slots.get(&w.worker).copied().unwrap_or(0) > w.capacity)
+                .map(|w| w.worker)
                 .collect();
-            for name in names_to_unfreeze {
-                if let Some(hosts) = frozen_hosts.remove(&name) {
-                    for w in &hosts {
-                        if let Some(c) = used_slots.get_mut(w) {
-                            *c = c.saturating_sub(1);
+
+            if !over_committed.is_empty() {
+                let names_to_unfreeze: Vec<String> = frozen_hosts
+                    .iter()
+                    .filter(|(_, hosts)| hosts.iter().any(|w| over_committed.contains(w)))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                for name in names_to_unfreeze {
+                    if let Some(hosts) = frozen_hosts.remove(&name) {
+                        for w in &hosts {
+                            if let Some(c) = used_slots.get_mut(w) {
+                                *c = c.saturating_sub(1);
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Compute residual capacities and replica demands
-        let rem_cap: HashMap<WorkerWithDpRank, usize> = workers
-            .iter()
-            .map(|w| {
-                let used = used_slots.get(&w.worker).copied().unwrap_or(0);
-                (w.worker, w.capacity.saturating_sub(used))
-            })
-            .collect();
+            // Compute residual capacities and replica demands
+            let rem_cap: HashMap<WorkerWithDpRank, usize> = workers
+                .iter()
+                .map(|w| {
+                    let used = used_slots.get(&w.worker).copied().unwrap_or(0);
+                    (w.worker, w.capacity.saturating_sub(used))
+                })
+                .collect();
 
-        let active_loras: Vec<&LoraInput> = loras
-            .iter()
-            .filter(|l| {
-                let frozen = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
-                l.replicas > frozen
-            })
-            .collect();
+            let active_loras: Vec<&LoraInput> = loras
+                .iter()
+                .filter(|l| {
+                    let frozen = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
+                    l.replicas > frozen
+                })
+                .collect();
 
-        let active_workers: Vec<&WorkerInput> = workers
-            .iter()
-            .filter(|w| rem_cap.get(&w.worker).copied().unwrap_or(0) > 0)
-            .collect();
+            let active_workers: Vec<&WorkerInput> = workers
+                .iter()
+                .filter(|w| rem_cap.get(&w.worker).copied().unwrap_or(0) > 0)
+                .collect();
 
-        let total_demand: usize = active_loras
-            .iter()
-            .map(|l| {
-                let frozen = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
-                l.replicas.saturating_sub(frozen)
-            })
-            .sum();
+            let total_demand: usize = active_loras
+                .iter()
+                .map(|l| {
+                    let frozen = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
+                    l.replicas.saturating_sub(frozen)
+                })
+                .sum();
 
-        // ── Per-LoRA metadata (computed once, reused by both solve attempts) ──
-        // HRW ranking, prior hosts, and residual demand do not depend on the
-        // candidate density, so derive them once here. The candidate list
-        // itself is built inside `build_and_solve` per attempt.
-        let all_workers_sorted: Vec<WorkerWithDpRank> = {
-            let mut ws: Vec<WorkerWithDpRank> = workers.iter().map(|w| w.worker).collect();
-            ws.sort();
-            ws
-        };
-
-        // One entry per active LoRA, in the same order as `active_loras`.
-        let metas: Vec<LoraMeta> = active_loras
-            .iter()
-            .map(|l| {
-                let frozen = frozen_hosts.get(&l.name).cloned().unwrap_or_default();
-                let rem_rep = l.replicas.saturating_sub(frozen.len());
-                let prev_hosts = prev_assignment.get(&l.name).cloned().unwrap_or_default();
-                let ranked_pairs = RendezvousHasher::rank_workers(&l.name, &all_workers_sorted);
-                let rank_map: HashMap<WorkerWithDpRank, usize> = ranked_pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (w, _))| (*w, i))
-                    .collect();
-                let ranked: Vec<WorkerWithDpRank> =
-                    ranked_pairs.into_iter().map(|(w, _)| w).collect();
-                LoraMeta {
-                    ranked,
-                    rank_map,
-                    prev_hosts,
-                    frozen,
-                    rem_rep,
-                }
-            })
-            .collect();
-
-        // ── Solve: sparse fast path, dense fallback on spurious overflow ──────
-        let total_cap: usize = active_workers
-            .iter()
-            .map(|w| rem_cap.get(&w.worker).copied().unwrap_or(0))
-            .sum();
-
-        // Does the sparse candidate set already reach every active worker for
-        // every LoRA? If so, the dense graph is identical to the sparse one and
-        // a retry cannot place anything more — crucially, this prevents a LoRA
-        // whose demand exceeds the worker count (each LoRA→worker edge is cap=1)
-        // from triggering a pointless full dense solve on every tick.
-        let active_worker_set: HashSet<WorkerWithDpRank> =
-            active_workers.iter().map(|w| w.worker).collect();
-        let sparse_covers_all = metas.iter().all(|m| {
-            // A LoRA's usable workers are the active workers it does not already
-            // occupy (frozen hosts are excluded — see LoraMeta::frozen).
-            let usable = active_worker_set.difference(&m.frozen).count();
-            let take_n = self.params.candidate_m.max(m.rem_rep);
-            // Usable workers reached = usable workers in the top-`take_n` HRW
-            // window plus any usable prior hosts beyond it.
-            let mut reached: HashSet<WorkerWithDpRank> = HashSet::new();
-            for w in m.ranked.iter().take(take_n) {
-                if active_worker_set.contains(w) && !m.frozen.contains(w) {
-                    reached.insert(*w);
-                }
-            }
-            for w in &m.prev_hosts {
-                if active_worker_set.contains(w) && !m.frozen.contains(w) {
-                    reached.insert(*w);
-                }
-            }
-            reached.len() >= usable
-        });
-
-        let sparse = self.build_and_solve(
-            &active_loras,
-            &active_workers,
-            &rem_cap,
-            &metas,
-            total_demand,
-            CandStrategy::Sparse,
-        );
-
-        // Retry with a full bipartite graph only when it could actually help:
-        // the sparse graph must not already cover all workers (otherwise dense
-        // == sparse), AND either the sparse attempt overflowed while real
-        // capacity was still free (a candidate-matching conflict), or it failed
-        // outright under allow_overflow=false (dense is a superset, may be
-        // feasible). Without the coverage guard, a LoRA whose residual demand
-        // exceeds the active worker count would overflow under any density yet
-        // force a dense re-solve every tick.
-        let retry_dense = !sparse_covers_all
-            && match &sparse {
-                Ok((_, overflow)) => {
-                    *overflow > 0 && total_cap > total_demand.saturating_sub(*overflow)
-                }
-                Err(_) => true,
+            // ── Per-LoRA metadata (computed once, reused by both solve attempts) ──
+            // HRW ranking, prior hosts, and residual demand do not depend on the
+            // candidate density, so derive them once here. The candidate list
+            // itself is built inside `build_and_solve` per attempt.
+            let all_workers_sorted: Vec<WorkerWithDpRank> = {
+                let mut ws: Vec<WorkerWithDpRank> = workers.iter().map(|w| w.worker).collect();
+                ws.sort();
+                ws
             };
 
-        let (solved_hosts, overflow_count) = if retry_dense {
-            self.build_and_solve(
+            // One entry per active LoRA, in the same order as `active_loras`.
+            let metas: Vec<LoraMeta> = active_loras
+                .iter()
+                .map(|l| {
+                    let frozen = frozen_hosts.get(&l.name).cloned().unwrap_or_default();
+                    let rem_rep = l.replicas.saturating_sub(frozen.len());
+                    let prev_hosts = prev_assignment.get(&l.name).cloned().unwrap_or_default();
+                    let ranked_pairs = RendezvousHasher::rank_workers(&l.name, &all_workers_sorted);
+                    let rank_map: HashMap<WorkerWithDpRank, usize> = ranked_pairs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (w, _))| (*w, i))
+                        .collect();
+                    let ranked: Vec<WorkerWithDpRank> =
+                        ranked_pairs.into_iter().map(|(w, _)| w).collect();
+                    LoraMeta {
+                        ranked,
+                        rank_map,
+                        prev_hosts,
+                        frozen,
+                        rem_rep,
+                    }
+                })
+                .collect();
+
+            // ── Solve: sparse fast path, dense fallback on spurious overflow ──────
+            let total_cap: usize = active_workers
+                .iter()
+                .map(|w| rem_cap.get(&w.worker).copied().unwrap_or(0))
+                .sum();
+
+            // Does the sparse candidate set already reach every active worker for
+            // every LoRA? If so, the dense graph is identical to the sparse one and
+            // a retry cannot place anything more — crucially, this prevents a LoRA
+            // whose demand exceeds the worker count (each LoRA→worker edge is cap=1)
+            // from triggering a pointless full dense solve on every tick.
+            let active_worker_set: HashSet<WorkerWithDpRank> =
+                active_workers.iter().map(|w| w.worker).collect();
+            let sparse_covers_all = metas.iter().all(|m| {
+                // A LoRA's usable workers are the active workers it does not already
+                // occupy (frozen hosts are excluded — see LoraMeta::frozen).
+                let usable = active_worker_set.difference(&m.frozen).count();
+                let take_n = self.params.candidate_m.max(m.rem_rep);
+                // Usable workers reached = usable workers in the top-`take_n` HRW
+                // window plus any usable prior hosts beyond it.
+                let mut reached: HashSet<WorkerWithDpRank> = HashSet::new();
+                for w in m.ranked.iter().take(take_n) {
+                    if active_worker_set.contains(w) && !m.frozen.contains(w) {
+                        reached.insert(*w);
+                    }
+                }
+                for w in &m.prev_hosts {
+                    if active_worker_set.contains(w) && !m.frozen.contains(w) {
+                        reached.insert(*w);
+                    }
+                }
+                reached.len() >= usable
+            });
+
+            let sparse = self.build_and_solve(
                 &active_loras,
                 &active_workers,
                 &rem_cap,
                 &metas,
                 total_demand,
-                CandStrategy::Dense,
-            )?
-        } else {
-            sparse?
+                CandStrategy::Sparse,
+            );
+
+            // Retry with a full bipartite graph only when it could actually help:
+            // the sparse graph must not already cover all workers (otherwise dense
+            // == sparse), AND either the sparse attempt overflowed while real
+            // capacity was still free (a candidate-matching conflict), or it failed
+            // outright under allow_overflow=false (dense is a superset, may be
+            // feasible). Without the coverage guard, a LoRA whose residual demand
+            // exceeds the active worker count would overflow under any density yet
+            // force a dense re-solve every tick.
+            let retry_dense = !sparse_covers_all
+                && match &sparse {
+                    Ok((_, overflow)) => {
+                        *overflow > 0 && total_cap > total_demand.saturating_sub(*overflow)
+                    }
+                    Err(_) => true,
+                };
+
+            let (solved_hosts, overflow_count) = if retry_dense {
+                self.build_and_solve(
+                    &active_loras,
+                    &active_workers,
+                    &rem_cap,
+                    &metas,
+                    total_demand,
+                    CandStrategy::Dense,
+                )?
+            } else {
+                sparse?
+            };
+
+            Ok((frozen_hosts, solved_hosts, overflow_count))
         };
+
+        // Run the delta-impacted placement first (low churn).
+        let (mut frozen_hosts, mut solved_hosts, mut overflow_count) = place(&impacted)?;
+
+        // Global-unfreeze correctness fallback. Delta freezing keeps churn low,
+        // but a frozen non-impacted LoRA can block an otherwise-feasible
+        // placement, leaving overflow even though a full re-placement would fit
+        // (violating the "overflow == true capacity shortage" contract). When
+        // overflow remains, some LoRA was actually frozen, and total live
+        // capacity still exceeds what we placed, retry with every LoRA impacted
+        // (no freezing) and adopt that result only if it strictly reduces
+        // overflow. This self-corrects in one tick and does not recur, since the
+        // next solve starts from the now-conflict-free assignment.
+        let froze_some = loras.iter().any(|l| !impacted.contains(&l.name));
+        if overflow_count > 0 && froze_some {
+            let total_full_demand: usize = loras
+                .iter()
+                .fold(0usize, |a, l| a.saturating_add(l.replicas));
+            let live_capacity: usize = workers
+                .iter()
+                .fold(0usize, |a, w| a.saturating_add(w.capacity));
+            if live_capacity > total_full_demand.saturating_sub(overflow_count) {
+                let all_impacted: HashSet<String> = loras.iter().map(|l| l.name.clone()).collect();
+                let (f2, s2, ov2) = place(&all_impacted)?;
+                if ov2 < overflow_count {
+                    frozen_hosts = f2;
+                    solved_hosts = s2;
+                    overflow_count = ov2;
+                }
+            }
+        }
 
         // ── Step 7: Merge frozen + solved ────────────────────────────────────
         let mut assignment: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
@@ -1234,6 +1279,54 @@ mod tests {
             .solve(&workers, &loras, &HashMap::new(), None, None)
             .expect("solve must succeed with sanitized params");
         assert_eq!(result.overflow_count, 0);
+    }
+
+    #[test]
+    fn test_frozen_blocker_resolved_by_global_unfreeze() {
+        // Delta-solve can overflow when a frozen, non-impacted LoRA blocks an
+        // otherwise-feasible placement. w0 cap=1, w1 cap=2; prev A->{w1},
+        // B->{w0}; new demand A=2, B=1, only A changed. Freezing B on w0 leaves
+        // A able to use w1 once -> 1 overflow. But moving B to w1 fits
+        // everything (w1 hosts A+B = 2 <= cap 2; w0 hosts A = 1). The global
+        // unfreeze fallback must find that and report zero overflow.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let w0 = WorkerWithDpRank::new(0, 0);
+        let w1 = WorkerWithDpRank::new(1, 0);
+        let workers = vec![
+            WorkerInput {
+                worker: w0,
+                capacity: 1,
+            },
+            WorkerInput {
+                worker: w1,
+                capacity: 2,
+            },
+        ];
+        let loras = vec![make_lora("A", 2), make_lora("B", 1)];
+        let mut prev: HashMap<String, HashSet<WorkerWithDpRank>> = HashMap::new();
+        prev.insert("A".to_string(), HashSet::from([w1]));
+        prev.insert("B".to_string(), HashSet::from([w0]));
+
+        let changed = HashSet::from(["A".to_string()]);
+        let result = solver
+            .solve(&workers, &loras, &prev, Some(&changed), None)
+            .expect("solve should succeed");
+
+        assert_eq!(
+            result.overflow_count, 0,
+            "global unfreeze must place all replicas (move B off the blocker)"
+        );
+        assert_eq!(result.assignment["A"].len(), 2);
+        assert_eq!(result.assignment["B"].len(), 1);
+
+        // Every worker stays within capacity.
+        let mut counts: HashMap<WorkerWithDpRank, usize> = HashMap::new();
+        for hosts in result.assignment.values() {
+            for w in hosts {
+                *counts.entry(*w).or_insert(0) += 1;
+            }
+        }
+        assert!(counts[&w0] <= 1 && counts[&w1] <= 2);
     }
 
     #[test]

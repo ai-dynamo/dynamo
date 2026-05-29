@@ -33,6 +33,11 @@ use crate::lora::predictor::{EmaPredictor, LoadPredictor};
 /// epoch, and readers skip the bucket until then.
 const BUCKET_ROTATING: u64 = u64::MAX;
 
+/// Upper bound on the per-LoRA sliding-window bucket count. Caps the bucket
+/// vector allocation (~16 bytes/bucket) so a pathological rate-window or
+/// bucket-rate config cannot OOM. 1M buckets ≈ 16 MiB.
+const MAX_BUCKETS: u64 = 1_000_000;
+
 /// Lock-free, epoch-based sliding-window rate counter.
 ///
 /// Divides time into fixed-duration buckets. Each bucket has an atomic counter
@@ -222,9 +227,12 @@ impl LoadEstimatorConfig {
 
     fn num_buckets(&self) -> usize {
         let secs = self.rate_window.as_secs().max(1);
-        // saturating_mul guards against overflow on pathological window/bucket
-        // sizes; the value is only used to size the bucket vector.
-        secs.saturating_mul(self.buckets_per_second).max(1) as usize
+        // saturating_mul guards against overflow; the clamp then bounds the
+        // bucket-vector allocation so a pathological (operator-supplied) window
+        // or bucket rate cannot OOM/panic when a counter is created. At 16 bytes
+        // per bucket (count + epoch atomics) the cap is ~16 MiB per LoRA.
+        secs.saturating_mul(self.buckets_per_second)
+            .clamp(1, MAX_BUCKETS) as usize
     }
 
     fn bucket_duration(&self) -> Duration {
