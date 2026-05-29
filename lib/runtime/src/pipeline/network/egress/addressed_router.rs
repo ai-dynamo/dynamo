@@ -323,54 +323,13 @@ impl<S> Drop for InflightDecStream<S> {
     }
 }
 
-/// RAII guard that cancels the recv and (optionally) send halves of a
-/// registration on drop unless [`Self::disarm`] is called first. Drop is
-/// sync; the async `cancel_*_stream` calls fire as a detached
-/// `tokio::spawn` task. Cancellation is idempotent so the detached
-/// completion order does not need to be observed by the caller.
-struct CancelGuard {
-    armed: bool,
-    transport: Arc<tcp::server::TcpStreamServer>,
-    recv_subject: Option<String>,
-    send_subject: Option<String>,
-}
-
-impl CancelGuard {
-    fn arm(
-        transport: Arc<tcp::server::TcpStreamServer>,
-        recv_subject: Option<String>,
-        send_subject: Option<String>,
-    ) -> Self {
-        Self {
-            armed: true,
-            transport,
-            recv_subject,
-            send_subject,
-        }
-    }
-
-    fn disarm(mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let transport = self.transport.clone();
-        let recv = self.recv_subject.take();
-        let send = self.send_subject.take();
-        tokio::spawn(async move {
-            if let Some(s) = recv {
-                transport.cancel_recv_stream(&s).await;
-            }
-            if let Some(s) = send {
-                transport.cancel_send_stream(&s).await;
-            }
-        });
-    }
+/// Extract the TCP stream subject from a [`ConnectionInfo`], if it carries a
+/// well-formed [`tcp::TcpStreamConnectionInfo`]. Used for the pre-dispatch
+/// tombstone check.
+fn subject_of(conn_info: &ConnectionInfo) -> Option<String> {
+    serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&conn_info.info)
+        .ok()
+        .map(|ci| ci.subject)
 }
 
 pub struct AddressedRequest<T> {
@@ -516,31 +475,46 @@ impl AddressedPushRouter {
 
         let enable_request_stream = input_stream.is_some();
 
-        let (pending_send_stream, pending_recv_stream) = self
+        // Hold the `RegisteredStream`s rather than destructuring them up front:
+        // their RAII cleanup stays armed while held, so any `?` before a
+        // provider is handed off cancels the registration. Each side is
+        // disarmed by `into_parts()` at its await site — past that point the
+        // subject is reaped by the worker's dial-in (success) or the discovery
+        // watcher (failure), so no cleanup is owed.
+        let (send_registered, recv_registered) = self
             .register_streams(engine_ctx.clone(), enable_request_stream, true)
             .await;
-        let (resp_stream_conn_info, response_stream_provider) =
-            pending_recv_stream.unwrap().into_parts();
-        let (req_stream_conn_info, request_stream_provider) = if enable_request_stream {
-            let (connection_info, request_stream_provider) =
-                pending_send_stream.unwrap().into_parts();
-            (Some(connection_info), Some(request_stream_provider))
-        } else {
-            (None, None)
-        };
+        let recv_registered = recv_registered.expect("response stream always registered");
 
-        let cancel_guard = self
-            .resolve_subjects(
-                &resp_stream_conn_info,
-                req_stream_conn_info.as_ref(),
-                instance,
-            )
-            .await?;
+        // Tombstone check: if discovery already removed the worker, fail fast
+        // with a migratable error rather than writing to the request plane.
+        // Dropping the held registrations on this return runs their cleanup.
+        let recv_subject = subject_of(&recv_registered.connection_info);
+        let send_subject = send_registered
+            .as_ref()
+            .and_then(|r| subject_of(&r.connection_info));
+        if let (Some(subject), Some(inst)) = (&recv_subject, instance)
+            && !self
+                .resp_transport
+                .associate_instance(
+                    subject,
+                    send_subject.as_deref(),
+                    &inst.endpoint_instance_id(),
+                )
+                .await
+        {
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::Disconnected)
+                    .message("Worker removed before request could be sent (tombstoned instance)")
+                    .build()
+            ));
+        }
 
         let buffer = build_request_envelope(
             ctx_unit,
-            resp_stream_conn_info,
-            req_stream_conn_info,
+            recv_registered.connection_info.clone(),
+            send_registered.as_ref().map(|r| r.connection_info.clone()),
             request,
         )?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
@@ -555,12 +529,16 @@ impl AddressedPushRouter {
         // `engine.generate()` returns; awaiting it second avoids stalling the
         // request-side handshake on engine setup latency.
         if let Some(stream) = input_stream {
+            let request_stream_provider = send_registered.map(|r| r.into_parts().1);
             spawn_request_stream_forwarder(request_stream_provider, stream, engine_ctx.clone())
                 .await?;
         }
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id = ctx_unit.id(), "awaiting transport handshake");
+
+        // Disarms the recv-side cleanup; see the holding rationale above.
+        let (_recv_conn_info, response_stream_provider) = recv_registered.into_parts();
 
         // RecvError → migratable Disconnected (watcher cancelled the subject
         // or the worker died before establishing the response stream).
@@ -595,7 +573,6 @@ impl AddressedPushRouter {
         };
         drop(_nvtx_wait);
 
-        cancel_guard.disarm();
         Ok(finalize_response_stream(
             response_stream.rx,
             engine_ctx,
@@ -642,60 +619,6 @@ impl AddressedPushRouter {
         );
 
         (send_stream, recv_stream)
-    }
-
-    /// Resolve the TCP subjects from the recv-side (always present on TCP)
-    /// and the optional send-side connection-info, run the tombstone check,
-    /// and return an armed [`CancelGuard`] owning those subjects.
-    ///
-    /// On tombstone the guard is dropped before this function returns,
-    /// firing the same cleanup as any other dispatch failure; the caller
-    /// sees a migratable `Disconnected` error.
-    async fn resolve_subjects(
-        &self,
-        recv_conn_info: &ConnectionInfo,
-        send_conn_info: Option<&ConnectionInfo>,
-        instance: Option<&Instance>,
-    ) -> Result<CancelGuard, Error> {
-        let recv_subject: Option<String> =
-            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&recv_conn_info.info)
-                .ok()
-                .map(|ci| ci.subject);
-        let send_subject: Option<String> = send_conn_info.and_then(|ci| {
-            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&ci.info)
-                .ok()
-                .map(|ci| ci.subject)
-        });
-
-        // Arm the guard before the tombstone check so the tombstone-Err
-        // path goes through the same Drop-based cleanup as every other
-        // dispatch failure.
-        let guard = CancelGuard::arm(
-            self.resp_transport.clone(),
-            recv_subject.clone(),
-            send_subject.clone(),
-        );
-
-        if let (Some(subject), Some(inst)) = (&recv_subject, instance)
-            && !self
-                .resp_transport
-                .associate_instance(
-                    subject,
-                    send_subject.as_deref(),
-                    &inst.endpoint_instance_id(),
-                )
-                .await
-        {
-            // guard drops on return → spawns cancel for both halves
-            return Err(anyhow::anyhow!(
-                DynamoError::builder()
-                    .error_type(ErrorType::Disconnected)
-                    .message("Worker removed before request could be sent (tombstoned instance)")
-                    .build()
-            ));
-        }
-
-        Ok(guard)
     }
 
     /// Build standard request-plane headers (trace propagation, request-id,
