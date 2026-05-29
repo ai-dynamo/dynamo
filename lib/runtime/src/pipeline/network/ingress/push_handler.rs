@@ -3,11 +3,14 @@
 
 use super::*;
 
+use crate::engine::AsyncEngineContext;
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
+use crate::pipeline::{ManyIn, RequestStream};
 use crate::protocols::maybe_error::MaybeError;
+use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -244,14 +247,11 @@ struct ParsedRequest<Req> {
 }
 
 /// Per-shape strategy for turning a raw payload into a typed engine
-/// request. Captures the wire-shape-specific parsing of the request
-/// envelope; everything else — metrics-guard, response stream open,
-/// `segment.generate`, prologue, pump — lives in
+/// request. Captures the wire-shape divergence between the unary
+/// (`HeaderAndData`) and bidirectional (`HeaderOnly` + dial-in for the
+/// request stream) paths; everything else — metrics-guard, response stream
+/// open, `segment.generate`, prologue, pump — lives in
 /// [`Ingress::handle_payload_shared`] below.
-///
-/// Currently has a single impl (the unary `HeaderAndData` shape). The
-/// abstraction exists to keep an additional impl for the bidirectional
-/// `HeaderOnly` + dial-in shape addition cheap when that lands.
 #[async_trait]
 trait IngressDispatch: Send + Sync {
     type Request: PipelineIO;
@@ -327,6 +327,142 @@ where
 
         let request: context::Context<T> =
             Context::with_id_and_metadata(request_t, control_msg.id, control_msg.metadata);
+
+        Ok(ParsedRequest {
+            request,
+            response_connection_info: control_msg.connection_info,
+            frontend_send_ts_ns: control_msg.frontend_send_ts_ns,
+        })
+    }
+}
+
+#[async_trait]
+impl<T, U> IngressDispatch for Ingress<ManyIn<T>, ManyOut<U>>
+where
+    T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
+    U: Data + Serialize + MaybeError + std::fmt::Debug,
+{
+    type Request = ManyIn<T>;
+
+    async fn parse_and_build_request(
+        &self,
+        payload: Bytes,
+    ) -> Result<ParsedRequest<ManyIn<T>>, PipelineError> {
+        // Bidirectional envelopes are header-only — all request frames
+        // (including the first) flow on the request-stream socket once
+        // it's dialed in. A HeaderAndData payload here would mean the
+        // sender used the unary wire shape; reject it.
+        let msg = TwoPartCodec::default()
+            .decode_message(payload)?
+            .into_message_type();
+
+        let control_msg = match msg {
+            TwoPartMessageType::HeaderOnly(header) => serde_json::from_slice::<RequestControlMessage>(&header).map_err(|err| {
+                let json_str = String::from_utf8_lossy(&header);
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::DESERIALIZATION])
+                        .inc();
+                }
+                PipelineError::DeserializationError(format!(
+                    "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
+                ))
+            })?,
+            _ => {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                        .inc();
+                }
+                return Err(PipelineError::Generic(String::from(
+                    "bidirectional engine received a non-header-only envelope",
+                )));
+            }
+        };
+
+        if !matches!(control_msg.request_type, RequestType::ManyIn) {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                    .inc();
+            }
+            return Err(PipelineError::Generic(String::from(
+                "bidirectional engine received a non-ManyIn request envelope",
+            )));
+        }
+
+        let req_stream_conn_info = control_msg
+            .request_stream_connection_info
+            .clone()
+            .ok_or_else(|| {
+                PipelineError::Generic(String::from(
+                    "bidirectional control message missing request_stream_connection_info",
+                ))
+            })?;
+
+        let request_context: context::Context<()> = context::Context::with_id_and_metadata(
+            (),
+            control_msg.id.clone(),
+            control_msg.metadata.clone(),
+        );
+        let context_arc: Arc<dyn AsyncEngineContext> = request_context.context();
+
+        // Open the request stream (upstream → worker) up front. The shared
+        // handler opens the response stream uniformly after we return. If
+        // response-stream open subsequently fails, the forwarder task
+        // spawned below exits cleanly when `frame_tx.send` observes the
+        // dropped `frame_rx`.
+        let request_stream_recv = tcp::client::TcpClient::create_request_stream(
+            context_arc.clone(),
+            req_stream_conn_info,
+            None,
+        )
+        .await
+        .map_err(|e| {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                    .inc();
+            }
+            PipelineError::Generic(format!("Failed to create request stream: {:?}", e))
+        })?;
+
+        // Forwarder: deserialize raw bytes off the request socket into `T`
+        // and feed the engine's `ManyIn<T>` input. Every request frame
+        // (including the first) flows over this socket — the envelope is
+        // header-only.
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<T>(8);
+        let forwarder_ctx = context_arc.clone();
+        tokio::spawn(async move {
+            let mut rx = request_stream_recv.rx;
+            while let Some(bytes) = rx.recv().await {
+                if forwarder_ctx.is_killed() {
+                    break;
+                }
+                match serde_json::from_slice::<T>(&bytes) {
+                    Ok(item) => {
+                        if frame_tx.send(item).await.is_err() {
+                            tracing::debug!(
+                                "engine consumer dropped; bidirectional input forwarder exiting"
+                            );
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "failed to deserialize bidirectional request frame; killing context"
+                        );
+                        forwarder_ctx.kill();
+                        break;
+                    }
+                }
+            }
+        });
+
+        let input_stream: crate::engine::DataStream<T> =
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(frame_rx));
+        let request: ManyIn<T> = request_context.map(|_| RequestStream::new(input_stream));
 
         Ok(ParsedRequest {
             request,
@@ -481,6 +617,37 @@ where
 
     fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
         use crate::pipeline::network::Ingress;
+        self.endpoint_health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+        Ok(())
+    }
+
+    async fn handle_payload(
+        &self,
+        payload: Bytes,
+        request_id: Option<String>,
+    ) -> Result<(), PipelineError> {
+        self.handle_payload_shared(payload, request_id).await
+    }
+}
+
+#[async_trait]
+impl<T, U> PushWorkHandler for Ingress<ManyIn<T>, ManyOut<U>>
+where
+    T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
+    U: Data + Serialize + MaybeError + std::fmt::Debug,
+{
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        use crate::pipeline::network::Ingress;
+        Ingress::add_metrics(self, endpoint, metrics_labels)
+    }
+
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
         self.endpoint_health_check_notifier
             .set(notifier)
             .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
