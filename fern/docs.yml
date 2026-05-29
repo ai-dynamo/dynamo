@@ -133,6 +133,8 @@ navbar-links:
     links:
       - text: All Posts
         href: /dynamo/dev/digest
+      - text: "DynoSim: Simulating the Pareto Frontier"
+        href: /dynamo/dev/digest/dynosim-pareto-frontier
       - text: "Dynamo Day 0 support for TokenSpeed"
         href: /dynamo/dev/digest/tokenspeed-day-0
       - text: "Multi-Turn Agentic Harnesses"
