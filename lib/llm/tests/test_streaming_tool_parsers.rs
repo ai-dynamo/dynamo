@@ -1346,7 +1346,7 @@ mod tests {
         run_deepseek_v4_tool_call_fixture(&file_path).await;
     }
 
-    /// `PARSER.stream.4.a` — stream ends after a complete invoke but before
+    /// `TOOLCALLING.stream.4.a` — stream ends after a complete invoke but before
     /// `</｜DSML｜tool_calls>`. Finalization should recover the complete invoke
     /// without enabling early stream exit on unterminated DSML wrappers.
     #[tokio::test]
