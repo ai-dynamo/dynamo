@@ -537,6 +537,13 @@ mod core_behavior {
         let pass = core.execute_pass_internal(None, 0.0);
 
         assert_eq!(pass.router_event_visibility, RouterEventVisibility::PassEnd);
+        assert!(!pass.kv_events.is_empty());
+        assert!(
+            pass.kv_events
+                .iter()
+                .all(|event| event.worker_id == ROUTER_TEST_WORKER_ID)
+        );
+        assert!(pass.kv_events.iter().all(|event| event.event.dp_rank == 0));
     }
 }
 

@@ -17,22 +17,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on missing/orphan end marker (impl-defined recovery)"
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜>
-      vllm:
+      dynamo: &d_5_a
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      sglang:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
+      vllm: *d_5_a
+      sglang: *d_5_a
   TOOLCALLING.batch.5.b:
     description: Closing tool_calls_end without matching tool_calls_begin
     ref: dynamo
@@ -53,16 +45,11 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on missing/orphan end marker (impl-defined recovery)"
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"loc
-      vllm:
+      dynamo: &d_5_c
         calls: []
         normal_text: ''
-      sglang:
-        calls: []
-        normal_text: ''
+      vllm: *d_5_c
+      sglang: *d_5_c
   TOOLCALLING.batch.5.d:
     description: Multi-call, last call missing only end marker (body complete)
     ref: dynamo
@@ -71,22 +58,14 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        calls: []
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"Boston"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"New
-          York"}
-      vllm:
+      dynamo: &d_5_d
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      sglang:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Boston
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm: *d_5_d
+      sglang: *d_5_d
   TOOLCALLING.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
@@ -95,19 +74,11 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        calls: []
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"Boston"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"New
-          York
-      vllm:
+      dynamo: &d_5_e
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      sglang:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Boston
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm: *d_5_e
+      sglang: *d_5_e
