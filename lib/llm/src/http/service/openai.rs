@@ -35,6 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
+    metadata::extract_metadata_from_http,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
         process_response_and_observe_metrics,
@@ -223,6 +224,19 @@ impl ErrorMessage {
         )
     }
 
+    pub fn request_headers_too_large(msg: &str) -> ErrorResponse {
+        let code = StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
@@ -400,6 +414,18 @@ fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, heade
     }
 }
 
+fn context_from_headers<T: Send + Sync + 'static>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+) -> Result<Context<T>, ErrorResponse> {
+    let metadata = extract_metadata_from_http(headers)
+        .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
+    let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    attach_x_request_id(&mut request, headers);
+    Ok(request)
+}
+
 fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
@@ -445,8 +471,7 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -714,7 +739,11 @@ async fn completions_batch(
 
         // Generate unique request_id for each prompt: original_id-{prompt_idx}
         let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
-        let mut single_request_context = Context::with_id(single_request, unique_request_id);
+        let mut single_request_context = Context::with_id_and_metadata(
+            single_request,
+            unique_request_id,
+            request.metadata().clone(),
+        );
         copy_x_request_id(&request, &mut single_request_context);
 
         // Generate stream for this prompt
@@ -857,7 +886,7 @@ async fn embeddings(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // Embeddings are typically not streamed, so we default to non-streaming
@@ -963,8 +992,7 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -1639,8 +1667,7 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -2233,7 +2260,7 @@ async fn images(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // Images are typically not streamed, so we default to non-streaming
@@ -2365,7 +2392,7 @@ async fn videos(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     let streaming = request.stream.unwrap_or(false);
@@ -2485,7 +2512,7 @@ async fn video_stream(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let model = request.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -2649,7 +2676,7 @@ async fn audio_speech(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     let streaming = false;
