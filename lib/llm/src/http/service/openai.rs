@@ -882,6 +882,12 @@ async fn embeddings(
     headers: HeaderMap,
     Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
+    // DEBUG-TIMING: stopwatch begins on handler entry, after axum/serde JSON
+    // body parse. Each labelled `t_*` checkpoint below feeds into one INFO
+    // log line at the end summarising the per-phase budget so we can locate
+    // residual overhead between the Python worker and the HTTP response.
+    let t_entry = std::time::Instant::now();
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -927,6 +933,9 @@ async fn embeddings(
         .create_response_collector(&metric_model);
     let model_name = model.to_string();
 
+    // DEBUG-TIMING: before NATS dispatch through the engine.
+    let t_before_generate = std::time::Instant::now();
+
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
@@ -938,6 +947,9 @@ async fn embeddings(
         inflight.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+
+    // DEBUG-TIMING: engine.generate returned a stream (not yet folded).
+    let t_after_generate = std::time::Instant::now();
 
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
@@ -966,10 +978,33 @@ async fn embeddings(
             err_response
         })?;
 
+    // DEBUG-TIMING: stream fully folded into NvCreateEmbeddingResponse.
+    let t_after_fold = std::time::Instant::now();
+
     state
         .metrics_clone()
         .observe_embedding_latency(&model_name, embedding_start.elapsed().as_secs_f64());
     inflight.mark_ok();
+
+    // DEBUG-TIMING: one INFO line per request -- compare against the Python
+    // worker's `[embedding-timing]` log to localize the framework cost
+    // outside the Python `generate()` body.
+    //
+    //   preflight       = HTTP entry .. immediately before engine.generate
+    //   dispatch        = engine.generate call returned (NATS publish + handshake)
+    //   stream_fold     = first item received .. stream collected into one response
+    //                     (this contains the worker's wall-clock for the entire
+    //                     `[embedding-timing]` window plus the NATS round-trip)
+    tracing::info!(
+        "[embedding-timing-rust] total={:.2}ms preflight={:.2}ms dispatch={:.2}ms \
+         stream_fold={:.2}ms n_data={}",
+        (t_after_fold - t_entry).as_secs_f64() * 1000.0,
+        (t_before_generate - t_entry).as_secs_f64() * 1000.0,
+        (t_after_generate - t_before_generate).as_secs_f64() * 1000.0,
+        (t_after_fold - t_after_generate).as_secs_f64() * 1000.0,
+        response.inner.data.len(),
+    );
+
     Ok(Json(response).into_response())
 }
 
