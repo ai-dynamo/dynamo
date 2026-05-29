@@ -208,21 +208,6 @@ vllm:nixl_num_pending_sends{
 A scripted version of the above lives at
 `verification/dynamo_runtime_test.sh`.
 
-## Production diagnostic the new metric enables
-
-```promql
-# Per-worker count of pinned KV transfers right now (leading indicator)
-vllm:nixl_num_pending_sends{pod=~".*prefillworker.*"}
-
-# Trailing indicator — non-zero rate = timeout sweep is actively reclaiming
-rate(vllm:nixl_num_kv_expired_reqs_total{pod=~".*prefillworker.*"}[5m])
-
-# The "worker is lying about being idle" alert:
-(vllm:num_requests_running == 0)
-  and (vllm:num_requests_waiting == 0)
-  and (vllm:nixl_num_pending_sends > 0)
-```
-
 ## DGD activation snippet
 
 Add to the prefill worker args in the DGD (decode workers don't need it; their
