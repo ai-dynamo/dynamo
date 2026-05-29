@@ -587,7 +587,7 @@ def _parser_marker(case: dict[str, Any] | None, family: str | None, impl: str) -
         peers = (expected.get("vllm"), expected.get("sglang"))
         if all(isinstance(peer, dict) and "unavailable" in peer for peer in peers):
             return "·"
-    return "="
+    return ""
 
 
 def _parser_marker_attrs(case: dict[str, Any] | None, family: str | None) -> str:

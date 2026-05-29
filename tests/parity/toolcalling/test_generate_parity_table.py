@@ -70,9 +70,9 @@ def test_generate_parser_parity_table_html() -> None:
     assert "data-marker-parity-vllm" in html
     assert "content: attr(data-marker-parity-vllm)" in html
     assert 'data-marker-dynamo="' in html
-    assert 'data-marker-dynamo="="' in html
-    assert 'data-marker-vllm="="' in html
-    assert 'data-marker-sglang="="' in html
+    assert 'data-marker-dynamo="="' not in html
+    assert 'data-marker-vllm="="' not in html
+    assert 'data-marker-sglang="="' not in html
     assert "color: #aeb6bf;" in html
     assert "background: #e4e8ec;" in html
     assert 'data-marker-parity-dynamo="D"' not in html
@@ -110,8 +110,8 @@ def test_generate_parser_parity_table_html() -> None:
     assert "TOOLCALLING.stream.1.a</td><td>Single complete tool-call payload" in html
     assert re.search(
         r'data-status-dynamo="ok" data-status-vllm="problem" data-status-sglang="na" '
-        r'data-marker-dynamo="=" data-marker-vllm="↯" data-marker-sglang="n/a" '
-        r'data-marker-parity-dynamo="=" data-marker-parity-vllm="↯" '
+        r'data-marker-dynamo="" data-marker-vllm="↯" data-marker-sglang="n/a" '
+        r'data-marker-parity-dynamo="" data-marker-parity-vllm="↯" '
         r'data-marker-parity-sglang="n/a"><a href="fixtures/deepseek_v4/TOOLCALLING\.batch\.4\.yaml">V</a>'
         r'<div class="ttip"><div class="ttip-head">TOOLCALLING\.batch\.4\.a — deepseek_v4',
         html,
