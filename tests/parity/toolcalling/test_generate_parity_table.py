@@ -118,6 +118,22 @@ def test_generate_parser_parity_table_html() -> None:
     )
     assert 'data-marker-vllm="!"' in html
     assert 'data-marker-parity-vllm="!"' in html
+    assert re.search(
+        r'data-status-dynamo="ok" data-status-vllm="ok" data-status-sglang="problem" '
+        r'data-marker-dynamo="" data-marker-vllm="" data-marker-sglang="↯" '
+        r'data-marker-parity-dynamo="S" data-marker-parity-vllm="S" '
+        r'data-marker-parity-sglang="↯DV"><a href="fixtures/harmony/TOOLCALLING\.batch\.yaml">S</a>'
+        r'<div class="ttip"><div class="ttip-head">TOOLCALLING\.batch\.1 — harmony',
+        html,
+    )
+    assert re.search(
+        r'data-status-dynamo="ok" data-status-vllm="problem" data-status-sglang="ok" '
+        r'data-marker-dynamo="" data-marker-vllm="↯" data-marker-sglang="" '
+        r'data-marker-parity-dynamo="VS" data-marker-parity-vllm="↯DS" '
+        r'data-marker-parity-sglang="DV"><a href="fixtures/llama3_json/TOOLCALLING\.batch\.4\.yaml">VS</a>'
+        r'<div class="ttip"><div class="ttip-head">TOOLCALLING\.batch\.4\.a — llama3_json',
+        html,
+    )
     assert fixture_links
     assert len(fixture_families) > 10
     assert "deepseek_v3" in fixture_families
