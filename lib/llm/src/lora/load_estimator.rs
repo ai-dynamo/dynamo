@@ -211,14 +211,20 @@ impl LoadEstimatorConfig {
     pub fn from_controller_timestep(timestep_secs: u64, multiplier: u64) -> Self {
         let min_window = crate::lora::config::MIN_RATE_WINDOW_SECS;
         Self {
-            rate_window: Duration::from_secs((timestep_secs * multiplier).max(min_window)),
+            // saturating_mul: both operands are operator-supplied and could
+            // otherwise overflow u64.
+            rate_window: Duration::from_secs(
+                timestep_secs.saturating_mul(multiplier).max(min_window),
+            ),
             ..Default::default()
         }
     }
 
     fn num_buckets(&self) -> usize {
         let secs = self.rate_window.as_secs().max(1);
-        (secs * self.buckets_per_second).max(1) as usize
+        // saturating_mul guards against overflow on pathological window/bucket
+        // sizes; the value is only used to size the bucket vector.
+        secs.saturating_mul(self.buckets_per_second).max(1) as usize
     }
 
     fn bucket_duration(&self) -> Duration {

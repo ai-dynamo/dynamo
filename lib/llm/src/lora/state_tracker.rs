@@ -288,9 +288,15 @@ impl LoraStateTracker {
             .map(|entry| (*entry.key(), *entry.value()))
             .collect();
         caps.into_iter()
-            .map(|(worker, cap)| {
+            .filter_map(|(worker, cap)| {
                 let loaded = self.loaded_count(&worker);
-                (worker, (loaded, cap as usize))
+                // Drop workers removed since the snapshot. handle_worker_removal
+                // clears worker_capacity before worker_to_loras, so if loaded
+                // dropped to 0 due to a concurrent removal, the capacity entry
+                // is already gone and this recheck filters out the stale row.
+                self.worker_capacity
+                    .contains_key(&worker)
+                    .then_some((worker, (loaded, cap as usize)))
             })
             .collect()
     }
@@ -304,7 +310,14 @@ impl LoraStateTracker {
             .map(|entry| (*entry.key(), *entry.value()))
             .collect();
         caps.into_iter()
-            .filter(|(worker, capacity)| (self.loaded_count(worker) as u32) < *capacity)
+            .filter(|(worker, capacity)| {
+                // loaded_count first, then re-confirm the worker still exists:
+                // a worker removed since the snapshot has its capacity cleared
+                // before worker_to_loras, so a transient loaded==0 cannot make
+                // a removed worker look free.
+                (self.loaded_count(worker) as u32) < *capacity
+                    && self.worker_capacity.contains_key(worker)
+            })
             .map(|(worker, _)| worker)
             .collect()
     }
