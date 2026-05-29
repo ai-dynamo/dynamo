@@ -17,3 +17,5 @@ pub(crate) use worker_query_endpoint::start_worker_kv_query_endpoint;
 pub(crate) use worker_query_endpoint::{
     register_velo_query_handler, start_worker_kv_velo_peer_endpoint,
 };
+#[cfg(feature = "velo-recovery")]
+pub(crate) use worker_query_transport::build_velo_messenger;

@@ -38,7 +38,9 @@ pub(crate) use recovery::start_subscriber;
 pub(crate) use recovery::start_worker_kv_query_endpoint;
 
 #[cfg(feature = "velo-recovery")]
-pub(crate) use recovery::{register_velo_query_handler, start_worker_kv_velo_peer_endpoint};
+pub(crate) use recovery::{
+    build_velo_messenger, register_velo_query_handler, start_worker_kv_velo_peer_endpoint,
+};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed

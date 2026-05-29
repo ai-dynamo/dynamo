@@ -393,13 +393,14 @@ impl Drop for KvEventPublisher {
 
 // Velo direct-transport helpers
 
-/// Create a Velo Messenger, register the worker KV query handler, and start the
-/// peer-info endpoint so routers using Velo direct transport can discover and
-/// query this worker.
+/// Create a Velo/UDS Messenger, register the worker KV query handler,
+/// and start the peer-info endpoint so routers can discover and query this worker.
 ///
-/// This is gated behind `velo-recovery` and called once per `(worker_id, dp_rank)`
-/// that has a local KV indexer.  It runs until the peer-info Dynamo endpoint shuts
-/// down (i.e., for the lifetime of the worker process).
+/// Targets same-host deployments only (UDS transport).  Cross-host TCP support
+/// is deferred as future work.
+///
+/// Gated behind `velo-recovery` and called once per `(worker_id, dp_rank)` that
+/// has a local KV indexer.  Runs for the lifetime of the worker process.
 #[cfg(feature = "velo-recovery")]
 async fn start_worker_velo_kv_transport(
     component: Component,
@@ -407,28 +408,23 @@ async fn start_worker_velo_kv_transport(
     dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
 ) -> anyhow::Result<()> {
-    use std::net::TcpListener;
-    use velo::backend::tcp::TcpTransportBuilder;
+    use std::path::PathBuf;
 
     use crate::kv_router::indexer::{
-        register_velo_query_handler, start_worker_kv_velo_peer_endpoint,
+        build_velo_messenger, register_velo_query_handler, start_worker_kv_velo_peer_endpoint,
     };
 
-    let listener = TcpListener::bind("0.0.0.0:0")
-        .map_err(|e| anyhow::anyhow!("Velo TCP bind for worker {worker_id}: {e}"))?;
-    let transport = Arc::new(
-        TcpTransportBuilder::new()
-            .from_listener(listener)
-            .map_err(|e| anyhow::anyhow!("Velo TCP from_listener: {e}"))?
-            .build()
-            .map_err(|e| anyhow::anyhow!("Velo TCP build: {e}"))?,
-    ) as Arc<dyn velo::backend::Transport>;
-    // Messenger::builder().build() returns Arc<Messenger> directly.
-    let messenger = velo::Messenger::builder()
-        .add_transport(transport)
-        .build()
-        .await
-        .map_err(|e| anyhow::anyhow!("Velo Messenger build: {e}"))?;
+    // Deterministic UDS path keyed by (worker_id, dp_rank) so the router can
+    // find this socket without any out-of-band coordination.  The path is also
+    // included in the PeerInfo that the router fetches via the peer-info endpoint,
+    // so there is no need for the router to know the naming scheme in advance.
+    let worker_uds_path = PathBuf::from(format!(
+        "/tmp/dynamo-velo-worker-recovery-{worker_id}-dp{dp_rank}.sock"
+    ));
+    // Remove any leftover socket from a previous run (worker restart).
+    let _ = std::fs::remove_file(&worker_uds_path);
+
+    let messenger = build_velo_messenger(&worker_uds_path).await?;
 
     register_velo_query_handler(&messenger, worker_id, dp_rank, local_indexer)
         .map_err(|e| anyhow::anyhow!("register_velo_query_handler: {e}"))?;
@@ -436,10 +432,17 @@ async fn start_worker_velo_kv_transport(
     tracing::info!(
         worker_id,
         dp_rank,
-        "Worker Velo KV transport started; publishing peer-info endpoint"
+        uds_path = %worker_uds_path.display(),
+        "Worker Velo/UDS KV transport started (same-host); publishing peer-info endpoint"
     );
 
     // Runs until the component shuts down.
     start_worker_kv_velo_peer_endpoint(component, worker_id, dp_rank, messenger).await;
+
+    // Clean up the UDS socket file when the worker exits so stale paths do not
+    // accumulate across restarts.
+    let _ = std::fs::remove_file(&worker_uds_path);
+    tracing::debug!(worker_id, dp_rank, "Removed Velo worker UDS socket");
+
     Ok(())
 }

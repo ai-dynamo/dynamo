@@ -121,32 +121,33 @@ async fn start_kv_router_background_event_plane(
 
 /// Build a `WorkerQueryClient` using Velo direct transport.
 ///
-/// Creates a TCP-bound Velo `Messenger`, then delegates to
+/// Constructs a [`velo::Messenger`], then delegates to
 /// [`WorkerQueryClient::spawn_with_velo`].
 #[cfg(feature = "velo-recovery")]
 async fn make_worker_query_client(
     component: Component,
     indexer: Indexer,
 ) -> Result<Arc<WorkerQueryClient>> {
-    use std::net::TcpListener;
-    use velo::backend::tcp::TcpTransportBuilder;
+    use std::path::PathBuf;
 
-    let listener =
-        TcpListener::bind("0.0.0.0:0").map_err(|e| anyhow::anyhow!("Velo TCP bind: {e}"))?;
-    let transport = Arc::new(
-        TcpTransportBuilder::new()
-            .from_listener(listener)
-            .map_err(|e| anyhow::anyhow!("Velo TCP from_listener: {e}"))?
-            .build()
-            .map_err(|e| anyhow::anyhow!("Velo TCP build: {e}"))?,
+    use super::worker_query_transport::build_velo_messenger;
+
+    // Each router instance gets a unique UDS path so that multiple routers on
+    // the same host do not collide.  Process ID + a per-process counter suffices.
+    static ROUTER_UDS_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = ROUTER_UDS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let router_uds_path = PathBuf::from(format!(
+        "/tmp/dynamo-velo-router-recovery-{}-{seq}.sock",
+        std::process::id()
+    ));
+    // Remove any leftover socket from a previous run at the same path.
+    let _ = std::fs::remove_file(&router_uds_path);
+
+    let messenger = build_velo_messenger(&router_uds_path).await?;
+    tracing::info!(
+        uds_path = %router_uds_path.display(),
+        "Router using Velo/UDS direct transport for KV gap-recovery (same-host)"
     );
-    // Messenger::builder().build() returns Arc<Messenger> directly.
-    let messenger = velo::Messenger::builder()
-        .add_transport(transport as Arc<dyn velo::backend::Transport>)
-        .build()
-        .await
-        .map_err(|e| anyhow::anyhow!("Velo Messenger build: {e}"))?;
-    tracing::info!("Router using Velo direct transport for KV gap-recovery queries");
     WorkerQueryClient::spawn_with_velo(component, indexer, messenger).await
 }
 

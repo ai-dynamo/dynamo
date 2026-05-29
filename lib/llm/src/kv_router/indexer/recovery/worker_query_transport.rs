@@ -218,6 +218,34 @@ impl WorkerQueryTransport for VeloWorkerQueryTransport {
     }
 }
 
+/// Build a same-host `velo::Messenger` backed by a Unix domain socket.
+///
+/// This MR targets same-host deployments only.  UDS is the sole registered
+/// transport; there is no TCP fallback.  Cross-host support (TCP) is deferred
+/// to a follow-up once the same-host path is benchmarked and validated.
+///
+/// The caller is responsible for creating (by calling this function) and later
+/// cleaning up the UDS socket file.
+#[cfg(feature = "velo-recovery")]
+pub(crate) async fn build_velo_messenger(
+    uds_path: &std::path::Path,
+) -> anyhow::Result<Arc<velo::Messenger>> {
+    use velo::backend::uds::UdsTransportBuilder;
+
+    let uds_transport = Arc::new(
+        UdsTransportBuilder::new()
+            .socket_path(uds_path)
+            .build()
+            .map_err(|e| anyhow::anyhow!("Velo UDS transport build: {e}"))?,
+    ) as Arc<dyn velo::backend::Transport>;
+
+    velo::Messenger::builder()
+        .add_transport(uds_transport)
+        .build()
+        .await
+        .map_err(|e| anyhow::anyhow!("Velo Messenger build: {e}"))
+}
+
 // Tests
 
 #[cfg(all(test, feature = "velo-recovery"))]
