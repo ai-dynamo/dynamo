@@ -25,10 +25,7 @@ import logging
 import sys
 
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
-from gpu_memory_service.snapshot.transfer import (
-    DEFAULT_TRANSFER_BACKEND,
-    TRANSFER_BACKEND_CHOICES,
-)
+from gpu_memory_service.snapshot.transfer import TransferBackendKind
 
 logging.basicConfig(
     level=logging.INFO,
@@ -140,15 +137,12 @@ def _run_load(args) -> None:
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-_SHARD_SIZE_DEFAULT = 4 * 1024**3  # 4 GiB
-_LOAD_WORKERS_DEFAULT = 16
-
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gms-storage-client",
         description="Save and load GPU Memory Service state to/from disk.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="subcommand")
 
@@ -156,6 +150,7 @@ def _build_parser() -> argparse.ArgumentParser:
     save_p = subparsers.add_parser(
         "save",
         help="Save GMS state to a sharded binary directory.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Connect to a running GMS server in RO mode and export every "
             "allocation plus all metadata to a compact sharded binary format."
@@ -170,7 +165,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--device",
         type=int,
         default=0,
-        help="CUDA device index (default: 0).",
+        help="CUDA device index.",
     )
     save_p.add_argument(
         "--socket-path",
@@ -187,10 +182,9 @@ def _build_parser() -> argparse.ArgumentParser:
     save_p.add_argument(
         "--shard-size-bytes",
         type=int,
-        default=_SHARD_SIZE_DEFAULT,
+        default=4 * 1024**3,
         help=(
-            f"Soft upper bound per shard file in bytes "
-            f"(default: {_SHARD_SIZE_DEFAULT // 1024**3} GiB).  "
+            "Soft upper bound per shard file in bytes. "
             "Decrease to increase parallelism on save/load; increase to "
             "reduce file count."
         ),
@@ -207,7 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--save-workers",
         type=int,
         default=8,
-        help="Thread pool size for parallel shard writes (default: 8).",
+        help="Thread pool size for parallel shard writes.",
     )
     save_p.add_argument(
         "--verbose",
@@ -220,6 +214,7 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p = subparsers.add_parser(
         "load",
         help="Load a saved GMS state back into a running GMS server.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Connect to a running GMS server in RW mode, restore tensor data "
             "from a saved directory through the selected transfer backend, "
@@ -235,7 +230,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--device",
         type=int,
         default=0,
-        help="CUDA device index (default: 0).",
+        help="CUDA device index.",
     )
     load_p.add_argument(
         "--socket-path",
@@ -252,16 +247,13 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p.add_argument(
         "--workers",
         type=int,
-        default=_LOAD_WORKERS_DEFAULT,
-        help=(
-            "Thread pool size for parallel shard reads "
-            f"(default: {_LOAD_WORKERS_DEFAULT})."
-        ),
+        default=16,
+        help="Thread pool size for parallel shard reads.",
     )
     load_p.add_argument(
         "--transfer-backend",
-        choices=TRANSFER_BACKEND_CHOICES,
-        default=DEFAULT_TRANSFER_BACKEND,
+        choices=[backend.value for backend in TransferBackendKind],
+        default=TransferBackendKind.NIXL.value,
         help=(
             "Byte transfer backend for restore. "
             "'nixl' uses NIXL POSIX with host staging; "
@@ -280,8 +272,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help=(
-            "Number of independent sharded-ssd restore queues per SSD root "
-            "(default: 2). Increase this "
+            "Number of independent sharded-ssd restore queues per SSD root. "
+            "Increase this "
             "to use multiple NIXL/POSIX workers per local SSD root."
         ),
     )

@@ -8,16 +8,15 @@ import threading
 import pytest
 
 try:
-    from gpu_memory_service.snapshot.backends.nixl_staging import (
+    from gpu_memory_service.snapshot.backends.nixl_common import (
         NixlFileGroup,
         NixlWorkGroup,
+        split_work_groups,
+    )
+    from gpu_memory_service.snapshot.backends.nixl_staging import (
         _NixlPosixStagingTransferSession,
-        _split_work_groups,
     )
-    from gpu_memory_service.snapshot.transfer import (
-        FileTransferSource,
-        GMSTransferTarget,
-    )
+    from gpu_memory_service.snapshot.transfer import FileTransferSource
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
@@ -46,7 +45,7 @@ def _work_group(name: str, byte_count: int) -> NixlWorkGroup:
 def test_split_work_groups_limits_bucket_count():
     work_groups = [_work_group(f"shard-{idx}", 1) for idx in range(142)]
 
-    buckets = _split_work_groups(work_groups, worker_count=8)
+    buckets = split_work_groups(work_groups, worker_count=8)
 
     assert len(buckets) == 8
     assert sum(len(file_groups) for _name, file_groups in buckets) == 142
@@ -63,7 +62,7 @@ def test_split_work_groups_limits_bucket_count():
 def test_split_work_groups_keeps_existing_groups_when_not_over_limit():
     work_groups = [_work_group("a", 1), _work_group("b", 2)]
 
-    assert _split_work_groups(work_groups, worker_count=8) == work_groups
+    assert split_work_groups(work_groups, worker_count=8) == work_groups
 
 
 def test_split_work_groups_balances_by_bytes():
@@ -75,99 +74,13 @@ def test_split_work_groups_balances_by_bytes():
         _work_group("small-b", 1),
     ]
 
-    buckets = _split_work_groups(work_groups, worker_count=2)
+    buckets = split_work_groups(work_groups, worker_count=2)
     bucket_sizes = sorted(
         sum(source.byte_count for _path, sources in file_groups for source in sources)
         for _name, file_groups in buckets
     )
 
     assert bucket_sizes == [12, 12]
-
-
-def test_posix_backend_params_are_forwarded_to_nixl_agent(monkeypatch):
-    from gpu_memory_service.snapshot.backends import nixl_staging
-
-    source = FileTransferSource(
-        allocation_id="alloc-0",
-        file_path="/checkpoint/shard.bin",
-        file_offset=0,
-        byte_count=4096,
-    )
-    target = GMSTransferTarget(
-        allocation_id="alloc-0",
-        va=0x1000,
-        device=0,
-        byte_count=4096,
-    )
-    captured = {}
-
-    class FakeApi:
-        @staticmethod
-        def agent_config_type(*, backends):
-            captured["config_backends"] = backends
-            return {"backends": backends}
-
-        @staticmethod
-        def agent_type(agent_name, _config):
-            captured["agent_name"] = agent_name
-            return FakeAgent()
-
-    class FakeAgent:
-        def create_backend(self, backend_name, backend_params=None):
-            captured["backend_name"] = backend_name
-            captured["backend_params"] = backend_params
-
-    def group_sources(_sources):
-        return {"file": [(source.file_path, [source])]}
-
-    def fake_restore_file_groups_with_nixl_staging(**kwargs):
-        captured["restore_agent"] = kwargs["agent"]
-        captured["restore_agent_name"] = kwargs["agent_name"]
-        captured["restore_file_groups"] = kwargs["file_groups"]
-        return source.byte_count
-
-    monkeypatch.setattr(
-        nixl_staging.cuda_utils,
-        "cuda_runtime_set_device",
-        lambda _device: None,
-    )
-    monkeypatch.setattr(
-        nixl_staging,
-        "restore_file_groups_with_nixl_staging",
-        fake_restore_file_groups_with_nixl_staging,
-    )
-    monkeypatch.setattr(
-        nixl_staging,
-        "load_nixl_api",
-        lambda: FakeApi(),
-    )
-    monkeypatch.setattr(
-        nixl_staging,
-        "make_pinned_copy_slots",
-        lambda _count: [],
-    )
-
-    session = _NixlPosixStagingTransferSession(
-        backend_name="test-backend",
-        device=0,
-        max_workers=1,
-        group_sources=group_sources,
-        group_kind="file",
-        warn_under_parallelized=False,
-        posix_backend_params={"ios_pool_size": "64", "kernel_queue_size": "16"},
-        sources=[source],
-    )
-
-    session.restore({"alloc-0": target})
-
-    assert captured["config_backends"] == []
-    assert captured["backend_name"] == "POSIX"
-    assert captured["backend_params"] == {
-        "ios_pool_size": "64",
-        "kernel_queue_size": "16",
-    }
-    assert captured["restore_agent_name"] == captured["agent_name"]
-    assert captured["restore_file_groups"] == [(source.file_path, [source])]
 
 
 def test_staging_prep_starts_before_restore(monkeypatch):

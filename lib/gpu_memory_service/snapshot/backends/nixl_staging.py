@@ -9,19 +9,23 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Mapping as MappingABC
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, List, Mapping, Optional, Sequence
 
 from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.snapshot.backends.nixl_common import (
     DRAM_MEM_TYPE,
     FILE_MEM_TYPE,
     NIXL_POSIX_BACKEND,
+    NixlFileGroup,
+    NixlWorkGroup,
     create_nixl_agent,
     load_nixl_api,
     open_direct_read_fd,
     release_transfer_resources,
+    split_work_groups,
     wait_for_transfer,
 )
 from gpu_memory_service.snapshot.backends.pinned_host import (
@@ -42,8 +46,6 @@ logger = logging.getLogger(__name__)
 
 _PINNED_COPY_BUFFERS_PER_WORKER = 2
 
-NixlFileGroup = Tuple[str, Sequence[FileTransferSource]]
-NixlWorkGroup = Tuple[str, Sequence[NixlFileGroup]]
 NixlGroupingFn = Callable[
     [Sequence[FileTransferSource]], Mapping[str, List[NixlFileGroup]]
 ]
@@ -60,63 +62,6 @@ class _PreparedNixlGroup:
     closed: bool = False
 
 
-def _split_work_groups(
-    work_groups: Sequence[NixlWorkGroup],
-    worker_count: int,
-) -> List[NixlWorkGroup]:
-    """Split logical work groups into at most worker_count balanced buckets.
-
-    The grouping function chooses the storage-affinity unit for a backend: one
-    checkpoint file for the default NIXL/POSIX backend, or one SSD root for the
-    sharded-SSD backend.  The staging code creates one NIXL agent and one pair
-    of pinned staging buffers per submitted work item, so submitting one item per
-    checkpoint shard can create hundreds of agents for large models.  Instead,
-    preserve each logical file/root group internally while coalescing them into
-    a bounded number of balanced worker buckets.
-    """
-    if not work_groups:
-        return []
-
-    worker_count = max(1, min(int(worker_count), len(work_groups)))
-    if len(work_groups) <= worker_count:
-        return list(work_groups)
-
-    bucket_file_groups: List[List[NixlFileGroup]] = [[] for _ in range(worker_count)]
-    bucket_names: List[List[str]] = [[] for _ in range(worker_count)]
-    bucket_bytes = [0] * worker_count
-
-    # Largest-first greedy bin packing keeps workers reasonably balanced while
-    # staying deterministic for equal-sized groups.
-    sized_groups = [
-        (
-            sum(
-                source.byte_count
-                for _path, sources in file_groups
-                for source in sources
-            ),
-            index,
-            group_name,
-            file_groups,
-        )
-        for index, (group_name, file_groups) in enumerate(work_groups)
-    ]
-    sized_groups.sort(key=lambda item: (-item[0], item[1]))
-
-    for size_bytes, _index, group_name, file_groups in sized_groups:
-        bucket_index = min(range(worker_count), key=lambda idx: bucket_bytes[idx])
-        bucket_file_groups[bucket_index].extend(file_groups)
-        bucket_names[bucket_index].append(group_name)
-        bucket_bytes[bucket_index] += size_bytes
-
-    buckets: List[NixlWorkGroup] = []
-    for index, file_groups in enumerate(bucket_file_groups):
-        if not file_groups:
-            continue
-        group_name = ",".join(bucket_names[index])
-        buckets.append((group_name, file_groups))
-    return buckets
-
-
 class NixlPosixStagingTransferBackend:
     """Restore files through NIXL POSIX direct I/O and pinned host staging."""
 
@@ -129,18 +74,26 @@ class NixlPosixStagingTransferBackend:
         group_kind: str,
         warn_under_parallelized: bool = False,
     ) -> None:
-        self.name = backend_name
+        self._backend_name = backend_name
         self._device = config.device
         self._max_workers = config.max_workers
-        self._api_pool = ThreadPoolExecutor(max_workers=1)
-        self._api_future = self._api_pool.submit(load_nixl_api)
-        # NIXL's POSIX backend default preallocates a large I/O pool. GMS
-        # staging workers issue one POSIX NIXL transfer at a time, so smaller
-        # explicit defaults are enough and avoid oversized agent startup work.
+        # These are NIXL POSIX backend custom-param keys. NIXL's POSIX default
+        # preallocates a large I/O pool, while GMS staging workers issue one
+        # POSIX NIXL transfer at a time. Keep smaller GMS defaults, but let
+        # callers override or add NIXL POSIX params through backend_config.
         self._posix_backend_params = {
             "ios_pool_size": "1024",
             "kernel_queue_size": "128",
         }
+        posix_backend_params = config.backend_config.get("posix_backend_params")
+        if posix_backend_params is not None:
+            if not isinstance(posix_backend_params, MappingABC):
+                raise TypeError("posix_backend_params must be a mapping")
+            self._posix_backend_params.update(
+                {str(key): str(value) for key, value in posix_backend_params.items()}
+            )
+        self._api_pool = ThreadPoolExecutor(max_workers=1)
+        self._api_future = self._api_pool.submit(load_nixl_api)
         self._group_sources = group_sources
         self._group_kind = group_kind
         self._warn_under_parallelized = warn_under_parallelized
@@ -148,7 +101,7 @@ class NixlPosixStagingTransferBackend:
             "%s configured for device %d with %d workers using NIXL POSIX "
             "staging backend_params=%s; NIXL import is running in the "
             "background and agent setup starts in start_restore() so it can "
-            "overlap manifest planning, RW connect, and Phase A allocation",
+            "overlap manifest planning, RW connect, and restore target allocation",
             backend_name,
             self._device,
             self._max_workers,
@@ -157,7 +110,7 @@ class NixlPosixStagingTransferBackend:
 
     def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
         return _NixlPosixStagingTransferSession(
-            backend_name=self.name,
+            backend_name=self._backend_name,
             device=self._device,
             max_workers=self._max_workers,
             group_sources=self._group_sources,
@@ -197,7 +150,6 @@ class _NixlPosixStagingTransferSession:
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
         )
         self._cancel_event = threading.Event()
-        self._active = True
         self._prep_started_at = time.monotonic()
         grouped = group_sources(self._sources)
         self._logical_group_count = len(grouped)
@@ -214,7 +166,7 @@ class _NixlPosixStagingTransferSession:
                 self._group_kind,
                 self._worker_count,
             )
-        self._work_groups = _split_work_groups(work_groups, self._worker_count)
+        self._work_groups = split_work_groups(work_groups, self._worker_count)
         self._total_bytes = sum(source.byte_count for source in self._sources)
         self._prep_pool: Optional[ThreadPoolExecutor] = None
         self._prep_futures: dict[Future[_PreparedNixlGroup], str] = {}
@@ -245,7 +197,6 @@ class _NixlPosixStagingTransferSession:
     def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
         validate_transfer_targets(self._sources, targets, device=self._device)
         if not self._work_groups:
-            self._active = False
             return
 
         t0 = time.monotonic()
@@ -257,7 +208,6 @@ class _NixlPosixStagingTransferSession:
             prep_overlap_s,
         )
         try:
-            assert self._prep_pool is not None
             with ThreadPoolExecutor(max_workers=self._worker_count) as pool:
                 transfer_futures: dict[Future[None], str] = {}
                 for prep_future in as_completed(self._prep_futures):
@@ -293,7 +243,6 @@ class _NixlPosixStagingTransferSession:
                             f"{self._group_kind} group {group_name}: {exc}"
                         ) from exc
         finally:
-            self._active = False
             if self._prep_pool is not None:
                 self._prep_pool.shutdown(wait=True, cancel_futures=True)
 
@@ -311,7 +260,6 @@ class _NixlPosixStagingTransferSession:
 
     def close(self) -> None:
         self._cancel_event.set()
-        self._active = False
         if self._prep_pool is not None:
             self._prep_pool.shutdown(wait=True, cancel_futures=True)
         for future in self._prep_futures:
@@ -428,44 +376,6 @@ class _NixlPosixStagingTransferSession:
         )
 
 
-class NixlPosixFileReader:
-    """NIXL POSIX FILE reader for pinned host staging slots."""
-
-    def __init__(
-        self,
-        *,
-        agent: object,
-        agent_name: str,
-        file_path: str,
-        backend_name: str,
-    ) -> None:
-        self._agent = agent
-        self._agent_name = agent_name
-        self._file_path = file_path
-        self._backend_name = backend_name
-        self._fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
-
-    def read_into_slot(
-        self,
-        slot: PinnedCopySlot,
-        file_offset: int,
-        size: int,
-    ) -> None:
-        _read_file_to_dram(
-            self._agent,
-            self._agent_name,
-            self._fd,
-            self._file_path,
-            file_offset,
-            slot.ptr,
-            size,
-            self._backend_name,
-        )
-
-    def close(self) -> None:
-        os.close(self._fd)
-
-
 def restore_file_groups_with_nixl_staging(
     *,
     backend_name: str,
@@ -486,26 +396,37 @@ def restore_file_groups_with_nixl_staging(
         if owned_slots:
             slots = make_pinned_copy_slots(buffers_per_worker)
         for file_path, sources in file_groups:
-            reader = NixlPosixFileReader(
-                agent=agent,
-                agent_name=agent_name,
-                file_path=file_path,
-                backend_name=backend_name,
-            )
+            fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
             try:
                 for source in sources:
-                    copied, next_slot = _restore_source(
-                        backend_name=backend_name,
-                        reader=reader,
-                        source=source,
-                        target=targets[source.allocation_id],
-                        slots=slots,
-                        next_slot=next_slot,
-                        cancel_event=cancel_event,
-                    )
-                    total_bytes += copied
+                    target = targets[source.allocation_id]
+                    done = 0
+                    while done < source.byte_count:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise CancelledError(f"{backend_name} cancelled")
+
+                        slot = slots[next_slot]
+                        slot.wait()
+                        chunk_size = min(
+                            PINNED_COPY_CHUNK_SIZE,
+                            source.byte_count - done,
+                        )
+                        _read_file_to_dram(
+                            agent,
+                            agent_name,
+                            fd,
+                            file_path,
+                            source.file_offset + done,
+                            slot.ptr,
+                            chunk_size,
+                            backend_name,
+                        )
+                        slot.copy_to_device_async(target.va + done, chunk_size)
+                        done += chunk_size
+                        total_bytes += chunk_size
+                        next_slot = (next_slot + 1) % len(slots)
             finally:
-                reader.close()
+                os.close(fd)
 
         for slot in slots:
             slot.wait()
@@ -517,36 +438,6 @@ def restore_file_groups_with_nixl_staging(
                 logger,
                 "failed to release NIXL pinned copy slot",
             )
-
-
-def _restore_source(
-    *,
-    backend_name: str,
-    reader: NixlPosixFileReader,
-    source: FileTransferSource,
-    target: GMSTransferTarget,
-    slots: List[PinnedCopySlot],
-    next_slot: int,
-    cancel_event: Optional[threading.Event],
-) -> Tuple[int, int]:
-    done = 0
-    while done < source.byte_count:
-        if cancel_event is not None and cancel_event.is_set():
-            raise CancelledError(f"{backend_name} cancelled")
-
-        slot = slots[next_slot]
-        slot.wait()
-        chunk_size = min(PINNED_COPY_CHUNK_SIZE, source.byte_count - done)
-        reader.read_into_slot(
-            slot,
-            source.file_offset + done,
-            chunk_size,
-        )
-        slot.copy_to_device_async(target.va + done, chunk_size)
-        done += chunk_size
-        next_slot = (next_slot + 1) % len(slots)
-
-    return done, next_slot
 
 
 def _read_file_to_dram(
