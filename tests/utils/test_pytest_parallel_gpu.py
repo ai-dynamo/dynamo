@@ -47,8 +47,9 @@ def _t(name: str, profiled: float, timeout: float = 600.0) -> _TestEntry:
     return _TestEntry(id=name, name=name, profiled_gib=profiled, timeout=timeout)
 
 
-def _select(pending, gpus, *, num_slots, running_count=0):
-    actual_free = {gi: gs.total_gib - gs.budget_used for gi, gs in gpus.items()}
+def _select(pending, gpus, *, num_slots, running_count=0, actual_free=None):
+    if actual_free is None:
+        actual_free = {gi: gs.total_gib - gs.budget_used for gi, gs in gpus.items()}
     return _select_launches(
         pending=pending,
         gpu_states=gpus,
@@ -136,6 +137,22 @@ def test_slot_cap_is_global():
     launches = _select(pending, gpus, num_slots=2, running_count=1)
 
     assert len(launches) == 1  # 1 running + 1 new == 2 slots
+
+
+def test_actual_usage_gate_blocks_when_live_vram_exceeds_budget():
+    # The reserved-budget gate alone would allow a 13 GiB test (the GPU is idle
+    # by markers), but a live nvidia-smi reading of only 5 GiB free (an init
+    # spike or residual allocation the markers don't reflect) must block it via
+    # the independent actual-usage gate.
+    gpus = {0: _gpu(0, 22.0)}  # budget_used=0 -> reserved-budget gate allows 13
+    pending = [_t("big", 13.0)]
+
+    # Budget gate alone (actual_free defaults to total - budget = 22): launches.
+    assert _select(pending, gpus, num_slots=8) == [(0, 0)]
+
+    # Only 5 GiB actually free => 17 GiB live-used; 17 + 13 = 30 > 22 cap -> the
+    # actual-usage gate blocks the launch the budget gate would have allowed.
+    assert _select(pending, gpus, num_slots=8, actual_free={0: 5.0}) == []
 
 
 # --------------------------------------------------------------------------- #

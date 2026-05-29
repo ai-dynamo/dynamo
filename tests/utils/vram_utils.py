@@ -115,9 +115,10 @@ def effective_cpu_budget() -> int:
     try:
         quota_s, period_s = open("/sys/fs/cgroup/cpu.max").read().split()[:2]
         if quota_s != "max":
-            n = int(int(quota_s) / int(period_s))
-            if n > 0:
-                return n
+            # Floor at 1: fractional --cpus (e.g. 0.5 -> int 0) must not fall
+            # through to the host os.cpu_count() and defeat the cap. Matches the
+            # cgroup-v1 branch below.
+            return max(1, int(int(quota_s) / int(period_s)))
     except (OSError, ValueError, ZeroDivisionError):
         pass
     try:
