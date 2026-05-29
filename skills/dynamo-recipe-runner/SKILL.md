@@ -1,6 +1,18 @@
 ---
 name: dynamo-recipe-runner
 description: Select, validate, patch, and deploy existing NVIDIA Dynamo Kubernetes recipes. Use for model/backend/GPU/deployment-mode recipe bring-up; use router-starter for router-only mode work and troubleshoot for broken deployments.
+license: Apache-2.0
+metadata:
+  author: Dan Gil <dagil@nvidia.com>
+  tags:
+    - dynamo
+    - kubernetes
+    - recipes
+    - bring-up
+  permissions:
+    - file_read
+    - network
+    - kubectl_exec
 ---
 
 # Dynamo Recipe Runner
@@ -10,12 +22,21 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: CC-BY-4.0
 -->
 
-## Goal
+## Purpose
 
 Get from user intent to a working Dynamo recipe endpoint with minimal back and
 forth. Do not create new guide content. Operate on the existing `recipes/`
 tree, patch the smallest necessary set of manifests, deploy when the user has
 cluster access, and prove success with an OpenAI-compatible smoke request.
+
+## Prerequisites
+
+- Python 3.10+ on the operator machine.
+- `kubectl` configured with a working cluster context.
+- Cluster has a default storage class for model-cache PVCs.
+- Hugging Face token stored in a Kubernetes secret named `hf-token-secret`
+  (or equivalent) in the target namespace.
+- Read access to the `recipes/` tree in the ai-dynamo/dynamo repository.
 
 ## Required Inputs
 
@@ -31,7 +52,7 @@ Collect or infer these before changing manifests:
 If a required value is missing and cannot be inferred from the selected recipe,
 ask for only that value.
 
-## Workflow
+## Instructions
 
 ### 1. Preflight
 
@@ -120,6 +141,40 @@ If `dynamo-router-starter` is also installed, prefer its `scripts/check_router_h
 for the full OpenAI-compatible smoke test. If this fails, switch to
 `dynamo-troubleshoot`.
 
+## Available Scripts
+
+| Script | Purpose | Arguments |
+|---|---|---|
+| `scripts/recipe_tool.py list` | Enumerate available recipes, optionally filtered | `--query`, `--framework`, `--mode`, `--format` |
+| `scripts/recipe_tool.py validate` | Validate a recipe directory before apply | positional recipe path |
+
+Invoke via the agentskills.io `run_script()` protocol:
+
+```python
+run_script("scripts/recipe_tool.py", args=["list", "--framework", "sglang", "--format", "table"])
+run_script("scripts/recipe_tool.py", args=["validate", "recipes/nemotron-3-super-fp8/sglang/agg"])
+```
+
+## Examples
+
+List sglang recipes that fit a single 8xB200 node:
+
+```bash
+python3 scripts/recipe_tool.py list --framework sglang --format table
+```
+
+Validate a specific recipe and resolve blockers before applying:
+
+```bash
+python3 scripts/recipe_tool.py validate recipes/nemotron-3-super-fp8/sglang/agg
+```
+
+Equivalent through the agent protocol:
+
+```python
+run_script("scripts/recipe_tool.py", args=["validate", "recipes/nemotron-3-super-fp8/sglang/agg"])
+```
+
 ## Output Contract
 
 Return:
@@ -130,6 +185,23 @@ Return:
 - endpoint and smoke-test result
 - unresolved blockers, if any
 - next troubleshooting step when deployment does not become healthy
+
+## Limitations
+
+- Operates on the existing `recipes/` tree only. Does not author new manifests.
+- Cluster-mutating apply steps require `kubectl` permission to the target namespace.
+- Smoke-test depth is intentionally minimal; for full router/endpoint coverage use `dynamo-router-starter`.
+- Multi-node disagg transport correctness is out of scope; use `dynamo-interconnect-check` after deploy.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Next step |
+|---|---|---|
+| `kubectl` cluster unreachable | Context not set or VPN down | Return exact commands instead of running them; resume when cluster is reachable |
+| `validate` reports missing storage class | Cluster has no default `StorageClass` | Patch `storageClassName` on the model-cache manifest before applying |
+| Model-cache job stuck `Pending` | PVC unbound or HF secret missing | Inspect PVC events; create or rename the HF secret to match the recipe |
+| Worker pods `ImagePullBackOff` | Stale image tag or missing pull secret | Patch the image tag; verify image pull secret in the namespace |
+| `/v1/models` 4xx/5xx after deploy | Frontend not ready or wrong service port | Wait for pods Ready; re-run port-forward; switch to `dynamo-troubleshoot` if it persists |
 
 ## References
 

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -13,6 +14,14 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+# Tunables and conventional return codes (kept here to avoid magic numbers).
+DEFAULT_KUBECTL_TIMEOUT_SEC = 30
+DEFAULT_LOG_TAIL_LINES = 200
+# POSIX-conventional return codes used when the wrapper itself fails before
+# kubectl can produce a real one.
+RETURNCODE_COMMAND_NOT_FOUND = 127  # `kubectl` not installed
+RETURNCODE_TIMED_OUT = 124  # subprocess timeout
 
 # `kubectl describe` and pod logs can echo secret env values (HF tokens,
 # bearer tokens, passwords). Scrub them before anything is written to disk so
@@ -46,11 +55,16 @@ def run(cmd: list[str], timeout: int) -> dict[str, Any]:
             "stderr": proc.stderr,
         }
     except FileNotFoundError as exc:
-        return {"cmd": cmd, "returncode": 127, "stdout": "", "stderr": str(exc)}
+        return {
+            "cmd": cmd,
+            "returncode": RETURNCODE_COMMAND_NOT_FOUND,
+            "stdout": "",
+            "stderr": str(exc),
+        }
     except subprocess.TimeoutExpired as exc:
         return {
             "cmd": cmd,
-            "returncode": 124,
+            "returncode": RETURNCODE_TIMED_OUT,
             "stdout": exc.stdout or "",
             "stderr": exc.stderr or f"Timed out after {timeout}s",
         }
@@ -129,8 +143,8 @@ def main() -> int:
         default=None,
         help="Output dir; defaults to a private mkdtemp dynamo-debug-* directory",
     )
-    parser.add_argument("--tail", type=int, default=200)
-    parser.add_argument("--timeout", type=int, default=30)
+    parser.add_argument("--tail", type=int, default=DEFAULT_LOG_TAIL_LINES)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_KUBECTL_TIMEOUT_SEC)
     args = parser.parse_args()
 
     if args.outdir:

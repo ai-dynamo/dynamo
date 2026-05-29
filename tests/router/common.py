@@ -2377,6 +2377,71 @@ def _test_disagg_background_prefill_sticky_routing(
         asyncio.run(test_sync())
 
 
+def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    prefill_zone_a_id: int,
+    prefill_zone_b_id: int,
+    shared_namespace: str,
+    request_plane: str = "tcp",
+):
+    """Validate required topology constraints derived from pinned prefill workers."""
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        namespace=decode_workers.namespace,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        min_initial_workers=decode_workers.num_workers,
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        async def run_requests() -> None:
+            runtime = get_runtime(request_plane=request_plane)
+            decode_endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
+            prefill_endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
+
+            await poll_for_worker_instances(decode_endpoint, decode_workers.num_workers)
+            await poll_for_worker_instances(
+                prefill_endpoint, decode_workers.num_workers
+            )
+
+            zone_a_payload = {
+                **test_payload,
+                "nvext": {
+                    "prefill_worker_id": prefill_zone_a_id,
+                },
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(chat_url, json=zone_a_payload) as response:
+                    response_body = await response.text()
+                    assert response.status == 200, (
+                        "Expected required KV-transfer topology match to succeed, "
+                        f"got status={response.status} body={response_body}"
+                    )
+
+            zone_b_payload = {
+                **test_payload,
+                "nvext": {
+                    "prefill_worker_id": prefill_zone_b_id,
+                },
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(chat_url, json=zone_b_payload) as response:
+                    response_body = await response.text()
+                    assert response.status == 500, (
+                        "Expected required KV-transfer topology mismatch to fail, "
+                        f"got status={response.status} body={response_body}"
+                    )
+
+        asyncio.run(run_requests())
+
+
 def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
     prefill_workers,
     decode_workers,
