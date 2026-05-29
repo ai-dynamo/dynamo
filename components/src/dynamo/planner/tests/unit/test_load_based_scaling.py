@@ -141,6 +141,27 @@ class TestPrefillRegressionModel:
             model.add_observation(fpm)
         assert abs(model.avg_isl - 2000.0) < 1.0
 
+    def test_idle_fpms_decay_avg_isl_after_traffic(self):
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=3, min_observations=3, bucket_count=16
+        )
+        model.add_observation(_make_fpm(wall_time=0.0))
+        assert model.avg_isl == 0.0
+
+        for isl in [1000, 2000, 3000]:
+            model.add_observation(
+                _make_fpm(
+                    sum_prefill_tokens=isl,
+                    num_prefill_requests=1,
+                    wall_time=0.01,
+                )
+            )
+        assert abs(model.avg_isl - 2000.0) < 1.0
+
+        for _ in range(3):
+            model.add_observation(_make_fpm(wall_time=0.0))
+        assert model.avg_isl == 0.0
+
     def test_find_best_engine_prefill_rps(self):
         model = PrefillRegressionModel(
             max_num_fpm_samples=50, min_observations=3, bucket_count=16

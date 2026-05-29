@@ -3,329 +3,194 @@
 # SPDX-License-Identifier: Apache-2.0
 #}
 # === BEGIN templates/trtllm_runtime.Dockerfile ===
-##################################################
-########## Runtime Image ########################
-##################################################
-#
-# PURPOSE: Production runtime environment
-#
-# This stage creates a lightweight production-ready image containing:
-# - Pre-compiled TensorRT-LLM and framework dependencies
-# - Dynamo runtime libraries and Python packages
-# - Essential runtime dependencies and configurations
-# - Optimized for inference workloads and deployment
-#
-# Use this stage when you need:
-# - Production deployment of Dynamo with TensorRT-LLM
-# - Minimal runtime footprint without build tools
-# - Ready-to-run inference server environment
-# - Base for custom application containers
-#
+##################################
+########## Runtime Image #########
+##################################
 
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+# Transport stage — runtime pulls /workspace_src/ in one bind-mount cp.
+FROM scratch AS workspace_files
+COPY --chmod=775 tests /workspace_src/tests
+COPY --chmod=775 examples /workspace_src/examples
+COPY --chmod=775 deploy /workspace_src/deploy
+COPY --chmod=775 dev /workspace_src/dev
+COPY --chmod=775 components/src/dynamo/common /workspace_src/components/src/dynamo/common
+COPY --chmod=775 components/src/dynamo/frontend /workspace_src/components/src/dynamo/frontend
+COPY --chmod=775 components/src/dynamo/trtllm /workspace_src/components/src/dynamo/trtllm
+COPY --chmod=775 components/src/dynamo/mocker /workspace_src/components/src/dynamo/mocker
+COPY --chmod=775 lib /workspace_src/lib
+COPY --chmod=664 ATTRIBUTION* LICENSE /workspace_src/
 
-ARG TARGETARCH
-WORKDIR /workspace
-ENV ENV=${ENV:-/etc/shinit_v2}
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-# workaround for pickle lib issue
-ENV OMPI_MCA_coll_ucc_enable=0
-
-# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from PyTorch base image
-COPY --from=pytorch_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
-COPY --from=pytorch_base /usr/local/cuda/bin/nvlink /usr/local/cuda/bin/nvlink
-COPY --from=pytorch_base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
-COPY --from=pytorch_base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
-COPY --from=pytorch_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
-COPY --from=pytorch_base /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=pytorch_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
-COPY --from=pytorch_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-COPY --from=pytorch_base /usr/local/cuda/lib64/libcupti* /usr/local/cuda/lib64/
-COPY --from=pytorch_base /usr/local/lib/lib* /usr/local/lib/
-COPY --from=pytorch_base /usr/local/cuda/bin/cuobjdump /usr/local/cuda/bin/cuobjdump
-COPY --from=pytorch_base /usr/local/cuda/bin/nvdisasm /usr/local/cuda/bin/nvdisasm
-
-ENV CUDA_HOME=/usr/local/cuda \
-    TRITON_CUPTI_PATH=/usr/local/cuda/include \
-    TRITON_CUDACRT_PATH=/usr/local/cuda/include \
-    TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
-    TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
-    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
-    TRITON_CUDART_PATH=/usr/local/cuda/include
-
-# Copy OpenMPI from PyTorch base image
-COPY --from=pytorch_base /opt/hpcx/ompi /opt/hpcx/ompi
-# Copy NUMA library from PyTorch base image (arch-dependent path)
-RUN --mount=type=bind,from=pytorch_base,source=/usr/lib,target=/mnt/usr_lib \
-    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    mkdir -p /usr/lib/${ARCH_ALT}-linux-gnu && \
-    cp /mnt/usr_lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
-
-# Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
-COPY --from=pytorch_base /opt/hpcx /opt/hpcx
-# This is needed to make libucc.so visible so pytorch can use it.
-ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
-# Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
-# networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
-# pytorch-triton is copied after trtllm installation.
-COPY --from=pytorch_base /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
-
-# Copy nats and etcd from dynamo_base image
+# Transport stage for dynamo_base artifacts. uv/uvx go to /usr/bin (not /bin)
+# because upstream is usrmerged and cross-stage COPY chokes on the symlink.
+FROM scratch AS dynamo_base_export
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
-ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+COPY --from=dynamo_base /bin/uv /usr/bin/uv
+COPY --from=dynamo_base /bin/uvx /usr/bin/uvx
 
-# Copy uv to system /bin
-COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+{% if target == "runtime" %}
+# Renamed `runtime` → `runtime_full` so the final stage can re-FROM upstream
+# and overlay our changes as a single layer (cuts depth for downstream wrappers).
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_full
+{% else %}
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+{% endif %}
 
-# Create dynamo user with group 0 for OpenShift compatibility
+ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
+ARG TARGETARCH
+
+# DYNAMO_HOME points at /workspace so bundled TRT-LLM scripts that reference
+# $DYNAMO_HOME/examples/... resolve. LD_PRELOAD/NIXL_PLUGIN_DIR are a workaround
+# for ai-dynamo/nixl#1668: nixl-cu13's bundled UCX 1.20.0 hangs in
+# `uct_md_query_tl_resources` (md_resources realloc loop, >1 GiB) when two NIXL
+# agents init on the same host. Force-load TRT-LLM's bundled libnixl 0.9.0
+# (uses system UCX, no bug). LD_PRELOAD is the only lever: nixl-cu13's
+# _bindings.so has DT_RPATH which beats LD_LIBRARY_PATH. Drop the two NIXL
+# vars when the upstream issue is fixed.
+ENV DYNAMO_HOME=/workspace \
+    HOME=/home/dynamo \
+    PATH=/usr/local/bin/etcd:${PATH} \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+
+WORKDIR /workspace
+
+# Install packages missing from upstream, sanity-check libnixl, register
+# TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
+# for shells, not K8s python3 launches), swap upstream's single-binary etcd
+# for dynamo_base's directory, and symlink system libstdc++ to a stable
+# path for LD_PRELOAD — keeps PyInstaller-bundled tools (specifically `jet`,
+# NVIDIA's internal PyInstaller-packaged CI runner) from shadowing it with an
+# older copy.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        openssh-server \
+        librdmacm1 \
+        rdma-core && \
+    test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
+    test -d "${NIXL_PLUGIN_DIR}" && \
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    printf '%s\n' \
+        "/usr/local/tensorrt/lib" \
+        "/usr/local/cuda/lib64" \
+        "/usr/local/ucx/lib" \
+        "/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu" \
+        "/opt/nvidia/nvda_nixl/lib64" \
+        > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
+    ldconfig && \
+    rm -f /usr/local/bin/etcd && \
+    mkdir -p /opt/dynamo && \
+    LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
+    test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
+
+# One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
+COPY --from=dynamo_base_export / /
+
+# dynamo user (group 0 for OpenShift), clear upstream /workspace baggage
+# (otherwise pytest collects broken tutorial test files), and create the
+# Dynamo venv on non-dev. --system-site-packages keeps upstream's solve
+# importable since system Python is PEP 668 externally-managed.
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    # Non-recursive chown - only the directories themselves, not contents
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && rm -rf /workspace && mkdir /workspace \
     && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
-    # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
-    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
-    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
-    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+    && mkdir -p /etc/profile.d \
+    && echo 'umask 002' > /etc/profile.d/00-umask.sh{% if target not in ("dev", "local-dev") %} \
+    && python3 -m venv --system-site-packages /opt/dynamo/venv \
+    && ln -sf /usr/bin/uv /opt/dynamo/venv/bin/uv{% endif %}
 
-# Install Python, build-essential and python3-dev as apt dependencies
-# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
-ARG PYTHON_VERSION
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64"); \
-    if [ ${ARCH_ALT} = "x86_64" ]; then \
-        ARCH_FOR_GPG=${ARCH_ALT}; \
-    else \
-        ARCH_FOR_GPG="sbsa"; \
-    fi && \
-    curl -fsSL --retry 5 --retry-delay 3 \
-        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH_FOR_GPG}/cuda-archive-keyring.gpg \
-        -o /usr/share/keyrings/cuda-archive-keyring.gpg &&\
-    echo "deb [signed-by=/usr/share/keyrings/cuda-archive-keyring.gpg] \
-        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH_FOR_GPG} /" \
-        | tee /etc/apt/sources.list.d/cuda.repo.list > /dev/null &&\
-    apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Build tools
-        build-essential \
-        g++ \
-        ninja-build \
-        git \
-        git-lfs \
-        # required for verification of GPG keys
-        gnupg2 \
-        # Python runtime - CRITICAL for virtual environment to work
-        python${PYTHON_VERSION}-dev \
-        python3-pip \
-        # jq for polling various endpoints and health checks
-        jq \
-        # CUDA/ML libraries
-        libcudnn9-cuda-13 \
-        libnvshmem3-cuda-13 \
-        # Network and communication libraries
-        libzmq3-dev \
-        # RDMA/UCX libraries required to find RDMA devices
-        ibverbs-providers \
-        ibverbs-utils \
-        libibumad3 \
-        libibverbs1 \
-        libnuma1 \
-        numactl \
-        librdmacm1 \
-        rdma-core \
-        # OpenMPI dependencies
-        openssh-client \
-        openssh-server \
-        # System utilities and dependencies
-        curl && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    # Create libnccl.so symlink pointing to libnccl.so.2. TensorRT-LLM requires explicit libnccl.so
-    ln -sf /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so.2 /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so
-
-# nvcr.io/nvidia/cuda-dl-base includes the AWS OFI NCCL plugin, which can crash TRTLLM.
-# Disable it by renaming aws-ofi-nccl.conf and refreshing the dynamic linker cache.
-RUN if [ -f /etc/ld.so.conf.d/aws-ofi-nccl.conf ]; then \
-      mv /etc/ld.so.conf.d/aws-ofi-nccl.conf /etc/ld.so.conf.d/aws-ofi-nccl.conf.disabled; \
-    fi && \
-    ldconfig
-
-{% if context.trtllm.enable_media_ffmpeg == "true" %}
-# Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
-RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    mkdir -p /usr/local/lib/pkgconfig && \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
-{% endif %}
-
-# Copy TensorRT and libgomp from framework image (arch-dependent path, needs root)
-COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
-RUN --mount=type=bind,from=framework,source=/usr/lib,target=/mnt/usr_lib \
-    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    cp /mnt/usr_lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
-
-# Register arch-dependent TensorRT and nvshmem library paths with ldconfig so the
-# dynamic linker finds them in every execution context (docker run, exec, k8s, etc.)
-RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    echo "/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib" > /etc/ld.so.conf.d/tensorrt.conf && \
-    echo "/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13" >> /etc/ld.so.conf.d/tensorrt.conf && \
-    ldconfig
-
-# Switch to dynamo user
-USER dynamo
-ENV HOME=/home/dynamo
-# This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
-SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-
-ENV DYNAMO_HOME=/workspace
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-
-# Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-
-# Copy UCX from framework image as plugin for NIXL
-# Copy NIXL source from framework image
-# Copy dynamo wheels for gitlab artifacts (read-only, no group-write needed)
-COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
-
-ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
-# Both arch paths are listed; the non-existent one is silently ignored by the linker.
-ENV LD_LIBRARY_PATH=\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-/opt/hpcx/ompi/lib:\
-/usr/local/tensorrt/targets/x86_64-linux-gnu/lib:\
-/usr/local/tensorrt/targets/aarch64-linux-gnu/lib:\
-/usr/lib/x86_64-linux-gnu/nvshmem/13/:\
-/usr/lib/aarch64-linux-gnu/nvshmem/13/:\
-/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
-/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
-/usr/local/cuda/lib:\
-/usr/local/cuda/lib64:\
-$LD_LIBRARY_PATH
-ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
-ENV OPAL_PREFIX=/opt/hpcx/ompi
-
-# TODO: skip /workspace COPYs for dev/local-dev (bind-mounted from host, these get shadowed)
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 {% if target not in ("dev", "local-dev") %}
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/opt/dynamo/venv/bin:${PATH}
 {% endif %}
 
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+# Place wheels in /opt/dynamo/wheelhouse unconditionally — dev/local-dev images
+# install from source and skip the pip install RUN below, but they still need
+# the wheels on disk because tests/dependencies/test_kvbm_imports.py greps
+# this path and runs in dev-derived test images.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if target not in ("dev", "local-dev") %}
-# Install dynamo, NIXL, and dynamo-specific dependencies.
-# `pip` is installed into the venv so TRT-LLM's NVRTC JIT can locate this
-# install via `pip show tensorrt_llm` at runtime (required for FMHA kernel
-# JIT compilation on sm_100a, where cubins are not pre-compiled).
-ARG ENABLE_KVBM
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install \
-      pip \
-      /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-      /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-      /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    \
+    # Dynamo's own wheels — --no-deps preserves upstream's solve.
+    uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
+    uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    \
+    # Third-party deps Dynamo wheels declare but upstream lacks, plus the
+    # huggingface-hub pin and KVBM-matching nixl-cu13. See the file for context.
+    uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt && \
+    \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
-            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+            echo "ERROR: ENABLE_KVBM=true but no kvbm*.whl found in /opt/dynamo/wheelhouse" >&2; \
             exit 1; \
         fi; \
-        uv pip install "$KVBM_WHEEL"; \
+        uv pip install --no-deps "$KVBM_WHEEL"; \
     fi && \
-    cd /workspace/benchmarks && \
-    UV_GIT_LFS=1 uv pip install --no-cache . && \
-    chmod -R g+w /workspace/benchmarks
-{% else %}
-# Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
-# Install NIXL wheel only (pre-built C++ binary, not buildable from source).
-# `pip` is installed into the venv so TRT-LLM's NVRTC JIT can locate this
-# install via `pip show tensorrt_llm` at runtime (required for FMHA kernel
-# JIT compilation on sm_100a, where cubins are not pre-compiled).
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install pip /opt/dynamo/wheelhouse/nixl/nixl*.whl
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -n "$GMS_WHEEL" ]; then uv pip install --no-deps "$GMS_WHEEL"; fi; \
+    fi
 {% endif %}
 
-# Install gpu_memory_service wheel if enabled (all targets)
-ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
-    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
-        export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
-    fi
-
-# Install runtime dependencies (common + benchmarks).
-# Test and dev dependencies are NOT installed here — they go in the test and dev images.
-# --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels
-RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
-    --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
-    export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} && \
-    # Remove any cupy variant that may already be in the inherited venv.
-    # cupy's `_detect_duplicate_installation` ERRORS at import if both cu12
-    # and cu13 variants are present, so we install exactly one variant
-    # matching the build target's CUDA major version. Discover the installed
-    # variants instead of hardcoding so future cupy versions (cupy-cuda14x,
-    # etc.) are covered without further edits.
-    (uv pip freeze 2>/dev/null | awk -F= '/^cupy-/{print $1}' | xargs -r uv pip uninstall 2>/dev/null || true) && \
-    uv pip install \
-        --no-cache \
-        --index-strategy unsafe-best-match \
-        --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.common.txt \
-        --requirement /tmp/requirements.benchmark.txt \
-        cupy-cuda${CUDA_VERSION_MAJOR}x && \
-    # nvidia-cutlass-dsl-libs-base==4.4.1 (transitive dep) ships a stub cute/experimental/__init__.py
-    # that unconditionally raises NotImplementedError, crashing TRT-LLM on import. cutlass-dsl==4.3.4
-    # (pinned by TRT-LLM) works without cute/experimental/. Remove the stub to fix the NotImplementedError.
-    rm -rf ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cute/experimental/
-
-# Copy tests, deploy, and the trtllm/common/mocker component subtrees for CI.
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
-COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
-COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
-COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
-COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
-COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/trtllm /workspace/components/src/dynamo/trtllm
-COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
-COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
-
-# Setup launch banner in common directory accessible to all users
-RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
-    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
-
-# Setup environment for all users
-USER root
-# Fix directory permissions: COPY --chmod only affects contents, not the directory itself
-RUN chmod g+w ${VIRTUAL_ENV} /workspace /workspace/* /opt/dynamo /opt/dynamo/* && \
-    chown dynamo:0 ${VIRTUAL_ENV} /workspace /opt/dynamo/ && \
+# Pull /workspace_src (incl. ATTRIBUTION/LICENSE) from the transport stage and
+# wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
+RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
+    --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
+    cp -a /tmp/workspace_src/. /workspace/ && \
+    chown -R dynamo:0 /workspace && \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
-    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
+# Kept at the bottom — SHA changes per build; layers above stay cached.
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
+
+# Reset upstream TRT-LLM image's entrypoint so derived runtimes behave like
+# other Dynamo images and can execute arbitrary commands directly.
+ENTRYPOINT []
+CMD ["/bin/bash"]
+
+{% if target == "runtime" %}
+# Rebase on upstream so this stage inherits upstream's image config
+# (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
+# single layer. Only Dynamo-specific env needs redeclaring below.
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+# Whiteout paths runtime_full removed — COPY can't represent deletions, so
+# without this, upstream's /workspace, /home/ubuntu, and single-file
+# /usr/local/bin/etcd would leak alongside our content.
+RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd
+COPY --from=runtime_full / /
+
+# Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
+# because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
+ENV DYNAMO_HOME=/workspace \
+    HOME=/home/dynamo \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/opt/dynamo/venv/bin:/usr/local/bin/etcd:${PATH} \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+
+WORKDIR /workspace
+
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
+
+USER dynamo
+
+ENTRYPOINT []
+CMD ["/bin/bash"]
+{% endif %}

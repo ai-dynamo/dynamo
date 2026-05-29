@@ -26,3 +26,25 @@ pub struct ToolCallResponse {
     pub tp: ToolCallType,
     pub function: CalledFunction,
 }
+
+/// Streaming (delta) variant of a parsed tool call.
+///
+/// Mirrors the field shape of a streaming tool-call chunk so consumers can map
+/// it onto their own wire types without `dynamo-parsers` depending on those
+/// types. Field semantics match the unary [`ToolCallResponse`]: `name` and
+/// `arguments` live under `function`, and `index` orders parallel calls.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ToolCallResponseChunk {
+    pub index: u32,
+    pub id: Option<String>,
+    #[serde(rename = "type")]
+    pub tp: Option<ToolCallType>,
+    pub function: Option<CalledFunctionStream>,
+}
+
+/// Streaming variant of [`CalledFunction`] where both fields are optional.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CalledFunctionStream {
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+}

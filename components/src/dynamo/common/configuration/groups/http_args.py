@@ -24,7 +24,7 @@ from typing import Optional, Self
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument
+from dynamo.common.configuration.utils import add_argument, nullable_float
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +66,6 @@ def _apply_legacy_env_aliases() -> None:
                 _legacy_warned.add(legacy)
                 logger.warning("%s is deprecated; use %s instead.", legacy, canonical)
             break
-
-
-def _nullable_float(value: str) -> Optional[float]:
-    """Parse a float; treat empty/'None' as unset."""
-    if value is None or value == "" or value == "None":
-        return None
-    return float(value)
 
 
 class HttpConfigBase(ConfigBase):
@@ -162,7 +155,7 @@ class HttpArgGroup(ArgGroup):
             flag_name="--http-timeout",
             env_var="DYN_HTTP_TIMEOUT",
             default=None,
-            arg_type=_nullable_float,
+            arg_type=nullable_float,
             dest="per_call_timeout_override",
             help=(
                 "Per-call timeout override (seconds). When set, replaces "

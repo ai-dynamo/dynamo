@@ -11,12 +11,12 @@ For quick start instructions, see the [SGLang README](README.md). This document 
 For local/bare-metal development, start etcd and optionally NATS using Docker Compose:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 <Note>
 - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
-- **NATS** is only needed when using KV routing with events (`--kv-events-config`). Use `--no-router-kv-events` on the frontend for prediction-based routing without NATS.
+- **NATS** is only needed when using NATS-backed KV routing events (`--kv-events-config`). Use ZMQ-backed events or `--no-router-kv-events` for routing without NATS.
 - **On Kubernetes**, neither is required when using the Dynamo operator (`DYN_DISCOVERY_BACKEND=kubernetes`).
 </Note>
 

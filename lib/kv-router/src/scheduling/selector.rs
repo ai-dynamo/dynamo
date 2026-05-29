@@ -7,7 +7,7 @@ use rand::Rng;
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
-use super::types::{KvSchedulerError, SchedulingRequest, pinned_worker_config};
+use super::types::{KvSchedulerError, RoutingEligibility, SchedulingRequest, pinned_worker_config};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// A trait that users can implement to define custom selection logic.
@@ -18,6 +18,7 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         &self,
         workers: &HashMap<WorkerId, C>,
         request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
@@ -200,11 +201,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         &self,
         workers: &HashMap<WorkerId, C>,
         request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
-        let eligibility = request.eligibility();
-        eligibility.validate_pinned_worker()?;
+        eligibility.validate_pinned_worker_allowed()?;
 
         let pinned_worker = eligibility.pinned_worker();
 
@@ -215,6 +216,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                     .map(|(&worker_id, config)| (worker_id, config)),
             )
         {
+            if eligibility.has_eligible_worker_ignoring_overload(
+                workers
+                    .iter()
+                    .map(|(&worker_id, config)| (worker_id, config)),
+            ) {
+                return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+            }
+
             return Err(KvSchedulerError::NoEndpoints);
         }
 
@@ -239,12 +248,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         };
 
         if let Some(worker) = pinned_worker {
-            pinned_worker_config(workers, worker)?;
-            if workers
-                .get(&worker.worker_id)
-                .is_some_and(|config| !eligibility.allows_worker(worker.worker_id, config))
-            {
+            let config = pinned_worker_config(workers, worker)?;
+            if !eligibility.allows_worker_ignoring_overload(worker.worker_id, config) {
                 return Err(KvSchedulerError::NoEndpoints);
+            }
+            if eligibility.is_worker_overloaded(worker.worker_id) {
+                return Err(KvSchedulerError::PinnedWorkerOverloaded {
+                    worker_id: worker.worker_id,
+                });
             }
 
             let logit = self.worker_logit(request, worker, block_size, weights, "Pinned formula");
@@ -429,6 +440,30 @@ mod tests {
         }
     }
 
+    fn base_request(isl_tokens: usize) -> SchedulingRequest {
+        SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
+            shared_cache_hits: None,
+            resp_tx: None,
+        }
+    }
+
     #[test]
     fn test_softmax_sample_single_key() {
         let mut logits = FxHashMap::default();
@@ -576,7 +611,9 @@ mod tests {
         let mut selected = [false; 3];
 
         for _ in 0..120 {
-            let result = selector.select_worker(&workers, &request, 16).unwrap();
+            let result = selector
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap();
             match result.worker.worker_id {
                 10 => selected[0] = true,
                 20 => selected[1] = true,
@@ -590,6 +627,91 @@ mod tests {
             selected_count > 1,
             "zero-temperature tie-breaking should not always select the same worker"
         );
+    }
+
+    #[test]
+    fn test_overloaded_high_overlap_worker_is_skipped() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.0,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.effective_overlap_blocks.insert(worker0, 4.0);
+        request.effective_cached_tokens.insert(worker0, 64);
+
+        let overloaded_worker_ids = HashSet::from([0]);
+        let result = selector
+            .select_worker(
+                &workers,
+                &request,
+                request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+                16,
+            )
+            .unwrap();
+
+        assert_eq!(result.worker.worker_id, 1);
+    }
+
+    #[test]
+    fn test_all_eligible_workers_overloaded_returns_overload_error() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let request = base_request(16);
+        let overloaded_worker_ids = HashSet::from([0, 1]);
+
+        let result = selector.select_worker(
+            &workers,
+            &request,
+            request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+            16,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+    }
+
+    #[test]
+    fn test_overloaded_pinned_worker_is_not_rerouted() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(0));
+        let overloaded_worker_ids = HashSet::from([0]);
+
+        let result = selector.select_worker(
+            &workers,
+            &request,
+            request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+            16,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::PinnedWorkerOverloaded { worker_id: 0 })
+        ));
     }
 
     #[test]
@@ -626,7 +748,7 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector.select_worker(&workers, &request, 16);
+        let result = selector.select_worker(&workers, &request, request.eligibility(), 16);
         assert!(matches!(result, Err(KvSchedulerError::NoEndpoints)));
     }
 
@@ -672,7 +794,9 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector.select_worker(&workers, &request, 16).unwrap();
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
         assert_eq!(result.worker.worker_id, 20);
     }
 
@@ -734,7 +858,9 @@ mod tests {
                 resp_tx: None,
             };
 
-            let result = selector.select_worker(&workers, &request, 16).unwrap();
+            let result = selector
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap();
             assert_eq!(
                 result.worker.worker_id, expected_worker_id,
                 "required taint {required_taint} should route only within its compatible worker set"
@@ -794,7 +920,9 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector.select_worker(&workers, &request, 16).unwrap();
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
         assert_eq!(result.worker.worker_id, 10);
     }
 
@@ -850,7 +978,9 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector.select_worker(&workers, &request, 16).unwrap();
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
         assert_eq!(result.worker.worker_id, 20);
     }
 
@@ -920,7 +1050,7 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         // Worker 0 should win: logit 1.0 < 2.0
@@ -985,7 +1115,7 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(
@@ -1045,7 +1175,7 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(
@@ -1095,7 +1225,7 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(result.worker, worker0);

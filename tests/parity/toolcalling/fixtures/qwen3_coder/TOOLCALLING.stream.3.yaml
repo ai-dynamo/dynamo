@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen3_coder
+model_label: Qwen 3 Coder
+mode: stream
+cases:
+  TOOLCALLING.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: <t
+    - delta_text: ool
+    - delta_text: _call
+    - delta_text: |-
+        >
+        <function
+    - delta_text: |-
+        =get_weather>
+        <para
+    - delta_text: me
+    - delta_text: ter
+    - delta_text: =loca
+    - delta_text: |-
+        tion>
+        NYC
+        <
+    - delta_text: |-
+        /parameter>
+        </funct
+    - delta_text: io
+    - delta_text: |
+        n>
+    - delta_text: </too
+    - delta_text: l_call>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang: *id001
+      vllm:
+        calls: []
+        normal_text: |-
+          <tool_call>
+          <function=get_weather>
+          <parameter=location>
+          NYC
+          </parameter>
+          </function>
+          </tool_call>
+        reason: >-
+          Same root cause as TOOLCALLING.stream.2: vLLM checks for `<tool_call>` in
+          `delta_text` only (qwen3coder_tool_parser.py:402). With the start
+          token split across chunks (`<t` + `ool` + `_call` + `>\n…`), the
+          guard never matches and every chunk is emitted as plain content via
+          qwen3coder_tool_parser.py:422, leaking the entire payload into
+          `normal_text`.

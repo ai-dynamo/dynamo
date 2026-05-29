@@ -7,7 +7,6 @@
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import logging
 import os
-from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 import pytest
@@ -21,6 +20,7 @@ from tests.router.e2e_harness import (
 )
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DefaultPort
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
@@ -86,7 +86,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
             num_workers: Number of SGLang worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables this many data-parallel ranks per worker process.
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
             durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
@@ -168,6 +168,8 @@ class SGLangProcess(ManagedEngineProcessMixin):
             if context_length is not None:
                 command.extend(["--context-length", str(context_length)])
 
+            command.extend(build_gpu_mem_args("build_sglang_gpu_mem_args"))
+
             if disaggregation_mode is not None:
                 command.extend(["--disaggregation-mode", disaggregation_mode])
                 command.extend(["--disaggregation-transfer-backend", "nixl"])
@@ -243,67 +245,12 @@ class SGLangProcess(ManagedEngineProcessMixin):
     cleanup_name = "SGLang worker resources"
 
 
-class _FakeRequest:
-    node = SimpleNamespace(
-        name="test_sglang_dp_workers_use_contiguous_kv_event_port_blocks"
-    )
-
-    def __init__(self):
-        self.finalizers = []
-
-    def addfinalizer(self, finalizer):
-        self.finalizers.append(finalizer)
-
-
-def _kv_events_config(command: list[str]) -> str:
-    return command[command.index("--kv-events-config") + 1]
-
-
-@pytest.mark.unit
-@pytest.mark.pre_merge
-@pytest.mark.gpu_0
-def test_sglang_dp_workers_use_contiguous_kv_event_port_blocks(monkeypatch):
-    def fake_allocate_ports(count: int, start_port: int) -> list[int]:
-        assert (count, start_port) == (2, DefaultPort.SYSTEM1.value)
-        return [10000, 10010]
-
-    contiguous_calls = []
-
-    def fake_allocate_contiguous_ports(
-        count: int, block_size: int, start_port: int
-    ) -> list[int]:
-        contiguous_calls.append((count, block_size, start_port))
-        return [11000, 11001, 11010, 11011]
-
-    monkeypatch.setitem(
-        SGLangProcess.__init__.__globals__, "allocate_ports", fake_allocate_ports
-    )
-    monkeypatch.setitem(
-        SGLangProcess.__init__.__globals__,
-        "allocate_contiguous_ports",
-        fake_allocate_contiguous_ports,
-    )
-
-    process = SGLangProcess(
-        _FakeRequest(),
-        sglang_args=SGLANG_ARGS,
-        num_workers=2,
-        data_parallel_size=2,
-    )
-
-    assert contiguous_calls == [(2, 2, DefaultPort.SYSTEM1.value)]
-    assert '"endpoint":"tcp://*:11000"' in _kv_events_config(
-        process.worker_processes[0].command
-    )
-    assert '"endpoint":"tcp://*:11010"' in _kv_events_config(
-        process.worker_processes[1].command
-    )
-
-
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_kv_router_basic(
@@ -330,6 +277,8 @@ def test_sglang_kv_router_basic(
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
@@ -440,6 +389,8 @@ def test_router_decisions_sglang_disagg(
 @pytest.mark.skip_in_nightly
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [

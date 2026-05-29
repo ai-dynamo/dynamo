@@ -124,7 +124,11 @@ See [Planner Guide](planner-guide.md) for the full workflow.
 
 Load-based scaling has the following known limitations. Throughput-based scaling is not affected by any of these.
 
-**Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). FPM is currently only available for vllm and is automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set. The KV Router is **not** required for load-based scaling.
+**Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). The KV Router is **not** required for load-based scaling. FPM availability by backend:
+
+- **vLLM** — supported. Automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set.
+- **TensorRT-LLM** — supported for non-attention-DP workers (`attention_dp_size == 1`); gated off when `attention_dp_size > 1` pending per-rank FPM emission.
+- **SGLang** — pipeline wired in Dynamo, but the upstream SGLang FPM module is not included in the current 1.2.0 SGLang runtime image. See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) for the runtime-image prerequisite.
 
 ### General
 
@@ -188,7 +192,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 Deploy the planner dashboard:
 
 ```bash
-kubectl apply -n monitoring -f deploy/observability/k8s/grafana-planner-dashboard-configmap.yaml
+kubectl apply -n monitoring -f deploy/observability/grafana-planner-dashboard-configmap.yaml
 ```
 
 The dashboard shows:

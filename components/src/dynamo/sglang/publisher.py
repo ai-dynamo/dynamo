@@ -26,23 +26,12 @@ from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
+from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
 
 
 def get_local_dp_rank_range(server_args) -> range:
     """Return the global DP ranks hosted by this local worker."""
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
-    nnodes = getattr(server_args, "nnodes", 1) or 1
-    node_rank = getattr(server_args, "node_rank", 0) or 0
-
-    if enable_dp_attention and dp_size > 1:
-        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-        start_dp_rank = node_rank * local_dp_size
-        end_dp_rank = start_dp_rank + local_dp_size
-    else:
-        start_dp_rank = 0
-        end_dp_rank = 1
-
+    start_dp_rank, end_dp_rank = local_dp_rank_bounds(server_args)
     return range(start_dp_rank, end_dp_rank)
 
 
@@ -228,15 +217,15 @@ class DynamoSglangPublisher:
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
-                active_decode_blocks = kv_metrics.kv_active_blocks
+                active_decode_blocks, total_blocks = kv_metrics_block_values(
+                    kv_metrics, self.server_args.page_size
+                )
                 self.metrics_publisher.publish(
                     dp_rank, kv_used_blocks=active_decode_blocks
                 )
                 dp_rank_str = str(dp_rank)
                 # Publish total blocks (always available in KvMetrics)
-                self.component_gauges.set_total_blocks(
-                    dp_rank_str, kv_metrics.kv_total_blocks
-                )
+                self.component_gauges.set_total_blocks(dp_rank_str, total_blocks)
                 # Publish GPU cache usage percentage (always available in KvMetrics)
                 self.component_gauges.set_gpu_cache_usage(
                     dp_rank_str, kv_metrics.gpu_cache_usage_perc
@@ -460,8 +449,24 @@ async def setup_sgl_metrics(
     config: Config,
     generate_endpoint: Endpoint,
     kv_worker_id: Optional[int] = None,
-) -> tuple[DynamoSglangPublisher, asyncio.Task, list[tuple[str, str]]]:
+) -> tuple[Optional[DynamoSglangPublisher], asyncio.Task, list[tuple[str, str]]]:
     """Create publisher, initialize metrics, and start the metrics publishing loop.
+
+    For chat/decode workers (the default), this registers SGLang's
+    multiprocess ``sglang:*`` metrics, the Dynamo ``LLMBackendMetrics``
+    chat-shaped gauges (KV total_blocks, gpu_cache_usage, model_load_time),
+    and starts a ``DynamoSglangPublisher`` that pulls scheduler metrics
+    over ZMQ and (optionally) forwards KV events / FPM stats.
+
+    For **embedding workers** (``config.dynamo_args.embedding_worker``),
+    the chat-shaped pipeline is **skipped entirely**: pooling engines
+    have no KV cache, no prefill/decode phase, and no scheduler metrics
+    worth collecting, so every metric in that pipeline would emit zeros
+    forever. The function returns ``(None, <noop task>, metrics_labels)``
+    so callers can keep the same ``await setup_sgl_metrics(...)`` shape
+    and ``metrics_task.cancel()`` cleanup. Embedding-shaped metrics are
+    registered separately by ``init_embedding.py`` via
+    ``init_embedding_metrics``.
 
     Args:
         engine: The SGLang engine instance.
@@ -470,8 +475,25 @@ async def setup_sgl_metrics(
         kv_worker_id: Optional worker identity for KV event attribution.
 
     Returns:
-        Tuple of (publisher instance, running asyncio task, metrics labels).
+        Tuple of (publisher instance or None, asyncio task, metrics labels).
     """
+    metrics_labels = [("model", engine.server_args.served_model_name)]
+
+    if getattr(config.dynamo_args, "embedding_worker", False):
+        logging.info(
+            "Embedding worker: skipping chat-shaped Prometheus + KV-event "
+            "wiring (no KV cache, no prefill/decode, no scheduler metrics). "
+            "Embedding-shaped metrics are registered separately."
+        )
+
+        # Hold a never-completing task so callers can ``cancel()`` + ``await``
+        # it uniformly in their finally blocks, matching the chat-worker shape.
+        async def _idle() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_idle())
+        return None, task, metrics_labels
+
     # Register SGLang multiprocess metrics only when --enable-metrics was passed.
     # SGLang only calls set_prometheus_multiproc_dir() when enable_metrics=True,
     # so MultiProcessCollector will crash without it.
@@ -498,7 +520,6 @@ async def setup_sgl_metrics(
         component_name=config.dynamo_args.component,
     )
 
-    metrics_labels = [("model", engine.server_args.served_model_name)]
     publisher = DynamoSglangPublisher(
         engine,
         config,

@@ -4,6 +4,7 @@
 use anyhow::Error;
 use async_stream::stream;
 use dynamo_llm::{
+    discovery::UNKNOWN_METRIC_MODEL,
     http::service::{metrics::Endpoint, service_v2::HttpService},
     model_card::ModelDeploymentCard,
     preprocessor::LLMMetricAnnotation,
@@ -318,6 +319,119 @@ async fn test_metrics_with_mock_model() {
     .await;
 }
 
+#[tokio::test]
+async fn test_unknown_model_uses_sentinel_label() {
+    // Regression test: unknown-model requests must collapse to the bounded
+    // sentinel `UNKNOWN_METRIC_MODEL` instead of letting arbitrary
+    // client-supplied strings create unbounded Prometheus series. Both the
+    // pre-lookup InflightGuard and HttpQueueGuard must use the sentinel from
+    // the start, since their Drop impls cannot retroactively relabel children.
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+        // Register exactly one valid model so the manager can distinguish
+        // known vs unknown lookups.
+        let card = ModelDeploymentCard::with_name_only("mockmodel");
+        let mock_engine = Arc::new(MockModelEngine {});
+        manager
+            .add_chat_completions_model("mockmodel", card.mdcsum(), mock_engine)
+            .unwrap();
+
+        wait_for_metrics_ready(port).await;
+
+        let client = reqwest::Client::new();
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                    "hi".to_string(),
+                ),
+                name: None,
+            },
+        );
+
+        // Two distinct unknown-model strings exercise the cardinality concern:
+        // without the sentinel each would create its own Prometheus child.
+        let bogus_models = ["nonexistent-model-1", "Foo"];
+        for bogus in bogus_models {
+            let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+                .model(bogus)
+                .messages(vec![message.clone()])
+                .max_tokens(8u32)
+                .stream(false)
+                .build()
+                .expect("Failed to build request");
+
+            let resp = client
+                .post(format!("http://localhost:{}/v1/chat/completions", port))
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            // Unknown model must fail. The exact status is not what we're
+            // testing; only that the guard's drop path ran.
+            assert!(
+                !resp.status().is_success(),
+                "expected unknown-model request for {bogus} to fail"
+            );
+        }
+
+        // Give Drop impls time to emit the request counter / duration samples.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let metrics_body = client
+            .get(format!("http://localhost:{}/metrics", port))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        // Scan only `dynamo_frontend_*` series lines so we don't false-positive
+        // on HELP/TYPE descriptors or unrelated metric namespaces:
+        //   * at least one such series must carry the sentinel label
+        //   * none of them may carry a raw user-supplied bogus name
+        let sentinel_needle = format!("model=\"{UNKNOWN_METRIC_MODEL}\"");
+        let mut sentinel_seen = false;
+        for line in metrics_body.lines() {
+            if !line.starts_with("dynamo_frontend_") {
+                continue;
+            }
+            if line.contains(&sentinel_needle) {
+                sentinel_seen = true;
+            }
+            for bogus in bogus_models {
+                let needle = format!("model=\"{bogus}\"");
+                assert!(
+                    !line.contains(&needle),
+                    "unknown-model label leaked into Prometheus series: {line}"
+                );
+            }
+        }
+        assert!(
+            sentinel_seen,
+            "expected at least one dynamo_frontend_* series under {sentinel_needle}, got:\n{metrics_body}"
+        );
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    })
+    .await;
+}
+
 // Integration tests that require distributed runtime with etcd
 #[cfg(feature = "integration")]
 mod integration_tests {
@@ -415,6 +529,8 @@ mod integration_tests {
                 dynamo_llm::model_type::ModelType::Chat,
                 dynamo_llm::model_type::ModelInput::Text,
                 None,
+                None,
+                Vec::new(),
             )
             .await
             .unwrap();

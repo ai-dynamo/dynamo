@@ -34,9 +34,7 @@ func TestEnsureServerSidecar(t *testing.T) {
 	assert.Equal(t, []string{"python3", "-m", ServerModule}, server.Command)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *server.RestartPolicy)
 	assert.Nil(t, server.StartupProbe, "clients drive readiness via connect-retry")
-
-	// DRA claim on server
-	assert.Len(t, server.Resources.Claims, 1)
+	require.Len(t, server.Resources.Claims, 1)
 	assert.Equal(t, dra.ClaimName, server.Resources.Claims[0].Name)
 
 	// Shared volume and env on main
@@ -71,6 +69,35 @@ func TestEnsureServerSidecarDoesNotAddCheckpointControl(t *testing.T) {
 			t.Fatal("should not add checkpoint control volume")
 		}
 	}
+}
+
+func TestEnsureClientOverridesOperatorOwnedSocketFields(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Volumes: []corev1.Volume{{
+			Name:         SharedVolumeName,
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/wrong"}},
+		}},
+		Containers: []corev1.Container{{
+			Name: "main",
+			Env: []corev1.EnvVar{{
+				Name:      EnvSocketDir,
+				ValueFrom: &corev1.EnvVarSource{},
+			}},
+			VolumeMounts: []corev1.VolumeMount{{
+				Name:      SharedVolumeName,
+				MountPath: "/wrong",
+			}},
+		}},
+	}
+
+	EnsureClient(podSpec, &podSpec.Containers[0])
+
+	require.NotNil(t, podSpec.Volumes[0].EmptyDir)
+	assert.Equal(t, SharedMountPath, podSpec.Containers[0].VolumeMounts[0].MountPath)
+	assert.Equal(t, SharedMountPath, podSpec.Containers[0].Env[0].Value)
+	assert.Nil(t, podSpec.Containers[0].Env[0].ValueFrom)
+	require.Len(t, podSpec.Containers[0].Resources.Claims, 1)
+	assert.Equal(t, dra.ClaimName, podSpec.Containers[0].Resources.Claims[0].Name)
 }
 
 func envValue(t *testing.T, container *corev1.Container, name string) string {
