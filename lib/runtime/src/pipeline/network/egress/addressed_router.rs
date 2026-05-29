@@ -48,7 +48,7 @@ use tracing::Instrument;
 /// metrics on first response, and hand off the `InflightGuard` to a
 /// stream-lifetime `InflightDecStream` so the inflight gauge stays accurate
 /// for the whole response lifetime.
-fn finalize_response_stream<U>(
+fn decode_response_stream<U>(
     response_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
     queue_start: Instant,
@@ -571,7 +571,7 @@ impl AddressedPushRouter {
         };
         drop(_nvtx_wait);
 
-        Ok(finalize_response_stream(
+        Ok(decode_response_stream(
             response_stream.rx,
             engine_ctx,
             queue_start,
