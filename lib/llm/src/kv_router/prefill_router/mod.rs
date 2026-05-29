@@ -11,11 +11,12 @@ use dynamo_kv_router::conditional_prefill::ConditionalPrefillPolicy;
 use dynamo_kv_router::{PrefillLoadEstimator, protocols::RoutingConstraints};
 use dynamo_runtime::{
     pipeline::{
-        AsyncEngineContextProvider, Context, ManyOut, Operator, RouterMode, ServerStreamingEngine,
-        SingleIn, async_trait,
+        AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
+        ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{EndpointId, annotated::Annotated},
 };
+use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::ModelManager,
@@ -39,7 +40,7 @@ use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override
 /// this annotation and skips its "disaggregated_params is required" validation,
 /// running the request as AGG instead. Kept in sync with the Python constant in
 /// `components/src/dynamo/trtllm/request_handlers/handler_base.py`.
-const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefill";
+pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefill";
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
@@ -153,7 +154,15 @@ impl
                             .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
                     }
 
-                    return next.generate(context.map(|_| req)).await;
+                    let response_stream = next.generate(context.map(|_| req)).await?;
+                    let ctx = response_stream.context();
+                    let annotation = Annotated::<LLMEngineOutput>::from_annotation(
+                        BYPASS_REMOTE_PREFILL_ANNOTATION,
+                        &true,
+                    )?;
+                    let merged =
+                        stream::once(async move { annotation }).chain(response_stream);
+                    return Ok(ResponseStream::new(Box::pin(merged), ctx));
                 }
                 Ok(None) => {}
                 Err(error) => {

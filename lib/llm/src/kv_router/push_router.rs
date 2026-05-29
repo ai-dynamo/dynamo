@@ -28,6 +28,7 @@ use crate::{
     kv_router::{
         FindBestMatchOutcome, KvRouter,
         metrics::RouterRequestMetrics,
+        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         sticky::{
             coordinator::{StickySessionCoordinator, sticky_allowed_for_phase},
             lifecycle::SessionCloseAction,
@@ -608,6 +609,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
 
+        // Bookkeeping for conditional disagg mode; true if prefill work is bypassed to decode worker
+        let bypassed_remote_prefill = request.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION);
+
         let should_record = !is_query_only && self.chooser.indexer().records_routing_decisions();
         let block_size = self.chooser.block_size() as usize;
         let routing_parts = RoutingRequestParts::new(&request);
@@ -831,6 +835,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 dp_rank = dp_rank,
                 overlap_blocks = overlap_amount,
                 phase = ?phase,
+                bypassed = bypassed_remote_prefill,
             ))
             .await?;
         // direct() succeeded — mark dispatched so record_metrics() fires.
