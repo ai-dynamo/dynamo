@@ -244,8 +244,7 @@ def _load_write_mode(
     _last_model_memory_usage_offset_bytes = finalize_result.pruned_bytes
 
     logger.info(
-        "[GMS] Write mode: published %.2f GiB "
-        "(vLLM memory offset %.2f GiB)",
+        "[GMS] Write mode: published %.2f GiB " "(vLLM memory offset %.2f GiB)",
         _last_imported_weights_bytes / (1 << 30),
         _last_model_memory_usage_offset_bytes / (1 << 30),
     )
