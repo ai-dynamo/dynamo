@@ -432,16 +432,14 @@ impl AddressedPushRouter {
         T: Data + Serialize,
         U: Data + for<'de> Deserialize<'de> + MaybeError,
     {
-        let engine_ctx = input.context();
-        let (request_stream, ctx_unit) = input.into_parts();
+        let (request_stream, context) = input.into_parts();
         let input_stream = request_stream
             .take()
             .expect("RequestStream::take called twice on bidirectional dispatch input");
 
         self.dispatch_and_finalize::<T, U>(
-            &ctx_unit,
+            &context,
             address,
-            engine_ctx,
             Some(&instance),
             None,
             Some(input_stream),
@@ -458,9 +456,8 @@ impl AddressedPushRouter {
     ///     `[ctrl, data]` envelope. The payload travels in the data part.
     async fn dispatch_and_finalize<T, U>(
         &self,
-        ctx_unit: &context::Context<()>,
+        context: &context::Context<()>,
         address: String,
-        engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
         instance: Option<&Instance>,
         request: Option<&T>,
         input_stream: Option<crate::engine::DataStream<T>>,
@@ -469,6 +466,8 @@ impl AddressedPushRouter {
         T: Data + Serialize,
         U: Data + for<'de> Deserialize<'de> + MaybeError,
     {
+        let engine_ctx = context.context();
+
         let queue_start = Instant::now();
         REQUEST_PLANE_INFLIGHT.inc();
         let inflight_guard = InflightGuard::new();
@@ -511,7 +510,7 @@ impl AddressedPushRouter {
         }
 
         let buffer = build_request_envelope(
-            ctx_unit,
+            context,
             recv_registered.connection_info.clone(),
             send_registered.as_ref().map(|r| r.connection_info.clone()),
             request,
@@ -519,7 +518,7 @@ impl AddressedPushRouter {
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
         let tx_start = Instant::now();
-        self.dispatch_buffer(address, buffer, ctx_unit.id()).await?;
+        self.dispatch_buffer(address, buffer, context.id()).await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         // Spawn the forwarder before awaiting the response prologue so request
@@ -534,7 +533,7 @@ impl AddressedPushRouter {
         }
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
-        tracing::trace!(request_id = ctx_unit.id(), "awaiting transport handshake");
+        tracing::trace!(request_id = context.id(), "awaiting transport handshake");
 
         // Disarms the recv-side cleanup; see the holding rationale above.
         let (_recv_conn_info, response_stream_provider) = recv_registered.into_parts();
@@ -656,12 +655,10 @@ where
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
         let (addressed_request, context) = request.transfer(());
         let (request, address, instance_info) = addressed_request.into_parts();
-        let engine_ctx = context.context();
 
         self.dispatch_and_finalize::<T, U>(
             &context,
             address,
-            engine_ctx,
             instance_info.as_ref(),
             Some(&request),
             None,
