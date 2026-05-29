@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from tests.parity.common import _FAMILY_TO_SGLANG_REASONING, _FAMILY_TO_VLLM_REASONING
 from tests.parity.common import TOP_N_TOOL_CALLING_FAMILIES as TOP_N_FAMILIES
 from tests.parity.common import (
     build_parity_tooltip_html,
@@ -361,27 +362,6 @@ _REASONING_MODE_METADATA = {
     },
 }
 
-_FAMILY_TO_VLLM_REASONING = {
-    "deepseek_r1": "deepseek_r1",
-    "deepseek_v3": "deepseek_v3",
-    "deepseek_v4": "deepseek_v4",
-    "gemma4": "gemma4",
-    "gpt_oss": "openai_gptoss",
-    "granite": "granite",
-    "kimi_k25": "kimi_k2",
-    "mistral": "mistral",
-    "minimax_append_think": "minimax_m2_append_think",
-    "nemotron_deci": "glm45",
-    "qwen3": "qwen3",
-}
-
-_FAMILY_TO_SGLANG_REASONING = {
-    "deepseek_r1": "deepseek-r1",
-    "gpt_oss": "gpt-oss",
-    "kimi": "kimi",
-    "qwen3": "qwen3",
-}
-
 
 def _make_jinja_env() -> Environment:
     return Environment(
@@ -627,6 +607,7 @@ def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, 
     expected = case["expected"]
     dynamo = expected["dynamo"]
     dynamo_leak = _has_dynamo_leak(case, family)
+    dynamo_leak_reason = _dynamo_leak_reason(expected, family) if dynamo_leak else None
     markers = []
     unavailable = 0
     tooltip_parts = [case.get("description", "")]
@@ -644,10 +625,15 @@ def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, 
         if _canonical(spec) == _canonical(dynamo):
             tooltip_parts.append(f"{impl}: matches Dynamo")
             continue
-        suffix = "?" if dynamo_leak or not spec.get("reason") else ""
+        suffix = (
+            "?"
+            if (dynamo_leak and not dynamo_leak_reason)
+            or (not dynamo_leak and not spec.get("reason"))
+            else ""
+        )
         markers.append(f"{letter}{suffix}")
         reason = (
-            "research-needed" if dynamo_leak else spec.get("reason", "research-needed")
+            dynamo_leak_reason if dynamo_leak else spec.get("reason", "research-needed")
         )
         tooltip_parts.append(f"{impl}: diverges — {reason}")
 
@@ -1359,6 +1345,7 @@ def _tooltip_for(
     parts: list[str] = []
     dynamo_leak = _has_dynamo_leak(case, family)
     expected = case.get("expected", {})
+    dynamo_leak_reason = _dynamo_leak_reason(expected, family) if dynamo_leak else None
     for impl in ("vllm", "sglang"):
         block = expected.get(impl)
         if not isinstance(block, dict) or block is dyn:
@@ -1371,7 +1358,11 @@ def _tooltip_for(
             continue
         if _canonical(block) == _canonical(dyn):
             continue
-        if "reason" in block and not dynamo_leak:
+        if dynamo_leak_reason:
+            continue
+        if dynamo_leak:
+            parts.append(f"{name}: (research-needed — no `reason:` field yet)")
+        elif "reason" in block and not dynamo_leak:
             parts.append(f"{name}: {block['reason']}")
         elif "reasoning_text" in block or "normal_text" in block:
             parts.append(f"{name}: (research-needed — no `reason:` field yet)")
@@ -1738,7 +1729,7 @@ def _parser_cell_html(
         [
             "",
             "Mode:",
-            f"- {html_lib.escape(f'{mode_meta['label']} / {mode_meta['control']}')}",
+            "- " + html_lib.escape(f"{mode_meta['label']} / {mode_meta['control']}"),
         ]
     )
     static_config = mode_meta.get("static", [])

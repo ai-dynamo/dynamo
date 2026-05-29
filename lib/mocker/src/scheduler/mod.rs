@@ -323,11 +323,14 @@ pub fn init_kvbm_offline(
     tracing::debug!(
         num_g2_blocks = config.num_g2_blocks,
         num_g3_blocks = config.num_g3_blocks,
+        g4_enabled = config.enable_g4_storage,
         offload_batch_size = config.offload_batch_size,
         bw_g1_to_g2_gbps = config.bandwidth_g1_to_g2_gbps,
         bw_g2_to_g1_gbps = config.bandwidth_g2_to_g1_gbps,
         bw_g2_to_g3_gbps = config.bandwidth_g2_to_g3_gbps,
         bw_g3_to_g2_gbps = config.bandwidth_g3_to_g2_gbps,
+        bw_g2_to_g4_gbps = config.bandwidth_g2_to_g4_gbps,
+        bw_g4_to_g2_gbps = config.bandwidth_g4_to_g2_gbps,
         "kvbm-offload: init_kvbm_offline attaching engine"
     );
     let engine = build_owned_offload_engine(config)?;

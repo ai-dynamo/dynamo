@@ -21,15 +21,15 @@ cases:
             type: string
     expected:
       dynamo: &id001
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜>
-      sglang:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *id001
+      sglang: *id001
+      vllm:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜>
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from TOOLCALLING.batch.5.c
@@ -46,15 +46,17 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id002
+      dynamo:
         calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"loc
+        normal_text: ''
       sglang:
         calls:
         - name: get_weather
           arguments: '{"loc'
         normal_text: ''
-      vllm: *id002
+      vllm:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"loc
   TOOLCALLING.stream.4.c:
     description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
       repeated close markers

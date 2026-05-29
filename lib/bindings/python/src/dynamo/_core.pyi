@@ -1674,6 +1674,9 @@ class MockEngineArgs:
         bandwidth_g2_to_g1_gbps: Optional[float] = None,
         bandwidth_g2_to_g3_gbps: Optional[float] = None,
         bandwidth_g3_to_g2_gbps: Optional[float] = None,
+        enable_g4_storage: bool = False,
+        bandwidth_g2_to_g4_gbps: Optional[float] = None,
+        bandwidth_g4_to_g2_gbps: Optional[float] = None,
     ) -> None:
         ...
 
@@ -1733,6 +1736,15 @@ class MockEngineArgs:
 
     @property
     def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
+
+    @property
+    def enable_g4_storage(self) -> bool: ...
+
+    @property
+    def bandwidth_g2_to_g4_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g4_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
