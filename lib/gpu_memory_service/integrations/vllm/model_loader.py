@@ -48,9 +48,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Track imported weights for memory accounting
+# Track imported weights plus the vLLM-local model_memory_usage adjustment.
 _last_imported_weights_bytes: int = 0
-_last_weight_memory_charge_bytes: int = 0
+_last_model_memory_usage_offset_bytes: int = 0
 
 
 def get_imported_weights_bytes() -> int:
@@ -58,9 +58,9 @@ def get_imported_weights_bytes() -> int:
     return _last_imported_weights_bytes
 
 
-def get_weight_memory_charge_bytes() -> int:
-    """Return non-KV model bytes to charge to vLLM memory accounting."""
-    return _last_weight_memory_charge_bytes or _last_imported_weights_bytes
+def get_model_memory_usage_offset_bytes() -> int:
+    """Return the offset to add to imported bytes for vLLM model_memory_usage."""
+    return _last_model_memory_usage_offset_bytes
 
 
 # =============================================================================
@@ -172,7 +172,7 @@ def _load_read_mode(
     When MX is active, registers materialized tensors with NIXL so this
     node is discoverable as a P2P source (e.g. for shadow engine failover).
     """
-    global _last_imported_weights_bytes, _last_weight_memory_charge_bytes
+    global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
 
     try:
         model = _create_meta_model(vllm_config, model_config)
@@ -185,7 +185,7 @@ def _load_read_mode(
             publish_metadata(mx_ctx)
 
         _last_imported_weights_bytes = gms_client.total_bytes
-        _last_weight_memory_charge_bytes = _last_imported_weights_bytes
+        _last_model_memory_usage_offset_bytes = 0
         logger.info(
             "[GMS] Read mode: imported %.2f GiB",
             _last_imported_weights_bytes / (1 << 30),
@@ -212,7 +212,7 @@ def _load_write_mode(
     detection (RDMA P2P -> ModelStreamer -> GDS -> disk) with fallback.
     The chain also handles NIXL registration and metadata publishing.
     """
-    global _last_imported_weights_bytes, _last_weight_memory_charge_bytes
+    global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
 
     from vllm.model_executor.model_loader.utils import (
         initialize_model,
@@ -241,14 +241,13 @@ def _load_write_mode(
 
     finalize_result = finalize_gms_write(gms_client, model)
     _last_imported_weights_bytes = finalize_result.committed_bytes
-    _last_weight_memory_charge_bytes = (
-        finalize_result.committed_bytes + finalize_result.pruned_bytes
-    )
+    _last_model_memory_usage_offset_bytes = finalize_result.pruned_bytes
 
     logger.info(
-        "[GMS] Write mode: published %.2f GiB (vLLM memory charge %.2f GiB)",
+        "[GMS] Write mode: published %.2f GiB "
+        "(vLLM memory offset %.2f GiB)",
         _last_imported_weights_bytes / (1 << 30),
-        _last_weight_memory_charge_bytes / (1 << 30),
+        _last_model_memory_usage_offset_bytes / (1 << 30),
     )
     return model.eval()
 
