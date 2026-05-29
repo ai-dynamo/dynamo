@@ -946,25 +946,20 @@ fn wrap_engine_route_callback(
 
                     match callback(body).await {
                         Ok(response) => {
-                            if route_response_is_error(&response)
-                                && let Err(e) = endpoint.register_endpoint_instance().await
-                            {
+                            if route_response_is_error(&response) {
                                 tracing::warn!(
                                     route = %route_name,
-                                    error = %e,
-                                    "failed to re-register endpoint after route error"
+                                    "route returned an error after endpoint unregister; leaving endpoint unregistered"
                                 );
                             }
                             Ok(response)
                         }
                         Err(e) => {
-                            if let Err(register_err) = endpoint.register_endpoint_instance().await {
-                                tracing::warn!(
-                                    route = %route_name,
-                                    error = %register_err,
-                                    "failed to re-register endpoint after route callback failed"
-                                );
-                            }
+                            tracing::warn!(
+                                route = %route_name,
+                                error = %e,
+                                "route callback failed after endpoint unregister; leaving endpoint unregistered"
+                            );
                             Err(e)
                         }
                     }
