@@ -18,8 +18,7 @@ cases:
         reasoning_text: ''
         normal_text: plain answer
       vllm: *d_0
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+      sglang: *d_0
   REASONING.batch.2.a:
     description: Single reasoning block
     ref: *upstream_ref
@@ -29,8 +28,7 @@ cases:
         reasoning_text: thinking
         normal_text: ''
       vllm: *d_1
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+      sglang: *d_1
   REASONING.batch.3.a:
     description: Reasoning followed by downstream tool-call text
     ref: *upstream_ref
@@ -50,8 +48,7 @@ cases:
           </｜DSML｜invoke>
           </｜DSML｜tool_calls>
       vllm: *d_2
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+      sglang: *d_2
   REASONING.batch.3.b:
     description: Open reasoning interrupted by downstream tool-call text is not configured for DeepSeek V4
     ref: *upstream_ref
@@ -65,12 +62,11 @@ cases:
         reasoning_text: thinking
         normal_text: answer
       vllm: *d_3
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+      sglang: *d_3
   REASONING.batch.2.d:
     description: Normal text around reasoning
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
+    spec_ref: lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     model_text: before <think>thinking</think> after
     expected:
       dynamo:
@@ -81,19 +77,24 @@ cases:
         normal_text: ' after'
         reason: Dynamo keeps visible text outside a complete reasoning span as normal_text; vLLM drops the prefix.
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+        reasoning_text: before thinking
+        normal_text: ' after'
+        reason: Dynamo keeps text emitted before the reasoning open marker as normal_text; SGLang strips the start marker in place and folds that prefix into reasoning_text.
   REASONING.batch.4:
     description: Dangling end marker without an opening think tag
     ref: *upstream_ref
     model_text: normal</think>answer
     expected:
-      dynamo: &d_4
+      dynamo:
         reasoning_text: normal
         normal_text: answer
       vllm:
-        <<: *d_4
+        reasoning_text: normal
+        normal_text: answer
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+        reasoning_text: ''
+        normal_text: normal</think>answer
+        reason: Dynamo treats the text before an unpaired end marker as reasoning (implicit-opener recovery, matching vLLM); SGLang enters reasoning only on an explicit start marker, so the dangling end marker and surrounding text stay in normal_text.
   REASONING.batch.5:
     description: Open think marker starts reasoning from an outside-reasoning initial state
     ref: *upstream_ref
@@ -103,8 +104,7 @@ cases:
         reasoning_text: plain answer
         normal_text: ''
       vllm: *d_5
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+      sglang: *d_5
   REASONING.batch.2.e:
     description: Empty reasoning block
     ref: *upstream_ref
@@ -114,8 +114,7 @@ cases:
         reasoning_text: ''
         normal_text: answer
       vllm: *d_6
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+      sglang: *d_6
   REASONING.batch.2.f:
     description: Complex reasoning content with Unicode and newlines
     ref: *upstream_ref
@@ -131,8 +130,7 @@ cases:
           JSON-ish: {"x": [1, true]}
         normal_text: Done.
       vllm: *d_7
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+      sglang: *d_7
   REASONING.batch.1.a:
     description: Empty input
     ref: *upstream_ref
@@ -142,15 +140,14 @@ cases:
         reasoning_text: ''
         normal_text: ''
       vllm: *d_8
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+      sglang: *d_8
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated by Dynamo
     ref: *upstream_ref
-    spec_ref: 'lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo'
+    spec_ref: lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     model_text: <think>first</think> middle <think>second</think> done
     expected:
-      dynamo: &d_9
+      dynamo:
         reasoning_text: firstsecond
         normal_text: middle  done
       vllm:
@@ -158,4 +155,6 @@ cases:
         normal_text: ' middle <think>second</think> done'
         reason: Dynamo extracts each complete reasoning span; vLLM leaves the later complete span in normal_text.
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+        reasoning_text: first
+        normal_text: ' middle <think>second</think> done'
+        reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span, with its literal markers, in normal_text.

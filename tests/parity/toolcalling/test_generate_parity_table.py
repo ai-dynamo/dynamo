@@ -95,7 +95,7 @@ def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> N
     )
     split_end_cell = _cell_for(html, "REASONING.stream.3.b — gpt_oss")
     assert re.search(
-        r'<td class="cell donly[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">D</a>',
+        r'<td class="cell research[^"]*"[^>]*><a href="fixtures/gpt_oss/REASONING\.stream\.yaml">S\?</a>',
         split_end_cell,
     )
     handoff_cell = _cell_for(html, "REASONING.stream.4.b — gpt_oss")

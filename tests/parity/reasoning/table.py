@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from tests.parity.common import _FAMILY_TO_SGLANG_REASONING, _FAMILY_TO_VLLM_REASONING
 from tests.parity.common import TOP_N_TOOL_CALLING_FAMILIES as TOP_N_FAMILIES
 from tests.parity.common import (
     build_parity_tooltip_html,
@@ -359,27 +360,6 @@ _REASONING_MODE_METADATA = {
             "requires special tokens to remain visible in decoded text",
         ],
     },
-}
-
-_FAMILY_TO_VLLM_REASONING = {
-    "deepseek_r1": "deepseek_r1",
-    "deepseek_v3": "deepseek_v3",
-    "deepseek_v4": "deepseek_v4",
-    "gemma4": "gemma4",
-    "gpt_oss": "openai_gptoss",
-    "granite": "granite",
-    "kimi_k25": "kimi_k2",
-    "mistral": "mistral",
-    "minimax_append_think": "minimax_m2_append_think",
-    "nemotron_deci": "glm45",
-    "qwen3": "qwen3",
-}
-
-_FAMILY_TO_SGLANG_REASONING = {
-    "deepseek_r1": "deepseek-r1",
-    "gpt_oss": "gpt-oss",
-    "kimi": "kimi",
-    "qwen3": "qwen3",
 }
 
 

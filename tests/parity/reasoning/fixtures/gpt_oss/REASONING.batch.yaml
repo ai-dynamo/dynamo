@@ -12,14 +12,13 @@ cases:
     ref: *upstream_ref
     model_text: plain answer
     expected:
-      dynamo:
+      dynamo: &id001
         reasoning_text: ''
         normal_text: ''
       vllm:
         reasoning_text: ''
         normal_text: ''
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *id001
   REASONING.batch.2.a:
     description: Harmony analysis channel followed by final channel
     ref: *upstream_ref
@@ -29,8 +28,7 @@ cases:
         reasoning_text: thinking
         normal_text: answer
       vllm: *d_1
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_1
   REASONING.batch.3.a:
     description: Harmony analysis followed by commentary tool-call channel
     ref: *upstream_ref
@@ -41,7 +39,8 @@ cases:
         normal_text: ''
       vllm: *d_2
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+        reasoning_text: choose tool
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
   REASONING.batch.3.c:
     description: Recipientless Harmony commentary is visible normal text
     ref: *upstream_ref
@@ -54,7 +53,8 @@ cases:
           Done.
       vllm: *d_10
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+        reasoning_text: ''
+        normal_text: I will check that.Done.
   REASONING.batch.3.d:
     description: Directed Harmony commentary tool call is not visible normal text
     ref: *upstream_ref
@@ -65,7 +65,8 @@ cases:
         normal_text: ''
       vllm: *d_11
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+        reasoning_text: ''
+        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
   REASONING.batch.3.e:
     description: Directed Harmony analysis tool call stays in reasoning text
     ref: *upstream_ref
@@ -76,7 +77,8 @@ cases:
         normal_text: ''
       vllm: *d_12
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+        reasoning_text: ''
+        normal_text: <|channel|>analysis to=functions.search <|constrain|>json<|message|>{"q":"x"}<|call|>
   REASONING.batch.3.f:
     description: Harmony analysis, directed commentary tool call, then final answer
     ref: *upstream_ref
@@ -87,7 +89,8 @@ cases:
         normal_text: It is sunny.
       vllm: *d_13
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+        reasoning_text: think
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>It is sunny.
   REASONING.batch.2.c:
     description: Harmony analysis followed by normal final answer text
     ref: *upstream_ref
@@ -97,8 +100,7 @@ cases:
         reasoning_text: compute
         normal_text: answer
       vllm: *d_3
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_3
   REASONING.batch.4:
     description: Final channel without prior analysis channel
     ref: *upstream_ref
@@ -108,8 +110,7 @@ cases:
         reasoning_text: ''
         normal_text: answer
       vllm: *d_4
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_4
   REASONING.batch.5:
     description: Analysis channel without a final or commentary channel
     ref: *upstream_ref
@@ -119,8 +120,7 @@ cases:
         reasoning_text: partial reasoning
         normal_text: ''
       vllm: *d_5
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_5
   REASONING.batch.2.e:
     description: Empty analysis channel followed by final text
     ref: *upstream_ref
@@ -130,8 +130,7 @@ cases:
         reasoning_text: ''
         normal_text: answer
       vllm: *d_6
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_6
   REASONING.batch.2.f:
     description: Complex Harmony analysis content with Unicode and newlines
     ref: *upstream_ref
@@ -147,8 +146,7 @@ cases:
           JSON-ish: {"x": [1, true]}
         normal_text: Done.
       vllm: *d_7
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_7
   REASONING.batch.1.a:
     description: Empty input
     ref: *upstream_ref
@@ -158,8 +156,7 @@ cases:
         reasoning_text: ''
         normal_text: ''
       vllm: *d_8
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+      sglang: *d_8
   REASONING.batch.6.a:
     description: Multiple Harmony analysis spans
     ref: *upstream_ref
@@ -172,7 +169,8 @@ cases:
         normal_text: done
       vllm: *d_9
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+        reasoning_text: firstsecond
+        normal_text: done
   REASONING.batch.2.d:
     description: Normal text before a Harmony analysis channel is not a portable parser-level fixture
     reason: Harmony reasoning content is channel-framed; prefix text before the first channel is outside this parser-level fixture contract.
