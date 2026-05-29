@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use crate::kv_router::protocols::WorkerWithDpRank;
 use crate::lora::routing::hrw::RendezvousHasher;
 
-use super::min_cost_flow::MinCostFlowGraph;
+use super::min_cost_flow::{INF_COST, MinCostFlowGraph};
 
 /// Per-LoRA data shared across graph-build attempts (HRW order, prior hosts,
 /// residual replica demand). Computed once; reused by both the sparse and the
@@ -129,9 +129,49 @@ pub struct McfPlacementSolver {
     params: McfSolveParams,
 }
 
+/// Largest `overflow_cost` the solver will honor. Path costs through the
+/// overflow edge must stay safely below [`INF_COST`] or the shortest-path
+/// search would misread a reachable overflow path as "no augmenting path"
+/// and return a spurious `InsufficientFlow`. Half of `INF_COST` leaves ample
+/// headroom for potential accumulation across augmentations.
+const MAX_OVERFLOW_COST: i64 = INF_COST / 2;
+
 impl McfPlacementSolver {
     pub fn new(params: McfSolveParams) -> Self {
-        Self { params }
+        Self {
+            params: Self::sanitize_params(params),
+        }
+    }
+
+    /// Clamp `McfSolveParams` into the range the solver's invariants require.
+    /// The struct has public fields, so callers can build arbitrary values;
+    /// rather than fail or silently misbehave, we coerce into a safe range and
+    /// warn if anything had to change.
+    fn sanitize_params(mut p: McfSolveParams) -> McfSolveParams {
+        let orig = p.clone();
+
+        // Cost weights must be non-negative; a negative weight would invert the
+        // HRW-preference / keep / load incentives the cost function encodes.
+        p.alpha_pref = p.alpha_pref.max(0);
+        p.beta_keep = p.beta_keep.max(0);
+        p.gamma_load = p.gamma_load.max(0);
+
+        // overflow_cost must dominate every real edge (>= 1) yet stay below
+        // MAX_OVERFLOW_COST so overflow paths remain "reachable" to the solver.
+        p.overflow_cost = p.overflow_cost.clamp(1, MAX_OVERFLOW_COST);
+
+        if p.alpha_pref != orig.alpha_pref
+            || p.beta_keep != orig.beta_keep
+            || p.gamma_load != orig.gamma_load
+            || p.overflow_cost != orig.overflow_cost
+        {
+            tracing::warn!(
+                ?orig,
+                sanitized = ?p,
+                "McfSolveParams out of range; clamped to safe values"
+            );
+        }
+        p
     }
 
     /// Solve the LoRA placement problem.
@@ -157,6 +197,28 @@ impl McfPlacementSolver {
         changed_loras: Option<&HashSet<String>>,
         changed_workers: Option<&HashSet<WorkerWithDpRank>>,
     ) -> Result<McfPlacementResult, String> {
+        // Reject duplicate worker or LoRA identities up front, before any early
+        // return. The flow graph keys nodes on them; duplicates would silently
+        // overwrite a node and double-count sink capacity / overflow demand.
+        let mut seen_workers: HashSet<WorkerWithDpRank> = HashSet::with_capacity(workers.len());
+        for w in workers {
+            if !seen_workers.insert(w.worker) {
+                return Err(format!(
+                    "MCF solver: duplicate worker {:?} in input; workers must be unique",
+                    w.worker
+                ));
+            }
+        }
+        let mut seen_loras: HashSet<&str> = HashSet::with_capacity(loras.len());
+        for l in loras {
+            if !seen_loras.insert(l.name.as_str()) {
+                return Err(format!(
+                    "MCF solver: duplicate LoRA '{}' in input; LoRA names must be unique",
+                    l.name
+                ));
+            }
+        }
+
         // No LoRAs desired. Compute unloads for any prior placements that
         // are still on live workers (workers that have since left handle
         // their own cleanup via handle_worker_removal / changed_workers).
@@ -179,12 +241,22 @@ impl McfPlacementSolver {
             });
         }
 
-        // LoRAs exist but there are no workers. Every required replica
-        // overflows: route through the overflow path if allowed, otherwise
-        // fail hard to match the behaviour of the main solver under
-        // allow_overflow = false.
+        // LoRAs exist but there are no workers.
         if workers.is_empty() {
             let total_demand: usize = loras.iter().map(|l| l.replicas).sum();
+            // Zero real demand (e.g. only replicas=0 removal entries) is a
+            // no-op success regardless of allow_overflow: there is nothing to
+            // place and no live worker to unload from.
+            if total_demand == 0 {
+                return Ok(McfPlacementResult {
+                    assignment: HashMap::new(),
+                    loads: HashMap::new(),
+                    unloads: HashMap::new(),
+                    overflow_count: 0,
+                });
+            }
+            // Real demand with no workers: every replica overflows, or fail
+            // hard to match the main solver path under allow_overflow = false.
             if !self.params.allow_overflow {
                 return Err(format!(
                     "MCF solver failed: no workers available but {} replica(s) required across {} LoRA(s); \
@@ -199,28 +271,6 @@ impl McfPlacementSolver {
                 unloads: HashMap::new(),
                 overflow_count: total_demand,
             });
-        }
-
-        // Reject duplicate worker or LoRA identities. The flow graph keys nodes
-        // on them; duplicates would silently overwrite a node and double-count
-        // sink capacity, corrupting the solve.
-        let mut seen_workers: HashSet<WorkerWithDpRank> = HashSet::with_capacity(workers.len());
-        for w in workers {
-            if !seen_workers.insert(w.worker) {
-                return Err(format!(
-                    "MCF solver: duplicate worker {:?} in input; workers must be unique",
-                    w.worker
-                ));
-            }
-        }
-        let mut seen_loras: HashSet<&str> = HashSet::with_capacity(loras.len());
-        for l in loras {
-            if !seen_loras.insert(l.name.as_str()) {
-                return Err(format!(
-                    "MCF solver: duplicate LoRA '{}' in input; LoRA names must be unique",
-                    l.name
-                ));
-            }
         }
 
         let worker_map: HashMap<WorkerWithDpRank, &WorkerInput> =
@@ -369,6 +419,32 @@ impl McfPlacementSolver {
             .map(|w| rem_cap.get(&w.worker).copied().unwrap_or(0))
             .sum();
 
+        // Does the sparse candidate set already reach every active worker for
+        // every LoRA? If so, the dense graph is identical to the sparse one and
+        // a retry cannot place anything more — crucially, this prevents a LoRA
+        // whose demand exceeds the worker count (each LoRA→worker edge is cap=1)
+        // from triggering a pointless full dense solve on every tick.
+        let active_worker_set: HashSet<WorkerWithDpRank> =
+            active_workers.iter().map(|w| w.worker).collect();
+        let n_active_workers = active_worker_set.len();
+        let sparse_covers_all = metas.iter().all(|m| {
+            let take_n = self.params.candidate_m.max(m.rem_rep);
+            // Active workers reached = active workers in the top-`take_n` HRW
+            // window plus any active prior hosts beyond it.
+            let mut reached: HashSet<WorkerWithDpRank> = HashSet::new();
+            for w in m.ranked.iter().take(take_n) {
+                if active_worker_set.contains(w) {
+                    reached.insert(*w);
+                }
+            }
+            for w in &m.prev_hosts {
+                if active_worker_set.contains(w) {
+                    reached.insert(*w);
+                }
+            }
+            reached.len() >= n_active_workers
+        });
+
         let sparse = self.build_and_solve(
             &active_loras,
             &active_workers,
@@ -378,16 +454,21 @@ impl McfPlacementSolver {
             CandStrategy::Sparse,
         );
 
-        // Retry with a full bipartite graph when the sparse attempt either
-        // overflowed while real capacity was still free (a candidate-matching
-        // conflict), or failed outright under allow_overflow=false (a denser
-        // graph is a strict superset and may be feasible).
-        let retry_dense = match &sparse {
-            Ok((_, overflow)) => {
-                *overflow > 0 && total_cap > total_demand.saturating_sub(*overflow)
-            }
-            Err(_) => true,
-        };
+        // Retry with a full bipartite graph only when it could actually help:
+        // the sparse graph must not already cover all workers (otherwise dense
+        // == sparse), AND either the sparse attempt overflowed while real
+        // capacity was still free (a candidate-matching conflict), or it failed
+        // outright under allow_overflow=false (dense is a superset, may be
+        // feasible). Without the coverage guard, a LoRA whose residual demand
+        // exceeds the active worker count would overflow under any density yet
+        // force a dense re-solve every tick.
+        let retry_dense = !sparse_covers_all
+            && match &sparse {
+                Ok((_, overflow)) => {
+                    *overflow > 0 && total_cap > total_demand.saturating_sub(*overflow)
+                }
+                Err(_) => true,
+            };
 
         let (solved_hosts, overflow_count) = if retry_dense {
             self.build_and_solve(
@@ -1005,6 +1086,83 @@ mod tests {
             result.is_err(),
             "with allow_overflow=false, missing workers must surface as an error"
         );
+    }
+
+    #[test]
+    fn test_no_workers_zero_demand_is_noop_even_without_overflow() {
+        // No workers + only replicas=0 entries (removal contract) must be a
+        // no-op success, not an InsufficientFlow error, regardless of
+        // allow_overflow.
+        let solver = McfPlacementSolver::new(McfSolveParams {
+            allow_overflow: false,
+            ..Default::default()
+        });
+        let loras = vec![make_lora("A", 0), make_lora("B", 0)];
+        let result = solver
+            .solve(&[], &loras, &HashMap::new(), None, None)
+            .expect("zero real demand with no workers must be a no-op success");
+        assert!(result.assignment.is_empty());
+        assert_eq!(result.overflow_count, 0);
+    }
+
+    #[test]
+    fn test_duplicate_rejected_before_empty_worker_early_return() {
+        // Duplicate validation must run before the workers.is_empty() early
+        // return, otherwise duplicate LoRAs are double-counted as overflow.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let loras = vec![make_lora("A", 1), make_lora("A", 1)];
+        let result = solver.solve(&[], &loras, &HashMap::new(), None, None);
+        assert!(
+            result.is_err_and(|e| e.contains("duplicate LoRA")),
+            "duplicate LoRAs must be rejected even with no workers"
+        );
+    }
+
+    #[test]
+    fn test_degree_bound_overflow_does_not_force_dense_retry() {
+        // A single LoRA needing more replicas than there are workers overflows
+        // under any candidate density (each LoRA→worker edge is cap=1). The
+        // sparse-covers-all guard must recognize the sparse graph already
+        // reaches every worker, so the result is correct and stable: 2 placed,
+        // 1 overflow, with no behavioral difference from a dense solve.
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let workers = make_workers(2, 8); // 2 workers, ample capacity each
+        let loras = vec![make_lora("A", 3)]; // needs 3 distinct workers
+        let result = solver
+            .solve(&workers, &loras, &HashMap::new(), None, None)
+            .expect("should solve via overflow");
+        assert_eq!(
+            result.overflow_count, 1,
+            "1 replica must overflow: only 2 distinct workers for 3 replicas"
+        );
+        assert_eq!(result.assignment["A"].len(), 2);
+    }
+
+    #[test]
+    fn test_params_sanitized() {
+        // Out-of-range params are clamped: negative weights -> 0, and
+        // overflow_cost is bounded to [1, INF_COST/2].
+        let solver = McfPlacementSolver::new(McfSolveParams {
+            alpha_pref: -5,
+            beta_keep: -1,
+            gamma_load: -100,
+            overflow_cost: i64::MAX,
+            ..Default::default()
+        });
+        let p = solver.params();
+        assert_eq!(p.alpha_pref, 0);
+        assert_eq!(p.beta_keep, 0);
+        assert_eq!(p.gamma_load, 0);
+        assert_eq!(p.overflow_cost, MAX_OVERFLOW_COST);
+
+        // A clamped overflow_cost still dominates real edges, so a free worker
+        // is preferred over overflow.
+        let workers = make_workers(2, 4);
+        let loras = vec![make_lora("A", 1)];
+        let result = solver
+            .solve(&workers, &loras, &HashMap::new(), None, None)
+            .expect("solve must succeed with sanitized params");
+        assert_eq!(result.overflow_count, 0);
     }
 
     #[test]
