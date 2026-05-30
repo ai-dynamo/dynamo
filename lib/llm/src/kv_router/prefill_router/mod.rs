@@ -137,9 +137,27 @@ impl
                 dp_rank,
                 bootstrap_info,
             } => {
-                // Bootstrap optimization path: spawn prefill in background
-                // We successfully used the peeked worker, so we must now advance the router state
-                // to ensure the next request gets a different worker.
+                // Bootstrap optimization path: spawn prefill in background.
+                //
+                // Load accounting for the bootstrap dispatch: the actual prefill
+                // request is sent via `router.direct(worker_id)` from the spawned
+                // task, which bypasses the per-mode dispatcher's
+                // increment/Permit-drop pair. Without an explicit
+                // `track_dispatch` here, LL / P2C / DeviceAwareWeighted would
+                // accumulate no occupancy state for bootstrap-routed requests,
+                // and peek-based selection would degenerate to all-equal-zero
+                // → uniform-random. Acquire a permit at the commit point and
+                // hand it to the spawned task; its drop emits the matching
+                // decrement when the prefill stream ends.
+                let load_permit = self
+                    .prefill_router
+                    .get()
+                    .and_then(|router| router.track_dispatch(worker_id));
+
+                // For routing modes that *do* advance state via the existing
+                // `select_next_worker` call site (RoundRobin advances its
+                // counter; LeastLoaded etc. are no-ops here and rely on the
+                // permit above), keep the call so RR's counter still ticks.
                 if !self.router_mode.is_kv_routing()
                     && let Some(router) = self.prefill_router.get()
                 {
@@ -164,7 +182,12 @@ impl
 
                 // Pass the phase barrier to the spawned task. It is released after routing
                 // completes so worker recording finishes before phase changes to Decode.
-                self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
+                self.spawn_prefill_task(
+                    prefill_context,
+                    Some(worker_id),
+                    prefill_phase_barrier,
+                    load_permit,
+                );
 
                 Ok(PrefillOutcome::Bootstrap(bootstrap_info))
             }

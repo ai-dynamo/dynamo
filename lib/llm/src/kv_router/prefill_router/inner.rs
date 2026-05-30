@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use dynamo_runtime::{
-    pipeline::{AsyncEngine, ManyOut, PushRouter, SingleIn},
+    pipeline::{AsyncEngine, ManyOut, OccupancyPermit, PushRouter, SingleIn},
     protocols::annotated::Annotated,
 };
 
@@ -49,6 +49,22 @@ impl InnerPrefillRouter {
     pub(super) fn select_next_worker(&self) -> Option<u64> {
         match self {
             InnerPrefillRouter::SimpleRouter(router) => router.select_next_worker(),
+            InnerPrefillRouter::KvRouter(_) => None,
+        }
+    }
+
+    /// Commit load tracking for a worker chosen via [`Self::generate_to_worker`]'s
+    /// disagg-bootstrap path. Returns `Some(permit)` only for `SimpleRouter` modes
+    /// whose underlying `PushRouter` maintains an occupancy counter
+    /// (LeastLoaded / PowerOfTwoChoices / DeviceAwareWeighted). Drop the permit
+    /// when the dispatched request finishes — typically by moving it into the
+    /// spawned prefill task so it lives for the prefill stream's lifetime.
+    ///
+    /// `KvRouter` routes via `KvPushRouter::select_worker`, which has its own
+    /// state-keeping via worker-pushed kv_metrics events, so this returns `None`.
+    pub(super) fn track_dispatch(&self, instance_id: u64) -> Option<OccupancyPermit> {
+        match self {
+            InnerPrefillRouter::SimpleRouter(router) => router.track_dispatch(instance_id),
             InnerPrefillRouter::KvRouter(_) => None,
         }
     }
