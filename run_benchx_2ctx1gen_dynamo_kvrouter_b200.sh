@@ -75,7 +75,7 @@ DYN_SYS_PORT_CTX_1=8082
 DYN_SYS_PORT_GEN_2=8085
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="$REPO_DIR/bench/results/dynamo-b200-0528/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
+RESULTS_DIR="$REPO_DIR/bench/results/dynamo-b200-0529/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
 mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
 cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 
@@ -383,7 +383,7 @@ start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
       --request-plane ${DYNAMO_REQUEST_PLANE} \
       --router-mode kv \
       --no-router-kv-events \
-      --router-ttl-secs 480.0"
+      --router-ttl-secs 2400.0"
 FRONTEND_PID="${SRUN_PIDS[-1]}"
 require_alive "${FRONTEND_PID}" "FRONTEND_PID"
 

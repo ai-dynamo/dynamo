@@ -5,7 +5,7 @@ moe_expert_parallel_size: 1
 max_batch_size: 128
 max_num_tokens: 512
 max_seq_len: 131072
-stream_interval: 100
+stream_interval: 10
 trust_remote_code: true
 enable_chunked_prefill: true
 enable_attention_dp: false
@@ -292,7 +292,6 @@ speculative_config:
   decoding_type: Eagle
   max_draft_len: 3
   speculative_model: /lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/rihuo/nvidia_gpt-oss-120b-Eagle3-v3
-  allow_advanced_sampling: true
   eagle3_one_model: true
   eagle3_layers_to_capture:
   - 23

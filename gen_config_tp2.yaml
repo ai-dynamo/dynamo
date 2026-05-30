@@ -5,7 +5,7 @@ moe_expert_parallel_size: 1
 max_batch_size: 128
 max_num_tokens: 512
 max_seq_len: 131072
-stream_interval: 100
+stream_interval: 10
 trust_remote_code: true
 enable_chunked_prefill: true
 enable_attention_dp: false
