@@ -12,6 +12,8 @@ use dynamo_bench::kv_router_common::results::{
 };
 use dynamo_bench::kv_router_common::sweep::{compute_sweep_durations, print_sweep_summary};
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, ShardSizeSnapshot};
+#[cfg(feature = "uds-raw-bench")]
+use mooncake_shared::UdsShardGuards;
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig,
     PreparedMooncakeBenchmark, merge_worker_traces, prepare_scaled_benchmark,
@@ -71,6 +73,34 @@ enum IndexerArgs {
         #[clap(long, default_value = "2")]
         prefix_depth: usize,
     },
+
+    /// Branch-sharded over raw UDS sockets with each shard running in a
+    /// separate OS process (separate address space, no shared Tokio scheduler).
+    ///
+    /// Build the server binary first:
+    ///   cargo build -p dynamo-kv-router --features uds-raw-bench \
+    ///     --bin kv_shard_server --release
+    ///
+    /// Requires `--features uds-raw-bench`.
+    #[cfg(feature = "uds-raw-bench")]
+    BranchShardedUds {
+        /// Number of independent shard-server processes to spawn.
+        #[clap(long, default_value = "2")]
+        num_shards: usize,
+
+        /// Number of OS event-worker threads inside each shard server process.
+        #[clap(long, default_value = "4")]
+        num_event_workers_per_shard: usize,
+
+        /// Maximum routing-trie depth before dispatching suffixes to one shard.
+        #[clap(long, default_value = "2")]
+        prefix_depth: usize,
+
+        /// Path to the `kv_shard_server` binary.
+        /// Default: look for `kv_shard_server` on $PATH.
+        #[clap(long, default_value = "kv_shard_server")]
+        shard_server_path: std::path::PathBuf,
+    },
 }
 
 impl IndexerArgs {
@@ -95,6 +125,18 @@ impl IndexerArgs {
                 *num_shards,
                 *num_event_workers_per_shard,
                 *prefix_depth,
+            ),
+            #[cfg(feature = "uds-raw-bench")]
+            IndexerArgs::BranchShardedUds {
+                num_shards,
+                num_event_workers_per_shard,
+                prefix_depth,
+                shard_server_path,
+            } => MooncakeIndexerConfig::branch_sharded_uds(
+                *num_shards,
+                *num_event_workers_per_shard,
+                *prefix_depth,
+                shard_server_path.clone(),
             ),
         }
     }
@@ -287,7 +329,8 @@ fn indexer_config(args: &Args, name: &str) -> anyhow::Result<MooncakeIndexerConf
     }
 }
 
-fn build_indexer(
+/// Synchronous indexer build for all non-UDS variants.
+fn build_indexer_sync(
     args: &Args,
     config: &MooncakeIndexerConfig,
 ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
@@ -303,6 +346,33 @@ fn build_indexer(
         ))
     }
 }
+
+/// Build the indexer, returning an `(indexer, Option<guard>)` pair.
+///
+/// For UDS variants the guard keeps shard servers alive for the duration of
+/// the benchmark.  For all other variants the guard is `None` and the build
+/// is synchronous under the hood.
+async fn build_indexer(
+    args: &Args,
+    config: &MooncakeIndexerConfig,
+) -> anyhow::Result<(Arc<dyn KvIndexerInterface + Send + Sync>, Option<UdsGuard>)> {
+    #[cfg(feature = "uds-raw-bench")]
+    if matches!(
+        config.kind,
+        mooncake_shared::MooncakeIndexerKind::BranchShardedUds
+    ) {
+        let (indexer, guard) = config.build_uds(args.common.block_size).await?;
+        return Ok((indexer, Some(guard)));
+    }
+    let indexer = build_indexer_sync(args, config)?;
+    Ok((indexer, None))
+}
+
+/// Opaque guard that keeps UDS shard servers alive.  `None` for non-UDS runs.
+#[cfg(feature = "uds-raw-bench")]
+type UdsGuard = UdsShardGuards;
+#[cfg(not(feature = "uds-raw-bench"))]
+type UdsGuard = std::convert::Infallible;
 
 fn benchmark_config(
     args: &Args,
@@ -382,7 +452,7 @@ async fn run_sweep_mode(
 
         for &dur_ms in durations {
             println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
-            let indexer = build_indexer(args, &config)?;
+            let (indexer, _guard) = build_indexer(args, &config).await?;
             let bench_config = benchmark_config(args, &config, dur_ms);
             let prepared = prepare_scaled_benchmark(&merged, bench_config);
             let run = run_prepared_benchmark(indexer, &prepared, bench_config).await?;
@@ -499,7 +569,7 @@ async fn run_single_trial(
     bench_config: MooncakeBenchmarkConfig,
     run_idx: usize,
 ) -> anyhow::Result<BenchmarkResults> {
-    let indexer = build_indexer(args, config)?;
+    let (indexer, _guard) = build_indexer(args, config).await?;
 
     let shard_cancel = CancellationToken::new();
     let shard_sampler = if !args.shard_metrics_csv.is_empty() {

@@ -21,6 +21,7 @@ profile = []
 shard-metrics = []
 standalone-indexer = ["dep:axum", "dep:serde_json", "dep:reqwest", "dep:zmq"]
 indexer-runtime = ["metrics", "runtime-protocols", "standalone-indexer"]
+uds-raw-bench = ["dep:clap", "dep:tracing-subscriber"]
 
 [dependencies]
 # repo
@@ -57,8 +58,18 @@ rustc-hash = "2.1.1"
 axum = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 
+# uds-raw-bench (optional)
+clap = { version = "4.5", features = ["derive"], optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[[bin]]
+name = "kv_shard_server"
+path = "bin/kv_shard_server.rs"
+required-features = ["uds-raw-bench"]
+
 [dev-dependencies]
 rstest = "0.18.2"
+tempfile = "3"
 rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

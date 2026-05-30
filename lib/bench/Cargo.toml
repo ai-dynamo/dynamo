@@ -15,6 +15,7 @@ description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 default = []
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 profile = ["dynamo-mocker/profile"]
+uds-raw-bench = ["dynamo-kv-router/uds-raw-bench", "dep:tempfile"]
 
 [[bench]]
 name = "multiturn_bench"
@@ -69,6 +70,7 @@ dynamo-tokens = { workspace = true }
 dynamo-data-gen = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["bench", "metrics", "shard-metrics"] }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 dynamo-tokens = { workspace = true }

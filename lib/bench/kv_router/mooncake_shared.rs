@@ -12,10 +12,24 @@ use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics}
 use dynamo_kv_router::protocols::{
     KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier, TokensWithHashes, WorkerWithDpRank,
 };
+#[cfg(feature = "uds-raw-bench")]
+use dynamo_kv_router::shard_router::RawUdsShardClient;
 use dynamo_kv_router::{
     BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
     ThreadPoolIndexer,
 };
+
+/// Keeps alive the spawned `kv_shard_server` child processes for the duration
+/// of a `BranchShardedUds` benchmark run.
+///
+/// Each child was spawned with `kill_on_drop(true)`.  Dropping this guard
+/// sends SIGKILL to every child and removes the socket temp directory.
+#[cfg(feature = "uds-raw-bench")]
+pub struct UdsShardGuards {
+    _tmp: tempfile::TempDir,
+    /// Processes spawned with `kill_on_drop(true)`; killed when this is dropped.
+    _children: Vec<tokio::process::Child>,
+}
 use dynamo_mocker::loadgen::Trace;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -32,6 +46,12 @@ pub enum MooncakeIndexerKind {
     ConcurrentRadixTree,
     ConcurrentRadixTreeCompressed,
     BranchShardedCrtc,
+    /// N independent `kv_shard_server` OS processes communicating over UDS.
+    /// Each shard lives in a separate address space with no shared Tokio
+    /// scheduler.  Requires the `kv_shard_server` binary to be built and its
+    /// path passed via `--shard-server-path`.
+    #[cfg(feature = "uds-raw-bench")]
+    BranchShardedUds,
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +62,10 @@ pub struct MooncakeIndexerConfig {
     pub num_shards: usize,
     pub num_event_workers_per_shard: usize,
     pub prefix_depth: usize,
+    /// Path to the `kv_shard_server` binary.  Required for `BranchShardedUds`;
+    /// ignored for all other variants.
+    #[cfg(feature = "uds-raw-bench")]
+    pub shard_server_path: std::path::PathBuf,
 }
 
 #[allow(dead_code)]
@@ -54,6 +78,8 @@ impl MooncakeIndexerConfig {
             num_shards: 2,
             num_event_workers_per_shard: 4,
             prefix_depth: 2,
+            #[cfg(feature = "uds-raw-bench")]
+            shard_server_path: std::path::PathBuf::from("kv_shard_server"),
         }
     }
 
@@ -96,6 +122,23 @@ impl MooncakeIndexerConfig {
         }
     }
 
+    #[cfg(feature = "uds-raw-bench")]
+    pub fn branch_sharded_uds(
+        num_shards: usize,
+        num_event_workers_per_shard: usize,
+        prefix_depth: usize,
+        shard_server_path: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            kind: MooncakeIndexerKind::BranchShardedUds,
+            num_shards,
+            num_event_workers_per_shard,
+            prefix_depth,
+            shard_server_path,
+            ..Self::radix_tree()
+        }
+    }
+
     pub fn short_name(&self) -> &'static str {
         match self.kind {
             MooncakeIndexerKind::RadixTree => "radix-tree",
@@ -105,10 +148,16 @@ impl MooncakeIndexerConfig {
                 "concurrent-radix-tree-compressed"
             }
             MooncakeIndexerKind::BranchShardedCrtc => "branch-sharded-crtc",
+            #[cfg(feature = "uds-raw-bench")]
+            MooncakeIndexerKind::BranchShardedUds => "branch-sharded-uds",
         }
     }
 
     pub fn is_multi_threaded(&self) -> bool {
+        #[cfg(feature = "uds-raw-bench")]
+        if matches!(self.kind, MooncakeIndexerKind::BranchShardedUds) {
+            return true;
+        }
         matches!(
             self.kind,
             MooncakeIndexerKind::NestedMap
@@ -123,7 +172,12 @@ impl MooncakeIndexerConfig {
     }
 
     pub fn supports_approximate(&self) -> bool {
-        !matches!(self.kind, MooncakeIndexerKind::BranchShardedCrtc)
+        match self.kind {
+            MooncakeIndexerKind::BranchShardedCrtc => false,
+            #[cfg(feature = "uds-raw-bench")]
+            MooncakeIndexerKind::BranchShardedUds => false,
+            _ => true,
+        }
     }
 
     pub fn from_short_name(name: &str, num_event_workers: usize) -> anyhow::Result<Self> {
@@ -135,9 +189,22 @@ impl MooncakeIndexerConfig {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
+            #[cfg(feature = "uds-raw-bench")]
+            "branch-sharded-uds" => {
+                anyhow::bail!(
+                    "branch-sharded-uds requires --shard-server-path; \
+                     use the BranchShardedUds subcommand instead of --compare"
+                )
+            }
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc",
-                name
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, \
+                 concurrent-radix-tree-compressed, branch-sharded-crtc{}",
+                name,
+                if cfg!(feature = "uds-raw-bench") {
+                    ", branch-sharded-uds"
+                } else {
+                    ""
+                },
             ),
         };
         Ok(config)
@@ -193,7 +260,74 @@ impl MooncakeIndexerConfig {
                     block_size,
                 ))
             }
+            #[cfg(feature = "uds-raw-bench")]
+            MooncakeIndexerKind::BranchShardedUds => {
+                panic!(
+                    "BranchShardedUds requires async construction; \
+                     call build_uds() instead of build()"
+                )
+            }
         }
+    }
+
+    /// Cross-process UDS: spawns `num_shards` independent `kv_shard_server`
+    /// OS processes and connects a client to each.
+    ///
+    /// Each child is spawned with `kill_on_drop(true)` so the guard's `Drop`
+    /// sends SIGKILL automatically.  The bench waits up to 10 s per socket
+    /// for the child process to bind and start accepting connections.
+    #[cfg(feature = "uds-raw-bench")]
+    pub async fn build_uds(
+        &self,
+        block_size: u32,
+    ) -> anyhow::Result<(Arc<dyn KvIndexerInterface + Send + Sync>, UdsShardGuards)> {
+        use std::time::Duration;
+
+        let tmp = tempfile::TempDir::new()?;
+        let mut children = Vec::with_capacity(self.num_shards);
+        let mut socket_paths = Vec::with_capacity(self.num_shards);
+
+        // Spawn all child processes first so they can bind concurrently.
+        for shard_idx in 0..self.num_shards {
+            let socket_path = tmp.path().join(format!("shard_{shard_idx}.sock"));
+            let child = tokio::process::Command::new(&self.shard_server_path)
+                .arg("--socket-path")
+                .arg(&socket_path)
+                .arg("--num-threads")
+                .arg(self.num_event_workers_per_shard.to_string())
+                .arg("--block-size")
+                .arg(block_size.to_string())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to spawn kv_shard_server at '{}': {e}\n\
+                         Build it first: cargo build -p dynamo-kv-router \
+                         --features uds-raw-bench --bin kv_shard_server --release",
+                        self.shard_server_path.display()
+                    )
+                })?;
+            children.push(child);
+            socket_paths.push(socket_path);
+        }
+
+        // Wait for each socket to become connectable.
+        let mut clients = Vec::with_capacity(self.num_shards);
+        for (shard_idx, socket_path) in socket_paths.iter().enumerate() {
+            let client = wait_and_connect(socket_path, shard_idx, Duration::from_secs(10)).await?;
+            clients.push(client);
+        }
+
+        let indexer: Arc<dyn KvIndexerInterface + Send + Sync> = Arc::new(
+            BranchShardedIndexer::new_with_options(clients, self.prefix_depth, block_size),
+        );
+        Ok((
+            indexer,
+            UdsShardGuards {
+                _tmp: tmp,
+                _children: children,
+            },
+        ))
     }
 
     pub fn build_approximate(
@@ -248,8 +382,45 @@ impl MooncakeIndexerConfig {
             MooncakeIndexerKind::BranchShardedCrtc => {
                 anyhow::bail!("branch-sharded-crtc does not support approximate pruning")
             }
+            #[cfg(feature = "uds-raw-bench")]
+            MooncakeIndexerKind::BranchShardedUds => {
+                anyhow::bail!("branch-sharded-uds does not support approximate pruning")
+            }
         };
         Ok(indexer)
+    }
+}
+
+/// Retries `UnixStream::connect` until the socket file exists and accepts
+/// a connection, or until `timeout` elapses.
+///
+/// Child processes need a small startup window before they bind the socket.
+/// 10 ms polling interval is fast enough to not slow down bench setup while
+/// avoiding a tight spin.
+#[cfg(feature = "uds-raw-bench")]
+async fn wait_and_connect(
+    socket_path: &std::path::Path,
+    shard_idx: usize,
+    timeout: std::time::Duration,
+) -> anyhow::Result<RawUdsShardClient> {
+    use tokio::time::{Duration, sleep};
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match RawUdsShardClient::connect(socket_path).await {
+            Ok(client) => {
+                tracing::debug!(shard_idx, path = %socket_path.display(), "shard server connected");
+                return Ok(client);
+            }
+            Err(_) if std::time::Instant::now() < deadline => {
+                sleep(Duration::from_millis(10)).await;
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "timed out ({timeout:?}) waiting for shard {shard_idx} at '{}': {e}",
+                    socket_path.display()
+                );
+            }
+        }
     }
 }
 
@@ -617,6 +788,14 @@ pub(crate) async fn run_prepared_benchmark(
     for task in tasks {
         latencies.extend(task.await??);
     }
+
+    // Flush the indexer before stopping the clock.  For cross-process UDS
+    // variants, apply_event only enqueues a frame locally; the frame may not
+    // have been drained to the shard server process yet.  flush() waits until
+    // all previously enqueued writes have been processed, giving trustworthy
+    // "submitted + drained" throughput numbers.
+    indexer.flush().await;
+
     let total_duration = started_at.elapsed();
 
     fm_stop.store(true, Ordering::Relaxed);
