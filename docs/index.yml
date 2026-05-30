@@ -242,7 +242,7 @@ navigation:
             path: fault-tolerance/testing.md
       - page: Benchmarking
         path: benchmarks/benchmarking.md
-      - section: DynoSim Simulation
+      - section: DynoSim
         contents:
           - page: DynoSim Overview
             path: dynosim/README.md
@@ -489,9 +489,6 @@ navigation:
       # -- Benchmarks --
       - page: KV Router A/B Testing
         path: benchmarks/kv-router-ab-testing.md
-      # -- DynoSim --
-      - page: Live Simulation with Mocker
-        path: dynosim/mocker.md
       # -- Templates --
       - section: Templates
         path: templates/README.md
