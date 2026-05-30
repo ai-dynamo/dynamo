@@ -4,14 +4,20 @@
 """
 Tests for the bidirectional Python engine registration API.
 
-Coverage of the round-trip path (client driving multi-frame input,
-asserting multi-frame output, exercising cancellation, exercising
-input-stream-end-is-not-cancellation) requires a Python client surface
-for `PushRouter::<serde_json::Value, _>::generate(ManyIn<_>)` which is
-not exposed today. Those checks live as TODOs below and are covered by
-the corresponding Rust-side bidirectional E2E test in
-`lib/runtime/tests/bidirectional_e2e.rs` (which drives the bidirectional
-engine through the same PushRouter path with a Rust engine).
+These are fast, process-free smoke checks of the binding surface: the
+inbound-iterator pyclass is reachable, `serve_bidirectional_endpoint` is
+exposed, and registering a bidirectional engine wires through the
+bindings -> Rust adapter -> Ingress path without raising.
+
+The full multi-frame round-trip (client driving streaming input, asserting
+streaming output) is covered at the integration level by
+`tests/frontend/test_realtime_python_bridge.py`, which drives a real
+WebSocket through the realtime frontend into a Python bidirectional worker,
+and on the Rust side by `lib/runtime/tests/bidirectional_e2e.rs`. A pure
+Python client surface for bidirectional
+`PushRouter::<serde_json::Value, _>::generate(ManyIn<_>)` is still not
+exposed, so the round-trip cannot yet be driven from Python without a
+frontend.
 """
 
 import asyncio
@@ -108,10 +114,10 @@ async def test_serve_bidirectional_endpoint_starts(temp_file_store, runtime):
     ), "no client was driven; handler should not have been called"
 
 
-# TODO: end-to-end round-trip tests (multi-frame echo, cancellation,
-# input-stream-end-is-not-cancellation) need a Python client surface for
-# bidirectional `PushRouter::<T, U>::generate(ManyIn<T>)`. Tracked under
-# the follow-up to expose a `Client.generate_bidirectional(async_iter)`
-# method; until then, the Rust-side test in
-# `lib/runtime/tests/bidirectional_e2e.rs` exercises the same PushRouter
-# code path through a Rust engine.
+# A pure-Python client surface for bidirectional
+# `PushRouter::<T, U>::generate(ManyIn<T>)` is still not exposed (it would be
+# a `Client.generate_bidirectional(async_iter)` method), so the round-trip
+# cannot be driven from Python without a frontend. Until then it is covered
+# through the realtime frontend by
+# `tests/frontend/test_realtime_python_bridge.py` and on the Rust side by
+# `lib/runtime/tests/bidirectional_e2e.rs`.
