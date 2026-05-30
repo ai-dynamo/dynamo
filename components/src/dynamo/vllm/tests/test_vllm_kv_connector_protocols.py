@@ -224,6 +224,14 @@ def test_make_kv_connector_protocol_dispatches_mooncake(fake_mooncake):
     assert isinstance(proto, MooncakeConnectorProtocol)
 
 
+def test_make_kv_connector_protocol_dispatches_pdconnector():
+    """KVBM PD deployments set ``kv_connector='PdConnector'``; before it was
+    registered, the factory raised at request setup and every PD request
+    failed. The factory must now resolve it to the NIXL protocol."""
+    proto = make_kv_connector_protocol(_config("PdConnector"))
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
 def test_make_kv_connector_protocol_falls_back_to_nixl_for_missing_config():
     """No KVTransferConfig at all — preserve pre-existing (NIXL) behavior."""
     proto = make_kv_connector_protocol(SimpleNamespace())
@@ -250,9 +258,46 @@ def test_make_kv_connector_protocol_raises_on_unknown_connector():
 def test_registry_keys_match_vllm_connector_names():
     """Wire-format guard: KV_CONNECTOR_PROTOCOLS keys must match the strings
     vLLM uses in ``KVTransferConfig.kv_connector``."""
-    assert set(KV_CONNECTOR_PROTOCOLS) == {"NixlConnector", "MooncakeConnector"}
+    assert set(KV_CONNECTOR_PROTOCOLS) == {
+        "NixlConnector",
+        "MooncakeConnector",
+        "PdConnector",
+    }
     for cls in KV_CONNECTOR_PROTOCOLS.values():
         assert issubclass(cls, KvConnectorProtocol)
+
+
+# ---------------------------------------------------------------------------
+# PdConnector (KVBM multi-connector wrapper)
+#
+# PdConnector nests DynamoConnector (KVBM offload) + NixlConnector (PD
+# transport) behind vLLM's MultiConnector. At the PD layer the wire shape is
+# NIXL's — decode pulls block locations off the prefill response — so it must
+# resolve to NixlConnectorProtocol rather than carry its own strategy.
+# ---------------------------------------------------------------------------
+
+
+def test_pdconnector_registered_as_nixl_protocol():
+    """The PD layer treats PdConnector as NIXL because that's the connector
+    it uses internally for PD transport."""
+    assert KV_CONNECTOR_PROTOCOLS["PdConnector"] is NixlConnectorProtocol
+
+
+def test_pdconnector_emits_nixl_pull_based_wire_shape():
+    """PdConnector wraps NixlConnector for PD transport, so the params it
+    hands vLLM must be byte-for-byte the NIXL pull-based shape on both sides
+    of the prefill/decode boundary — anything else would emit the wrong wire
+    format and surface as opaque decode failures."""
+    pd = make_kv_connector_protocol(_config("PdConnector"))
+    nixl = make_kv_connector_protocol(_config("NixlConnector"))
+    assert (
+        pd.prefill_request_kv_transfer_params()
+        == nixl.prefill_request_kv_transfer_params()
+    )
+    # Decode is a pass-through of the engine response, same as plain NIXL.
+    engine_payload = {"remote_engine_id": "eng-1", "remote_block_ids": [7, 8]}
+    response = SimpleNamespace(kv_transfer_params=engine_payload)
+    assert pd.decode_request_kv_transfer_params(response) is engine_payload
 
 
 # ---------------------------------------------------------------------------
