@@ -133,16 +133,18 @@ fn extract_tool_calls(
     if !text.contains(start_token.as_str())
         && let Some(marker_idx) = first_orphan_glm47_marker_index(text, config)
     {
-        if let Some(parsed_call) = recover_bare_glm47_call(text, marker_idx, config, tools)? {
+        if let Some((prefix, parsed_call)) =
+            recover_bare_glm47_call(text, marker_idx, config, tools)?
+        {
             warn!(
                 why = "bare_body_recovery",
                 recovered_calls = 1,
-                recovered_bytes = text.len(),
-                kept_prefix_bytes = 0,
+                recovered_bytes = text.len() - prefix.len(),
+                kept_prefix_bytes = prefix.len(),
                 "GLM-4.7 parser recovered complete bare call body without <tool_call> start"
             );
             calls.push(parsed_call);
-            return Ok((String::new(), calls));
+            return Ok((prefix, calls));
         }
         warn!(
             why = "GLM-4.7 tool-call marker found without <tool_call> start; dropping orphan marker tail so wire tags do not leak into normal_text",
@@ -297,12 +299,20 @@ fn recover_bare_glm47_call(
     marker_idx: usize,
     config: &Glm47ParserConfig,
     tools: Option<&[ToolDefinition]>,
-) -> anyhow::Result<Option<ToolCallResponse>> {
+) -> anyhow::Result<Option<(String, ToolCallResponse)>> {
     if !text[marker_idx..].contains(config.tool_call_end.as_str()) {
         return Ok(None);
     }
 
-    let candidate_name = text[..marker_idx].trim();
+    let before_marker = text[..marker_idx].trim_end();
+    let function_name_start = before_marker
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+
+    let candidate_name = before_marker[function_name_start..].trim();
     if candidate_name.is_empty()
         || !candidate_name
             .chars()
@@ -311,8 +321,9 @@ fn recover_bare_glm47_call(
         return Ok(None);
     }
 
-    let wrapped = format!("{}{}", config.tool_call_start, text);
-    parse_tool_call_block(&wrapped, config, tools).map(Some)
+    let prefix = text[..function_name_start].to_string();
+    let wrapped = format!("{}{}", config.tool_call_start, &text[function_name_start..]);
+    parse_tool_call_block(&wrapped, config, tools).map(|call| Some((prefix, call)))
 }
 
 /// Decode XML character entities in a string.

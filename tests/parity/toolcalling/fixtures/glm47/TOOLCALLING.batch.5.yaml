@@ -114,3 +114,21 @@ cases:
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New
           York
         reason: SGLang preserves the trailing truncated <tool_call>... block as content; Dynamo and vLLM both drop it
+  TOOLCALLING.batch.5.f:
+    description: Closing </tool_call> without matching <tool_call> open after prefix prose
+    ref: dynamo
+    model_text: I will check that. get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check that. '
+      vllm: &id005
+        reason: "vLLM and SGLang preserve orphan GLM <arg_key>/<arg_value>/</tool_call> markup as content when opening <tool_call> is missing; Dynamo preserves the prefix prose, recovers the complete bare call body, and strips the orphan close marker."
+        calls: []
+        normal_text: I will check that. get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+      sglang: *id005
