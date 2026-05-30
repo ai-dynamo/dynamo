@@ -140,10 +140,14 @@ spec:
           # --- UCX backend over RoCE (NIXL default; no DYN_KVBM_NIXL_BACKEND_* needed) ---
           # NOTE: don't set UCX_TLS. UCX needs internal transports (notably ud_mlx5
           # for active-messages wireup) that an explicit allowlist almost always
-          # omits. Let UCX auto-probe; restrict via UCX_NET_DEVICES only.
-          - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
+          # omits. Let UCX auto-probe.
+          # NOTE: no UCX_NET_DEVICES. Verified 2026-05-29 via smoke test that UCX
+          # auto-probe picks the 4 RoCE NICs cleanly on GKE A4X; all 4 ranks
+          # "Backend UCX was instantiated", 4/4 KV_Caches registered.
+          # NOTE: no NCCL_CROSS_NIC. NCCL doesn't exercise its IB transport in 1P1D
+          # (intra-pod TP=4 uses NVLink/P2P, cross-pod KV uses NIXL/UCX) — verified
+          # 2026-05-29. See [[nccl-ib-unused-in-disagg]] memory.
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
-          - { name: NCCL_CROSS_NIC,     value: "0" }
           # --- GKE NCCL/GIB plugin + driver libs (mounted from host) ---
           # /opt/nvidia/nvda_nixl/lib64 must come FIRST so NIXL_TELEMETRY_ENABLE=y can
           # load libcore.so.1.3 (otherwise libtelemetry_exporter_prometheus.so fails

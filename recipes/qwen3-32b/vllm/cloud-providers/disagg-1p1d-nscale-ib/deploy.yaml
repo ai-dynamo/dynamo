@@ -2,13 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Qwen3-32B BF16 disagg, 1 prefill + 1 decode, cross-node over Nscale NDR InfiniBand.
-# Purpose: measure NIXL KV-transfer bandwidth over UCX/IB backend on Blackwell (B200).
-# Topology: TP=4 prefill on node A, TP=4 decode on node B (pod anti-affinity).
-# Each worker requests rdma/ib: "1" which (per NVIDIA Network Operator shared-device
-# plugin convention) grants access to all 8 NDR HCAs via /dev/infiniband/*.
 #
-# Hardware: Nscale dynamo-nscale-dev-cluster, 8x B200 (192 GB HBM) + 8x NDR IB per node.
-# Image: standard vllm-runtime:1.1.1 (vLLM v0.19.0, CUDA 12.9) — covers SM 10.0 (B200).
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -92,17 +86,19 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
-          # --- UCX IB minimal symmetric (exp9, 2026-05-28) ---
-          # Symmetric minimal config: only MX_RDMA_NIC_PIN=auto + NIXL_LOG_LEVEL.
-          # UCX_NET_DEVICES, UCX_LOG_LEVEL, UCX_RNDV_SCHEME, UCX_RNDV_THRESH all
-          # commented out on BOTH sides — let UCX auto-probe everything end-to-end.
-          # Tests whether the previous failures were caused by overrestrictive
-          # UCX env on Nscale's specific fabric (vs the cluster-side issue).
-          # exp10 2026-05-28: ib-probe showed 12 raw mlx5 NICs, in two fabrics.
-          # mlx5_0..5 + mlx5_10..11 = compute IB (MTU 4096, GUID prefix 605e6503).
-          # mlx5_6..9 = SIDE fabric (MTU 512, vendor 8c913a03). Previous 0..7 list
-          # mixed compute with side — cross-rank handshake via side NICs likely
-          # what caused the disconnects.
+          # --- UCX IB: explicit NIC list is LOAD-BEARING on Nscale ---
+          # ib-probe (2026-05-28) showed 12 raw mlx5 NICs in two IB fabrics + a bond:
+          #   mlx5_0..5 + mlx5_10..11 = compute IB (MTU 4096, GUID prefix 605e6503)
+          #   mlx5_6..9              = SIDE fabric (MTU 512, vendor 8c913a03)
+          #   mlx5_bond_0            = RoCE bond aggregator (broken in containers)
+          # Verified 2026-05-29: deploy with NO UCX_NET_DEVICES (auto-probe) →
+          # UCX selected mlx5_bond_0 → ibv_create_ah "No such device" on all 4 ranks
+          # → RuntimeError: Engine core initialization failed. Auto-probe is unsafe
+          # on Nscale. Nscale is the ONLY cluster in this family where the explicit
+          # list is required (verified by smoke tests across AKS / GKE / Nebius —
+          # see 2026-05-29-recipe-claims-audit.md).
+          # Side fabric (mlx5_6..9) must also be excluded: mixing fabrics caused
+          # NIXL_ERR_REMOTE_DISCONNECT at first transfer in earlier experiments.
           - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1" }
           - { name: MX_RDMA_NIC_PIN,    value: "auto" }
           - { name: NIXL_LOG_LEVEL,     value: "INFO" }

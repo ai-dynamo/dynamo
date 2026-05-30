@@ -1,8 +1,8 @@
 # Qwen3-32B 1P1D Cross-Node Disagg — GCP GKE A4X (GB200 NVL72, RoCEv2) Variant
 
-This is the **GCP GKE / A4X / RoCEv2-over-ConnectX-7** member of the cross-provider benchmark family. For the family-wide topology, perf-measurement protocol, and result format, see [`../disagg-1p1d-base/README.md`](../disagg-1p1d-base/README.md). This README only documents the GKE-A4X-specific overrides + measured results.
+This is the **GCP GKE / A4X / RoCEv2-over-ConnectX-7** member of the cross-provider benchmark family. For the family-wide topology, perf-measurement protocol, and result format, see [`../README.md`](../README.md). This README only documents the GKE-A4X-specific overrides + measured results.
 
-## What this variant overrides (vs. the base template)
+## What this variant overrides (vs. the family template)
 
 | Override | Value |
 |---|---|
@@ -11,7 +11,7 @@ This is the **GCP GKE / A4X / RoCEv2-over-ConnectX-7** member of the cross-provi
 | **TP / GPUs per pod** | **TP=4** (not 8) — A4X nodes have 4 GPUs |
 | **RDMA NIC attachment** | Pod-level Multus annotation `networking.gke.io/interfaces` listing `rdma-0..rdma-3` (4 NICs); **no `resources.limits.custom.rdma/*` key** |
 | **NIXL backend selection** | Defaults (UCX); no `DYN_KVBM_NIXL_BACKEND_*` env |
-| **Transport env** | `UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1`, `NCCL_CROSS_NIC=0`, `LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64`. **No `UCX_TLS`** — let UCX auto-probe (allowlists break wireup AM selection). |
+| **Transport env** | `LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64`. **No `UCX_TLS`** — let UCX auto-probe (allowlists break wireup AM selection). **No `UCX_NET_DEVICES`** — verified 2026-05-29 via smoke test that UCX auto-probe picks the 4 RoCE NICs cleanly. **No `NCCL_CROSS_NIC`** — NCCL doesn't exercise its IB transport in 1P1D (intra-pod TP uses NVLink/P2P; cross-pod uses NIXL/UCX). |
 | **HostPath mounts** | `/home/kubernetes/bin/gib` → `/usr/local/gib`, `/home/kubernetes/bin/nvidia` → `/usr/local/nvidia` (GIB NCCL plugin + GKE-injected NVIDIA driver libs) |
 | **Model PVC** | `model-cache` (per-cluster PVC on `dynamo-gcp-dev-02`) |
 

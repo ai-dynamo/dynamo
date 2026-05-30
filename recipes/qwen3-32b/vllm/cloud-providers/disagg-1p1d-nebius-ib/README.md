@@ -1,15 +1,15 @@
 # Qwen3-32B 1P1D Cross-Node Disagg — Nebius InfiniBand Variant
 
-This is the **Nebius MK8S NDR InfiniBand** member of the cross-provider benchmark family. For the family-wide topology, perf-measurement protocol, and result format, see [`../disagg-1p1d-base/README.md`](../disagg-1p1d-base/README.md). This README only documents the Nebius-specific overrides + measured results.
+This is the **Nebius MK8S NDR InfiniBand** member of the cross-provider benchmark family. For the family-wide topology, perf-measurement protocol, and result format, see [`../README.md`](../README.md). This README only documents the Nebius-specific overrides + measured results.
 
-## What this variant overrides (vs. the base template)
+## What this variant overrides (vs. the family template)
 
 | Override | Value |
 |---|---|
 | **Container image** | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1` (stock; no provider tag) |
 | **RDMA resource** | `rdma/ib: "1"` under `resources.limits.custom`. This is the Network Operator's RDMA-shared-device-plugin slot count, **not** an HCA count. One slot grants the pod access to all 8 HCAs via `/dev/infiniband/*`. Do NOT request `rdma/ib: 8` — pod will be unschedulable. |
 | **NIXL backend selection** | Defaults (UCX). No `DYN_KVBM_NIXL_BACKEND_LIBFABRIC` / `_UCX` env. |
-| **Transport env** | `UCX_NET_DEVICES=mlx5_0:1,...,mlx5_7:1` (8 HCAs), `UCX_IB_GPU_DIRECT_RDMA=yes`, `UCX_RNDV_THRESH=8192`. Plus `NCCL_IB_HCA=mlx5_0,...,mlx5_7`, `NCCL_IB_DISABLE=0`, `NCCL_SOCKET_IFNAME=eth0`. **No `UCX_TLS`** — let UCX auto-probe (allowlists break wireup AM selection). **No `FI_*` env**, **no EFA `LD_LIBRARY_PATH`** — those are AWS-only. **No `NCCL_IB_GID_INDEX`** — that's RoCE-only; native IB uses GID 0. |
+| **Transport env** | `UCX_IB_GPU_DIRECT_RDMA=yes`. Plus `NCCL_IB_HCA=mlx5_0,...,mlx5_7`, `NCCL_IB_DISABLE=0`, `NCCL_SOCKET_IFNAME=eth0`. **No `UCX_TLS`** — let UCX auto-probe. **No `UCX_NET_DEVICES`** — verified 2026-05-29 via smoke test that auto-probe picks the 8 IB NICs cleanly. **No `UCX_RNDV_THRESH`** — the `=8192` value was cargo-culted with no test record; removing it produced no behavioral change. |
 | **HostPath volumes** | `/dev/infiniband` (hostPath) and `/dev/shm` (tmpfs emptyDir, 64 GiB) bind-mounted into both worker pods. |
 | **Model PVC** | `model-cache` (PVC name on `dynamo-nebius-2`; verify with `tsh kubectl -n jihao get pvc` and adjust if your cluster uses a different name). |
 | **Cluster** | `dynamo-nebius-2` — 8 nodes of 8× H200 SXM (141 GB) + 8× NDR400 IB (3.2 Tb/s aggregate per node). |
@@ -27,7 +27,6 @@ H200 (141 GB HBM) has plenty of headroom; recipe ships at TP=4 (cross-CSP family
 | Mean TTFT | 1510 sec (queue-bound — Mooncake trace too aggressive for 1P1D at TP=4 on H200) |
 | Trace completion | 12031 / 12031 (100%) |
 | Errors | 0 |
-| aiperf artifact | `/perf-cache/artifacts/Qwen3-32B_nebius-ib_20260528-0732/` |
 
 ## Prereqs
 
@@ -117,17 +116,4 @@ tsh kubectl cp ${NAMESPACE}/q32b-1p1d-nebius-ib-benchmark:/perf-cache/artifacts 
 - **`privileged: true` + `IPC_LOCK`** are required for UCX `ucp_mem_map` on VRAM (same as the EFA `fi_mr_reg` requirement). `IPC_LOCK` alone is not enough.
 - **No `FI_*` env, no Sara's libfabric patch, no EFA `LD_LIBRARY_PATH`.** These are AWS-only.
 
-## Results
-
-_(filled in after benchmark runs — current state: recipe authored, deploy + benchmark BLOCKED, see below)_
-
-| Metric | Value |
-|---|---|
-| Mean NIXL KV transfer BW (GB/s) | TBD |
-| P50 TTFT (ms) | TBD |
-| P99 TTFT (ms) | TBD |
-| P50 ITL (ms) | TBD |
-| Goodput (req/s) | TBD |
-| aiperf artifact | TBD |
-
-**Status:** Recipe files authored from the base template + the AKS-IB sibling pattern (which is the closest UCX/IB precedent in this repo) + the Nebius section of the cross-provider RDMA playbook. Deploy + verify + benchmark were not performed in this session because the harness blocked all `tsh kubectl` access; rerun the Deploy / Verify / Benchmark sections above in a shell with cluster access to fill in the Results table.
+Measured results live in the "Measured results (2026-05-28, TP=4, post UCX_TLS scrub)" section near the top of this file.

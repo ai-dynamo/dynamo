@@ -3,7 +3,7 @@
 #
 # Qwen3-32B BF16 disagg, 1 prefill + 1 decode, cross-node over Nebius NDR InfiniBand.
 # Purpose: measure NIXL KV-transfer bandwidth over the UCX/IB backend on Nebius MK8S.
-# Topology: TP=8 prefill on node A, TP=8 decode on node B (pod anti-affinity).
+# Topology: TP=4 prefill on node A, TP=4 decode on node B (pod anti-affinity). TP=4 is the cross-CSP family standard.
 # Each worker gets `rdma/ib: 1` — the Network Operator's RDMA shared-device-plugin
 # slot count (NOT an HCA count). One slot grants the pod access to all 8 HCAs via
 # /dev/infiniband/*. 8 x NDR400 = 3.2 Tb/s aggregate per H200 node.
@@ -96,10 +96,14 @@ spec:
           # --- UCX over NDR InfiniBand (8 ConnectX-7 HCAs: mlx5_0..mlx5_7) ---
           # NOTE: don't set UCX_TLS. UCX needs internal transports (notably ud_mlx5
           # for active-messages wireup) that an explicit allowlist almost always
-          # omits. Let UCX auto-probe; restrict via UCX_NET_DEVICES only.
-          - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }
+          # omits. Let UCX auto-probe.
+          # NOTE: no UCX_NET_DEVICES. Verified 2026-05-29 via smoke test that UCX
+          # auto-probe picks the 8 IB NICs cleanly on Nebius H200; all 4 ranks
+          # "Backend UCX was instantiated", 4/4 KV_Caches registered.
+          # NOTE: no UCX_RNDV_THRESH. The "=8192" value was cargo-culted with no
+          # test record; removing it produced no behavioral change (smoke verified
+          # 2026-05-29). UCX defaults are fine here.
           - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
-          - { name: UCX_RNDV_THRESH,        value: "8192" }
           # --- NCCL over the same 8 IB rails; eth0 is control plane only ---
           - { name: NCCL_IB_HCA,            value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
           - { name: NCCL_IB_DISABLE,        value: "0" }

@@ -4,16 +4,16 @@ A family of disaggregated prefill+decode (1P1D) recipes for **Qwen3-32B (BF16)**
 
 ## What's in this folder
 
-| Variant | Provider | Testing Hardware | Transport | 
+| Variant | Provider | Testing Hardware | Transport |
 |---|---|---|---|
-| [`disagg-1p1d-aws-efa/`](disagg-1p1d-aws-efa/) | AWS EKS (p5.48xlarge) | H100 | AWS EFA + libfabric | 
-| [`disagg-1p1d-gke-roce/`](disagg-1p1d-gke-roce/) | GCP GKE (A4X) | GB200 | RoCEv2 (CX-7) + UCX | 
-| [`disagg-1p1d-aks-ib/`](disagg-1p1d-aks-ib/) | Azure AKS (ND H100 v5) | H100 | NDR InfiniBand + UCX | 
-| [`disagg-1p1d-nebius-ib/`](disagg-1p1d-nebius-ib/) | Nebius MK8S | H200 | NDR InfiniBand + UCX | 
-| [`disagg-1p1d-nscale-ib/`](disagg-1p1d-nscale-ib/) | Nscale | B200 | NDR InfiniBand + UCX | 
+| [`disagg-1p1d-aws-efa/`](disagg-1p1d-aws-efa/) | AWS EKS (p5.48xlarge) | H100 | AWS EFA + libfabric |
+| [`disagg-1p1d-gke-roce/`](disagg-1p1d-gke-roce/) | GCP GKE (A4X) | GB200 | RoCEv2 (CX-7) + UCX |
+| [`disagg-1p1d-aks-ib/`](disagg-1p1d-aks-ib/) | Azure AKS (ND A100-class) | A100-SXM4-80GB | HDR InfiniBand (CX-6) + UCX |
+| [`disagg-1p1d-nebius-ib/`](disagg-1p1d-nebius-ib/) | Nebius MK8S | H200 | NDR InfiniBand + UCX |
+| [`disagg-1p1d-nscale-ib/`](disagg-1p1d-nscale-ib/) | Nscale | B200 | NDR InfiniBand + UCX |
 
 Each subdirectory ships:
-- **`deploy.yaml`** — full `DynamoGraphDeployment` 
+- **`deploy.yaml`** — full `DynamoGraphDeployment`
 - **`perf.yaml`** — Mooncake-trace aiperf benchmark pod (identical workload across variants)
 - **`README.md`** — provider-specific overrides + measured numbers
 
@@ -25,7 +25,7 @@ Each subdirectory ships:
 | VllmPrefillWorker | 1 | **4** | one GPU node |
 | VllmDecodeWorker | 1 | **4** | **different** GPU node — pod anti-affinity on `kubernetes.io/hostname` |
 
-We set pod anti-affinity is load-bearing to forces KV transfer across the provider's RDMA fabric, not the intra-node NVLink/CUDA-IPC shortcut. 
+We set pod anti-affinity is load-bearing to forces KV transfer across the provider's RDMA fabric, not the intra-node NVLink/CUDA-IPC shortcut.
 
 ## What differs per variant
 
@@ -55,27 +55,3 @@ All `perf.yaml` files run the same aiperf profile against the [Mooncake conversa
 | AKS (A100) | 1.88 GB/s | 0.47 GB/s | n/a | n/a | 58% (queue) | A100/CX-6; queue-bound by GPU class |
 
 Per-rank ordering follows GPU generation: GB200 (2.68) > H200 (1.49) > H100 (1.41) > A100 (0.47). Aggregate is per-rank × TP, so it tracks the same order except where wall-time differs across clusters. KV traffic was NOT fabric-bound on any cluster — utilization was <1% of NIC headroom; the bottleneck is GPU/HBM/PCIe.
-
-## Cross-cutting findings (apply to every IB/RoCE variant)
-
-These are deliberately documented once here and **not re-stated in each variant** — variants only cite this section.
-
-1. **Do NOT set `UCX_TLS`.** UCX needs internal transports (notably `ud_mlx5` for active-messages wireup) that an explicit allowlist almost always omits, breaking transport selection. Restrict via `UCX_NET_DEVICES` only and let UCX auto-probe transports.
-2. **Exclude `mlx5_bond_*` LAG devices** from `UCX_NET_DEVICES`. The bond is unusable by UCX in containers (`ibv_create_ah` segfaults). Pin to raw HCAs instead. Same rule [ModelExpress's `ucx_utils.py`](https://github.com/ai-dynamo/modelexpress/blob/main/modelexpress_client/python/modelexpress/ucx_utils.py) enforces.
-3. **On clusters with multiple IB fabrics** (e.g. Nscale has compute-IB MTU 4096 + side-fabric MTU 512), the `UCX_NET_DEVICES` list must include only the **compute-fabric** NICs. Mixing fabrics causes `NIXL_ERR_REMOTE_DISCONNECT` at the first transfer.
-4. **`privileged: true` + `IPC_LOCK`** are required on every variant for GPU-memory registration, not just AWS EFA.
-5. **Recipe pod-anti-affinity must match operator labels** (`prefill`/`decode`) — the generic `nvidia.com/dynamo-component-type=worker` selector silently matches nothing and lets prefill+decode co-locate, invalidating the BW measurement.
-
-## Adding a new CSP variant
-
-1. `cp -r disagg-1p1d-aws-efa disagg-1p1d-<csp>-<fabric>` (use whichever existing variant matches your fabric class)
-2. Replace the per-variant fields per the "What differs" table above
-3. Update the new variant's `README.md` Overrides table and (after first deploy) the Measured Results table
-4. Add the row to the variant table in this README
-5. Run the variant's `perf.yaml` and confirm the workload completes 12,031/12,031 — that's the validation gate before adding to the comparison table
-
-## Related
-
-- Cross-CSP design rationale, debugging stories, and per-CSP gotchas: `dynamo-writings/csp/` (sibling repo)
-- llm-d kustomize evaluation: `dynamo-writings/csp/2026-05-28-llm-d-kustomize-eval.md`
-- Cross-framework CSP survey: `dynamo-writings/csp/2026-05-29-cross-framework-csp-survey.md`
