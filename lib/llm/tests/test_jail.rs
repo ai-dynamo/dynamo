@@ -3733,6 +3733,32 @@ fahrenheit
             .as_ref()
             .expect("partial marker buffer should flush with the final finish chunk");
         assert_eq!(test_utils::extract_text(content), "call");
+
+        let mut terminal_content_chunk =
+            test_utils::create_mock_response_chunk(expected.to_string(), 0);
+        terminal_content_chunk.data.as_mut().unwrap().inner.choices[0].finish_reason =
+            Some(FinishReason::Stop);
+        let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(vec![terminal_content_chunk]))
+            .collect()
+            .await;
+        let content_chunks: Vec<_> = results
+            .iter()
+            .filter_map(|result| result.data.as_ref())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| {
+                choice
+                    .delta
+                    .content
+                    .as_ref()
+                    .map(|content| (test_utils::extract_text(content), choice.finish_reason))
+            })
+            .collect();
+        assert_eq!(
+            content_chunks,
+            vec![("I will ", None), ("call", Some(FinishReason::Stop))]
+        );
     }
 
     #[tokio::test]
@@ -3766,6 +3792,37 @@ fahrenheit
                 .collect();
             assert_eq!(content_before_finish, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn test_gemma4_trailing_partial_after_unjail_is_buffered() {
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "<|tool_call>call:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|> ca".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "ll:get_weather{location:<|\"|>Boston<|\"|>}<tool_call|>".to_string(),
+                0,
+            ),
+        ];
+        let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(
+            tool_call_names(&results),
+            vec!["get_weather".to_string(), "get_weather".to_string()]
+        );
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, " ");
+        assert_content_omits_markers(
+            "Gemma 4 trailing partial",
+            &results,
+            &["call:get_weather", "ca", "ll:get_weather", "<tool_call|>"],
+        );
     }
 
     #[tokio::test]
