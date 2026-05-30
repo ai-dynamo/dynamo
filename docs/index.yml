@@ -243,17 +243,23 @@ navigation:
       - page: Benchmarking
         path: benchmarks/benchmarking.md
       - section: DynoSim
+        slug: dynosim
         contents:
           - page: DynoSim Overview
             path: dynosim/README.md
+            slug: overview
           - page: Live Simulation with Mocker
             path: dynosim/mocker.md
+            slug: mocker
           - page: DynoSim Runs
             path: dynosim/runs.md
+            slug: runs
           - page: DynoSim Sweeps
             path: dynosim/sweeps.md
+            slug: sweeps
           - page: Planner DynoSim Benchmarking
             path: dynosim/planner-benchmarking.md
+            slug: planner-benchmarking
       - page: Writing Python Workers (lower-level)
         path: development/backend-guide.md
       - page: Writing Python Unified Backends

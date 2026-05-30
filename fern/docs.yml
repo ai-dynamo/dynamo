@@ -103,6 +103,17 @@ redirects:
     destination: "/dynamo/dev/user-guides/agents"
   - source: "/dynamo/latest/planner/planner_intro.html"
     destination: "/dynamo/components/planner"
+  # DynoSim docs moved from the old Mocker/replay surface.
+  - source: "/dynamo/dev/user-guides/simulation-with-mocker/testing-with-mocker"
+    destination: "/dynamo/dev/user-guides/dynosim/mocker"
+  - source: "/dynamo/dev/user-guides/simulation-with-mocker/mocker-offline-trace-replay"
+    destination: "/dynamo/dev/user-guides/dynosim/runs"
+  - source: "/dynamo/dev/mocker/mocker"
+    destination: "/dynamo/dev/user-guides/dynosim/mocker"
+  - source: "/dynamo/dev/benchmarks/mocker-trace-replay"
+    destination: "/dynamo/dev/user-guides/dynosim/runs"
+  - source: "/dynamo/dev/benchmarks/planner-replay-benchmarking"
+    destination: "/dynamo/dev/user-guides/dynosim/planner-benchmarking"
   # SGLang HiCache doc: canonical URL under Backends > SGLang (see docs/index.yml)
   - source: "/dynamo/dev/integrations/sg-lang-hi-cache"
     destination: "/dynamo/dev/backends/sg-lang/hi-cache"
