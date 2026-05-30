@@ -38,6 +38,7 @@ pub struct SharedFinishReasonMetadata {
 struct FinishReasonMetadataState {
     metadata: FinishReasonMetadata,
     pending_tool_calls: HashMap<(u32, u32), PendingToolCallMetadata>,
+    tool_call_positions: HashMap<(u32, u32), usize>,
 }
 
 #[derive(Debug, Default)]
@@ -49,6 +50,25 @@ struct PendingToolCallMetadata {
 impl SharedFinishReasonMetadata {
     fn lock(&self) -> parking_lot::MutexGuard<'_, FinishReasonMetadataState> {
         self.state.lock()
+    }
+
+    #[cfg(feature = "agent-trace-bench")]
+    #[doc(hidden)]
+    pub fn record_tool_call_chunk_for_bench(
+        &self,
+        choice_index: u32,
+        tool_call_index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+    ) {
+        self.lock()
+            .record_tool_call_chunk(choice_index, tool_call_index, id, name);
+    }
+
+    #[cfg(feature = "agent-trace-bench")]
+    #[doc(hidden)]
+    pub fn snapshot_for_bench(&self) -> Option<FinishReasonMetadata> {
+        self.lock().snapshot()
     }
 }
 
@@ -91,19 +111,45 @@ impl FinishReasonMetadataState {
         id: Option<&str>,
         name: Option<&str>,
     ) {
+        if id.is_none() && name.is_none() {
+            return;
+        }
+
         let pending = self
             .pending_tool_calls
             .entry((choice_index, tool_call_index))
             .or_default();
+        let mut changed = false;
         if let Some(id) = id {
-            pending.id = Some(id.to_string());
+            if pending.id.as_deref() != Some(id) {
+                pending.id = Some(id.to_string());
+                changed = true;
+            }
         }
         if let Some(name) = name {
-            pending.name = Some(name.to_string());
+            if pending.name.as_deref() != Some(name) {
+                pending.name = Some(name.to_string());
+                changed = true;
+            }
         }
 
-        if pending.id.is_some() || pending.name.is_some() {
-            self.metadata.record_tool_call(ToolCallMetadata {
+        if !changed {
+            return;
+        }
+
+        let key = (choice_index, tool_call_index);
+        if let Some(position) = self.tool_call_positions.get(&key).copied() {
+            let existing = &mut self.metadata.tool_calls[position];
+            if existing.id.is_none() {
+                existing.id = pending.id.clone();
+            }
+            if existing.name.is_none() {
+                existing.name = pending.name.clone();
+            }
+        } else {
+            let position = self.metadata.tool_calls.len();
+            self.tool_call_positions.insert(key, position);
+            self.metadata.tool_calls.push(ToolCallMetadata {
                 choice_index,
                 tool_call_index,
                 id: pending.id.clone(),

@@ -141,26 +141,6 @@ impl FinishReasonMetadata {
             && self.choices.is_empty()
     }
 
-    pub fn record_tool_call(&mut self, tool_call: ToolCallMetadata) {
-        if let Some(existing) = self.tool_calls.iter_mut().find(|existing| {
-            (existing.choice_index == tool_call.choice_index
-                && existing.tool_call_index == tool_call.tool_call_index)
-                || tool_call
-                    .id
-                    .as_ref()
-                    .is_some_and(|id| existing.id.as_ref() == Some(id))
-        }) {
-            if existing.id.is_none() {
-                existing.id = tool_call.id;
-            }
-            if existing.name.is_none() {
-                existing.name = tool_call.name;
-            }
-        } else {
-            self.tool_calls.push(tool_call);
-        }
-    }
-
     pub fn record_choice_finish_reason(
         &mut self,
         choice_index: u32,
