@@ -140,6 +140,32 @@ async def test_memory_routes_delegate_to_tokenizer_manager():
 
 
 @pytest.mark.asyncio
+async def test_resume_recovers_generation_pause_after_failed_release_rollback():
+    engine = _make_engine()
+    manager = engine.engine.tokenizer_manager
+    manager.release_memory_occupation = AsyncMock(
+        side_effect=RuntimeError("release failed")
+    )
+    failed_continue = AsyncMock(side_effect=RuntimeError("continue failed"))
+    manager.continue_generation = failed_continue
+
+    release_result = await engine.release_memory_occupation({})
+
+    assert release_result["status"] == "error"
+    assert engine._quiesce_controller.is_quiesced is False
+    assert engine._quiesce_controller.needs_resume_recovery is True
+    failed_continue.assert_awaited_once()
+
+    manager.continue_generation = AsyncMock()
+    resume_result = await engine.resume_memory_occupation({})
+
+    assert resume_result["status"] == "ok"
+    manager.resume_memory_occupation.assert_not_awaited()
+    manager.continue_generation.assert_awaited_once()
+    assert engine._quiesce_controller.needs_resume_recovery is False
+
+
+@pytest.mark.asyncio
 async def test_update_weights_from_disk_forwards_request_body():
     engine = _make_engine()
 

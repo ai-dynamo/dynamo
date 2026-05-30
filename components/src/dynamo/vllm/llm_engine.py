@@ -472,6 +472,11 @@ class VllmLLMEngine(LLMEngine):
         async with self._quiesce_lock:
             if controller.is_quiesced:
                 return {"status": "ok", "message": "Engine already sleeping"}
+            if controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "wake_up required before retrying sleep",
+                }
             try:
                 if not await controller.quiesce(level):
                     return {"status": "ok", "message": "Engine already sleeping"}
@@ -488,7 +493,8 @@ class VllmLLMEngine(LLMEngine):
             return {"status": "error", "message": "engine is not initialized"}
 
         async with self._quiesce_lock:
-            if not controller.is_quiesced:
+            needs_recovery = controller.needs_resume_recovery
+            if not controller.is_quiesced and not needs_recovery:
                 return {"status": "ok", "message": "Engine already awake"}
             try:
                 await controller.resume(tags)

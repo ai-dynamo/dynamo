@@ -462,6 +462,11 @@ class SglangLLMEngine(LLMEngine):
         async with self._quiesce_lock:
             if controller.is_quiesced:
                 return {"status": "ok", "message": "Memory already released"}
+            if controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
             try:
                 await controller.quiesce(tags)
                 return {
@@ -487,7 +492,8 @@ class SglangLLMEngine(LLMEngine):
         body = body or {}
         tags = body.get("tags")
         async with self._quiesce_lock:
-            if not controller.is_quiesced:
+            needs_recovery = controller.needs_resume_recovery
+            if not controller.is_quiesced and not needs_recovery:
                 return {"status": "ok", "message": "Memory already resumed"}
             try:
                 await controller.resume(tags)

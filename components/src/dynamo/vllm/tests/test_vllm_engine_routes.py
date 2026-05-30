@@ -67,6 +67,29 @@ async def test_sleep_and_wake_delegate_to_engine_client():
 
 
 @pytest.mark.asyncio
+async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
+    engine = _make_engine()
+    engine.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+    failed_resume = AsyncMock(side_effect=RuntimeError("resume failed"))
+    engine.engine_client.resume_generation = failed_resume
+
+    sleep_result = await engine.sleep({"level": 1})
+
+    assert sleep_result["status"] == "error"
+    assert engine._quiesce_controller.is_quiesced is False
+    assert engine._quiesce_controller.needs_resume_recovery is True
+    failed_resume.assert_awaited_once()
+
+    engine.engine_client.resume_generation = AsyncMock()
+    wake_result = await engine.wake_up({})
+
+    assert wake_result["status"] == "ok"
+    engine.engine_client.wake_up.assert_not_awaited()
+    engine.engine_client.resume_generation.assert_awaited_once()
+    assert engine._quiesce_controller.needs_resume_recovery is False
+
+
+@pytest.mark.asyncio
 async def test_profile_routes_delegate_to_engine_client():
     engine = _make_engine()
 

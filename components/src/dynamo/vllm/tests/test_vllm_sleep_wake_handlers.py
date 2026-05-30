@@ -105,6 +105,31 @@ async def test_wake_up_passes_explicit_tags_from_request():
 
 
 @pytest.mark.asyncio
+async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
+    handler = _make_handler()
+    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+    failed_resume = AsyncMock(side_effect=RuntimeError("resume failed"))
+    handler.engine_client.resume_generation = failed_resume
+
+    sleep_result = await handler.sleep({"level": 1})
+
+    assert sleep_result["status"] == "error"
+    assert handler._quiesce_controller.is_quiesced is False
+    assert handler._quiesce_controller.needs_resume_recovery is True
+    failed_resume.assert_awaited_once()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+
+    handler.engine_client.resume_generation = AsyncMock()
+    wake_result = await handler.wake_up({})
+
+    assert wake_result["status"] == "ok"
+    handler.engine_client.wake_up.assert_not_awaited()
+    handler.engine_client.resume_generation.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    assert handler._quiesce_controller.needs_resume_recovery is False
+
+
+@pytest.mark.asyncio
 async def test_sleep_returns_error_for_unregister_failure():
     handler = _make_handler()
     handler.generate_endpoint.unregister_endpoint_instance = AsyncMock(

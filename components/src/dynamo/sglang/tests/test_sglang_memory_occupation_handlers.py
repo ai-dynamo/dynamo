@@ -137,6 +137,33 @@ async def test_memory_occupation_handlers_forward_tags_exactly(handler):
 
 
 @pytest.mark.asyncio
+async def test_resume_recovers_generation_pause_after_failed_release_rollback(handler):
+    manager = handler.engine.tokenizer_manager
+    manager.release_memory_occupation = AsyncMock(
+        side_effect=RuntimeError("release failed")
+    )
+    failed_continue = AsyncMock(side_effect=RuntimeError("continue failed"))
+    manager.continue_generation = failed_continue
+
+    release_result = await handler.release_memory_occupation({})
+
+    assert release_result["status"] == "error"
+    assert handler._quiesce_controller.is_quiesced is False
+    assert handler._quiesce_controller.needs_resume_recovery is True
+    failed_continue.assert_awaited_once()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+
+    manager.continue_generation = AsyncMock()
+    resume_result = await handler.resume_memory_occupation({})
+
+    assert resume_result["status"] == "ok"
+    manager.resume_memory_occupation.assert_not_awaited()
+    manager.continue_generation.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    assert handler._quiesce_controller.needs_resume_recovery is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method_name", "endpoint_method"),
     [

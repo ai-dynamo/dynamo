@@ -731,6 +731,11 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                     "status": "ok",
                     "message": "Memory already released",
                 }
+            if self._quiesce_controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
 
             try:
                 # Stop new requests and drain in-flight work before releasing memory.
@@ -771,7 +776,8 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         body = body or {}
         tags = body.get("tags")
         async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+            needs_recovery = self._quiesce_controller.needs_resume_recovery
+            if not self._quiesce_controller.is_quiesced and not needs_recovery:
                 return {
                     "status": "ok",
                     "message": "Memory already resumed",
