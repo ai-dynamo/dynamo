@@ -94,6 +94,8 @@ class ExternalPluginEntry(BaseModel):
     plugin entry must NOT take down the planner).
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     plugin_id: str = Field(
         ...,
         min_length=1,
@@ -214,6 +216,8 @@ class GatewayConfig(BaseModel):
     Default ``enabled=False`` keeps existing deployments unchanged.
     Operators opt in explicitly.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(
         default=False,
