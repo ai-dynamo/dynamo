@@ -86,22 +86,22 @@ pub fn try_tool_call_parse_dsml(
     let Some(start_idx) = trimmed.find(&config.block_start) else {
         if let Some(marker_idx) = first_orphan_dsml_marker_index(trimmed, config) {
             let marker_tail = &trimmed[marker_idx..];
-            if marker_tail.starts_with(config.invoke_start_prefix.as_str()) {
-                if marker_tail.contains(config.block_end.as_str()) || config.allow_eof_recovery {
-                    let tool_calls = extract_invokes(marker_tail, config)?;
-                    if !tool_calls.is_empty() {
-                        tracing::warn!(
-                            why = "bare_invoke_recovery",
-                            recovered_calls = tool_calls.len(),
-                            recovered_bytes = marker_tail.len(),
-                            kept_prefix_bytes = marker_idx,
-                            "DSML recovery: recovered complete bare invoke(s) without outer block_start"
-                        );
-                        return Ok((
-                            tool_calls,
-                            Some(trimmed[..marker_idx].trim_end().to_string()),
-                        ));
-                    }
+            if marker_tail.starts_with(config.invoke_start_prefix.as_str())
+                && (marker_tail.contains(config.block_end.as_str()) || config.allow_eof_recovery)
+            {
+                let tool_calls = extract_invokes(marker_tail, config)?;
+                if !tool_calls.is_empty() {
+                    tracing::warn!(
+                        why = "bare_invoke_recovery",
+                        recovered_calls = tool_calls.len(),
+                        recovered_bytes = marker_tail.len(),
+                        kept_prefix_bytes = marker_idx,
+                        "DSML recovery: recovered complete bare invoke(s) without outer block_start"
+                    );
+                    return Ok((
+                        tool_calls,
+                        Some(trimmed[..marker_idx].trim_end().to_string()),
+                    ));
                 }
             }
             let stripped = &trimmed[marker_idx..];
