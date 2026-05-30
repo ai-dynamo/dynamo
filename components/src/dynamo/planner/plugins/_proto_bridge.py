@@ -23,6 +23,9 @@ Edge cases handled:
 
 from __future__ import annotations
 
+import base64
+import typing
+from enum import IntEnum
 from typing import Any, Type, TypeVar
 
 from google.protobuf import json_format
@@ -116,9 +119,6 @@ def _pyd_to_dict(pyd_msg: BaseModel) -> dict[str, Any]:
 
 def _normalize(d: Any) -> Any:
     """Recursively convert IntEnum → int, bytes → base64 string, strip oneof tags."""
-    import base64
-    from enum import IntEnum
-
     if isinstance(d, dict):
         out: dict[str, Any] = {}
         kind: str | None = d.get("result_kind") if "result_kind" in d else None
@@ -182,9 +182,6 @@ def _decode_bytes_by_pyd_schema(d: Any, pyd_cls: Type[BaseModel]) -> Any:
     Inspects ``model_fields`` annotations to detect bytes-typed fields.
     Recurses into nested Pydantic message types.
     """
-    import base64
-    import typing
-
     if not isinstance(d, dict):
         return d
 

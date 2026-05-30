@@ -36,6 +36,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from dynamo.planner.plugins.orchestrator.engine_adapter import (
+    OrchestratorEngineAdapter,
+)
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     QueuedRequestMetrics,
@@ -154,10 +157,6 @@ class ReplayPlannerAdapter:
         self._sm: Optional[PlannerStateMachine] = None
         self._engine: EngineProtocol
         if use_orchestrator:
-            from dynamo.planner.plugins.orchestrator.engine_adapter import (
-                OrchestratorEngineAdapter,
-            )
-
             self._engine = OrchestratorEngineAdapter(
                 planner_config, capabilities or WorkerCapabilities()
             )

@@ -213,15 +213,12 @@ def _target_source(
     ComponentTarget instance we're looking at); fall back to priority
     + (type, replicas) equality for the rare case where the merge
     reconstructs targets."""
-    from dynamo.planner.plugins.merge.types import PluginResult  # local import to avoid cycle
-    from dynamo.planner.plugins.types import OverrideResult as _OverrideResult
-
     for pr in plugin_results:
         if not isinstance(pr, PluginResult):
             continue
         if pr.priority != priority:
             continue
-        if not isinstance(pr.result, _OverrideResult):
+        if not isinstance(pr.result, OverrideResult):
             continue
         for t in pr.result.targets:
             if t is target:
