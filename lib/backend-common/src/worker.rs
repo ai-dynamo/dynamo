@@ -904,6 +904,9 @@ enum EngineControlPolicy {
 
 fn engine_control_policy(control: &str) -> EngineControlPolicy {
     match control {
+        // Quiesce controls make the engine unsafe for new requests, so remove
+        // the endpoint before they mutate engine state. Resume controls make
+        // the engine serving-safe again, so advertise it only after success.
         "sleep" | "release_memory_occupation" => EngineControlPolicy::UnregisterBefore,
         "wake_up" | "resume_memory_occupation" => EngineControlPolicy::RegisterAfter,
         _ => EngineControlPolicy::Direct,

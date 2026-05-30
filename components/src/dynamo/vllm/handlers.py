@@ -243,10 +243,17 @@ class VllmEngineQuiesceController:
 
         level = args[0] if args else None
         await self._engine_client.pause_generation()
-        if level is None:
-            await self._engine_client.sleep()
-        else:
-            await self._engine_client.sleep(level)
+        try:
+            if level is None:
+                await self._engine_client.sleep()
+            else:
+                await self._engine_client.sleep(level)
+        except Exception:
+            try:
+                await self._engine_client.resume_generation()
+            except Exception:
+                logger.exception("Failed to resume generation after sleep failure")
+            raise
         self._is_quiesced = True
         return True
 

@@ -638,11 +638,16 @@ class TrtllmLLMEngine(LLMEngine):
                 await self._set_reject_new_requests(True)
                 timeout_s = float(body.get("timeout_s", 30.0))
                 await self._wait_for_inflight_requests(timeout_s)
+            except Exception as exc:
+                logger.error("release_memory_occupation failed before quiesce: %s", exc)
+                await self._set_reject_new_requests(False)
+                return {"status": "error", "message": str(exc)}
+
+            try:
                 await controller.quiesce(tags)
                 return {"status": "ok", "message": "Memory released"}
             except Exception as exc:
-                logger.error("release_memory_occupation failed: %s", exc)
-                await self._set_reject_new_requests(False)
+                logger.error("release_memory_occupation quiesce failed: %s", exc)
                 return {"status": "error", "message": str(exc)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
