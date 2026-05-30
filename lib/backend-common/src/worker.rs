@@ -268,6 +268,13 @@ impl EngineKind {
             EngineKind::Raw(e) => e.health_check_payload().await,
         }
     }
+
+    /// Raw media engines (image/video/audio) register name-only — the engine
+    /// loads the model itself and the model has no LLM artifacts (tokenizer /
+    /// chat template / config.json) for Dynamo to fetch.
+    fn is_raw(&self) -> bool {
+        matches!(self, EngineKind::Raw(_))
+    }
 }
 
 /// Runtime host for an engine (an [`LLMEngine`] or a [`RawEngine`]).
@@ -662,7 +669,8 @@ impl Worker {
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
 
-        let mut local_model = build_local_model(&self.config, engine_config).await?;
+        let mut local_model =
+            build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
         local_model
             .attach(
@@ -1084,6 +1092,7 @@ fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<
 async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
+    name_only: bool,
 ) -> Result<LocalModel, DynamoError> {
     let served_name = resolve_served_name(config, engine_config)
         .or_else(|| Some(engine_config.model.clone()))
@@ -1142,9 +1151,12 @@ async fn build_local_model(
         .custom_template_path(config.custom_jinja_template.clone())
         .runtime_config(rt_cfg);
 
-    // Resolve WorkerConfig.model_name into a local path. Empty string means
-    // name-only mode (no tokenizer / chat template on the card).
-    if !config.model_name.is_empty() {
+    // Resolve WorkerConfig.model_name into a local path. Empty string OR a
+    // raw media engine (`name_only`) means name-only mode (no tokenizer /
+    // chat template on the card): raw media models carry no LLM artifacts to
+    // fetch, and the engine loads the model itself — mirrors the legacy
+    // diffusion registration's `ModelDeploymentCard::with_name_only()`.
+    if !config.model_name.is_empty() && !name_only {
         let source = config.model_name.clone();
         let local_path = if std::fs::exists(&source).map_err(|e| {
             err(
@@ -1312,7 +1324,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
         let runtime_config = local_model.runtime_config();
 
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
@@ -1329,6 +1341,28 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("group-a")
         );
+    }
+
+    #[tokio::test]
+    async fn build_local_model_name_only_skips_fetch() {
+        // Raw media engines register name-only: a model_name that is neither a
+        // local path nor a valid HF repo must NOT trigger a fetch (the engine
+        // loads the model itself). If the gate regresses, this would attempt a
+        // network fetch and fail with BackendCannotConnect.
+        let bogus = "definitely/not-a-real-hf-model-xyz".to_string();
+        let config = WorkerConfig {
+            model_name: bogus.clone(),
+            endpoint_types: "images".to_string(),
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: bogus,
+            ..EngineConfig::default()
+        };
+        // name_only=true must succeed offline; name_only=false would fetch.
+        build_local_model(&config, &engine_config, true)
+            .await
+            .expect("name-only build must not fetch");
     }
 
     #[test]
@@ -1381,7 +1415,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
         // Decode workers cannot host the local indexer endpoint, so the
         // worker forces it off even when the operator-supplied flag is true.
         assert!(!local_model.runtime_config().enable_local_indexer);
@@ -1399,7 +1433,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
         assert!(local_model.runtime_config().enable_local_indexer);
     }
 
@@ -1420,7 +1454,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
         let endpoint = local_model
             .runtime_config()
             .disaggregated_endpoint
@@ -1442,7 +1476,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
         assert!(
             local_model
                 .runtime_config()
