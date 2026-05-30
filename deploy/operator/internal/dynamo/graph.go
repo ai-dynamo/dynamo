@@ -378,6 +378,25 @@ func generateSingleDCD(
 		}
 	}
 
+	// Stamp sidecar.istio.io/inject: "false" on EPP pod templates before
+	// DGD-level annotations are merged in. EPP serves its own TLS on port 9002
+	// (--secure-serving true); an Istio sidecar intercepting that port causes a
+	// double-TLS handshake failure when the namespace has STRICT mTLS, which
+	// surfaces as cx_connect_fail / HTTP 500 on the gateway.
+	//
+	// Placement before applyDGDTemplateDefaults is intentional: the merge
+	// function (mergeLowPriorityMetadata) does not overwrite keys already
+	// present in the destination map, so a graph-wide DGD Spec.Annotations
+	// entry of sidecar.istio.io/inject: "true" cannot silently bypass the
+	// EPP opt-out. An explicit per-EPP podTemplate annotation set by the user
+	// is preserved by the !exists guard.
+	if component.ComponentType == commonconsts.ComponentTypeEPP {
+		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
+		if _, exists := podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject]; !exists {
+			podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject] = "false"
+		}
+	}
+
 	applyDGDTemplateDefaults(&deployment.Spec.DynamoComponentDeploymentSharedSpec, parentDGD)
 
 	// Topology label controller marker: set on the DCD so it propagates to pods.
@@ -985,13 +1004,24 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 		skipVerify = *meshConfig.Istio.InsecureSkipVerify
 	}
 
+	tls := &istioNetworking.ClientTLSSettings{
+		Mode:               tlsMode,
+		InsecureSkipVerify: wrapperspb.Bool(skipVerify),
+	}
+	// Istio's validation webhook requires ClientCertificate and PrivateKey for
+	// MUTUAL mode (CaCertificates is optional). Plumb through the operator
+	// config values so the DR is accepted; for other modes these fields must
+	// remain empty per the Istio proto spec.
+	if tlsMode == istioNetworking.ClientTLSSettings_MUTUAL {
+		tls.ClientCertificate = meshConfig.Istio.ClientCertificate
+		tls.PrivateKey = meshConfig.Istio.PrivateKey
+		tls.CaCertificates = meshConfig.Istio.CaCertificates
+	}
+
 	dr.Spec = istioNetworking.DestinationRule{
 		Host: fmt.Sprintf("%s.%s.svc.cluster.local", normalizedName, namespace),
 		TrafficPolicy: &istioNetworking.TrafficPolicy{
-			Tls: &istioNetworking.ClientTLSSettings{
-				Mode:               tlsMode,
-				InsecureSkipVerify: wrapperspb.Bool(skipVerify),
-			},
+			Tls: tls,
 		},
 	}
 	return dr

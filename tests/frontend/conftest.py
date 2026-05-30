@@ -76,10 +76,15 @@ def start_services_with_http(
         yield ports.frontend_port, ports.system_ports[0]
 
 
-def check_grpc_server_ready(
+def check_grpc_server_live(
     port: int, max_attempts: int = 30, retry_delay: float = 0.5
 ) -> bool:
-    """Check if gRPC server is ready to accept connections.
+    """Check if the gRPC server process is up and accepting connections.
+
+    Uses KServe `server_live` rather than `server_ready` because this fixture
+    runs before any worker is launched — `server_ready` only flips true once
+    a model has a WorkerSet ready to serve, which won't happen until callers
+    of this fixture start their worker processes.
 
     Args:
         port: gRPC server port
@@ -87,24 +92,24 @@ def check_grpc_server_ready(
         retry_delay: Delay between retry attempts in seconds
 
     Returns:
-        True if server is ready
+        True if server is live
 
     Raises:
-        Exception: If server is not ready after max_attempts
+        Exception: If server is not live after max_attempts
     """
     import tritonclient.grpc as grpcclient
 
     for attempt in range(max_attempts):
         try:
             client = grpcclient.InferenceServerClient(f"localhost:{port}")
-            if client.is_server_ready():
+            if client.is_server_live():
                 logger.info(
-                    f"gRPC server is ready on port {port} (attempt {attempt + 1}/{max_attempts})"
+                    f"gRPC server is live on port {port} (attempt {attempt + 1}/{max_attempts})"
                 )
-                # Add delay after readiness check to ensure server is fully stable for parallel tests
+                # Add delay after liveness check to ensure server is fully stable for parallel tests
                 # Retry the check once more to confirm stability
                 time.sleep(0.5)
-                if client.is_server_ready():
+                if client.is_server_live():
                     logger.info(f"gRPC server confirmed stable on port {port}")
                     return True
                 else:
@@ -114,12 +119,10 @@ def check_grpc_server_ready(
                     continue
         except Exception as e:
             if attempt < max_attempts - 1:
-                logger.debug(f"gRPC server not ready on attempt {attempt + 1}: {e}")
+                logger.debug(f"gRPC server not live on attempt {attempt + 1}: {e}")
                 time.sleep(retry_delay)
             else:
-                logger.error(
-                    f"gRPC server not ready after {max_attempts} attempts: {e}"
-                )
+                logger.error(f"gRPC server not live after {max_attempts} attempts: {e}")
                 raise
     return False
 
@@ -213,7 +216,7 @@ def start_services_with_grpc(
                 f"gRPC Frontend starting on port {ports.frontend_port} "
                 f"(metrics on {grpc_metrics_port})"
             )
-            check_grpc_server_ready(ports.frontend_port)
+            check_grpc_server_live(ports.frontend_port)
             yield ports.frontend_port, ports.system_ports[0]
     finally:
         deallocate_port(grpc_metrics_port)

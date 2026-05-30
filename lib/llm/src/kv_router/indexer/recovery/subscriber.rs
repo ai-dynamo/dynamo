@@ -117,7 +117,7 @@ pub async fn start_subscriber(
     kv_router_config: &KvRouterConfig,
     indexer: Indexer,
 ) -> Result<()> {
-    let transport_kind = EventTransportKind::from_env_or_default();
+    let transport_kind = component.drt().default_event_transport_kind();
 
     // Start subscriber - durable_kv_events flag determines the mode:
     // - durable_kv_events=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
@@ -127,9 +127,9 @@ pub async fn start_subscriber(
             "--durable-kv-events is deprecated and will be removed in a future release. \
              The event-plane subscriber (local_indexer mode) is now the recommended path."
         );
-        if transport_kind == EventTransportKind::Zmq {
-            tracing::warn!(
-                "--durable-kv-events requires NATS, but ZMQ event plane is configured; falling back to JetStream anyway"
+        if transport_kind != EventTransportKind::Nats {
+            anyhow::bail!(
+                "--durable-kv-events requires NATS event plane, but runtime is configured for {transport_kind:?}"
             );
         }
         tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
