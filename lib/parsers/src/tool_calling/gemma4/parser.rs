@@ -215,7 +215,7 @@ fn has_bare_call_body_start(input: &str) -> bool {
 }
 
 pub fn split_partial_call_prefix_gemma4(chunk: &str) -> Option<(&str, &str)> {
-    for i in 1..CALL_PREFIX.len() {
+    for i in 1..=CALL_PREFIX.len() {
         if !CALL_PREFIX.is_char_boundary(i) || !chunk.ends_with(&CALL_PREFIX[..i]) {
             continue;
         }

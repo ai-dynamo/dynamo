@@ -3738,7 +3738,11 @@ fahrenheit
     #[tokio::test]
     async fn test_gemma4_call_prefix_prose_passes_without_waiting_for_eof() {
         let expected = "I will call: you tomorrow";
-        let cases = [vec![expected], vec!["I will ca", "ll: you tomorrow"]];
+        let cases = [
+            vec![expected],
+            vec!["I will ca", "ll: you tomorrow"],
+            vec!["I will call:", " you tomorrow"],
+        ];
 
         for chunks in cases {
             let input_chunks = chunks
@@ -3830,6 +3834,15 @@ fahrenheit
                 vec![
                     "I will check that. ca",
                     "ll:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>",
+                ],
+                &["call:get_weather", "<tool_call|>"][..],
+            ),
+            (
+                "gemma4",
+                "Gemma 4 split after call prefix",
+                vec![
+                    "I will check that. call:",
+                    "get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>",
                 ],
                 &["call:get_weather", "<tool_call|>"][..],
             ),
