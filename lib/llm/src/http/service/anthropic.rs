@@ -50,6 +50,7 @@ use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
+use super::metadata::extract_metadata_from_http;
 use super::openai::{get_body_limit, get_or_create_request_id};
 
 // ---------------------------------------------------------------------------
@@ -155,7 +156,14 @@ async fn handler_anthropic_messages(
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let metadata = extract_metadata_from_http(&headers).map_err(|err| {
+        anthropic_error(
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "invalid_request_error",
+            &err.to_string(),
+        )
+    })?;
+    let request = Context::with_id_and_metadata(request, request_id, metadata);
     let context = request.context();
 
     // Create connection handles

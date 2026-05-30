@@ -7,11 +7,11 @@ on:
   push:
     branches:
       - main
-      - 'release/*.*.*'
+      - "release/*.*.*"
   workflow_dispatch:
     inputs:
       framework:
-        description: 'Framework to validate'
+        description: "Framework to validate"
         type: choice
         options: [all, vllm, sglang, trtllm]
         default: all
@@ -29,7 +29,7 @@ jobs:
     name: Config
     runs-on: ubuntu-latest
     outputs:
-      run_vllm:   ${{ steps.flags.outputs.run_vllm }}
+      run_vllm: ${{ steps.flags.outputs.run_vllm }}
       run_sglang: ${{ steps.flags.outputs.run_sglang }}
       run_trtllm: ${{ steps.flags.outputs.run_trtllm }}
     steps:
@@ -59,9 +59,9 @@ jobs:
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
       # context. Matches the coverage of the old container-validation-dynamo
       # workflow.
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      gpu_test_markers: 'pre_merge and none and gpu_1'
+      cpu_parallel_test_markers: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)"
+      cpu_sequential_test_markers: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)"
+      gpu_test_markers: "pre_merge and none and gpu_1"
     secrets: inherit
 
   # ============================================================================
@@ -74,7 +74,7 @@ jobs:
       operator_default_tag: ${{ steps.build.outputs.image_tag }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Build and push operator
         id: build
@@ -91,9 +91,9 @@ jobs:
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
 
-# ============================================================================
-# Snapshot Agent
-# ============================================================================
+  # ============================================================================
+  # Snapshot Agent
+  # ============================================================================
 
   snapshot-agent:
     name: Snapshot Agent
@@ -101,7 +101,7 @@ jobs:
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Build and push snapshot agent
         uses: ./.github/actions/build-deploy-component
         with:
@@ -129,7 +129,7 @@ jobs:
       framework: vllm
       target: runtime
       cuda_version: '["12.9", "13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       extra_tags: |
@@ -146,7 +146,7 @@ jobs:
       framework: vllm
       target: dev
       cuda_version: '["12.9", "13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       push_image: true
       build_timeout_minutes: 60
@@ -163,7 +163,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       cuda_version: '["12.9"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -182,7 +182,7 @@ jobs:
       framework: sglang
       target: runtime
       cuda_version: '["12.9", "13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       extra_tags: |
@@ -199,7 +199,7 @@ jobs:
       framework: sglang
       target: dev
       cuda_version: '["12.9", "13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       push_image: true
       build_timeout_minutes: 60
@@ -216,7 +216,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       cuda_version: '["12.9"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -235,7 +235,7 @@ jobs:
       framework: trtllm
       target: runtime
       cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       extra_tags: |
@@ -252,7 +252,7 @@ jobs:
       framework: trtllm
       target: dev
       cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       push_image: true
       build_timeout_minutes: 60
@@ -269,7 +269,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       cuda_version: '["13.1"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -287,7 +287,7 @@ jobs:
       framework: dynamo
       target: planner
       cuda_version: '[""]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 45
       extra_tags: |
@@ -304,7 +304,7 @@ jobs:
       framework: dynamo
       target: frontend
       cuda_version: '[""]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: "linux/amd64,linux/arm64"
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 45
       extra_tags: |
@@ -328,14 +328,14 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      cpu_only_test_markers: "(pre_merge or post_merge) and vllm and gpu_0"
+      gpu_test_markers: "(pre_merge or post_merge) and vllm and gpu_1"
       gpu_test_timeout_minutes: 120
       # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
       # the parallel stage; the rest fall through to the sequential stage. 24 GiB admits all
       # currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
-      gpu_parallel_max_vram_gib: '24'
+      gpu_parallel_max_vram_gib: "24"
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -350,7 +350,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
+      gpu_test_markers: "(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)"
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -366,7 +366,7 @@ jobs:
       cuda_version: '["12.9"]'
       platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      cpu_only_test_markers: "(pre_merge or post_merge) and vllm and gpu_0"
       run_gpu_tests: false
     secrets: inherit
 
@@ -382,14 +382,14 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+      cpu_only_test_markers: "(pre_merge or post_merge) and sglang and gpu_0"
+      gpu_test_markers: "(pre_merge or post_merge) and sglang and gpu_1"
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
-      gpu_parallel_max_vram_gib: '24'
+      gpu_parallel_max_vram_gib: "24"
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -404,7 +404,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
+      gpu_test_markers: "(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)"
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -420,14 +420,14 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      cpu_only_test_markers: "(pre_merge or post_merge) and trtllm and gpu_0"
+      gpu_test_markers: "(pre_merge or post_merge) and trtllm and gpu_1"
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
-      gpu_parallel_max_vram_gib: '24'
+      gpu_parallel_max_vram_gib: "24"
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -442,7 +442,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
+      gpu_test_markers: "(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)"
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -458,7 +458,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      cpu_only_test_markers: "(pre_merge or post_merge) and trtllm and gpu_0"
       run_gpu_tests: false
     secrets: inherit
 
@@ -476,7 +476,7 @@ jobs:
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_parallel_mode: none
-      cpu_only_test_markers: '(pre_merge or post_merge) and planner and gpu_0'
+      cpu_only_test_markers: "(pre_merge or post_merge) and planner and gpu_0"
       cpu_only_test_timeout_minutes: 30
       run_gpu_tests: false
     secrets: inherit
@@ -642,16 +642,16 @@ jobs:
       vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
       operator_tag: ${{ steps.setup.outputs.operator_tag }}
     steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - name: Setup vCluster and operator
-      id: setup
-      uses: ./.github/actions/setup-dynamo-operator
-      with:
-        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-        operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
-        hf_token: ${{ secrets.HF_TOKEN }}
-        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-test-vllm:
     needs: [deploy-operator, vllm-copy-to-acr]
@@ -659,7 +659,7 @@ jobs:
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
-      image_suffix: vllm-runtime-cuda13
+      image_suffix: vllm-runtime
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -671,7 +671,7 @@ jobs:
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
-      image_suffix: sglang-runtime-cuda13
+      image_suffix: sglang-runtime
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -683,7 +683,7 @@ jobs:
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
-      image_suffix: trtllm-runtime-cuda13
+      image_suffix: trtllm-runtime
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -691,16 +691,23 @@ jobs:
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    needs:
+      [
+        deploy-operator,
+        deploy-test-vllm,
+        deploy-test-sglang,
+        deploy-test-trtllm,
+        deploy-test-gaie,
+      ]
     runs-on: prod-deploy-tester-v1
     steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - name: Teardown vCluster
-      if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
-      uses: ./.github/actions/teardown-dynamo-operator
-      with:
-        vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-        vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Teardown vCluster
+        if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
   # ============================================================================
   # GAIE DEPLOY TEST
@@ -714,7 +721,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
@@ -748,7 +755,8 @@ jobs:
           echo "${KUBECONFIG_B64}" | base64 -d > "${KUBECONFIG_FILE}"
           export KUBECONFIG="${KUBECONFIG_FILE}"
           export NAMESPACE=default
-          bash deploy/inference-gateway/gateways/agentgateway/install.sh
+          bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+          rm -f ${{ github.workspace }}/.kubeconfig_gaie
       - name: Run GAIE Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
@@ -762,11 +770,18 @@ jobs:
           extra_pytest_args: >-
             -m framework_with_gaie
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
-            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda13
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    needs:
+      [
+        deploy-operator,
+        deploy-test-vllm,
+        deploy-test-sglang,
+        deploy-test-trtllm,
+        deploy-test-gaie,
+      ]
     if: always()
     steps:
       - name: "Check all deploy test jobs"
@@ -781,28 +796,42 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
+    needs:
+      [
+        vllm-build,
+        sglang-build,
+        trtllm-build,
+        vllm-dev-build,
+        sglang-dev-build,
+        trtllm-dev-build,
+        vllm-efa-build,
+        sglang-efa-build,
+        trtllm-efa-build,
+        operator,
+        frontend-build,
+        planner-build,
+      ]
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - name: Create K8s builders (skip bootstrap)
-      uses: ./.github/actions/bootstrap-buildkit
-      continue-on-error: true
-      with:
-        builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-        buildkit_worker_addresses: '' # k8s builder
-        skip_bootstrap: true
-    - name: Builder Cleanup in case of k8s builder
-      shell: bash
-      run: |
-        docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create K8s builders (skip bootstrap)
+        uses: ./.github/actions/bootstrap-buildkit
+        continue-on-error: true
+        with:
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          buildkit_worker_addresses: "" # k8s builder
+          skip_bootstrap: true
+      - name: Builder Cleanup in case of k8s builder
+        shell: bash
+        run: |
+          docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && github.event_name != 'workflow_dispatch'
-    needs: [ deploy-status-check ]
+    needs: [deploy-status-check]
     permissions:
       contents: read
     steps:

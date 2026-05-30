@@ -16,8 +16,7 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_s0
   REASONING.stream.2.b:
     description: Multiple reasoning spans across chunks
     ref: dynamo
@@ -26,13 +25,14 @@ cases:
     - ' middle '
     - ◁think▷second◁/think▷ done
     expected:
-      dynamo: &d_s5
+      dynamo:
         reasoning_text: firstsecond
         normal_text: ' middle  done'
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
       sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+        reasoning_text: first
+        normal_text: ' middle ◁think▷second◁/think▷ done'
   REASONING.stream.2.a:
     description: Single reasoning block across chunks
     ref: dynamo
@@ -46,8 +46,7 @@ cases:
         normal_text: answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_s1
   REASONING.stream.3.a:
     description: Start marker split across chunks
     ref: dynamo
@@ -60,8 +59,7 @@ cases:
         normal_text: answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_s2
   REASONING.stream.3.b:
     description: End marker split across chunks
     ref: dynamo
@@ -69,13 +67,14 @@ cases:
     - ◁think▷thinking◁/thi
     - nk▷answer
     expected:
-      dynamo: &d_s3
+      dynamo:
         reasoning_text: thinking
         normal_text: answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
       sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+        reasoning_text: thinking◁/think▷answer
+        normal_text: ''
   REASONING.stream.3.c:
     description: Partial start-marker prefix later becomes normal text
     ref: dynamo
@@ -88,8 +87,7 @@ cases:
         normal_text: plain ◁thesis answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_s6
   REASONING.stream.1.b:
     description: Plain text without reasoning markers
     ref: dynamo
@@ -102,5 +100,4 @@ cases:
         normal_text: plain answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_s4
