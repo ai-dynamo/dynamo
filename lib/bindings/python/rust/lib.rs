@@ -1062,33 +1062,6 @@ impl Endpoint {
     /// is *not* a cancellation signal: the caller has merely stopped
     /// sending input. The engine must keep yielding response chunks until
     /// it chooses to return or observes `context.is_stopped()`.
-    ///
-    /// Unlike `serve_endpoint`, this intentionally omits both
-    /// `health_check_payload` and local in-process engine registration. They
-    /// are coupled — `EndpointConfigBuilder::start`
-    /// (`lib/runtime/src/component/endpoint.rs`) bails when a
-    /// `health_check_payload` is set and the canary is enabled but no local
-    /// engine is registered — and neither fits the bidirectional shape today:
-    ///
-    /// - The canary probe (`send_health_check_request` in
-    ///   `lib/runtime/src/health_check.rs`) calls the registered engine
-    ///   in-process as `SingleIn<serde_json::Value>`, and the local registry's
-    ///   `LocalAsyncEngine` (`lib/runtime/src/local_endpoint_registry.rs`) is
-    ///   typed to that unary shape. `PythonBidirectionalEngine` is
-    ///   `ManyIn<serde_json::Value>`, so it cannot be stored there.
-    /// - There is no in-process caller for a bidirectional engine, so a local
-    ///   registration would have nothing driving it.
-    ///
-    /// Enabling them for bidirectional engines would require:
-    ///   1. A `ManyIn`-typed local-registry slot (e.g. a
-    ///      `LocalBidirectionalEngine` alias plus a
-    ///      `register_local_bidirectional_engine` builder method).
-    ///   2. A canary path that wraps the payload as a single-frame input
-    ///      stream and reads the first response (the current canary builds
-    ///      `SingleIn::new(payload)`).
-    ///   3. A `health_check_payload` that is a protocol-valid opening client
-    ///      event (e.g. a realtime `session.update`); otherwise the engine
-    ///      yields an `error` frame and the probe is marked unhealthy.
     #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
     fn serve_bidirectional_endpoint<'p>(
         &self,
@@ -1109,6 +1082,31 @@ impl Endpoint {
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
+
+        // [gluo FIXME] skipping health check for now:
+        // both `health_check_payload` and local in-process engine registration
+        // are needed and that requires proper implementation of the bidirectional
+        // engine type which is too much for this PR.
+        //
+        // Enabling them for bidirectional engines would require:
+        //   1. A `ManyIn`-typed local-registry slot (e.g. a
+        //      `LocalBidirectionalEngine` alias plus a
+        //      `register_local_bidirectional_engine` builder method).
+        //   2. A canary path that wraps the payload as a single-frame input
+        //      stream and reads the first response (the current canary builds
+        //      `SingleIn::new(payload)`).
+        //   3. A `health_check_payload` that can be handled by the model
+        //      (e.g. a realtime `session.update`); otherwise the engine yields
+        //      an `error` frame and the probe is marked unhealthy.
+        //      This needs extra caring because the bidirectional engine is likely
+        //      to be stateful.
+
+        // if let Some(payload) = health_payload_json {
+        //     builder = builder.health_check_payload(payload);
+        // }
+
+        // // Register the engine in the local endpoint registry for in-process calls
+        // builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
