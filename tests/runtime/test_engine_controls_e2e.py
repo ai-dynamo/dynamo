@@ -40,7 +40,13 @@ async def test_engine_control_route_invokes_registered_callback(
     system_port = dynamo_dynamic_ports.system_ports[0]
     monkeypatch.setenv("DYN_SYSTEM_PORT", str(system_port))
 
-    runtime = DistributedRuntime(asyncio.get_running_loop(), "mem", "tcp")
+    # Keep this local-only test independent of ambient CI NATS_SERVER settings.
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(),
+        "mem",
+        "tcp",
+        event_plane="zmq",
+    )
     calls: list[dict[str, Any]] = []
 
     async def sleep_control(body: dict[str, Any]) -> dict[str, Any]:
