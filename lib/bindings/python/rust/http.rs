@@ -15,10 +15,6 @@ pub use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use dynamo_llm::discovery::ModelWatcher;
-use dynamo_llm::entrypoint::RouterConfig;
-use dynamo_llm::namespace::NamespaceFilter;
-
 #[pyclass]
 pub struct HttpService {
     inner: service_v2::HttpService,
@@ -121,77 +117,6 @@ impl HttpService {
         if let Some(token) = self.cancel_token.get() {
             token.inner.cancel();
         }
-    }
-
-    /// Spawn a background discovery watcher that pulls model deployment
-    /// cards out of the runtime's discovery store and registers the
-    /// matching typed engines on this service's model manager. Returns
-    /// immediately after spawning; the watcher runs until the runtime's
-    /// primary token is cancelled.
-    ///
-    /// Tests use this in combination with `Endpoint.serve_bidirectional_endpoint`
-    /// and `register_model(ModelType::Realtime + ModelInput::Text, ...)` to
-    /// exercise the discovery → typed-PushRouter → realtime engine path
-    /// without bringing up a full LLM frontend.
-    fn start_discovery_watcher<'p>(
-        &self,
-        py: Python<'p>,
-        runtime: &DistributedRuntime,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let drt = runtime.inner().clone();
-        let model_manager = self.inner.state_clone().manager_clone();
-        let metrics = self.inner.state_clone().metrics_clone();
-        let service_arc = Arc::new(self.inner.clone());
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut watch_obj = ModelWatcher::new(
-                drt.clone(),
-                model_manager,
-                RouterConfig::default(),
-                0,
-                None,
-                None,
-                None,
-                metrics.clone(),
-            );
-
-            let discovery = drt.discovery();
-            let discovery_stream = discovery
-                .list_and_watch(
-                    dynamo_runtime::discovery::DiscoveryQuery::AllModels,
-                    Some(drt.primary_token()),
-                )
-                .await
-                .map_err(to_pyerr)?;
-
-            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-            watch_obj.set_notify_on_model_update(tx);
-            let watch_obj = Arc::new(watch_obj);
-
-            // Endpoint enabler task: when a card lands, flip on the
-            // matching HTTP endpoint flag (e.g. EndpointType::Realtime
-            // for ModelType::Realtime), so the frontend accepts traffic
-            // without the test having to call enable_endpoint explicitly.
-            let service_for_enabler = service_arc.clone();
-            tokio::spawn(async move {
-                while let Some(update) = rx.recv().await {
-                    let card = match &update {
-                        dynamo_llm::discovery::ModelUpdate::Added(c) => c,
-                        dynamo_llm::discovery::ModelUpdate::Removed(c) => c,
-                    };
-                    let enabled = matches!(update, dynamo_llm::discovery::ModelUpdate::Added(_));
-                    for endpoint_type in card.model_type.as_endpoint_types() {
-                        service_for_enabler.enable_model_endpoint(endpoint_type, enabled);
-                    }
-                }
-            });
-
-            tokio::spawn(async move {
-                watch_obj.watch(discovery_stream, NamespaceFilter::Global).await;
-            });
-
-            Ok(())
-        })
     }
 
     fn enable_endpoint(&self, endpoint_type: String, enabled: bool) -> PyResult<()> {
