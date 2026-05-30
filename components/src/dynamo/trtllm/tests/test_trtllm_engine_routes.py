@@ -40,9 +40,11 @@ def _make_engine() -> TrtllmLLMEngine:
     engine._no_inflight_requests = asyncio.Event()
     engine._no_inflight_requests.set()
     engine._reject_new_requests = False
+    engine._resume_recovery_required = False
 
     controller = MagicMock()
     controller.is_quiesced = False
+    controller.needs_resume_recovery = False
 
     async def _quiesce(tags=None):
         controller.is_quiesced = True
@@ -101,6 +103,59 @@ async def test_release_rejects_new_requests_until_resume():
     await engine.resume_memory_occupation({})
     assert await engine._mark_request_started() is True
     await engine._mark_request_finished()
+
+
+@pytest.mark.asyncio
+async def test_resume_clears_reject_after_failed_quiesce():
+    engine = _make_engine()
+    engine._quiesce_controller.quiesce = AsyncMock(
+        side_effect=RuntimeError("sleep failed")
+    )
+
+    release = await engine.release_memory_occupation({})
+
+    assert release["status"] == "error"
+    assert engine._reject_new_requests is True
+    assert engine._resume_recovery_required is True
+    assert await engine._mark_request_started() is False
+
+    resume = await engine.resume_memory_occupation({})
+
+    assert resume["status"] == "ok"
+    engine._quiesce_controller.resume.assert_not_awaited()
+    engine._quiesce_controller.mark_resumed.assert_called_once_with()
+    assert engine._reject_new_requests is False
+    assert engine._resume_recovery_required is False
+
+
+@pytest.mark.asyncio
+async def test_resume_recovers_partial_quiesce_before_accepting_requests():
+    engine = _make_engine()
+
+    async def _quiesce_failed(tags=None):
+        engine._quiesce_controller.needs_resume_recovery = True
+        raise RuntimeError("weights failed")
+
+    async def _resume(tags=None):
+        engine._quiesce_controller.needs_resume_recovery = False
+        return True
+
+    engine._quiesce_controller.quiesce = AsyncMock(side_effect=_quiesce_failed)
+    engine._quiesce_controller.resume = AsyncMock(side_effect=_resume)
+
+    release = await engine.release_memory_occupation({})
+
+    assert release["status"] == "error"
+    assert engine._reject_new_requests is True
+    assert engine._resume_recovery_required is True
+
+    resume = await engine.resume_memory_occupation({})
+
+    assert resume["status"] == "ok"
+    engine._quiesce_controller.resume.assert_awaited_once_with(None)
+    engine._quiesce_controller.mark_resumed.assert_called_once_with()
+    assert engine._reject_new_requests is False
+    assert engine._resume_recovery_required is False
 
 
 @pytest.mark.asyncio

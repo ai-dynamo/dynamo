@@ -72,34 +72,47 @@ class TRTLLMEngineQuiesceController:
     def __init__(self, engine: TensorRTLLMEngine):
         self._engine = engine
         self._is_quiesced = False
+        self._pending_resume_tags: set[str] = set()
 
     @property
     def is_quiesced(self) -> bool:
         return self._is_quiesced
 
+    @property
+    def needs_resume_recovery(self) -> bool:
+        return bool(self._pending_resume_tags)
+
     async def quiesce(self, tags: list[str] | None = None) -> bool:
-        if self._is_quiesced:
+        if self._is_quiesced or self._pending_resume_tags:
             return False
         tags = tags or ["kv_cache", "weights"]
         if "kv_cache" in tags:
+            self._pending_resume_tags.add("kv_cache")
             self._collective_rpc("sleep", ["kv_cache"])
         if "weights" in tags:
+            self._pending_resume_tags.add("weights")
             self._release_gms_weights()
         self._is_quiesced = True
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
-        if not self._is_quiesced:
+        if not self._is_quiesced and not self._pending_resume_tags:
             return False
-        tags = tags or ["kv_cache", "weights"]
-        if "weights" in tags:
+        requested_tags = set(tags or ["kv_cache", "weights"])
+        # During recovery, restore the domains that may actually be asleep
+        # instead of trusting a narrower resume request.
+        resume_tags = self._pending_resume_tags or requested_tags
+        if "weights" in resume_tags:
             self._restore_gms_weights()
-        if "kv_cache" in tags:
+            self._pending_resume_tags.discard("weights")
+        if "kv_cache" in resume_tags:
             self._collective_rpc("wakeup", ["kv_cache"])
+            self._pending_resume_tags.discard("kv_cache")
         return True
 
     def mark_resumed(self) -> None:
         self._is_quiesced = False
+        self._pending_resume_tags.clear()
 
     def _collective_rpc(self, method: str, rpc_tags: list[str]) -> None:
         """Call TRT-LLM collective_rpc for KV cache sleep/wake."""
@@ -152,8 +165,7 @@ class _Abortable(Protocol):
     """Structural type for objects that support abort(). Satisfied by both
     GenerationResult and _DeferredAbort."""
 
-    def abort(self) -> None:
-        ...
+    def abort(self) -> None: ...
 
 
 class _DeferredAbort:
@@ -206,13 +218,13 @@ class RequestHandlerConfig:
     publisher: Optional[Publisher]
     disaggregation_mode: DisaggregationMode
     encode_client: Optional[Client] = None
-    multimodal_processor: Optional[
-        MultimodalRequestProcessor
-    ] = None  # for multimodal support
+    multimodal_processor: Optional[MultimodalRequestProcessor] = (
+        None  # for multimodal support
+    )
     connector: Optional[Connector] = None
-    runtime: Optional[
-        DistributedRuntime
-    ] = None  # DistributedRuntime reference for graceful shutdown
+    runtime: Optional[DistributedRuntime] = (
+        None  # DistributedRuntime reference for graceful shutdown
+    )
     metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
@@ -307,6 +319,13 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Timed out waiting for {inflight} in-flight request(s) to finish"
             ) from exc
 
+    @staticmethod
+    def _controller_needs_resume_recovery(
+        controller: TRTLLMEngineQuiesceController,
+    ) -> bool:
+        needs_recovery = getattr(controller, "needs_resume_recovery", False)
+        return needs_recovery if isinstance(needs_recovery, bool) else False
+
     # ------------------------------------------------------------------
     # Sleep / wake public API (delegates to TRTLLMEngineQuiesceController)
     # ------------------------------------------------------------------
@@ -335,7 +354,21 @@ class HandlerBase(BaseGenerativeHandler):
                 logger.error("release_memory_occupation failed: %s", exc)
                 # Rollback: TRT-LLM has no pause_generation(), so we
                 # manually unregistered the endpoint and set reject flag
-                # above. Restore both on failure.
+                # above. Restore both on failure. If quiesce partially
+                # succeeded, resume the completed domains first.
+                if self._controller_needs_resume_recovery(self._quiesce_controller):
+                    try:
+                        await self._quiesce_controller.resume(tags)
+                        self._quiesce_controller.mark_resumed()
+                    except Exception as resume_exc:
+                        logger.error(
+                            "release_memory_occupation rollback resume failed: %s",
+                            resume_exc,
+                        )
+                        return {
+                            "status": "error",
+                            "message": (f"{exc}; rollback resume failed: {resume_exc}"),
+                        }
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                 await self._set_reject_new_requests(False)
@@ -347,7 +380,10 @@ class HandlerBase(BaseGenerativeHandler):
         tags = body.get("tags")
 
         async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+            needs_recovery = self._controller_needs_resume_recovery(
+                self._quiesce_controller
+            )
+            if not self._quiesce_controller.is_quiesced and not needs_recovery:
                 return {"status": "ok", "message": "Memory already resumed"}
 
             try:

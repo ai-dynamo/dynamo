@@ -196,6 +196,7 @@ class TrtllmLLMEngine(LLMEngine):
         self._no_inflight_requests = asyncio.Event()
         self._no_inflight_requests.set()
         self._reject_new_requests = False
+        self._resume_recovery_required = False
 
     @classmethod
     async def from_args(
@@ -624,6 +625,13 @@ class TrtllmLLMEngine(LLMEngine):
                 f"Timed out waiting for {inflight} in-flight request(s) to finish"
             ) from exc
 
+    @staticmethod
+    def _controller_needs_resume_recovery(
+        controller: TRTLLMEngineQuiesceController,
+    ) -> bool:
+        needs_recovery = getattr(controller, "needs_resume_recovery", False)
+        return needs_recovery if isinstance(needs_recovery, bool) else False
+
     async def release_memory_occupation(self, body: dict) -> dict:
         controller = self._quiesce_controller
         if controller is None:
@@ -634,6 +642,13 @@ class TrtllmLLMEngine(LLMEngine):
         async with self._quiesce_lock:
             if controller.is_quiesced:
                 return {"status": "ok", "message": "Memory already released"}
+            if self._resume_recovery_required or self._controller_needs_resume_recovery(
+                controller
+            ):
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
             try:
                 await self._set_reject_new_requests(True)
                 timeout_s = float(body.get("timeout_s", 30.0))
@@ -645,9 +660,11 @@ class TrtllmLLMEngine(LLMEngine):
 
             try:
                 await controller.quiesce(tags)
+                self._resume_recovery_required = False
                 return {"status": "ok", "message": "Memory released"}
             except Exception as exc:
                 logger.error("release_memory_occupation quiesce failed: %s", exc)
+                self._resume_recovery_required = True
                 return {"status": "error", "message": str(exc)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
@@ -658,15 +675,24 @@ class TrtllmLLMEngine(LLMEngine):
         body = body or {}
         tags = body.get("tags")
         async with self._quiesce_lock:
-            if not controller.is_quiesced:
+            needs_recovery = (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
+            )
+            if not controller.is_quiesced and not needs_recovery:
                 return {"status": "ok", "message": "Memory already resumed"}
             try:
-                await controller.resume(tags)
+                if controller.is_quiesced or self._controller_needs_resume_recovery(
+                    controller
+                ):
+                    await controller.resume(tags)
                 await self._set_reject_new_requests(False)
                 controller.mark_resumed()
+                self._resume_recovery_required = False
                 return {"status": "ok", "message": "Memory resumed"}
             except Exception as exc:
                 logger.error("resume_memory_occupation failed: %s", exc)
+                self._resume_recovery_required = True
                 return {"status": "error", "message": str(exc)}
 
     async def generate(
