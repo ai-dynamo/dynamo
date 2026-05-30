@@ -61,7 +61,7 @@ The Dynamo ecosystem includes these additional modular components, and will cont
 | **Scaling / Cloud** | Planner | Automatically tune performance in real time for prefill and decode given SLA constraints (TTFT and TPOT) |
 | | [Grove](https://github.com/ai-dynamo/grove) | Enables gang scheduling and topology awareness required for Kubernetes multi-node disaggregated serving |
 | | [Model Express](https://github.com/ai-dynamo/model-express) | Load model weights fast by caching and transferring them via NIXL to other GPUs. Will also be leveraged for fault tolerance |
-| **Perf** | [DynoSim](../benchmarks/dynosim.md) | Simulate Dynamo deployment choices with Mocker, workload-driven runs, sweeps, and AIC-backed timing models before validating on GPUs |
+| **Perf** | [DynoSim](../dynosim/README.md) | Simulate Dynamo deployment choices with Mocker, workload-driven runs, sweeps, and AIC-backed timing models before validating on GPUs |
 | | [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Provides calibrated performance models and configuration search inputs for rapid DGDR profiling. Formerly known as LLMPet |
 | | [AIPerf](https://github.com/ai-dynamo/aiperf) | Re-architected GenAI-Perf written in Python for maximum extensibility; supports distributed benchmarking |
 | | AITune | Given a model or pipeline, searches for best backend to deploy with (e.g., TensorRT, Torch.compile, etc.) (coming soon) |

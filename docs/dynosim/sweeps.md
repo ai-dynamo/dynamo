@@ -83,6 +83,6 @@ Common columns to inspect:
 
 ## Relationship To DynoSim Runs
 
-A [DynoSim run](dynosim-runs.md) answers "how does this one configuration perform?" A DynoSim sweep answers "which configuration should I try next?"
+A [DynoSim run](runs.md) answers "how does this one configuration perform?" A DynoSim sweep answers "which configuration should I try next?"
 
 For final validation, take the feasible candidates into a live Mocker deployment or a real-GPU AIPerf benchmark. DynoSim is designed to narrow the search space before cluster validation, not to replace it.

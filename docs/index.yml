@@ -245,15 +245,15 @@ navigation:
       - section: DynoSim Simulation
         contents:
           - page: DynoSim Overview
-            path: benchmarks/dynosim.md
+            path: dynosim/README.md
           - page: Live Simulation with Mocker
-            path: mocker/mocker.md
+            path: dynosim/mocker.md
           - page: DynoSim Runs
-            path: benchmarks/dynosim-runs.md
+            path: dynosim/runs.md
           - page: DynoSim Sweeps
-            path: benchmarks/dynosim-sweeps.md
+            path: dynosim/sweeps.md
           - page: Planner DynoSim Benchmarking
-            path: benchmarks/planner-dynosim-benchmarking.md
+            path: dynosim/planner-benchmarking.md
       - page: Writing Python Workers (lower-level)
         path: development/backend-guide.md
       - page: Writing Python Unified Backends
@@ -491,7 +491,7 @@ navigation:
         path: benchmarks/kv-router-ab-testing.md
       # -- DynoSim --
       - page: Live Simulation with Mocker
-        path: mocker/mocker.md
+        path: dynosim/mocker.md
       # -- Templates --
       - section: Templates
         path: templates/README.md

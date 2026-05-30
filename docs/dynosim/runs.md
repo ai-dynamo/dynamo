@@ -66,7 +66,7 @@ flowchart TD
     MES --> P
 ```
 
-See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [`docs/mocker/mocker.md`](../mocker/mocker.md) for engine-core details (scheduler, KV block manager).
+See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [Live Simulation with Mocker](mocker.md) for engine-core details (scheduler, KV block manager).
 
 ## Quick Start
 
@@ -556,7 +556,7 @@ Use offline DynoSim when:
 - you want deterministic CI coverage of simulation behavior
 - you do not need HTTP serving, frontend behavior, or network effects
 
-Use [Dynamo Benchmarking](benchmarking.md) when:
+Use [Dynamo Benchmarking](../benchmarks/benchmarking.md) when:
 
 - you want end-to-end benchmarking against a live endpoint
 - you need frontend, transport, or cluster-level behavior

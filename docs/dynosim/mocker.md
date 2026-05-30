@@ -204,7 +204,7 @@ Timing semantics:
 - concurrency mode ignores first-turn timestamps but still enforces inter-turn delays
 - in concurrency mode, TTFT is measured from actual dispatch under the in-flight cap
 
-For full usage, constraints, and benchmarking guidance, see [DynoSim Runs](../benchmarks/dynosim-runs.md).
+For full usage, constraints, and benchmarking guidance, see [DynoSim Runs](runs.md).
 
 DynoSim runs support aggregated `vllm` and `sglang` engine configs. Internally the simulator uses canonical
 `block_size`; for `sglang`, `sglang.page_size` is still accepted as a compatibility alias as long
@@ -375,7 +375,7 @@ kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
 
 ## Architecture
 
-The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the DynoSim run harness on top of multiple engine cores; see [DynoSim Runs](../benchmarks/dynosim-runs.md) for the component-level diagram and for offline internals under [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md).
+The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the DynoSim run harness on top of multiple engine cores; see [DynoSim Runs](runs.md) for the component-level diagram and for offline internals under [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md).
 
 ### Scheduler
 

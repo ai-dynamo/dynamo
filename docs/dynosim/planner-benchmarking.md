@@ -7,7 +7,7 @@ subtitle: Drive the planner in the simulation loop against a saved trace to eval
 
 This guide shows how to benchmark the Dynamo Planner against a recorded trace by running it inside DynoSim. Use it to compare `agg` vs `disagg` topologies, tune SLA targets, and study how deployment realities (engine startup time, worker counts) affect planner behavior — all without bringing up a live cluster.
 
-For the general mechanics of DynoSim runs (input format, arrival speedup, router modes, synthetic workloads), see [DynoSim Runs](dynosim-runs.md). This guide focuses on the `--planner-config` path.
+For the general mechanics of DynoSim runs (input format, arrival speedup, router modes, synthetic workloads), see [DynoSim Runs](runs.md). This guide focuses on the `--planner-config` path.
 
 ## 1. Setup
 
@@ -51,7 +51,7 @@ Passed as JSON via `--extra-engine-args` (agg) or `--prefill-engine-args` / `--d
 | `aic_tp_size` | Tensor-parallel size of each engine replica. |
 | `startup_time` | Simulated seconds between a planner scale-up decision and the new worker becoming active. Unset or `0` means workers activate instantly. |
 
-Other fields follow the standard mocker engine protocol (see [DynoSim Runs](dynosim-runs.md)).
+Other fields follow the standard mocker engine protocol (see [DynoSim Runs](runs.md)).
 
 ## 2. Example: Agg vs Disagg On The Mooncake Agentic Trace
 
