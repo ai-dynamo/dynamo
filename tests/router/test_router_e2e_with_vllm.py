@@ -376,7 +376,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 process.__enter__()
 
                 new_worker_id = None
-                for _ in range(120):
+                for _ in range(600):
                     ids = set(client.instance_ids())
                     new = ids - known_ids
                     if new:

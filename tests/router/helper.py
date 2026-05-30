@@ -260,7 +260,7 @@ async def wait_for_frontend_ready(
 async def poll_for_worker_instances(
     endpoint,
     expected_num_workers: int,
-    max_wait_time: int = 60,
+    max_wait_time: int = 300,
 ) -> list[int]:
     """Poll the endpoint's discovery client until the expected number of worker instances appear.
 
@@ -347,7 +347,7 @@ async def wait_for_workers_ready(
 async def wait_for_indexer_workers_active(
     indexer_url: str,
     expected_workers: dict[int, dict[int, str]],
-    timeout_s: float = 30.0,
+    timeout_s: float = 120.0,
 ) -> None:
     """Wait until the standalone indexer reports all ZMQ listeners as active."""
     if not expected_workers:

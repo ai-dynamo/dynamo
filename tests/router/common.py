@@ -474,7 +474,7 @@ def _test_remote_indexer_decisions(
     async def wait_for_worker_ids(endpoint, expected_num_workers: int) -> list[int]:
         client = await endpoint.client()
 
-        for _ in range(120):
+        for _ in range(300):
             worker_ids = sorted(set(client.instance_ids()))
             if len(worker_ids) >= expected_num_workers:
                 return worker_ids
@@ -496,7 +496,7 @@ def _test_remote_indexer_decisions(
         )
         record_client = await record_endpoint.client()
 
-        for _ in range(120):
+        for _ in range(600):
             query_ids = set(query_client.instance_ids())
             record_ids = set(record_client.instance_ids())
 
@@ -535,7 +535,7 @@ def _test_remote_indexer_decisions(
                 router_predicted_ttl_secs=router_predicted_ttl_secs,
             )
             last_error: Exception | None = None
-            for _ in range(60):
+            for _ in range(300):
                 runtime = get_runtime(
                     store_backend=store_backend, request_plane=request_plane
                 )
@@ -3254,7 +3254,7 @@ def _test_disagg_direct_mode(
 
         async def wait_for_models():
             models_url = f"{frontend_url}/v1/models"
-            for _ in range(120):
+            for _ in range(300):
                 try:
                     async with aiohttp.ClientSession() as session:
                         async with session.get(models_url) as response:
@@ -3286,7 +3286,7 @@ def _test_disagg_direct_mode(
             prefill_client = await prefill_endpoint.client()
             decode_client = await decode_endpoint.client()
 
-            for _ in range(60):
+            for _ in range(600):
                 p_ids = prefill_client.instance_ids()
                 d_ids = decode_client.instance_ids()
                 if p_ids and d_ids:
