@@ -374,7 +374,7 @@ pub struct GuidedDecodingOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub whitespace_pattern: Option<String>,
 
-    /// Guided decoding related (sglang only right now)
+    /// If specified, xgrammar structural tag constraint for guided decoding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structural_tag: Option<serde_json::Value>,
 }
@@ -782,6 +782,7 @@ mod tests {
         assert!(opts.grammar.is_none());
         assert_eq!(opts.backend, backend);
         assert!(opts.whitespace_pattern.is_none());
+        assert!(opts.structural_tag.is_none());
 
         // Only regex set
         let regex = Some(r"\d+".to_string());
@@ -838,6 +839,26 @@ mod tests {
         assert!(opts.choice.is_none());
         assert!(opts.grammar.is_none());
 
+        // Only structural_tag set
+        let structural_tag = Some(serde_json::json!({"type": "structural_tag"}));
+        let opts = GuidedDecodingOptions::validated(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            structural_tag.clone(),
+        );
+        assert!(opts.is_ok());
+        let opts = opts.unwrap();
+        assert_eq!(opts.structural_tag, structural_tag);
+        assert!(opts.json.is_none());
+        assert!(opts.regex.is_none());
+        assert!(opts.choice.is_none());
+        assert!(opts.grammar.is_none());
+        assert!(opts.whitespace_pattern.is_none());
+
         // Multiple fields set (should error)
         let opts = GuidedDecodingOptions::validated(
             Some(serde_json::json!({})),
@@ -893,6 +914,23 @@ mod tests {
         assert!(val.is_some());
         let val = val.unwrap();
         assert_eq!(val.regex, regex);
+
+        // Only structural_tag set returns Ok(Some)
+        let structural_tag = Some(serde_json::json!({"type": "structural_tag"}));
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            structural_tag.clone(),
+        );
+        assert!(opts.is_ok());
+        let val = opts.unwrap();
+        assert!(val.is_some());
+        let val = val.unwrap();
+        assert_eq!(val.structural_tag, structural_tag);
 
         // Multiple set returns Err
         let opts = GuidedDecodingOptions::from_optional(
