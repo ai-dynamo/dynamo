@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("dynamo._core", reason="dynamo Rust Python bindings are required")
 
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import DistributedRuntime  # noqa: E402
 
 pytestmark = [
     pytest.mark.pre_merge,

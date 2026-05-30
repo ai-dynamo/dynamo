@@ -29,7 +29,7 @@ pytest.importorskip(
 )
 pytest.importorskip("tensorrt_llm")
 
-from dynamo.trtllm.request_handlers.handler_base import (
+from dynamo.trtllm.request_handlers.handler_base import (  # noqa: E402
     HandlerBase,
     TRTLLMEngineQuiesceController,
 )

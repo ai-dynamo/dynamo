@@ -642,8 +642,9 @@ class TrtllmLLMEngine(LLMEngine):
         async with self._quiesce_lock:
             if controller.is_quiesced:
                 return {"status": "ok", "message": "Memory already released"}
-            if self._resume_recovery_required or self._controller_needs_resume_recovery(
-                controller
+            if (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
             ):
                 return {
                     "status": "error",
