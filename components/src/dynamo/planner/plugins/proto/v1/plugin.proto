@@ -51,9 +51,11 @@ message RegisterRequest {
   HoldPolicy hold_policy = 7;
 
   // Capability subscription: dot-paths into PipelineContext that this plugin
-  // actually consumes. Orchestrator fills only these fields (saves wire +
-  // serialization cost). Empty = "no PipelineContext fields needed";
-  // unset (length 0 with default) = "send full context" (backward compatible).
+  // actually consumes. When non-empty, the orchestrator MAY trim the
+  // context to those fields to save wire / serialisation cost — best-
+  // effort; it must never break the contract. Empty and unset are
+  // indistinguishable on the wire (proto3 ``repeated`` has no field
+  // presence) and both mean "send full context" (the safe default).
   repeated string needs = 8;
 
   // Protocol versioning: orchestrator keeps a supported range
