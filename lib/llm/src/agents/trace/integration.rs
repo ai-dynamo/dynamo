@@ -120,17 +120,17 @@ impl FinishReasonMetadataState {
             .entry((choice_index, tool_call_index))
             .or_default();
         let mut changed = false;
-        if let Some(id) = id {
-            if pending.id.as_deref() != Some(id) {
-                pending.id = Some(id.to_string());
-                changed = true;
-            }
+        if let Some(id) = id
+            && pending.id.as_deref() != Some(id)
+        {
+            pending.id = Some(id.to_string());
+            changed = true;
         }
-        if let Some(name) = name {
-            if pending.name.as_deref() != Some(name) {
-                pending.name = Some(name.to_string());
-                changed = true;
-            }
+        if let Some(name) = name
+            && pending.name.as_deref() != Some(name)
+        {
+            pending.name = Some(name.to_string());
+            changed = true;
         }
 
         if !changed {
