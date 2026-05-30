@@ -3694,6 +3694,22 @@ fahrenheit
     /// split across stream chunks. Otherwise the jail emits protocol bytes as
     /// normal content before the aggregate parser gets a chance to recover.
     #[tokio::test]
+    async fn test_partial_marker_buffer_flushes_at_stream_end() {
+        for suffix in ["c", "ca", "cal", "call"] {
+            let expected = format!("I will {suffix}");
+            let input_chunks = vec![test_utils::create_mock_response_chunk(expected.clone(), 0)];
+            let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+            let results: Vec<_> = jail
+                .apply_with_finish_reason(stream::iter(input_chunks))
+                .collect()
+                .await;
+
+            assert_eq!(test_utils::reconstruct_content(&results), expected);
+            assert!(tool_call_names(&results).is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn test_split_bare_recovery_markers_are_jailed() {
         let cases = [
             (

@@ -494,6 +494,17 @@ impl ChoiceJailState {
             } else {
                 Some(ChoiceEmission::Content(final_choice))
             }
+        } else if !self.partial_match_buffer.is_empty() {
+            let content = std::mem::take(&mut self.partial_match_buffer);
+            let choice = create_choice_stream(
+                self.index,
+                Some(Role::Assistant),
+                &content,
+                None,
+                self.stream_finish_reason,
+                None,
+            );
+            Some(ChoiceEmission::Content(choice))
         } else {
             None
         }
