@@ -59,6 +59,7 @@ vllm = [
     "soundfile>=0.13.1",
     "librosa>=0.10.0",
     "ray>=2.55.0",
+    "zstandard>=0.23.0,<1.0",
 ]
 
 sglang = [

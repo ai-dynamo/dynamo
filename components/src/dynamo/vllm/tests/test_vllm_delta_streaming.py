@@ -63,6 +63,7 @@ def _request_output(outputs, *, prompt_token_ids=None):
     return SimpleNamespace(
         outputs=outputs,
         prompt_token_ids=prompt_token_ids if prompt_token_ids is not None else [101],
+        prompt_logprobs=None,
         num_cached_tokens=0,
         kv_transfer_params=None,
     )
@@ -214,6 +215,82 @@ async def test_generate_tokens_reads_delta_aligned_logprobs_from_zero_offset():
     assert chunks[0]["token_ids"] == [7, 8]
     assert chunks[0]["log_probs"] == [-0.7, -0.8]
     assert [entry[0]["token_id"] for entry in chunks[0]["top_logprobs"]] == [7, 8]
+
+
+@pytest.mark.asyncio
+async def test_generate_tokens_uploads_metadata_on_final_chunk(tmp_path):
+    zstd = pytest.importorskip("zstandard")
+    msgspec = pytest.importorskip("msgspec")
+    from dynamo.common.metadata_upload import MetadataUploader
+
+    logprobs = [
+        {7: SimpleNamespace(logprob=-0.7, rank=1, decoded_token="a")},
+        {8: SimpleNamespace(logprob=-0.8, rank=1, decoded_token="b")},
+    ]
+    responses = [
+        _request_output(
+            [_output([7, 8], finish_reason="length", logprobs=logprobs)],
+            prompt_token_ids=[10],
+        )
+    ]
+    handler = _handler_with_responses(responses)
+    uploader = MetadataUploader(url=(tmp_path / "rollout-1").as_uri())
+
+    chunks = []
+    async for chunk in BaseWorkerHandler.generate_tokens(
+        handler,
+        prompt=None,
+        sampling_params=SamplingParams(),
+        request_id="req-1",
+        metadata_uploader=uploader,
+    ):
+        chunks.append(chunk)
+
+    uploaded_path = tmp_path / "rollout-1" / "choice_0.msgpack.zst"
+    payload = msgspec.msgpack.decode(
+        zstd.ZstdDecompressor().decompress(uploaded_path.read_bytes())
+    )
+
+    assert len(chunks) == 1
+    assert "log_probs" not in chunks[0]
+    assert "top_logprobs" not in chunks[0]
+    assert "engine_data" not in chunks[0]
+    assert payload["metadata"]["log_probs"] == [-0.7, -0.8]
+    assert payload["metadata"]["top_logprobs"][0][0]["token_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_generate_tokens_upload_failure_blocks_final_chunk(tmp_path):
+    from dynamo.common.metadata_upload import MetadataUploader
+
+    class FailingUploader(MetadataUploader):
+        async def upload_choice(self, choice):
+            raise RuntimeError("metadata upload failed")
+
+    responses = [
+        _request_output(
+            [
+                _output(
+                    [7],
+                    finish_reason="length",
+                    logprobs=[{7: SimpleNamespace(logprob=-0.7)}],
+                )
+            ]
+        )
+    ]
+    handler = _handler_with_responses(responses)
+
+    with pytest.raises(RuntimeError, match="metadata upload failed"):
+        async for _ in BaseWorkerHandler.generate_tokens(
+            handler,
+            prompt=None,
+            sampling_params=SamplingParams(),
+            request_id="req-1",
+            metadata_uploader=FailingUploader(
+                url=(tmp_path / "rollout-fail").as_uri(),
+            ),
+        ):
+            pass
 
 
 @pytest.mark.asyncio

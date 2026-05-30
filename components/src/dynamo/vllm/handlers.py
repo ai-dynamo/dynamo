@@ -35,6 +35,7 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.metadata_upload import ChoiceMetadata, MetadataUploader
 from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
@@ -451,6 +452,14 @@ def _is_token_in_request(request: Dict[str, Any]) -> bool:
         return True
 
     return False
+
+
+def _metadata_uploader_from_request(
+    config: Config, request: Dict[str, Any]
+) -> MetadataUploader | None:
+    if not getattr(config, "enable_rl", False):
+        return None
+    return MetadataUploader.from_backend_request(request)
 
 
 def _accumulate_engine_data(
@@ -2362,6 +2371,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        metadata_uploader: Optional[MetadataUploader] = None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -2387,6 +2397,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             total_output_tokens_by_index: dict[int, int] = {}
             routed_experts_by_output: dict[int, Dict[str, Any]] = {}
+            metadata_by_output: dict[int, ChoiceMetadata] | None = (
+                {} if metadata_uploader is not None else None
+            )
             async for res in gen:
                 # res is vllm's RequestOutput
 
@@ -2442,9 +2455,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     log_probs, top_logprobs = self._extract_logprobs(
                         output, 0, tokenizer=tokenizer
                     )
-                    if log_probs is not None:
+                    if metadata_by_output is None and log_probs is not None:
                         out["log_probs"] = log_probs
-                    if top_logprobs is not None:
+                    if metadata_by_output is None and top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
                     if finish_reason:
@@ -2461,7 +2474,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 out, _serialize_prompt_logprobs(res.prompt_logprobs)
                             )
                         routed_experts = routed_experts_by_output.get(output_idx)
-                        if routed_experts is not None:
+                        if routed_experts is not None and metadata_by_output is None:
                             disaggregated_params = dict(
                                 out.get("disaggregated_params") or {}
                             )
@@ -2478,6 +2491,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             ),
                             finish_reason=finish_reason,
                         )
+                    if metadata_by_output is not None:
+                        choice_metadata = metadata_by_output.setdefault(
+                            output_idx, ChoiceMetadata(choice_index=output_idx)
+                        )
+                        choice_metadata.add_logprobs(log_probs, top_logprobs)
+                        routed_experts = routed_experts_by_output.get(output_idx)
+                        if routed_experts is not None:
+                            choice_metadata.routed_experts = routed_experts
+                        if finish_reason:
+                            try:
+                                await metadata_uploader.upload_choice(choice_metadata)
+                            finally:
+                                choice_metadata.release_payload()
+                                metadata_by_output.pop(output_idx, None)
+                    if finish_reason:
+                        routed_experts_by_output.pop(output_idx, None)
                     if stop_reason:
                         out["stop_reason"] = stop_reason
                     yield out
@@ -2702,6 +2731,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        metadata_uploader = _metadata_uploader_from_request(self.config, request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -2747,6 +2777,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        metadata_uploader=metadata_uploader,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()

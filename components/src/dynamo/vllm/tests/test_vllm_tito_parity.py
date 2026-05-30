@@ -185,6 +185,35 @@ class TestFlattenLogprobs:
         ) == pytest.approx([-0.1, -0.2, -0.3])
 
 
+class TestMetadataUpload:
+    def test_metadata_upload_requires_enable_rl(self):
+        from dynamo.vllm.handlers import _metadata_uploader_from_request
+
+        request = {
+            "extra_args": {
+                "nvext": {"metadata_upload": {"url": "s3://bucket/rollout/req-1"}}
+            }
+        }
+
+        assert (
+            _metadata_uploader_from_request(SimpleNamespace(enable_rl=False), request)
+            is None
+        )
+        uploader = _metadata_uploader_from_request(
+            SimpleNamespace(enable_rl=True), request
+        )
+        assert uploader is not None
+        assert uploader.url == "s3://bucket/rollout/req-1"
+        assert uploader.payload_format == "msgpack"
+
+        raw_request_uploader = _metadata_uploader_from_request(
+            SimpleNamespace(enable_rl=True),
+            {"nvext": {"metadata_upload": {"url": "s3://bucket/rollout/raw"}}},
+        )
+        assert raw_request_uploader is not None
+        assert raw_request_uploader.url == "s3://bucket/rollout/raw"
+
+
 class TestEngineDataAccumulation:
     def test_prompt_token_ids_come_from_built_prompt_when_available(self):
         from dynamo.vllm.handlers import _prompt_token_ids_for_engine_data
