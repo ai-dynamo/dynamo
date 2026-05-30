@@ -4920,7 +4920,10 @@ mod tests {
     #[test]
     fn decode_base64_embedding_to_floats_round_trips_little_endian_f32() {
         use base64::Engine as _;
-        let floats: Vec<f32> = vec![0.0, 1.0, -1.0, 3.14, -42.5, f32::MIN, f32::MAX];
+        // Avoid 3.14 to side-step ``clippy::approx_constant`` -- the lint
+        // would force importing ``std::f32::consts::PI``, which isn't the
+        // point of the test.
+        let floats: Vec<f32> = vec![0.0, 1.0, -1.0, 2.5, -42.5, f32::MIN, f32::MAX];
         let mut bytes: Vec<u8> = Vec::with_capacity(floats.len() * 4);
         for f in &floats {
             bytes.extend_from_slice(&f.to_le_bytes());
