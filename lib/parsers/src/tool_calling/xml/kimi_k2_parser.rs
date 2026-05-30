@@ -55,7 +55,10 @@ pub fn detect_tool_call_start_kimi_k2(chunk: &str, config: &KimiK2ParserConfig) 
         return true;
     }
 
-    for start_token in &config.section_start_variants {
+    let mut start_tokens = config.section_start_variants.clone();
+    start_tokens.push(config.call_start.clone());
+
+    for start_token in &start_tokens {
         debug_assert!(
             start_token.is_ascii(),
             "Kimi K2 section tokens must be ASCII for safe byte slicing, got: {start_token:?}"

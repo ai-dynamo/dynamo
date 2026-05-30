@@ -34,12 +34,14 @@ pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bo
         return true;
     }
 
-    // Check for partial match at the end (streaming scenario)
-    let start_chars: Vec<char> = start_token.chars().collect();
-    for i in 1..start_chars.len() {
-        let partial: String = start_chars[..i].iter().collect();
-        if chunk.ends_with(&partial) {
-            return true;
+    // Check for partial match at the end (streaming scenario).
+    for token in [start_token, &config.invoke_start_prefix] {
+        let chars: Vec<char> = token.chars().collect();
+        for i in 1..chars.len() {
+            let partial: String = chars[..i].iter().collect();
+            if chunk.ends_with(&partial) {
+                return true;
+            }
         }
     }
 

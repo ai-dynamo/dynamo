@@ -292,12 +292,27 @@ impl ParserConfig {
         match self {
             ParserConfig::Json(config) => config.tool_call_start_tokens.clone(),
             ParserConfig::Harmony(config) => config.tool_call_start_tokens.clone(),
-            ParserConfig::Xml(config) => vec![config.tool_call_start_token.clone()],
+            ParserConfig::Xml(config) => {
+                let mut tokens = vec![config.tool_call_start_token.clone()];
+                if config.backoff_when_no_wrapper {
+                    tokens.push(config.function_start_token.clone());
+                }
+                tokens
+            }
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
-            ParserConfig::Dsml(config) => vec![config.block_start.clone()],
+            ParserConfig::Dsml(config) => {
+                vec![
+                    config.block_start.clone(),
+                    config.invoke_start_prefix.clone(),
+                ]
+            }
             ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
-            ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
+            ParserConfig::KimiK2(config) => {
+                let mut tokens = config.section_start_variants.clone();
+                tokens.push(config.call_start.clone());
+                tokens
+            }
             ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()],
         }
     }

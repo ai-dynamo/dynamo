@@ -84,9 +84,11 @@ pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool
     }
 
     // Check for partial match at the end of the chunk (for streaming).
-    for i in 1..start_token.len() {
-        if chunk.ends_with(&start_token[..i]) {
-            return true;
+    for token in [start_token, &config.function_start_token] {
+        for i in 1..token.len() {
+            if chunk.ends_with(&token[..i]) {
+                return true;
+            }
         }
     }
 
@@ -127,6 +129,13 @@ pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) ->
             let trim_offset = rest.len() - trimmed.len();
             cursor += trim_offset + end_token.len();
             continue;
+        }
+        if config.is_bare_function_mode(chunk)
+            && trimmed.starts_with(config.tool_call_end_token.as_str())
+        {
+            let trim_offset = rest.len() - trimmed.len();
+            cursor += trim_offset + config.tool_call_end_token.len();
+            break;
         }
         if !trimmed.starts_with(start_token.as_str()) {
             break;

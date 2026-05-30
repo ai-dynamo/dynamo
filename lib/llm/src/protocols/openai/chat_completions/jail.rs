@@ -7,7 +7,7 @@ use dynamo_protocols::types::{
     ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType, Role,
 };
 
-use dynamo_parsers::tool_calling::config::JsonParserConfig;
+use dynamo_parsers::tool_calling::config::{JsonParserConfig, ParserConfig};
 use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
@@ -1551,6 +1551,15 @@ impl JailedStreamBuilder {
             if let Some(config) = parser_map.get(parser_name.as_str()) {
                 // Add start tokens from the parser config
                 all_patterns.extend(config.parser_config.tool_call_start_tokens());
+                if let ParserConfig::Glm47(glm_config) = &config.parser_config
+                    && let Some(tools) = self.tool_definitions.as_ref()
+                {
+                    for tool in tools {
+                        if !tool.name.is_empty() {
+                            all_patterns.push(format!("{}{}", tool.name, glm_config.arg_key_start));
+                        }
+                    }
+                }
             }
         }
 

@@ -3662,6 +3662,141 @@ fahrenheit
         }
     }
 
+    fn tool_call_names(results: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> Vec<String> {
+        results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            .filter_map(|tc| {
+                tc.function
+                    .as_ref()
+                    .and_then(|function| function.name.clone())
+            })
+            .collect()
+    }
+
+    fn assert_content_omits_markers(
+        label: &str,
+        results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        markers: &[&str],
+    ) {
+        let content = test_utils::reconstruct_content(results);
+        for marker in markers {
+            assert!(
+                !content.contains(marker),
+                "{label}: marker {marker:?} leaked into content: {content:?}"
+            );
+        }
+    }
+
+    /// Bare-body recovery must also work when the recovery marker itself is
+    /// split across stream chunks. Otherwise the jail emits protocol bytes as
+    /// normal content before the aggregate parser gets a chance to recover.
+    #[tokio::test]
+    async fn test_split_bare_recovery_markers_are_jailed() {
+        let cases = [
+            (
+                "minimax_m2",
+                "MiniMax",
+                vec![
+                    "I will check that. <inv",
+                    "oke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n</invoke>\n</minimax:tool_call>",
+                ],
+                &["<invoke", "</minimax:tool_call>"][..],
+            ),
+            (
+                "deepseek_v4",
+                "DeepSeek V4",
+                vec![
+                    "I will check that. <｜DSML｜inv",
+                    "oke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+                ],
+                &["<｜DSML｜invoke", "</｜DSML｜tool_calls>"][..],
+            ),
+            (
+                "kimi_k2",
+                "Kimi K2",
+                vec![
+                    "I will check that. <|tool_call_beg",
+                    "in|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\":\"NYC\"}<|tool_call_end|><|tool_calls_section_end|>",
+                ],
+                &["<|tool_call_begin|>", "<|tool_calls_section_end|>"][..],
+            ),
+        ];
+
+        for (parser, label, chunks, markers) in cases {
+            let input_chunks = chunks
+                .into_iter()
+                .map(|chunk| test_utils::create_mock_response_chunk(chunk.to_string(), 0));
+            let jail = JailedStream::builder().tool_call_parser(parser).build();
+            let results: Vec<_> = jail
+                .apply_with_finish_reason(stream::iter(input_chunks))
+                .collect()
+                .await;
+
+            assert_eq!(
+                tool_call_names(&results),
+                vec!["get_weather".to_string()],
+                "{label}: expected recovered get_weather call"
+            );
+            assert_eq!(
+                test_utils::reconstruct_content(&results),
+                "I will check that. ",
+                "{label}: expected only prefix prose as content"
+            );
+            assert_content_omits_markers(label, &results, markers);
+        }
+    }
+
+    /// GLM-4.7's bare-call marker starts at `<arg_key>`, after the function
+    /// name. The stream jail therefore needs parser-aware tool-name patterns
+    /// so a split between the function name and `<arg_key>` does not leak the
+    /// function name as user-visible content.
+    #[tokio::test]
+    async fn test_glm47_split_bare_call_jails_function_name_suffix() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+
+        let tool_defs = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+            })),
+            strict: None,
+        }];
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk("I will check that. get_weat".to_string(), 0),
+            test_utils::create_mock_response_chunk(
+                "her<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>".to_string(),
+                0,
+            ),
+        ];
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("glm47")
+            .tool_definitions(tool_defs)
+            .build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(tool_call_names(&results), vec!["get_weather".to_string()]);
+        assert_eq!(
+            test_utils::reconstruct_content(&results),
+            "I will check that. "
+        );
+        assert_content_omits_markers(
+            "GLM-4.7",
+            &results,
+            &["get_weather<arg_key>", "<arg_value>", "</tool_call>"],
+        );
+    }
+
     /// tool_choice=required with the alternate `arguments` key (SGLang's
     /// JsonArrayParser and some vLLM paths emit this variant).  The
     /// base_json_parser accepts either `parameters` or `arguments`.
