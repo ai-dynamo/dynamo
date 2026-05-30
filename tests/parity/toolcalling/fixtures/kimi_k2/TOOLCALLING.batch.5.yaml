@@ -103,11 +103,20 @@ cases:
           arguments:
             location: Boston
         normal_text: ''
-      vllm: &id007
+      vllm:
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
-        reason: vLLM and SGLang preserve the bare Kimi call before the first <|tool_calls_section_begin|> as content; Dynamo recovers it as the first structured call before parsing the wrapped section.
-      sglang: *id007
+        reason: vLLM preserves the bare Kimi call before the first <|tool_calls_section_begin|> as content; Dynamo recovers it as the first structured call before parsing the wrapped section.
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
+        reason: SGLang parses the bare Kimi call as a structured call and also preserves the orphan section as normal_text; Dynamo recovers both calls and strips the orphan section markers.

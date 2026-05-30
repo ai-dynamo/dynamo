@@ -213,7 +213,7 @@ cases:
           arguments:
             location: Boston
         normal_text: ''
-      vllm: &id003
+      vllm:
         calls:
         - name: get_weather
           arguments:
@@ -223,5 +223,15 @@ cases:
           <parameter name="location">NYC</parameter>
           </invoke>
           </minimax:tool_call>
-        reason: vLLM and SGLang preserve the bare MiniMax invoke before the first <minimax:tool_call> as content; Dynamo recovers it as the first structured call before parsing the wrapped call.
-      sglang: *id003
+        reason: vLLM preserves the bare MiniMax invoke before the first <minimax:tool_call> as content; Dynamo recovers it as the first structured call before parsing the wrapped call.
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          <invoke name="get_weather">
+          <parameter name="location">NYC</parameter>
+          </invoke>
+          </minimax:tool_call>
+        reason: SGLang preserves the bare MiniMax invoke before the first <minimax:tool_call> as content, including the trailing newline; Dynamo recovers it as the first structured call before parsing the wrapped call.
