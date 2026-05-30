@@ -923,8 +923,11 @@ async fn embeddings(
     // HTTP boundary so the public response shape matches their
     // ``encoding_format`` choice. See the PR description / DIS-2154 for
     // measured impact.
+    // Borrow rather than move ``encoding_format`` out of ``request`` so the
+    // request value remains intact for the later ``engine.generate(request)``
+    // call below.
     let client_wants_float = !matches!(
-        request.inner.encoding_format,
+        request.inner.encoding_format.as_ref(),
         Some(dynamo_protocols::types::EncodingFormat::Base64)
     );
 
