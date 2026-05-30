@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Qwen3-32B BF16 disagg, 1 prefill + 1 decode, cross-node over AWS EFA.
-# Purpose: measure NIXL KV-transfer bandwidth over EFA libfabric backend.
-# Topology: TP=8 prefill on node A, TP=8 decode on node B (pod anti-affinity).
+# Topology: TP=4 prefill on node A, TP=4 decode on node B (pod anti-affinity). TP=4 is the cross-CSP family standard.
 # Each worker requests all 32 EFA NICs on its p5.48xlarge host (3.2 Tb/s aggregate).
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -21,10 +20,6 @@ spec:
           value: /shared-models
       extraPodSpec:
         mainContainer:
-          # No command override — the -efa-amd64 image has a built-in entrypoint
-          # for the frontend role. Overriding it with `python -m dynamo.frontend`
-          # causes the underlying Rust binary to parse `-m dynamo.frontend` as
-          # CLI args and crash with "Unknown arguments specified".
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
           workingDir: /workspace
       replicas: 1
@@ -34,9 +29,7 @@ spec:
       subComponentType: null
       volumeMounts:
       # Frontend needs read access to the model cache to register the model
-      # card (tokenizer config, max-context, chat template). Without this mount
-      # the Dynamo runtime tries to mkdir HF_HOME and aborts model registration
-      # with "Failed to create cache directory: Permission denied".
+      # card (tokenizer config, max-context, chat template).
       - name: shared-model-cache
         mountPoint: /shared-models
 
