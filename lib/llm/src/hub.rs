@@ -25,9 +25,13 @@ fn get_cached_model_path(model_name: &str, ignore_weights: bool) -> Option<PathB
     // Check for required config file
     let config_path = repo.get("config.json")?;
 
-    // Check for tokenizer files (at least one must exist)
+    // Check for tokenizer files (at least one must exist). Only count
+    // artifacts that ``ModelDeploymentCard::TokenizerKind::from_disk`` can
+    // actually load -- ``tokenizer_config.json`` is metadata describing the
+    // tokenizer and cannot be used on its own, so a snapshot with only
+    // ``config.json`` + ``tokenizer_config.json`` would fall through to a
+    // download even though the cache appears "populated".
     let has_tokenizer = repo.get("tokenizer.json").is_some()
-        || repo.get("tokenizer_config.json").is_some()
         || repo.get("tiktoken.model").is_some()
         || has_tiktoken_file(config_path.parent()?);
 
@@ -408,6 +412,35 @@ mod tests {
         fs::write(snapshot.join("model-00002-of-00002.safetensors"), "").unwrap();
         let complete = get_cached_model_path(model, false);
         assert_eq!(complete.as_deref(), Some(snapshot.as_path()));
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn test_cached_path_rejects_tokenizer_config_without_real_tokenizer() {
+        // A snapshot with only ``config.json`` and ``tokenizer_config.json``
+        // (no ``tokenizer.json`` / ``tiktoken.model`` / ``*.tiktoken``) cannot
+        // actually load a tokenizer at runtime via
+        // ``TokenizerKind::from_disk``. The cache-hit probe must reject this
+        // partial state in BOTH modes so ``from_hf`` falls through to a
+        // download that populates the real tokenizer artifact.
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/tokenizer-config-only";
+        build_hf_cache(
+            temp.path(),
+            model,
+            &["config.json", "tokenizer_config.json"],
+        );
+
+        let _guard = EnvGuard::with_hub_cache(temp.path());
+
+        assert!(
+            get_cached_model_path(model, true).is_none(),
+            "tokenizer_config.json alone must NOT satisfy ignore_weights=true",
+        );
+        assert!(
+            get_cached_model_path(model, false).is_none(),
+            "tokenizer_config.json alone must NOT satisfy ignore_weights=false",
+        );
     }
 
     #[serial_test::serial]
