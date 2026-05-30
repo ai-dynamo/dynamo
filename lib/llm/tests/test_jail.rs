@@ -3707,6 +3707,32 @@ fahrenheit
             assert_eq!(test_utils::reconstruct_content(&results), expected);
             assert!(tool_call_names(&results).is_empty());
         }
+
+        let expected = "I will call";
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(expected.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+        let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(test_utils::reconstruct_content(&results), expected);
+        let finish_chunks: Vec<_> = results
+            .iter()
+            .filter_map(|result| result.data.as_ref())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter(|choice| choice.finish_reason.is_some())
+            .collect();
+        assert_eq!(finish_chunks.len(), 1);
+        let content = finish_chunks[0]
+            .delta
+            .content
+            .as_ref()
+            .expect("partial marker buffer should flush with the final finish chunk");
+        assert_eq!(test_utils::extract_text(content), "call");
     }
 
     #[tokio::test]

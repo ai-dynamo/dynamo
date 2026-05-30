@@ -696,7 +696,11 @@ impl JailedStream {
                             if choice.finish_reason.is_some() {
                                 choice_state.stream_finish_reason = choice.finish_reason;
                             }
-                            let was_ever_jailed = !choice_state.accumulated_content.is_empty() || choice_state.is_jailed;
+                            let has_pending_buffered_output =
+                                !choice_state.partial_match_buffer.is_empty();
+                            let was_ever_jailed = !choice_state.accumulated_content.is_empty()
+                                || choice_state.is_jailed
+                                || has_pending_buffered_output;
 
                             // Reasoning-only chunks must pass through even when jailed; only
                             // `content` is subject to accumulation.
