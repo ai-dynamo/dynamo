@@ -252,7 +252,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
 @pytest.mark.profiled_vram_gib(12.0)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
+@pytest.mark.timeout(270)  # 3x ~89s (sglang gpu_1 log)
 def test_sglang_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
@@ -399,7 +399,7 @@ def test_router_decisions_sglang_disagg(
     ids=["nats_core"],
     indirect=["durable_kv_events", "request_plane"],
 )
-@pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
+@pytest.mark.timeout(320)  # 3x ~106s (sglang gpu_1 log)
 def test_sglang_indexers_sync(
     request,
     runtime_services_dynamic_ports,
