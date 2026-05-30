@@ -387,6 +387,15 @@ fn recover_bare_glm47_calls(
         calls.push(parse_tool_call_block(&wrapped, config, tools)?);
         cursor = call_end;
 
+        if is_glm47_close_marker_spam(&text[cursor..], config) {
+            warn!(
+                why = "orphan_close_marker_spam",
+                dropped_block = %truncate_for_log(&text[cursor..]),
+                "GLM-4.7 parser dropping orphan close-marker spam after recovered bare call"
+            );
+            break;
+        }
+
         if first_orphan_glm47_marker_index(&text[cursor..], config).is_none() {
             break;
         }
@@ -396,6 +405,16 @@ fn recover_bare_glm47_calls(
         return Ok(None);
     }
     Ok(Some((prefix, calls)))
+}
+
+fn is_glm47_close_marker_spam(text: &str, config: &Glm47ParserConfig) -> bool {
+    let mut rest = text.trim_start();
+    let mut saw_close = false;
+    while let Some(after_close) = rest.strip_prefix(config.tool_call_end.as_str()) {
+        saw_close = true;
+        rest = after_close.trim_start();
+    }
+    saw_close && rest.is_empty()
 }
 
 /// Decode XML character entities in a string.
