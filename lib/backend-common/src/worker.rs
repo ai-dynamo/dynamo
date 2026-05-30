@@ -928,6 +928,16 @@ fn control_error_response(message: impl Into<String>) -> serde_json::Value {
     serde_json::json!({"status": "error", "message": message.into()})
 }
 
+fn control_request_body_error(body: &serde_json::Value) -> Option<serde_json::Value> {
+    if body.is_object() {
+        None
+    } else {
+        Some(control_error_response(
+            "engine control request body must be a JSON object",
+        ))
+    }
+}
+
 fn engine_control_callback(
     control_name: String,
     engine: Arc<dyn LLMEngine>,
@@ -958,6 +968,10 @@ fn wrap_engine_control_callback(
             match policy {
                 EngineControlPolicy::Direct => callback(body).await,
                 EngineControlPolicy::UnregisterBefore => {
+                    if let Some(response) = control_request_body_error(&body) {
+                        return Ok(response);
+                    }
+
                     if let Err(e) = endpoint.unregister_endpoint_instance().await {
                         return Ok(control_error_response(format!(
                             "failed to unregister endpoint before /engine/{control_name}: {e}"
@@ -1268,6 +1282,26 @@ mod tests {
             engine_control_policy("resume_memory_occupation"),
             EngineControlPolicy::RegisterAfter
         );
+    }
+
+    #[test]
+    fn control_request_body_validation_requires_json_object() {
+        assert!(control_request_body_error(&serde_json::json!({})).is_none());
+        assert!(control_request_body_error(&serde_json::json!({"tags": ["kv_cache"]})).is_none());
+
+        for body in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("bad"),
+            serde_json::json!(["kv_cache"]),
+        ] {
+            let response = control_request_body_error(&body).unwrap();
+            assert!(control_response_is_error(&response));
+            assert_eq!(
+                response.get("message").and_then(|value| value.as_str()),
+                Some("engine control request body must be a JSON object")
+            );
+        }
     }
 
     #[test]
