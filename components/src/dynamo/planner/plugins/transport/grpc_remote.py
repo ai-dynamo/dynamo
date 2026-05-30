@@ -29,6 +29,8 @@ class GrpcTransport(_GrpcTransportBase):
         timeout_seconds: float = 5.0,
         *,
         allow_insecure: bool = False,
+        keepalive_time_ms: int = 30_000,
+        max_message_size_bytes: int = 10 * 1024 * 1024,
     ) -> None:
         if not endpoint.startswith("grpc://"):
             raise ValueError(
@@ -50,10 +52,22 @@ class GrpcTransport(_GrpcTransportBase):
             endpoint,
         )
         self._target = target
-        super().__init__(plugin_id, endpoint, timeout_seconds)
+        super().__init__(
+            plugin_id,
+            endpoint,
+            timeout_seconds,
+            keepalive_time_ms=keepalive_time_ms,
+            max_message_size_bytes=max_message_size_bytes,
+        )
 
     def _build_channel(self) -> grpc.aio.Channel:
-        return grpc.aio.insecure_channel(self._target, options=grpc_channel_options())
+        return grpc.aio.insecure_channel(
+            self._target,
+            options=grpc_channel_options(
+                keepalive_time_ms=self.keepalive_time_ms,
+                max_message_size_bytes=self.max_message_size_bytes,
+            ),
+        )
 
 
 __all__ = ["GrpcTransport"]

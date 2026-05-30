@@ -13,11 +13,14 @@ by ``allow_insecure_grpc``) subclasses this.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import grpc
 from google.protobuf.message import Message as ProtoMessage
 from pydantic import BaseModel
+
+log = logging.getLogger(__name__)
 
 from dynamo.planner.plugins._proto_bridge import (
     proto_to_pydantic,
@@ -33,21 +36,31 @@ from dynamo.planner.plugins.transport.errors import (
 )
 from dynamo.planner.plugins.transport._method_dispatch import StubDispatcher
 
-# Default channel options — applied to all gRPC plugin channels.
-# Centralized so individual plugins can't override (avoids per-plugin tuning sprawl).
-_GRPC_CHANNEL_OPTIONS: list[tuple[str, int]] = [
-    ("grpc.keepalive_time_ms", 30_000),
-    ("grpc.keepalive_timeout_ms", 10_000),
-    ("grpc.keepalive_permit_without_calls", 1),
-    ("grpc.http2.max_pings_without_data", 0),
-    ("grpc.max_send_message_length", 10 * 1024 * 1024),  # 10 MB
-    ("grpc.max_receive_message_length", 10 * 1024 * 1024),
-]
+_DEFAULT_KEEPALIVE_TIME_MS = 30_000
+_DEFAULT_MAX_MESSAGE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
-def grpc_channel_options() -> list[tuple[str, int]]:
-    """Return a copy so callers can extend without mutating the module-level list."""
-    return list(_GRPC_CHANNEL_OPTIONS)
+def grpc_channel_options(
+    *,
+    keepalive_time_ms: int = _DEFAULT_KEEPALIVE_TIME_MS,
+    max_message_size_bytes: int = _DEFAULT_MAX_MESSAGE_SIZE_BYTES,
+) -> list[tuple[str, int]]:
+    """Build the per-channel gRPC option list for a plugin transport.
+
+    Centralised so individual plugins can't quietly override the
+    common options (keepalive timing, max ping behaviour), but the
+    operator-tunable knobs (``keepalive_time_ms``,
+    ``max_message_size_bytes``) are honoured per the user's
+    ``TransportConfig``.
+    """
+    return [
+        ("grpc.keepalive_time_ms", keepalive_time_ms),
+        ("grpc.keepalive_timeout_ms", 10_000),
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.http2.max_pings_without_data", 0),
+        ("grpc.max_send_message_length", max_message_size_bytes),
+        ("grpc.max_receive_message_length", max_message_size_bytes),
+    ]
 
 
 class _GrpcTransportBase(PluginTransport):
@@ -60,7 +73,15 @@ class _GrpcTransportBase(PluginTransport):
       ``grpc.aio.Channel`` (insecure UDS / insecure TCP / secure mTLS TCP)
     """
 
-    def __init__(self, plugin_id: str, endpoint: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        plugin_id: str,
+        endpoint: str,
+        timeout_seconds: float,
+        *,
+        keepalive_time_ms: int = _DEFAULT_KEEPALIVE_TIME_MS,
+        max_message_size_bytes: int = _DEFAULT_MAX_MESSAGE_SIZE_BYTES,
+    ) -> None:
         if timeout_seconds <= 0:
             raise ValueError(
                 f"{type(self).__name__}(plugin_id={plugin_id!r}): "
@@ -69,6 +90,8 @@ class _GrpcTransportBase(PluginTransport):
         self.plugin_id = plugin_id
         self.endpoint = endpoint
         self.timeout_seconds = timeout_seconds
+        self.keepalive_time_ms = keepalive_time_ms
+        self.max_message_size_bytes = max_message_size_bytes
         self._channel: grpc.aio.Channel | None = None
         self._dispatcher: StubDispatcher | None = None
         self._closed = False
@@ -125,7 +148,21 @@ class _GrpcTransportBase(PluginTransport):
         # at gRPC serialisation — found while writing the first real
         # external-plugin e2e test.
         request_was_pyd = isinstance(request, BaseModel)
-        wire_request: Any = pydantic_to_proto(request) if request_was_pyd else request
+        try:
+            wire_request: Any = (
+                pydantic_to_proto(request) if request_was_pyd else request
+            )
+        except KeyError as e:
+            # Unmapped Pydantic request type — surface as a typed
+            # transport error so callers see the documented contract
+            # (PluginCallError hierarchy) rather than a raw KeyError.
+            raise PluginSerializationError(
+                f"plugin {self.plugin_id!r} method {method!r}: unmapped "
+                f"Pydantic request class {type(request).__name__} ({e})",
+                plugin_id=self.plugin_id,
+                method=method,
+                cause=e,
+            ) from e
         try:
             wire_response = await asyncio.wait_for(
                 rpc(wire_request), self.timeout_seconds
@@ -211,9 +248,17 @@ class _GrpcTransportBase(PluginTransport):
         if self._channel is not None:
             try:
                 await self._channel.close()
-            except Exception:
-                # close should never raise to caller
-                pass
+            except Exception as exc:  # noqa: BLE001 — close must be idempotent
+                # ``close`` must not raise to caller (it's the planner
+                # shutdown path; one buggy plugin must not stall the
+                # remaining cleanup). Surface the failure via the
+                # logger so it isn't silently lost.
+                log.warning(
+                    "plugin %r transport close raised %s: %s",
+                    self.plugin_id,
+                    type(exc).__name__,
+                    exc,
+                )
         self._channel = None
         self._dispatcher = None
 

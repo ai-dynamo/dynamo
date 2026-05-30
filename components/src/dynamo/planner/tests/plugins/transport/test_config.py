@@ -105,6 +105,37 @@ def test_factory_propagates_request_timeout():
     assert t.timeout_seconds == 12.5
 
 
+def test_factory_propagates_grpc_channel_knobs():
+    """``TransportConfig.keepalive_time_ms`` and
+    ``TransportConfig.max_message_size_bytes`` must be plumbed through
+    to the ``GrpcTransport`` so the runtime channel honours operator-
+    supplied values. Previously these were advertised on the config
+    surface but silently ignored at the factory boundary."""
+    cfg = TransportConfig(
+        allow_insecure_grpc=True,
+        keepalive_time_ms=12_345,
+        max_message_size_bytes=42 * 1024 * 1024,
+    )
+    t = make_transport_for_endpoint("p3", "grpc://host:9090", cfg)
+    assert isinstance(t, GrpcTransport)
+    assert t.keepalive_time_ms == 12_345
+    assert t.max_message_size_bytes == 42 * 1024 * 1024
+
+
+def test_grpc_channel_options_honours_kwargs():
+    """The channel-options builder must echo its kwargs into the
+    ``grpc.keepalive_time_ms`` / ``grpc.max_*_message_length`` entries
+    so the GrpcTransport channel uses the right values."""
+    from dynamo.planner.plugins.transport._grpc_base import grpc_channel_options
+
+    opts = dict(
+        grpc_channel_options(keepalive_time_ms=7_777, max_message_size_bytes=4096)
+    )
+    assert opts["grpc.keepalive_time_ms"] == 7_777
+    assert opts["grpc.max_send_message_length"] == 4096
+    assert opts["grpc.max_receive_message_length"] == 4096
+
+
 # ----- Clock factory + production safety -----
 
 

@@ -122,6 +122,8 @@ def make_transport_for_endpoint(
             endpoint,
             timeout_seconds=timeout,
             allow_insecure=config.allow_insecure_grpc,
+            keepalive_time_ms=config.keepalive_time_ms,
+            max_message_size_bytes=config.max_message_size_bytes,
         )
 
     raise ValueError(
