@@ -23,7 +23,7 @@ use super::super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 pub(crate) const TOOL_CALL_START: &str = "<|tool_call>";
 pub(crate) const TOOL_CALL_END: &str = "<tool_call|>";
 pub(crate) const STRING_DELIM: &str = "<|\"|>";
-const CALL_PREFIX: &str = "call:";
+pub(crate) const CALL_PREFIX: &str = "call:";
 
 static TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
@@ -150,6 +150,27 @@ fn parse_recoverable_call_at(
     None
 }
 
+fn is_call_prefix_boundary(input: &str, idx: usize) -> bool {
+    idx == 0
+        || input[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')))
+}
+
+fn find_call_prefix_at_boundary(input: &str, from: usize) -> Option<usize> {
+    let mut cursor = from;
+    while cursor < input.len() {
+        let rel = input[cursor..].find(CALL_PREFIX)?;
+        let idx = cursor + rel;
+        if is_call_prefix_boundary(input, idx) {
+            return Some(idx);
+        }
+        cursor = idx + CALL_PREFIX.len();
+    }
+    None
+}
+
 /// Detect whether `chunk` contains the start of a Gemma 4 tool call, including
 /// partial-prefix matches at the chunk boundary so streaming pipelines can hold
 /// off emitting bytes that may belong to a tool-call marker.
@@ -157,16 +178,25 @@ pub fn detect_tool_call_start_gemma4(chunk: &str) -> bool {
     if chunk.contains(TOOL_CALL_START) {
         return true;
     }
-    if chunk.contains(CALL_PREFIX)
+    if find_call_prefix_at_boundary(chunk, 0).is_some()
         && (chunk.contains(TOOL_CALL_END) || chunk.contains(STRING_DELIM))
     {
         return true;
     }
-    for i in 1..TOOL_CALL_START.len() {
-        if !TOOL_CALL_START.is_char_boundary(i) {
-            continue;
-        }
-        if chunk.ends_with(&TOOL_CALL_START[..i]) {
+    for token in [TOOL_CALL_START, CALL_PREFIX] {
+        for i in 1..token.len() {
+            if !token.is_char_boundary(i) {
+                continue;
+            }
+            if !chunk.ends_with(&token[..i]) {
+                continue;
+            }
+            if token == CALL_PREFIX {
+                let partial_start = chunk.len() - i;
+                if !is_call_prefix_boundary(chunk, partial_start) {
+                    continue;
+                }
+            }
             return true;
         }
     }
@@ -179,7 +209,112 @@ pub fn detect_tool_call_start_gemma4(chunk: &str) -> bool {
 /// `<tool_call|>` literal embedded inside a `<|"|>` string value does not
 /// false-trigger a "section complete" signal here — matches upstream.
 pub fn find_tool_call_end_position_gemma4(chunk: &str) -> Option<usize> {
-    tool_call_regex().find_iter(chunk).last().map(|m| m.end())
+    let mut cursor = 0usize;
+    let mut last_end = None;
+
+    while cursor < chunk.len() {
+        let next_start = chunk[cursor..]
+            .find(TOOL_CALL_START)
+            .map(|rel| (cursor + rel, false, TOOL_CALL_START.len()));
+        let next_bare =
+            find_call_prefix_at_boundary(chunk, cursor).map(|idx| (idx, true, CALL_PREFIX.len()));
+        let Some((rel_start, allow_missing_start, marker_len)) = [next_start, next_bare]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(idx, _, _)| *idx)
+        else {
+            break;
+        };
+
+        if let Some((_, _, consumed)) =
+            parse_recoverable_call_at(&chunk[rel_start..], allow_missing_start, false)
+        {
+            let mut end = rel_start + consumed;
+            while chunk[end..].starts_with(TOOL_CALL_END) {
+                end += TOOL_CALL_END.len();
+            }
+            last_end = Some(end);
+            cursor = end;
+        } else {
+            cursor = rel_start + marker_len;
+        }
+    }
+
+    last_end
+}
+
+fn push_recovered_call(
+    calls: &mut Vec<ToolCallResponse>,
+    first_tool_start: &mut Option<usize>,
+    absolute_start: usize,
+    recovered: (&str, &str, usize),
+    tools: Option<&[ToolDefinition]>,
+    reason: &'static str,
+) -> anyhow::Result<()> {
+    if first_tool_start.is_none_or(|idx| absolute_start < idx) {
+        *first_tool_start = Some(absolute_start);
+    }
+    tracing::warn!(
+        why = reason,
+        recovered_calls = 1,
+        recovered_bytes = recovered.2,
+        "gemma4 recovery: recovered complete call body from damaged wrapper"
+    );
+    calls.push(parse_gemma_call_parts(recovered.0, recovered.1, tools)?);
+    Ok(())
+}
+
+fn recover_calls_in_span(
+    span: &str,
+    span_offset: usize,
+    allow_missing_end: bool,
+    tools: Option<&[ToolDefinition]>,
+    calls: &mut Vec<ToolCallResponse>,
+    first_tool_start: &mut Option<usize>,
+) -> anyhow::Result<()> {
+    let mut cursor = 0usize;
+
+    while cursor < span.len() {
+        let next_start = span[cursor..]
+            .find(TOOL_CALL_START)
+            .map(|rel| (cursor + rel, false, TOOL_CALL_START.len()));
+        let next_bare =
+            find_call_prefix_at_boundary(span, cursor).map(|idx| (idx, true, CALL_PREFIX.len()));
+        let Some((rel_start, allow_missing_start, marker_len)) = [next_start, next_bare]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(idx, _, _)| *idx)
+        else {
+            break;
+        };
+
+        let parsed = parse_recoverable_call_at(
+            &span[rel_start..],
+            allow_missing_start,
+            allow_missing_end && !allow_missing_start,
+        );
+
+        if let Some(recovered) = parsed {
+            let reason = if allow_missing_start {
+                "missing_start_recovery"
+            } else {
+                "missing_end_recovery"
+            };
+            push_recovered_call(
+                calls,
+                first_tool_start,
+                span_offset + rel_start,
+                recovered,
+                tools,
+                reason,
+            )?;
+            cursor = rel_start + recovered.2;
+        } else {
+            cursor = rel_start + marker_len;
+        }
+    }
+
+    Ok(())
 }
 
 /// Parse a Gemma 4 model response into structured tool calls + leftover text.
@@ -207,12 +342,20 @@ pub fn try_tool_call_parse_gemma4(
     let regex = tool_call_regex();
     let mut calls = Vec::new();
     let mut first_tool_start = None;
-    let mut last_complete_end = 0usize;
+    let mut cursor = 0usize;
 
     for caps in regex.captures_iter(message) {
         if let Some(m) = caps.get(0) {
+            recover_calls_in_span(
+                &message[cursor..m.start()],
+                cursor,
+                false,
+                tools,
+                &mut calls,
+                &mut first_tool_start,
+            )?;
             first_tool_start.get_or_insert(m.start());
-            last_complete_end = m.end();
+            cursor = m.end();
         }
         let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
         if name.is_empty() {
@@ -223,31 +366,14 @@ pub fn try_tool_call_parse_gemma4(
         calls.push(parse_gemma_call_parts(name, args_raw, tools)?);
     }
 
-    if let Some(rel_start) = message[last_complete_end..].find(TOOL_CALL_START) {
-        let abs_start = last_complete_end + rel_start;
-        if let Some(recovered) = parse_recoverable_call_at(&message[abs_start..], false, true) {
-            first_tool_start.get_or_insert(abs_start);
-            tracing::warn!(
-                why = "missing_end_recovery",
-                recovered_calls = 1,
-                recovered_bytes = recovered.2,
-                "gemma4 recovery: recovered complete call body without trailing <tool_call|>"
-            );
-            calls.push(parse_gemma_call_parts(recovered.0, recovered.1, tools)?);
-        }
-    } else if let Some(rel_call) = message[last_complete_end..].find(CALL_PREFIX) {
-        let abs_start = last_complete_end + rel_call;
-        if let Some(recovered) = parse_recoverable_call_at(&message[abs_start..], true, false) {
-            first_tool_start.get_or_insert(abs_start);
-            tracing::warn!(
-                why = "missing_start_recovery",
-                recovered_calls = 1,
-                recovered_bytes = recovered.2,
-                "gemma4 recovery: recovered complete call body without leading <|tool_call>"
-            );
-            calls.push(parse_gemma_call_parts(recovered.0, recovered.1, tools)?);
-        }
-    }
+    recover_calls_in_span(
+        &message[cursor..],
+        cursor,
+        true,
+        tools,
+        &mut calls,
+        &mut first_tool_start,
+    )?;
 
     // No-leak contract for `normal_text`:
     //   - Success path (≥1 call extracted): prefix BEFORE the first

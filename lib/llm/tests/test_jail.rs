@@ -3723,6 +3723,15 @@ fahrenheit
                 ],
                 &["<|tool_call_begin|>", "<|tool_calls_section_end|>"][..],
             ),
+            (
+                "gemma4",
+                "Gemma 4",
+                vec![
+                    "I will check that. ca",
+                    "ll:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>",
+                ],
+                &["call:get_weather", "<tool_call|>"][..],
+            ),
         ];
 
         for (parser, label, chunks, markers) in cases {
