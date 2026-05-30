@@ -187,7 +187,11 @@ async def test_chat_completion_http_error(http_server, msg_to_code: tuple[str, i
         async with session.post(url, json=data) as response:
             assert response.status == msg_to_code[1]
             error_json = await response.json()
+            # Error responses are sanitized: the client receives a static
+            # message and never the raw backend error text. The underlying
+            # detail is logged server-side instead.
+            assert "internal server error" in str(error_json).lower()
             if msg_to_code[0] == MSG_CONTAINS_ERROR:
-                assert MSG_CONTAINS_ERROR in str(error_json)
+                assert MSG_CONTAINS_ERROR not in str(error_json)
             elif msg_to_code[0] == MSG_CONTAINS_INTERNAL_ERROR:
-                assert "simulated internal error" in str(error_json).lower()
+                assert "simulated internal error" not in str(error_json).lower()
