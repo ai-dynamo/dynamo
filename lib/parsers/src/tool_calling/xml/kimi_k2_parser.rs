@@ -161,7 +161,7 @@ fn find_section_end(
 
 /// True for prefix-only narration before a tool section where vLLM preserves
 /// the wrapper-adjacent trailing space (TOOLCALLING.batch.8.a).
-fn should_preserve_vllm_prefix_trailing_space(normal_parts: &[&str]) -> bool {
+fn should_preserve_vllm_prefix_trailing_space(normal_parts: &[String]) -> bool {
     let mut non_empty_parts = normal_parts
         .iter()
         .enumerate()
@@ -176,7 +176,7 @@ fn should_preserve_vllm_prefix_trailing_space(normal_parts: &[&str]) -> bool {
 /// True when the first visible normal text appears only after a parsed tool
 /// section, so the intermediate Kimi tool-call turn should expose no content
 /// (TOOLCALLING.batch.8.b).
-fn should_drop_post_tool_text_without_prefix(normal_parts: &[&str]) -> bool {
+fn should_drop_post_tool_text_without_prefix(normal_parts: &[String]) -> bool {
     normal_parts
         .iter()
         .enumerate()
@@ -187,7 +187,7 @@ fn should_drop_post_tool_text_without_prefix(normal_parts: &[&str]) -> bool {
 /// True when there is prefix narration before the first tool section plus
 /// post-wrapper or inter-wrapper narration that should be dropped for Kimi
 /// tool-call turns (TOOLCALLING.batch.2.c, 8.c, 8.d).
-fn should_drop_post_tool_text_after_prefix(normal_parts: &[&str]) -> bool {
+fn should_drop_post_tool_text_after_prefix(normal_parts: &[String]) -> bool {
     normal_parts
         .first()
         .is_some_and(|prefix| !prefix.trim().is_empty())
@@ -256,9 +256,17 @@ fn extract_tool_calls(
     while cursor < text.len() {
         if let Some((start_pos, _start_len)) = find_section_start(text, cursor, config) {
             let abs_start = cursor + start_pos;
+            let gap = &text[cursor..abs_start];
+            if let Some((prefix, mut recovered)) =
+                recover_bare_kimi_calls_in_span(gap, config, tools)?
+            {
+                normal_parts.push(prefix);
+                calls.append(&mut recovered);
+            } else {
+                normal_parts.push(gap.to_string());
+            }
 
             // Add text before tool call section to normal parts.
-            normal_parts.push(&text[cursor..abs_start]);
 
             let (block, next_cursor) =
                 if let Some((end_pos, end_len)) = find_section_end(text, abs_start, config) {
@@ -279,7 +287,15 @@ fn extract_tool_calls(
             cursor = next_cursor;
         } else {
             // No more tool call sections.
-            normal_parts.push(&text[cursor..]);
+            let gap = &text[cursor..];
+            if let Some((prefix, mut recovered)) =
+                recover_bare_kimi_calls_in_span(gap, config, tools)?
+            {
+                normal_parts.push(prefix);
+                calls.append(&mut recovered);
+            } else {
+                normal_parts.push(gap.to_string());
+            }
             break;
         }
     }
@@ -310,6 +326,34 @@ fn extract_tool_calls(
             joined_normal_text.trim().to_string()
         };
     Ok((normal_text, calls))
+}
+
+fn recover_bare_kimi_calls_in_span(
+    span: &str,
+    config: &KimiK2ParserConfig,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    let Some(marker_idx) = first_orphan_kimi_marker_index(span, config) else {
+        return Ok(None);
+    };
+    let orphan_tail = &span[marker_idx..];
+    if !orphan_tail.starts_with(config.call_start.as_str()) {
+        return Ok(None);
+    }
+
+    let recovered = parse_section_block(orphan_tail, config, tools)?;
+    if recovered.is_empty() {
+        return Ok(None);
+    }
+
+    tracing::warn!(
+        why = "bare_call_gap_recovery",
+        recovered_calls = recovered.len(),
+        recovered_bytes = orphan_tail.len(),
+        kept_prefix_bytes = marker_idx,
+        "Kimi K2 parser recovered complete bare call(s) before a later section_begin"
+    );
+    Ok(Some((span[..marker_idx].trim().to_string(), recovered)))
 }
 
 fn first_orphan_kimi_marker_index(text: &str, config: &KimiK2ParserConfig) -> Option<usize> {

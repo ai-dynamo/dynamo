@@ -87,3 +87,27 @@ cases:
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm: *id006
       sglang: *id006
+  TOOLCALLING.batch.5.f:
+    description: Bare valid call before a complete wrapped section
+    ref: dynamo
+    model_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|><|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:1<|tool_call_argument_begin|>{"location":"Boston"}<|tool_call_end|><|tool_calls_section_end|>
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: ''
+      vllm: &id007
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
+        reason: vLLM and SGLang preserve the bare Kimi call before the first <|tool_calls_section_begin|> as content; Dynamo recovers it as the first structured call before parsing the wrapped section.
+      sglang: *id007

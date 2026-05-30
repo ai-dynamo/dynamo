@@ -222,7 +222,7 @@ fn extract_tool_calls(
     config: &XmlParserConfig,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(String, Vec<ToolCallResponse>)> {
-    let mut normal_parts = Vec::new();
+    let mut normal_text = String::new();
     let mut calls = Vec::new();
     let mut cursor = 0;
 
@@ -233,14 +233,22 @@ fn extract_tool_calls(
         // Find next tool call start.
         if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
             let abs_start = cursor + start_pos;
+            let gap = &text[cursor..abs_start];
+            if let Some((prefix, mut recovered_calls)) =
+                recover_bare_xml_calls_in_span(gap, config, tools)?
+            {
+                if calls.is_empty() {
+                    normal_text.push_str(&prefix);
+                }
+                calls.append(&mut recovered_calls);
+            } else if calls.is_empty() {
+                normal_text.push_str(gap);
+            }
 
             // Qwen3-Coder-style templates allow natural language before the
             // tool call, but text after the tool-call block is not response
             // content. Keep scanning for additional calls, but only surface
             // normal text that precedes the first parsed call.
-            if calls.is_empty() {
-                normal_parts.push(&text[cursor..abs_start]);
-            }
 
             // Find the corresponding end token.
             if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
@@ -275,20 +283,27 @@ fn extract_tool_calls(
                     break;
                 }
                 if calls.is_empty() && !looks_like_tool_call {
-                    normal_parts.push(&text[abs_start..]);
+                    normal_text.push_str(&text[abs_start..]);
                 }
                 break;
             }
         } else {
             // No more tool calls.
-            if calls.is_empty() {
-                normal_parts.push(&text[cursor..]);
+            let gap = &text[cursor..];
+            if let Some((prefix, mut recovered_calls)) =
+                recover_bare_xml_calls_in_span(gap, config, tools)?
+            {
+                if calls.is_empty() {
+                    normal_text.push_str(&prefix);
+                }
+                calls.append(&mut recovered_calls);
+            } else if calls.is_empty() {
+                normal_text.push_str(gap);
             }
             break;
         }
     }
 
-    let normal_text = normal_parts.join("");
     let normal_text = if calls.is_empty() {
         normal_text.trim().to_string()
     } else {
@@ -309,6 +324,39 @@ fn prefix_before_orphan_xml_marker(text: &str, config: &XmlParserConfig) -> Opti
     .filter_map(|marker| text.find(marker))
     .min()
     .map(|idx| text[..idx].trim().to_string())
+}
+
+fn recover_bare_xml_calls_in_span(
+    span: &str,
+    config: &XmlParserConfig,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    if !config.backoff_when_no_wrapper {
+        return Ok(None);
+    }
+
+    let Some(marker_idx) = span.find(config.function_start_token.as_str()) else {
+        return Ok(None);
+    };
+
+    let tail = &span[marker_idx..];
+    if !tail.contains(config.function_end_token.as_str()) && !config.allow_eof_recovery {
+        return Ok(None);
+    }
+
+    let calls = parse_tool_call_block(tail, config, tools)?;
+    if calls.is_empty() {
+        return Ok(None);
+    }
+
+    tracing::warn!(
+        why = "bare_function_gap_recovery",
+        recovered_calls = calls.len(),
+        recovered_bytes = tail.len(),
+        kept_prefix_bytes = marker_idx,
+        "XML recovery: recovered complete bare function block(s) before a later outer wrapper"
+    );
+    Ok(Some((span[..marker_idx].to_string(), calls)))
 }
 
 /// Parse a single tool call block

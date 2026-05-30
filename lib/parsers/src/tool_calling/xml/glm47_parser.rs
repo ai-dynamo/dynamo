@@ -158,14 +158,26 @@ fn extract_tool_calls(
         // Find next tool call start
         if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
             let abs_start = cursor + start_pos;
+            let gap = &text[cursor..abs_start];
+            if let Some((prefix, parsed_call)) =
+                recover_bare_glm47_call_in_span(gap, config, tools)?
+            {
+                if calls.is_empty() {
+                    normal_parts.push(prefix);
+                }
+                calls.push(parsed_call);
+            } else if calls.is_empty() {
+                if let Some(marker_idx) = first_orphan_glm47_marker_index(gap, config) {
+                    normal_parts.push(orphan_glm47_prefix(gap, marker_idx));
+                } else {
+                    normal_parts.push(gap.to_string());
+                }
+            }
 
             // Only surface normal text that precedes the first parsed call.
             // Text after any </tool_call> is not response content; matches the
             // convention ported into the generic XML parser by PR #9350 and
             // vLLM's glm47_moe_tool_parser.
-            if calls.is_empty() {
-                normal_parts.push(&text[cursor..abs_start]);
-            }
 
             // Find the corresponding end token
             if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
@@ -245,8 +257,20 @@ fn extract_tool_calls(
             }
         } else {
             // No more tool calls
-            if calls.is_empty() {
-                normal_parts.push(&text[cursor..]);
+            let gap = &text[cursor..];
+            if let Some((prefix, parsed_call)) =
+                recover_bare_glm47_call_in_span(gap, config, tools)?
+            {
+                if calls.is_empty() {
+                    normal_parts.push(prefix);
+                }
+                calls.push(parsed_call);
+            } else if calls.is_empty() {
+                if let Some(marker_idx) = first_orphan_glm47_marker_index(gap, config) {
+                    normal_parts.push(orphan_glm47_prefix(gap, marker_idx));
+                } else {
+                    normal_parts.push(gap.to_string());
+                }
             }
             break;
         }
@@ -259,6 +283,28 @@ fn extract_tool_calls(
         normal_text
     };
     Ok((normal_text, calls))
+}
+
+fn recover_bare_glm47_call_in_span(
+    span: &str,
+    config: &Glm47ParserConfig,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<Option<(String, ToolCallResponse)>> {
+    let Some(marker_idx) = first_orphan_glm47_marker_index(span, config) else {
+        return Ok(None);
+    };
+    let recovered = recover_bare_glm47_call(span, marker_idx, config, tools)?;
+    if let Some((prefix, parsed_call)) = recovered {
+        warn!(
+            why = "bare_body_gap_recovery",
+            recovered_calls = 1,
+            recovered_bytes = span.len() - prefix.len(),
+            kept_prefix_bytes = prefix.len(),
+            "GLM-4.7 parser recovered complete bare call body before a later <tool_call>"
+        );
+        return Ok(Some((prefix, parsed_call)));
+    }
+    Ok(None)
 }
 
 fn first_orphan_glm47_marker_index(text: &str, config: &Glm47ParserConfig) -> Option<usize> {

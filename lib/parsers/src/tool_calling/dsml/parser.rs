@@ -120,7 +120,11 @@ pub fn try_tool_call_parse_dsml(
     // Whether or not invokes parsed, normal_text is the prefix before the
     // first block_start — mirrors vLLM's success path. On no-invokes the
     // markup-leak warning still fires for the diagnostic trail.
-    let pre_block_text = trimmed[..start_idx].to_string();
+    let pre_block_span = &trimmed[..start_idx];
+    let pre_block_text = first_orphan_dsml_marker_index(pre_block_span, config)
+        .filter(|idx| pre_block_span[*idx..].starts_with(config.invoke_start_prefix.as_str()))
+        .map(|idx| pre_block_span[..idx].trim_end().to_string())
+        .unwrap_or_else(|| pre_block_span.to_string());
 
     if tool_calls.is_empty() {
         // A block-start was detected but no valid invokes parsed. Do NOT leak
@@ -184,9 +188,21 @@ fn extract_tool_calls(
 
     while cursor < text.len() {
         let Some(rel_start) = text[cursor..].find(config.block_start.as_str()) else {
+            if let Some((_, mut recovered)) =
+                recover_orphan_invokes_in_span(&text[cursor..], config)?
+            {
+                tool_calls.append(&mut recovered);
+            }
             break;
         };
-        let block_content_start = cursor + rel_start + config.block_start.len();
+        let abs_start = cursor + rel_start;
+        if let Some((_, mut recovered)) =
+            recover_orphan_invokes_in_span(&text[cursor..abs_start], config)?
+        {
+            tool_calls.append(&mut recovered);
+        }
+
+        let block_content_start = abs_start + config.block_start.len();
         let after_start = &text[block_content_start..];
 
         let (block, next_cursor) =
@@ -208,6 +224,36 @@ fn extract_tool_calls(
     }
 
     Ok(tool_calls)
+}
+
+fn recover_orphan_invokes_in_span(
+    span: &str,
+    config: &DsmlParserConfig,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    let Some(marker_idx) = first_orphan_dsml_marker_index(span, config) else {
+        return Ok(None);
+    };
+    let marker_tail = &span[marker_idx..];
+    if !marker_tail.starts_with(config.invoke_start_prefix.as_str()) {
+        return Ok(None);
+    }
+
+    let tool_calls = extract_invokes(marker_tail, config)?;
+    if tool_calls.is_empty() {
+        return Ok(None);
+    }
+
+    tracing::warn!(
+        why = "bare_invoke_gap_recovery",
+        recovered_calls = tool_calls.len(),
+        recovered_bytes = marker_tail.len(),
+        kept_prefix_bytes = marker_idx,
+        "DSML recovery: recovered complete bare invoke(s) before a later outer block"
+    );
+    Ok(Some((
+        span[..marker_idx].trim_end().to_string(),
+        tool_calls,
+    )))
 }
 
 /// Extract individual invoke blocks from function_calls content
