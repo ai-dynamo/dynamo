@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocols::openai::nvext::NvExt;
 use crate::protocols::openai::responses::NvCreateResponse;
@@ -30,7 +31,6 @@ const DEFAULT_TTL_SWEEP_SECS: u64 = 60 * 60;
 #[cfg(feature = "stateful-responses-tikv")]
 const DEFAULT_TIKV_PREFIX: &str = "dynamo/stateful-responses/";
 
-const COLLECT_TOKEN_IDS_ENV: &str = "DYN_STATEFUL_RESPONSES_COLLECT_TOKEN_IDS";
 const DEFAULT_TTL_SECS_ENV: &str = "DYN_STATEFUL_RESPONSES_DEFAULT_TTL_SECS";
 const TTL_SWEEP_SECS_ENV: &str = "DYN_STATEFUL_RESPONSES_TTL_SWEEP_SECS";
 const STORE_URL_ENV: &str = "DYN_STATEFUL_RESPONSES_STORE_URL";
@@ -53,7 +53,7 @@ fn duration_secs_from_env(
     parse_optional_duration_secs(name, &value)
 }
 
-fn store_settings_from_env() -> anyhow::Result<(Option<Duration>, Option<Duration>, bool)> {
+fn store_settings_from_env() -> anyhow::Result<(Option<Duration>, Option<Duration>)> {
     Ok((
         duration_secs_from_env(
             DEFAULT_TTL_SECS_ENV,
@@ -63,9 +63,6 @@ fn store_settings_from_env() -> anyhow::Result<(Option<Duration>, Option<Duratio
             TTL_SWEEP_SECS_ENV,
             Some(Duration::from_secs(DEFAULT_TTL_SWEEP_SECS)),
         )?,
-        env::var(COLLECT_TOKEN_IDS_ENV)
-            .map(|value| !is_falsey(&value))
-            .unwrap_or(true),
     ))
 }
 
@@ -141,6 +138,9 @@ pub enum StoreError {
     #[cfg(feature = "stateful-responses-redb")]
     #[error("redb state store error: {0}")]
     Redb(#[from] redb::Error),
+    #[cfg(feature = "stateful-responses-redb")]
+    #[error("redb state store task join error: {0}")]
+    RedbTask(#[from] tokio::task::JoinError),
     #[cfg(feature = "stateful-responses-tikv")]
     #[error("TiKV state store error: {0}")]
     Tikv(#[from] tikv_client::Error),
@@ -205,7 +205,7 @@ const REDB_CONTEXTS: redb::TableDefinition<&str, &[u8]> =
 
 #[cfg(feature = "stateful-responses-redb")]
 pub struct RedbResponseContextStore {
-    db: redb::Database,
+    db: Arc<redb::Database>,
 }
 
 #[cfg(feature = "stateful-responses-redb")]
@@ -225,7 +225,23 @@ impl RedbResponseContextStore {
         }
         write_txn.commit().map_err(redb::Error::from)?;
 
-        Ok(Self { db })
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    pub async fn open_async(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref().to_path_buf();
+        tokio::task::spawn_blocking(move || Self::open(path)).await?
+    }
+
+    async fn with_db<T>(
+        &self,
+        f: impl FnOnce(Arc<redb::Database>) -> Result<T, StoreError> + Send + 'static,
+    ) -> Result<T, StoreError>
+    where
+        T: Send + 'static,
+    {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || f(db)).await?
     }
 }
 
@@ -233,25 +249,29 @@ impl RedbResponseContextStore {
 #[async_trait]
 impl ResponseContextStore for RedbResponseContextStore {
     async fn get(&self, key: &str) -> Result<Option<StoredResponseContext>, StoreError> {
-        use redb::ReadableDatabase;
+        let key = key.to_string();
+        let lookup_key = key.clone();
+        let record = self
+            .with_db(move |db| {
+                use redb::ReadableDatabase;
 
-        let read_txn = self.db.begin_read().map_err(redb::Error::from)?;
-        let table = read_txn
-            .open_table(REDB_CONTEXTS)
-            .map_err(redb::Error::from)?;
-        let record = table
-            .get(key)
-            .map_err(redb::Error::from)?
-            .map(|bytes| decode_record(bytes.value()))
-            .transpose()?;
-        drop(table);
-        drop(read_txn);
+                let read_txn = db.begin_read().map_err(redb::Error::from)?;
+                let table = read_txn
+                    .open_table(REDB_CONTEXTS)
+                    .map_err(redb::Error::from)?;
+                table
+                    .get(lookup_key.as_str())
+                    .map_err(redb::Error::from)?
+                    .map(|bytes| decode_record(bytes.value()))
+                    .transpose()
+            })
+            .await?;
 
         let Some(record) = record else {
             return Ok(None);
         };
         if is_expired(record.expires_at, unix_timestamp()) {
-            self.delete(key).await?;
+            self.delete(&key).await?;
             return Ok(None);
         }
         Ok(Some(record.context))
@@ -263,56 +283,71 @@ impl ResponseContextStore for RedbResponseContextStore {
         context: &StoredResponseContext,
         expires_at: Option<i64>,
     ) -> Result<(), StoreError> {
+        let key = key.to_string();
         let value = serde_json::to_vec(&StoredResponseRecord {
             context: context.clone(),
             expires_at,
         })?;
-        let write_txn = self.db.begin_write().map_err(redb::Error::from)?;
-        {
-            let mut table = write_txn
-                .open_table(REDB_CONTEXTS)
-                .map_err(redb::Error::from)?;
-            table
-                .insert(key, value.as_slice())
-                .map_err(redb::Error::from)?;
-        }
-        write_txn.commit().map_err(redb::Error::from)?;
-        Ok(())
+        self.with_db(move |db| {
+            let write_txn = db.begin_write().map_err(redb::Error::from)?;
+            {
+                let mut table = write_txn
+                    .open_table(REDB_CONTEXTS)
+                    .map_err(redb::Error::from)?;
+                table
+                    .insert(key.as_str(), value.as_slice())
+                    .map_err(redb::Error::from)?;
+            }
+            write_txn.commit().map_err(redb::Error::from)?;
+            Ok(())
+        })
+        .await
     }
 
     async fn delete(&self, key: &str) -> Result<bool, StoreError> {
-        let write_txn = self.db.begin_write().map_err(redb::Error::from)?;
-        let removed = {
-            let mut table = write_txn
-                .open_table(REDB_CONTEXTS)
-                .map_err(redb::Error::from)?;
-            table.remove(key).map_err(redb::Error::from)?.is_some()
-        };
-        write_txn.commit().map_err(redb::Error::from)?;
-        Ok(removed)
+        let key = key.to_string();
+        self.with_db(move |db| {
+            let write_txn = db.begin_write().map_err(redb::Error::from)?;
+            let removed = {
+                let mut table = write_txn
+                    .open_table(REDB_CONTEXTS)
+                    .map_err(redb::Error::from)?;
+                table
+                    .remove(key.as_str())
+                    .map_err(redb::Error::from)?
+                    .is_some()
+            };
+            write_txn.commit().map_err(redb::Error::from)?;
+            Ok(removed)
+        })
+        .await
     }
 
     async fn purge_expired(&self, now: i64) -> Result<usize, StoreError> {
-        use redb::ReadableTable;
-        let write_txn = self.db.begin_write().map_err(redb::Error::from)?;
-        let expired = {
-            let mut table = write_txn
-                .open_table(REDB_CONTEXTS)
-                .map_err(redb::Error::from)?;
-            let mut expired = Vec::new();
-            for entry in table.iter().map_err(redb::Error::from)? {
-                let (key, value) = entry.map_err(redb::Error::from)?;
-                if is_expired(decode_record(value.value())?.expires_at, now) {
-                    expired.push(key.value().to_string());
+        self.with_db(move |db| {
+            use redb::ReadableTable;
+
+            let write_txn = db.begin_write().map_err(redb::Error::from)?;
+            let expired = {
+                let mut table = write_txn
+                    .open_table(REDB_CONTEXTS)
+                    .map_err(redb::Error::from)?;
+                let mut expired = Vec::new();
+                for entry in table.iter().map_err(redb::Error::from)? {
+                    let (key, value) = entry.map_err(redb::Error::from)?;
+                    if is_expired(decode_record(value.value())?.expires_at, now) {
+                        expired.push(key.value().to_string());
+                    }
                 }
-            }
-            for key in &expired {
-                table.remove(key.as_str()).map_err(redb::Error::from)?;
-            }
-            expired.len()
-        };
-        write_txn.commit().map_err(redb::Error::from)?;
-        Ok(expired)
+                for key in &expired {
+                    table.remove(key.as_str()).map_err(redb::Error::from)?;
+                }
+                expired.len()
+            };
+            write_txn.commit().map_err(redb::Error::from)?;
+            Ok(expired)
+        })
+        .await
     }
 }
 
@@ -446,7 +481,7 @@ impl StoreConfig {
         match self {
             Self::Memory => Ok(Arc::new(MemoryResponseContextStore::new())),
             #[cfg(feature = "stateful-responses-redb")]
-            Self::Redb(path) => Ok(Arc::new(RedbResponseContextStore::open(path)?)),
+            Self::Redb(path) => Ok(Arc::new(RedbResponseContextStore::open_async(path).await?)),
             #[cfg(feature = "stateful-responses-tikv")]
             Self::Tikv { endpoints, prefix } => Ok(Arc::new(
                 TikvResponseContextStore::connect(endpoints.to_vec(), prefix.to_string()).await?,
@@ -491,19 +526,17 @@ pub struct ResponseContextStoreConfig {
     pub store_config: StoreConfig,
     pub default_ttl: Option<Duration>,
     pub ttl_sweep_interval: Option<Duration>,
-    pub collect_token_ids: bool,
 }
 
 impl ResponseContextStoreConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let store_config = StoreConfig::from_env()?;
-        let (default_ttl, ttl_sweep_interval, collect_token_ids) = store_settings_from_env()?;
+        let (default_ttl, ttl_sweep_interval) = store_settings_from_env()?;
 
         Ok(Self {
             store_config,
             default_ttl,
             ttl_sweep_interval,
-            collect_token_ids,
         })
     }
 }
@@ -512,18 +545,31 @@ pub struct ResponseContextStoreManager {
     config: ResponseContextStoreConfig,
     store: OnceCell<Arc<dyn ResponseContextStore>>,
     sweeper_started: AtomicBool,
+    shutdown: CancellationToken,
 }
 
 impl ResponseContextStoreManager {
     pub fn from_env() -> anyhow::Result<Self> {
-        Ok(Self::new(ResponseContextStoreConfig::from_env()?))
+        Self::from_env_with_shutdown(CancellationToken::new())
+    }
+
+    pub fn from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<Self> {
+        Ok(Self::with_shutdown(
+            ResponseContextStoreConfig::from_env()?,
+            shutdown,
+        ))
     }
 
     pub fn new(config: ResponseContextStoreConfig) -> Self {
+        Self::with_shutdown(config, CancellationToken::new())
+    }
+
+    pub fn with_shutdown(config: ResponseContextStoreConfig, shutdown: CancellationToken) -> Self {
         Self {
             config,
             store: OnceCell::new(),
             sweeper_started: AtomicBool::new(false),
+            shutdown,
         }
     }
 
@@ -541,7 +587,7 @@ impl ResponseContextStoreManager {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
-            spawn_store_ttl_sweeper(store.clone(), interval);
+            spawn_store_ttl_sweeper(store.clone(), interval, self.shutdown.child_token());
         }
 
         Ok(store)
@@ -562,11 +608,7 @@ impl ResponseContextStoreManager {
                 None => None,
             };
 
-        expand_typed_request(
-            request,
-            previous_context.as_ref(),
-            self.config.collect_token_ids,
-        )
+        expand_typed_request(request, previous_context.as_ref())
     }
 
     pub async fn persist_response<T: Serialize>(
@@ -599,6 +641,12 @@ impl ResponseContextStoreManager {
     }
 }
 
+impl Drop for ResponseContextStoreManager {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExpandedResponseContext {
     pub input_items: Vec<Value>,
@@ -609,15 +657,23 @@ pub struct ExpandedResponseContext {
 #[error("`previous_response_id` `{0}` was not found")]
 pub struct PreviousResponseNotFound(pub String);
 
-fn spawn_store_ttl_sweeper(store: Arc<dyn ResponseContextStore>, interval: Duration) {
+fn spawn_store_ttl_sweeper(
+    store: Arc<dyn ResponseContextStore>,
+    interval: Duration,
+    shutdown: CancellationToken,
+) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
-            tick.tick().await;
-            if let Err(err) = store.purge_expired(unix_timestamp()).await {
-                tracing::warn!(%err, "failed to purge expired stateful Responses contexts");
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tick.tick() => {
+                    if let Err(err) = store.purge_expired(unix_timestamp()).await {
+                        tracing::warn!(%err, "failed to purge expired stateful Responses contexts");
+                    }
+                }
             }
         }
     });
@@ -626,7 +682,6 @@ fn spawn_store_ttl_sweeper(store: Arc<dyn ResponseContextStore>, interval: Durat
 fn expand_typed_request(
     request: &mut NvCreateResponse,
     previous_context: Option<&StoredResponseContext>,
-    collect_token_ids: bool,
 ) -> anyhow::Result<ExpandedResponseContext> {
     let current_items = typed_input_as_items(&request.inner.input)?;
     let mut input_items = Vec::new();
@@ -641,9 +696,6 @@ fn expand_typed_request(
     request.inner.store = Some(should_store);
 
     strip_input_token_data(&mut request.nvext);
-    if collect_token_ids {
-        ensure_completion_token_ids(&mut request.nvext);
-    }
 
     Ok(ExpandedResponseContext {
         input_items,
@@ -675,32 +727,24 @@ fn strip_input_token_data(nvext: &mut Option<NvExt>) {
     }
 }
 
-fn ensure_completion_token_ids(nvext: &mut Option<NvExt>) {
-    let nvext = nvext.get_or_insert_with(NvExt::default);
-    let extra_fields = nvext.extra_fields.get_or_insert_with(Vec::new);
-    if !extra_fields
-        .iter()
-        .any(|field| field == "completion_token_ids")
-    {
-        extra_fields.push("completion_token_ids".to_string());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_protocols::types::responses::{
+        AssistantRole, FunctionToolCall, InputItem, Item, MessageItem, OutputItem, OutputMessage,
+        OutputMessageContent, OutputStatus, OutputTextContent,
+    };
 
-    fn manager(store_config: StoreConfig, collect_token_ids: bool) -> ResponseContextStoreManager {
+    fn manager(store_config: StoreConfig) -> ResponseContextStoreManager {
         ResponseContextStoreManager::new(ResponseContextStoreConfig {
             store_config,
             default_ttl: None,
             ttl_sweep_interval: None,
-            collect_token_ids,
         })
     }
 
-    fn memory_manager(collect_token_ids: bool) -> ResponseContextStoreManager {
-        manager(StoreConfig::Memory, collect_token_ids)
+    fn memory_manager() -> ResponseContextStoreManager {
+        manager(StoreConfig::Memory)
     }
 
     fn context(input_items: Vec<Value>) -> StoredResponseContext {
@@ -748,7 +792,7 @@ mod tests {
 
     #[tokio::test]
     async fn manager_expands_typed_responses_request() {
-        let manager = memory_manager(true);
+        let manager = memory_manager();
         let mut request = text_request("hello");
         request.nvext = Some(
             NvExt::builder()
@@ -768,14 +812,54 @@ mod tests {
         assert!(nvext.token_data.is_none());
         assert_eq!(
             nvext.extra_fields.as_ref().unwrap(),
-            &vec!["worker_id".to_string(), "completion_token_ids".to_string()]
+            &vec!["worker_id".to_string()]
         );
         assert!(manager.store.get().is_none());
     }
 
+    #[test]
+    fn stored_output_items_round_trip_as_followup_input_items() {
+        let output_items = vec![
+            OutputItem::Message(OutputMessage {
+                id: "msg_1".into(),
+                role: AssistantRole::Assistant,
+                status: OutputStatus::Completed,
+                phase: None,
+                content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                    text: "hello".into(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                })],
+            }),
+            OutputItem::FunctionCall(FunctionToolCall {
+                arguments: "{}".into(),
+                call_id: "call_1".into(),
+                namespace: None,
+                name: "tool".into(),
+                id: Some("fc_1".into()),
+                status: Some(OutputStatus::Completed),
+            }),
+        ];
+        let stored = output_items
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let input: InputParam = serde_json::from_value(Value::Array(stored)).unwrap();
+        let InputParam::Items(items) = input else {
+            panic!("expected item input");
+        };
+        assert!(matches!(
+            &items[0],
+            InputItem::Item(Item::Message(MessageItem::Output(_)))
+        ));
+        assert!(matches!(&items[1], InputItem::Item(Item::FunctionCall(_))));
+    }
+
     #[tokio::test]
     async fn manager_store_false_skips_persist_and_expired_previous_is_not_found() {
-        let manager = memory_manager(false);
+        let manager = memory_manager();
         let store = manager.store().await.unwrap();
         store
             .put(
@@ -841,7 +925,7 @@ mod tests {
 
     #[tokio::test]
     async fn manager_handles_store_failures_based_on_store_flag() {
-        let manager = memory_manager(false);
+        let manager = memory_manager();
         assert!(manager.store.set(Arc::new(FailingStore)).is_ok());
 
         assert!(
@@ -900,7 +984,7 @@ mod tests {
     #[tokio::test]
     async fn manager_expands_previous_response_from_redb() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = manager(StoreConfig::Redb(dir.path().join("state.redb")), false);
+        let manager = manager(StoreConfig::Redb(dir.path().join("state.redb")));
         manager
             .store()
             .await

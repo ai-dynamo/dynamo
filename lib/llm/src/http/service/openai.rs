@@ -4,7 +4,10 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -33,7 +36,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
+    disconnect::{
+        ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_terminal_error,
+    },
     error::HttpError,
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
@@ -2061,7 +2067,7 @@ async fn handler_delete_response(
 
     Ok(Json(serde_json::json!({
         "id": response_id,
-        "object": "response.deleted",
+        "object": "response",
         "deleted": deleted
     }))
     .into_response())
@@ -2261,6 +2267,8 @@ async fn responses(
         let mut http_queue_guard = Some(http_queue_guard);
         let state_for_store = state.clone();
         let expanded_for_store = expanded_response_context.clone();
+        let persist_failed = Arc::new(AtomicBool::new(false));
+        let persist_failed_in_stream = persist_failed.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -2310,6 +2318,7 @@ async fn responses(
                     .await
                 {
                     tracing::error!(%err, "failed to persist streamed stateful Responses context");
+                    persist_failed_in_stream.store(true, Ordering::Release);
                     events.extend(converter.emit_failed_event(
                         "server_error",
                         "Failed to persist stateful Responses context.",
@@ -2324,7 +2333,15 @@ async fn responses(
             }
         };
 
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
+        // and defers inflight_guard.mark_ok() until the stream completes.
+        let stream = monitor_for_disconnects_with_terminal_error(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            Some(persist_failed),
+        );
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive() {
