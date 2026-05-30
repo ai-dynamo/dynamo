@@ -332,11 +332,20 @@ impl PrefillRouter {
     ///
     /// The `phase_transition_permit` is passed to the spawned task and released after routing
     /// completes, allowing the main task's `set_phase(Decode)` to proceed.
+    ///
+    /// `load_permit` is the occupancy-state handle returned by
+    /// `InnerPrefillRouter::track_dispatch`. It's moved into the spawned task
+    /// so its drop emits the load decrement when the prefill stream ends — this
+    /// keeps load accounting symmetric for the bootstrap path (which dispatches
+    /// via `router.direct()` and would otherwise skip both inc and dec). `None`
+    /// for routing modes that don't use occupancy-state tracking (KV /
+    /// RoundRobin / Random / Direct).
     pub(super) fn spawn_prefill_task(
         &self,
         prefill_request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: OwnedSemaphorePermit,
+        load_permit: Option<dynamo_runtime::pipeline::OccupancyPermit>,
     ) {
         let router = self.prefill_router.get().cloned();
         // Capture current span to propagate trace context to the spawned task
@@ -344,6 +353,7 @@ impl PrefillRouter {
 
         tokio::spawn(
             async move {
+                let _load_permit = load_permit;
                 match Self::execute_prefill(
                     router,
                     prefill_request,
@@ -359,6 +369,7 @@ impl PrefillRouter {
                         tracing::warn!("Prefill background task error: {e:?}");
                     }
                 }
+                // _load_permit drops here → state.decrement(worker_id)
             }
             .instrument(span),
         );

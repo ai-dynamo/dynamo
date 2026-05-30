@@ -63,6 +63,45 @@ impl RoutingOccupancyState {
         Some(id)
     }
 
+    /// Read-only mirror of [`select_exact_min_and_increment`] used by routing
+    /// modes (e.g. least-loaded) that want to *peek* a candidate without
+    /// committing the load increment — for example, the disagg-bootstrap path
+    /// in `prefill_router` which needs a worker_id to resolve `bootstrap_info`
+    /// before the actual prefill request is dispatched (and dispatching via
+    /// `direct(preselected_worker)` then performs the real load accounting).
+    ///
+    /// Tie-break policy matches [`select_exact_min_and_increment`] so peek and
+    /// select observe the same selection distribution, modulo concurrent races.
+    pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        let deterministic_ties = std::env::var("DYN_ROUTER_LL_DETERMINISTIC_TIES")
+            .ok()
+            .as_deref()
+            == Some("1");
+
+        let mut min_load = u64::MAX;
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
+        for &id in instance_ids {
+            let load = self.load(id);
+            if load < min_load {
+                min_load = load;
+                selected = Some(id);
+                tie_count = 1;
+                continue;
+            }
+
+            if load == min_load {
+                tie_count += 1;
+                if !deterministic_ties && rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
+            }
+        }
+
+        selected
+    }
+
     pub(crate) fn decrement(&self, instance_id: u64) {
         if let Some(count) = self.counts.get(&instance_id) {
             let _ = count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

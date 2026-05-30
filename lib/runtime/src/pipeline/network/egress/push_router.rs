@@ -61,7 +61,20 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
         .map(std::time::Duration::from_secs)
 }
 
-struct OccupancyPermit {
+/// RAII handle for a single in-flight unit of work charged against
+/// [`RoutingOccupancyState`].
+///
+/// Construction is the *commit* point — the underlying counter has already
+/// been incremented (by [`PushRouter::track_dispatch`] or
+/// [`RoutingOccupancyState::select_exact_min_and_increment`]). Dropping the
+/// permit, or letting it be consumed by [`Self::into_tracked_stream`], emits
+/// the matching decrement when the request finishes.
+///
+/// `pub` so the disagg-bootstrap path in `prefill_router` (a separate crate)
+/// can hold a permit for the lifetime of the spawned prefill task without
+/// going through the [`PushRouter::least_loaded`] dispatch — see
+/// [`PushRouter::track_dispatch`].
+pub struct OccupancyPermit {
     state: Arc<RoutingOccupancyState>,
     instance_id: u64,
     armed: bool,
@@ -714,10 +727,22 @@ where
 
     /// Peek the next worker according to the routing mode without incrementing the counter.
     /// Useful for checking if a worker is suitable before committing to it.
-    /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
+    ///
+    /// This is the read-only counterpart of [`Self::select_next_worker`] / the
+    /// per-mode `least_loaded`/`p2c`/`device_aware_weighted` dispatchers. The
+    /// disagg-bootstrap path in `prefill_router::resolve_prefill_worker` calls
+    /// this to obtain a worker_id ahead of the actual prefill request so it
+    /// can look up that worker's `bootstrap_info` and attach it to the decode
+    /// request — without which sglang/NIXL-rendezvous backends cannot complete
+    /// disagg under non-KV routing.
+    ///
+    /// Returns `None` only for [`RouterMode::Direct`] (caller-supplied
+    /// routing) and panics for [`RouterMode::KV`] (KV path uses
+    /// `kv_chooser::find_best_match` directly).
     pub fn peek_next_worker(&self) -> Option<u64> {
-        let routing_instances = self.client.routing_instances();
-        let count = routing_instances.free_ids().len();
+        // DIS-2105: select among free workers — see round_robin for rationale.
+        let instance_ids = self.client.routing_instances().free_ids().to_vec();
+        let count = instance_ids.len();
         if count == 0 {
             return None;
         }
@@ -726,23 +751,83 @@ where
             RouterMode::RoundRobin => {
                 // Just peek at the current counter value without incrementing
                 let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
-                Some(routing_instances.free_ids()[counter % count])
+                Some(instance_ids[counter % count])
             }
             RouterMode::Random => {
                 // For random, peeking implies a fresh random selection since it's stateless.
                 // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
                 let counter = rand::rng().random::<u64>() as usize;
-                Some(routing_instances.free_ids()[counter % count])
+                Some(instance_ids[counter % count])
             }
-            RouterMode::PowerOfTwoChoices
-            | RouterMode::Direct
-            | RouterMode::LeastLoaded
-            | RouterMode::DeviceAwareWeighted => None,
+            RouterMode::LeastLoaded => {
+                // Mirror least_loaded() selection logic read-only. Same tie-break
+                // policy as select_exact_min_and_increment. The caller is expected
+                // to follow up with `track_dispatch(worker_id)` to commit the load
+                // increment and obtain a permit whose drop emits the decrement when
+                // the dispatched request finishes — see `prefill_router` for the
+                // disagg-bootstrap usage that exercises this pattern.
+                self.occupancy_state.as_deref()?.peek_min(&instance_ids)
+            }
+            RouterMode::PowerOfTwoChoices => {
+                // p2c_select_from is already a sync read-only selector.
+                Some(p2c_select_from(
+                    self.occupancy_state.as_deref()?,
+                    &instance_ids,
+                ))
+            }
+            RouterMode::DeviceAwareWeighted => {
+                // Skip device-class partitioning in peek — the bootstrap-path
+                // peek is only used to resolve bootstrap_info on the chosen
+                // worker; the real device-aware policy is enforced when the
+                // actual prefill request dispatches via the device_aware_weighted
+                // path. For peek we degenerate to least-loaded across all free
+                // instances, which matches the mode's documented fallback.
+                self.occupancy_state.as_deref()?.peek_min(&instance_ids)
+            }
+            RouterMode::Direct => None,
             RouterMode::KV => {
                 panic!(
                     "peek_next_worker should not be called for {:?} routing mode",
                     self.router_mode
                 )
+            }
+        }
+    }
+
+    /// Commit load to a worker chosen externally (e.g., via [`Self::peek_next_worker`])
+    /// and return a permit whose drop emits the matching decrement.
+    ///
+    /// This is the missing primitive for callers that dispatch via
+    /// [`Self::direct`] (such as `prefill_router`'s disagg-bootstrap path).
+    /// `direct()` deliberately bypasses load tracking — it's used by callers
+    /// who have already picked a worker and want the routing layer to honor
+    /// that pick — so the bookkeeping has to be done here, at the
+    /// "we've committed to this worker" decision point.
+    ///
+    /// Returns `Some(permit)` only for routing modes that maintain a
+    /// per-worker occupancy counter (LeastLoaded, PowerOfTwoChoices,
+    /// DeviceAwareWeighted). Returns `None` for the other modes —
+    /// RoundRobin's counter is advanced through a different call site
+    /// (`select_next_worker`), Random is stateless, and KV is decoupled from
+    /// `OccupancyState` (load is fed from worker-pushed events instead).
+    /// Callers should hold the permit for the lifetime of the dispatched
+    /// request — typically by moving it into the spawned task that runs the
+    /// dispatch.
+    pub fn track_dispatch(&self, instance_id: u64) -> Option<OccupancyPermit> {
+        let state = self.occupancy_state.as_ref()?.clone();
+        // Same modes that produce a permit in their per-mode dispatcher
+        // (least_loaded, power_of_two_choices, device_aware_weighted) — keeping
+        // this gate aligned ensures the bootstrap path's accounting matches
+        // the aggregated path's accounting on the same router mode.
+        match self.router_mode {
+            RouterMode::LeastLoaded
+            | RouterMode::PowerOfTwoChoices
+            | RouterMode::DeviceAwareWeighted => {
+                state.increment(instance_id);
+                Some(OccupancyPermit::new(state, instance_id))
+            }
+            RouterMode::RoundRobin | RouterMode::Random | RouterMode::Direct | RouterMode::KV => {
+                None
             }
         }
     }
