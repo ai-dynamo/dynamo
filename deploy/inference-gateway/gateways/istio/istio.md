@@ -187,7 +187,7 @@ curl -X POST http://${IP}/v1/completions \
 
 ```bash
 kubectl delete gateway inference-gateway -n ${NAMESPACE}
-istioctl uninstall --purge -y
+istioctl uninstall -y --set values.global.istioNamespace=${ISTIO_NAMESPACE} --set values.pilot.env.ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true
 kubectl delete namespace ${ISTIO_NAMESPACE}
 kubectl delete gatewayclass istio istio-remote
 kubectl delete -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml"
