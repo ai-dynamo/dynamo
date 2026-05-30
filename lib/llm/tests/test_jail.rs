@@ -3977,6 +3977,55 @@ fahrenheit
         );
     }
 
+    #[tokio::test]
+    async fn test_glm47_trailing_split_bare_call_stays_jailed() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+
+        let tool_defs = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+            })),
+            strict: None,
+        }];
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>get_weat"
+                    .to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "her<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call>"
+                    .to_string(),
+                0,
+            ),
+        ];
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("glm47")
+            .tool_definitions(tool_defs)
+            .build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(
+            tool_call_names(&results),
+            vec!["get_weather".to_string(), "get_weather".to_string()]
+        );
+        assert_eq!(test_utils::reconstruct_content(&results), "");
+        assert_content_omits_markers(
+            "GLM-4.7 trailing split",
+            &results,
+            &["get_weat", "her<arg_key>", "<arg_value>", "</tool_call>"],
+        );
+    }
+
     /// tool_choice=required with the alternate `arguments` key (SGLang's
     /// JsonArrayParser and some vLLM paths emit this variant).  The
     /// base_json_parser accepts either `parameters` or `arguments`.

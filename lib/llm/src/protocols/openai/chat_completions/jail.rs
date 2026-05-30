@@ -216,6 +216,26 @@ impl ChoiceJailState {
             return;
         }
 
+        if let MatchResult::Partial {
+            prefix, partial, ..
+        } = jail_stream.marker_matcher.process_chunk(content, "")
+        {
+            if !prefix.is_empty() {
+                #[allow(deprecated)]
+                let trailing_choice = create_choice_stream(
+                    choice.index,
+                    choice.delta.role,
+                    &prefix,
+                    None,
+                    None,
+                    choice.logprobs.clone(),
+                );
+                emissions.push(ChoiceEmission::Trailing(trailing_choice));
+            }
+            self.partial_match_buffer = partial;
+            return;
+        }
+
         if let Some((prefix, partial)) = jail_stream.split_partial_tool_call_start(content) {
             if !prefix.is_empty() {
                 #[allow(deprecated)]

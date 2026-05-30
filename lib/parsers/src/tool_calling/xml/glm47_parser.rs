@@ -71,7 +71,7 @@ pub fn find_tool_call_end_position_glm47(chunk: &str, config: &Glm47ParserConfig
     let end_token = &config.tool_call_end;
 
     if !chunk.contains(start_token.as_str()) && chunk.contains(config.arg_key_start.as_str()) {
-        return chunk.len();
+        return find_bare_glm47_tool_call_end_position(chunk, config).unwrap_or(chunk.len());
     }
 
     let Some(first_end) = chunk.find(end_token.as_str()) else {
@@ -96,6 +96,48 @@ pub fn find_tool_call_end_position_glm47(chunk: &str, config: &Glm47ParserConfig
     }
 
     cursor
+}
+
+fn find_bare_glm47_tool_call_end_position(text: &str, config: &Glm47ParserConfig) -> Option<usize> {
+    let marker_idx = first_orphan_glm47_marker_index(text, config)?;
+    let before_marker = text[..marker_idx].trim_end();
+    let function_name_start = before_marker
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+
+    let candidate_name = before_marker[function_name_start..].trim();
+    if candidate_name.is_empty()
+        || !candidate_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return None;
+    }
+
+    let mut cursor = function_name_start;
+    let mut last_complete_end = None;
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        let trim_offset = rest.len() - rest.trim_start().len();
+        let call_start = cursor + trim_offset;
+        let tail = &text[call_start..];
+        let Some(end_pos) = tail.find(config.tool_call_end.as_str()) else {
+            break;
+        };
+
+        let call_end = call_start + end_pos + config.tool_call_end.len();
+        cursor = consume_glm47_close_markers(text, call_end, config);
+        last_complete_end = Some(cursor);
+
+        if first_orphan_glm47_marker_index(&text[cursor..], config).is_none() {
+            break;
+        }
+    }
+
+    last_complete_end
 }
 
 /// Try to parse GLM-4.7 formatted tool calls from a message.
@@ -415,6 +457,18 @@ fn is_glm47_close_marker_spam(text: &str, config: &Glm47ParserConfig) -> bool {
         rest = after_close.trim_start();
     }
     saw_close && rest.is_empty()
+}
+
+fn consume_glm47_close_markers(text: &str, mut cursor: usize, config: &Glm47ParserConfig) -> usize {
+    loop {
+        let rest = &text[cursor..];
+        let trim_offset = rest.len() - rest.trim_start().len();
+        let close_start = cursor + trim_offset;
+        if !text[close_start..].starts_with(config.tool_call_end.as_str()) {
+            return cursor;
+        }
+        cursor = close_start + config.tool_call_end.len();
+    }
 }
 
 /// Decode XML character entities in a string.
