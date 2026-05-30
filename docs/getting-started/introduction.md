@@ -10,7 +10,7 @@ sidebar-title: Introduction
 
 # Introduction to Dynamo
 
-Dynamo is an open-source, high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
+Dynamo is an open-source, high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments and optimized for production deployments on Kubernetes. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
 
 > [!TIP]
 > Looking to get started right away? See the [Quickstart](quickstart.mdx) to install and run Dynamo in minutes.
@@ -86,6 +86,16 @@ The full list of supported ecosystem components:
 | Networking and storage | Mooncake, DOCA NetIO, GDS, POSIX, S3, 3FS ([supported via NIXL](../design-docs/kvbm-design.md)) |
 | Multi-HW | Intel XPU, AMD |
 
+## Deployment Modes
+
+Dynamo supports two deployment modes. Both expose the same OpenAI-compatible API and the same backends; they differ in *where* request routing happens.
+
+- **Standalone mode** (default) -- The Dynamo Frontend serves HTTP requests directly, and the integrated Dynamo Router makes KV-aware routing decisions before dispatching to workers. No external gateway is required. This is the mode used by all local installs and the default Kubernetes deployment. Request flow: `client -> Frontend -> Router -> workers`.
+
+- **Gateway mode (GAIE)** -- Dynamo runs behind a Kubernetes [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway. KV-aware routing is performed at the gateway layer by the Dynamo Endpoint Picker Plugin (EPP); the Frontend runs as a sidecar in `--router-mode direct` and forwards requests to the worker the EPP selected. Use this mode when your platform standardizes on the Inference Gateway, or when you want gateway-level policy (auth, rate limiting, observability) co-located with KV-aware routing. Request flow: `client -> Inference Gateway -> EPP (KV-aware) -> Frontend sidecar (direct) -> workers`.
+
+Both modes support disaggregated serving, multimodal, and the same set of backends (vLLM, SGLang, TensorRT-LLM). For full setup, supported features, and configuration of gateway mode, see the [Inference Gateway (GAIE) guide](../kubernetes/inference-gateway.md).
+
 ## Performance
 
 Dynamo achieves state-of-the-art LLM performance by composing three core techniques: Disaggregated Serving, KV Cache-Aware Routing, and KV Cache Offloading. These techniques are underpinned by NIXL, a low-latency data transfer layer that enables seamless KV cache movement between nodes.
@@ -160,6 +170,7 @@ Explore the following resources to go deeper:
 - [KV Cache Offloading](../components/kvbm/kvbm-guide.md) -- Set up multi-tier memory management
 - [Planner](../components/planner/planner-guide.md) -- Configure SLA-based autoscaling
 - [Kubernetes Deployment](../kubernetes/README.md) -- Deploy at scale with Grove
+- [Inference Gateway (GAIE)](../kubernetes/inference-gateway.md) -- Run Dynamo in gateway mode behind the K8s Inference Gateway
 - [Overall Architecture](../design-docs/architecture.md) -- Full technical design
 - [Support Matrix](../reference/support-matrix.md) -- Check hardware and engine compatibility
 

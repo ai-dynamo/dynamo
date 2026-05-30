@@ -5,10 +5,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo Rust Backend (`dynamo-backend-common`)
 
-> **Work in progress.** The unified backend supports aggregated and
-> disaggregated (prefill/decode) inference; multimodal, LoRA, logprobs,
-> guided decoding, and engine-level metrics are still on the
-> non-unified path. The Python `Worker`
+> **Work in progress.** The unified backend covers aggregated and
+> disaggregated (prefill/decode) inference, metrics + Prometheus
+> bridging, KV event publishing, KV-aware (DP-rank) routing,
+> health-check canaries, OpenTelemetry tracing, and request-side
+> guided decoding. Logprob response wire, multimodal, diffusion
+> (image/video/DLLM), LoRA, engine routes (sleep/wake, profiling,
+> weight updates), text-in-text-out, and snapshot/CRIU are still on
+> the non-unified path. See the
+> [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
+> for the per-engine matrix. The Python `Worker`
 > ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
 > is a thin shim over this crate.
 
