@@ -81,6 +81,10 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         raise pytest.UsageError(format_collection_env_changes(changes))
 
 
+# optionalhook: pytest_testnodedown is an xdist-provided hookspec. Mark it
+# optional so collection does not raise PluginValidationError in environments
+# without pytest-xdist installed (e.g. the pre-commit marker-report hook).
+@pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node, error) -> None:
     # Controller side: gather each xdist worker's reported collection-env changes
     # as it shuts down (node.workeroutput is the worker's workeroutput dict).
