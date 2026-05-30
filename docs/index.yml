@@ -52,6 +52,9 @@ navigation:
     path: digest/index.mdx
     slug: digest
     contents:
+      - page: "DynoSim: Simulating the Pareto Frontier"
+        path: digest/dynosim/dynosim-pareto-frontier.md
+        slug: dynosim-pareto-frontier
       - page: "Dynamo Day 0 support for TokenSpeed"
         path: digest/tokenspeed/tokenspeed-day-0.md
         slug: tokenspeed-day-0
