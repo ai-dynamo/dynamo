@@ -84,7 +84,6 @@ class PluginRegistryGatewayServicer(pbg.PluginRegistryServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 f"register: malformed request: {type(exc).__name__}: {exc}",
             )
-            raise  # unreachable: context.abort() raises AbortError
         pyd_resp: RegisterResponse = await self._server.register(pyd_req)
         return pydantic_to_proto(pyd_resp)
 
@@ -100,7 +99,6 @@ class PluginRegistryGatewayServicer(pbg.PluginRegistryServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 f"heartbeat: malformed request: {type(exc).__name__}: {exc}",
             )
-            raise  # unreachable: context.abort() raises AbortError
         ok, reject = await self._server.authenticated_heartbeat(
             pyd_req.plugin_id, pyd_req.auth_token
         )
@@ -108,13 +106,11 @@ class PluginRegistryGatewayServicer(pbg.PluginRegistryServicer):
             await context.abort(
                 grpc.StatusCode.UNAUTHENTICATED, "heartbeat: auth_failed"
             )
-            raise  # unreachable
         if reject == "permission_denied":
             await context.abort(
                 grpc.StatusCode.PERMISSION_DENIED,
                 "heartbeat: caller subject does not match registered plugin",
             )
-            raise  # unreachable
         return pydantic_to_proto(HeartbeatResponse(ok=ok))
 
     async def Unregister(
@@ -129,7 +125,6 @@ class PluginRegistryGatewayServicer(pbg.PluginRegistryServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 f"unregister: malformed request: {type(exc).__name__}: {exc}",
             )
-            raise  # unreachable: context.abort() raises AbortError
         ok, reject = await self._server.authenticated_unregister(
             pyd_req.plugin_id, pyd_req.auth_token, reason=pyd_req.reason
         )
@@ -137,13 +132,11 @@ class PluginRegistryGatewayServicer(pbg.PluginRegistryServicer):
             await context.abort(
                 grpc.StatusCode.UNAUTHENTICATED, "unregister: auth_failed"
             )
-            raise  # unreachable
         if reject == "permission_denied":
             await context.abort(
                 grpc.StatusCode.PERMISSION_DENIED,
                 "unregister: caller subject does not match registered plugin",
             )
-            raise  # unreachable
         return pydantic_to_proto(UnregisterResponse(ok=ok))
 
     async def ListPlugins(
@@ -163,7 +156,6 @@ class PluginRegistryGatewayServicer(pbg.PluginRegistryServicer):
             "list_plugins: admin authentication is not yet wired over gRPC; "
             "use the in-process registry method until admin RBAC lands.",
         )
-        raise  # unreachable: context.abort() raises AbortError
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +207,16 @@ async def start_gateway_server(
         port = grpc_server.add_secure_port(listen, server_credentials)
     else:
         port = grpc_server.add_insecure_port(listen)
+    # ``add_*_port`` returns 0 when the bind fails (port in use, bad
+    # address, permission denied on a unix socket path, etc). Catch this
+    # before starting so the operator sees a clear error instead of a
+    # silently-running gateway that never accepts connections.
+    if port == 0:
+        raise RuntimeError(
+            f"plugin registry gateway failed to bind {listen!r} — "
+            "address may be in use, the path may be unwritable, or the "
+            "scheme may be malformed"
+        )
     await grpc_server.start()
     actual_listen = listen
     if listen.endswith(":0"):

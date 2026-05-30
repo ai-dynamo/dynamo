@@ -29,11 +29,14 @@ HOLD_LAST cache can be invalidated (v11 cache invalidation row 3).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Callable
 
 from dynamo.planner.plugins.clock import Clock
 from dynamo.planner.plugins.types import CircuitState
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -153,8 +156,22 @@ class CircuitBreaker:
     # ------------------------------------------------------------------
 
     def _fan_out_open(self, plugin_id: str) -> None:
+        # Each observer is best-effort: a bad callback must not stop the
+        # remaining callbacks from firing. record_failure() runs on the
+        # circuit-breaker failure path; if one observer escaped the loop,
+        # a single buggy scheduler-side listener could turn a per-plugin
+        # blip into a registry-wide failure.
         for cb in list(self._open_callbacks):
-            cb(plugin_id)
+            try:
+                cb(plugin_id)
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.warning(
+                    "on_open callback for plugin_id=%s raised %s: %s — "
+                    "remaining callbacks will still fire",
+                    plugin_id,
+                    type(exc).__name__,
+                    exc,
+                )
 
 
 __all__ = ["CircuitBreaker"]

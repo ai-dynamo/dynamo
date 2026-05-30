@@ -42,12 +42,14 @@ class StaticSecretAuth(AuthValidator):
         # bypass the gateway entirely). An operator who configured a
         # secret mapping to "" would let any gateway caller pass that
         # subject check against in-process plugins.
-        for secret, subject in secrets.items():
+        for secret_index, (_secret, subject) in enumerate(secrets.items()):
             if not subject:
                 raise ValueError(
                     "StaticSecretAuth: empty subject is not allowed for "
-                    f"secret entry (token prefix={secret[:4]!r}...); "
-                    "configure a distinguishing subject label per secret."
+                    f"secret entry at index {secret_index}; configure a "
+                    "distinguishing subject label per secret. (Token "
+                    "bytes are intentionally omitted from this error to "
+                    "avoid leaking secret material into startup logs.)"
                 )
         self._secrets: dict[str, str] = dict(secrets)
 

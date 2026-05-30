@@ -83,3 +83,19 @@ def test_construction_accepts_all_distinguishing_subjects():
     """Valid mapping (every secret → non-empty subject) constructs cleanly."""
     auth = StaticSecretAuth({"t1": "subj-a", "t2": "subj-b"})
     assert auth is not None
+
+
+def test_empty_subject_error_does_not_leak_secret_bytes():
+    """The empty-subject ValueError must not include any prefix of the
+    secret token. Startup logs and config-validation surfaces can
+    surface this message, so even a 4-char prefix is an unnecessary
+    secret leak."""
+    secret = "super-secret-token-please-do-not-log-me"
+    with pytest.raises(ValueError, match="empty subject") as exc_info:
+        StaticSecretAuth({secret: ""})
+    msg = str(exc_info.value)
+    # No substring of the token may appear in the error message. We
+    # check at least the first 4 chars (the previous bug) plus a few
+    # longer windows just to be sure.
+    for window in (secret[:4], secret[:6], secret[:8], secret):
+        assert window not in msg, f"error message leaks {window!r}: {msg!r}"

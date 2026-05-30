@@ -125,6 +125,29 @@ def test_on_open_callback_fires_on_half_open_to_open_reopen():
     assert opens == ["p1", "p1"]
 
 
+def test_on_open_callback_failure_does_not_skip_remaining_callbacks():
+    """One bad observer must not turn a per-plugin circuit-breaker
+    open into a registry-wide failure. The remaining ``on_open``
+    callbacks should still fire even if an earlier one raises."""
+    _, cb = _cb(failure_threshold=1)
+    fired: list[str] = []
+
+    def bad_callback(plugin_id: str) -> None:
+        raise RuntimeError("observer-side bug")
+
+    cb.on_open(bad_callback)
+    cb.on_open(lambda pid: fired.append(pid))
+
+    # Failure-threshold reached → CLOSED → OPEN → fan_out_open
+    cb.record_failure("p1")
+
+    # The second callback must have fired despite the first one raising.
+    assert fired == ["p1"], (
+        "second on_open callback should fire even when first raises; "
+        f"got fired={fired!r}"
+    )
+
+
 def test_multiple_plugins_tracked_independently():
     clock, cb = _cb(failure_threshold=2, cooldown_seconds=5.0)
     cb.record_failure("p1")

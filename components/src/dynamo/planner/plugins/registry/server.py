@@ -32,6 +32,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
+from packaging.version import InvalidVersion, Version
+
 from dynamo.planner.plugins.clock import Clock
 from dynamo.planner.plugins.registry.auth.base import AuthValidator
 from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
@@ -97,8 +99,23 @@ class PluginRegistryServer:
             )
             return RegisterResponse(accepted=False, reject_reason="auth_failed")
 
-        # 2. Protocol version (inclusive range check).
-        if not (self._protocol_min <= req.protocol_version <= self._protocol_max):
+        # 2. Protocol version (inclusive range check). Use semantic
+        # version compare via ``packaging.version.Version`` — a plain
+        # string compare mis-orders "1.10" vs "1.2" (lexicographic puts
+        # "1.10" < "1.2" because '1' < '2'), which could mistakenly
+        # reject valid plugins once a component reaches 10.
+        try:
+            req_v = Version(req.protocol_version)
+            min_v = Version(self._protocol_min)
+            max_v = Version(self._protocol_max)
+        except InvalidVersion as exc:
+            reason = (
+                f"protocol_version_malformed: requested={req.protocol_version!r} "
+                f"(detail={exc!s})"
+            )
+            log.info("register rejected plugin_id=%s reason=%s", req.plugin_id, reason)
+            return RegisterResponse(accepted=False, reject_reason=reason)
+        if not (min_v <= req_v <= max_v):
             reason = (
                 f"protocol_version_unsupported: requested={req.protocol_version}, "
                 f"supported=[{self._protocol_min},{self._protocol_max}]"

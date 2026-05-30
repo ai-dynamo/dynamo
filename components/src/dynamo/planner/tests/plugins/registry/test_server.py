@@ -296,6 +296,46 @@ async def test_protocol_version_out_of_range_rejected():
 
 
 @pytest.mark.asyncio
+async def test_protocol_version_semantic_compare_not_lexicographic():
+    """``1.10`` must be greater than ``1.2`` (semantic version),
+    even though lexicographically ``"1.10" < "1.2"`` because the
+    second character ``1`` < ``2``. The register check must use
+    ``packaging.version.Version`` (or equivalent) — not raw string
+    compare — otherwise valid plugins get rejected once any component
+    reaches 10."""
+    server, _, _, _ = _make_server(protocol_versions=("1.0", "1.10"))
+
+    # 1.10 must be accepted under max=1.10 (semantic compare).
+    # With lexicographic compare, "1.10" > "1.2" would be False and
+    # the upper-bound check ``req <= max`` would still pass (because
+    # "1.10" <= "1.10" lexicographically too); the failure mode is
+    # different. The real lex bug: requested="1.2", max="1.10" —
+    # lex says "1.2" > "1.10" so the register rejects something
+    # that should be accepted. Cover both that and the "above max"
+    # rejection that semantic compare must respect.
+    accepted = await server.register(_req(plugin_id="ok-1.10", protocol_version="1.10"))
+    assert accepted.accepted is True, accepted.reject_reason
+
+    accepted_mid = await server.register(_req(plugin_id="ok-1.2", protocol_version="1.2"))
+    assert accepted_mid.accepted is True, accepted_mid.reject_reason
+
+    rejected = await server.register(_req(plugin_id="too-new", protocol_version="2.0"))
+    assert rejected.accepted is False
+    assert "protocol_version_unsupported" in rejected.reject_reason
+
+
+@pytest.mark.asyncio
+async def test_protocol_version_malformed_rejected_clearly():
+    """A non-semver protocol_version string surfaces as a distinct
+    ``protocol_version_malformed`` reject reason — not silently treated
+    as out-of-range."""
+    server, _, _, _ = _make_server(protocol_versions=("1.0", "2.0"))
+    resp = await server.register(_req(protocol_version="not-a-version"))
+    assert resp.accepted is False
+    assert "protocol_version_malformed" in resp.reject_reason
+
+
+@pytest.mark.asyncio
 async def test_auth_failure_rejected_with_generic_reason():
     server, _, _, _ = _make_server(auth=StaticSecretAuth({"good": "alice"}))
     resp = await server.register(_req(auth_token="bad"))

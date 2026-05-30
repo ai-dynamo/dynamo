@@ -221,3 +221,63 @@ async def test_list_plugins_over_gateway_default_denied():
     # Error message must direct the operator to the in-process path so they
     # have an escape hatch until admin RBAC lands.
     assert "in-process" in ctx.aborted_message.lower()
+
+
+# ---------------------------------------------------------------------------
+# start_gateway_server bind-failure handling.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_server_raises_when_port_zero():
+    """``add_insecure_port`` returns 0 on bind failure (port in use,
+    bad address, etc). The helper must catch that BEFORE starting the
+    server so operators see a clear RuntimeError instead of a silently
+    running gateway that accepts no connections."""
+    from dynamo.planner.plugins.registry import gateway as gw_mod
+    from dynamo.planner.plugins.registry.gateway import start_gateway_server
+
+    server, _ = _make_servicer()
+
+    class _StubAioServer:
+        def __init__(self) -> None:
+            self.started = False
+
+        def add_generic_rpc_handlers(self, _handlers: Any) -> None:
+            # Called by ``add_PluginRegistryServicer_to_server``;
+            # no-op stub for the bind-failure test.
+            pass
+
+        def add_registered_method_handlers(
+            self, _service_name: str, _method_handlers: Any
+        ) -> None:
+            # Newer grpc.aio adds this alongside add_generic_rpc_handlers;
+            # we accept it as a no-op so the servicer install succeeds.
+            pass
+
+        def add_insecure_port(self, _listen: str) -> int:  # noqa: D401
+            # Simulate a bind failure.
+            return 0
+
+        def add_secure_port(self, _listen: str, _creds: Any) -> int:
+            return 0
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+    stub = _StubAioServer()
+    # Monkeypatch grpc.aio.server() to return our stub.
+    real_factory = gw_mod.grpc.aio.server
+    gw_mod.grpc.aio.server = lambda: stub  # type: ignore[assignment]
+    try:
+        with pytest.raises(RuntimeError, match="failed to bind"):
+            await start_gateway_server(server, listen="0.0.0.0:1")
+    finally:
+        gw_mod.grpc.aio.server = real_factory  # type: ignore[assignment]
+    assert stub.started is False, (
+        "start_gateway_server must fail fast BEFORE calling grpc_server.start() "
+        "when add_*_port() reports a bind failure"
+    )
