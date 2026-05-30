@@ -107,8 +107,12 @@ async def _python_realtime_echo(request_stream, context):
 
 
 async def main() -> None:
-    """Register the realtime echo model and serve the bidirectional engine."""
-    runtime = DistributedRuntime(asyncio.get_running_loop(), "etcd", "tcp")
+    """Register the realtime echo model and serve the bidirectional engine.
+
+    Uses file-based discovery (``DYN_FILE_KV``) + the tcp request plane, so the
+    worker and the launched frontend coordinate without etcd or nats.
+    """
+    runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
     endpoint = runtime.endpoint(ENDPOINT_PATH)
     await register_model(
         ModelInput.Text,
