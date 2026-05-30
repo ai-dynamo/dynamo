@@ -177,11 +177,11 @@ cases:
         - name: get_weather
           arguments:
             location: Boston
-        normal_text: |-
+        normal_text: |
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
           </｜DSML｜invoke>
           </｜DSML｜tool_calls>
-        reason: "vLLM preserves the bare DSML invoke before the first <｜DSML｜tool_calls> as content; Dynamo recovers it as the first structured call before parsing the wrapped call."
+        reason: "vLLM preserves the bare DSML invoke before the first <｜DSML｜tool_calls> as content, including the trailing newline; Dynamo recovers it as the first structured call before parsing the wrapped call."
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
