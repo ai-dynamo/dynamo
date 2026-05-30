@@ -61,9 +61,9 @@ you need.
 searchStrategy: rapid
 ```
 
-Uses the **AI Configurator (AIC)** to simulate GPU performance without
-running real inference. Completes in ~30 seconds with no GPU resources consumed
-during profiling.
+Uses AIC-backed DynoSim-style performance modeling to search deployment
+configurations without running real inference. Completes in ~30 seconds with no
+GPU resources consumed during profiling.
 
 **Use rapid when:**
 - Getting started or iterating quickly

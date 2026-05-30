@@ -52,7 +52,7 @@ spec:
 | `model` | Yes | — | HuggingFace model ID (e.g. `Qwen/Qwen3-0.6B`) |
 | `image` | No | — | Container image for the profiling job. Dynamo >= 1.1.0: use `dynamo-planner`; earlier versions: use `dynamo-frontend`. |
 | `backend` | No | `auto` | Inference engine: `auto`, `vllm`, `sglang`, `trtllm` |
-| `searchStrategy` | No | `rapid` | Profiling depth: `rapid` (AIC simulation, ~30s) or `thorough` (real GPU, 2–4h) |
+| `searchStrategy` | No | `rapid` | Profiling depth: `rapid` (AIC-backed DynoSim-style modeling, ~30s) or `thorough` (real GPU, 2–4h) |
 | `autoApply` | No | `true` | Automatically deploy the profiler's recommended config |
 | `sla.ttft` | No | — | Target time to first token (ms) |
 | `sla.itl` | No | — | Target inter-token latency (ms) |
