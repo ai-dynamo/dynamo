@@ -31,7 +31,10 @@
 use axum::response::sse::Event;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use crate::http::service::error::SanitizedError;
@@ -196,8 +199,24 @@ async fn connection_monitor(
 pub fn monitor_for_disconnects(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_terminal_error(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        None,
+    )
+}
+
+pub fn monitor_for_disconnects_with_terminal_error(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
+    terminal_error: Option<Arc<AtomicBool>>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -247,7 +266,14 @@ pub fn monitor_for_disconnects(
                         }
                         None => {
                             // Stream ended normally
-                            inflight_guard.mark_ok();
+                            if terminal_error
+                                .as_ref()
+                                .is_some_and(|failed| failed.load(Ordering::Acquire))
+                            {
+                                inflight_guard.mark_error(ErrorType::Internal);
+                            } else {
+                                inflight_guard.mark_ok();
+                            }
                             stream_handle.disarm();
 
                             // todo: if we yield a dynamo sentinel event, we need to do it before the done or the
