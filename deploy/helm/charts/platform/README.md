@@ -152,9 +152,12 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.dynamo.virtualServiceSupportsHTTPS | bool | `false` | Whether VirtualServices should support HTTPS routing |
 | dynamo-operator.dynamo.serviceMesh.enabled | bool | `false` | Whether to enable service mesh resource generation for EPP |
 | dynamo-operator.dynamo.serviceMesh.provider | string | `"istio"` | Service mesh provider. Supported: "istio" |
-| dynamo-operator.dynamo.serviceMesh.istio | object | `{"insecureSkipVerify":true,"tlsMode":"SIMPLE"}` | Istio-specific settings (only used when provider is "istio") |
+| dynamo-operator.dynamo.serviceMesh.istio | object | `{"caCertificates":"","clientCertificate":"","insecureSkipVerify":true,"privateKey":"","tlsMode":"SIMPLE"}` | Istio-specific settings (only used when provider is "istio") |
 | dynamo-operator.dynamo.serviceMesh.istio.tlsMode | string | `"SIMPLE"` | TLS mode for DestinationRules: "SIMPLE", "DISABLE", "ISTIO_MUTUAL", "MUTUAL" |
 | dynamo-operator.dynamo.serviceMesh.istio.insecureSkipVerify | bool | `true` | Skip TLS certificate verification (for self-signed EPP certs) |
+| dynamo-operator.dynamo.serviceMesh.istio.clientCertificate | string | `""` | Path (in the istio-proxy sidecar's filesystem) to the client TLS certificate used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored for other modes. |
+| dynamo-operator.dynamo.serviceMesh.istio.privateKey | string | `""` | Path (in the istio-proxy sidecar's filesystem) to the client TLS private key used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored for other modes. |
+| dynamo-operator.dynamo.serviceMesh.istio.caCertificates | string | `""` | Optional path (in the istio-proxy sidecar's filesystem) to CA certificates used to verify the EPP server certificate. Used only when tlsMode is "MUTUAL". |
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
 | dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
 | dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |
