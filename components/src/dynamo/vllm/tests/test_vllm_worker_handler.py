@@ -1209,7 +1209,13 @@ class TestEmbeddingWorkerHandlerCancellation:
         assert len(response["data"]) == 2
         assert response["data"][0]["index"] == 0
         assert response["data"][1]["index"] == 1
-        assert response["data"][0]["embedding"] == pytest.approx([0.1, 0.2, 0.3])
+        # The worker always emits base64 on the internal worker->frontend
+        # wire format; the Rust HTTP frontend decodes back to float at the
+        # HTTP boundary when the client asks for float. So both data items
+        # have the same base64 of [0.1, 0.2, 0.3] here.
+        expected_b64 = mod._encode_floats_to_base64([0.1, 0.2, 0.3])
+        assert response["data"][0]["embedding"] == expected_b64
+        assert response["data"][1]["embedding"] == expected_b64
         # No tasks were in flight at gather completion, so the finally
         # cancel-and-await pass must not have touched the engine.
         assert aborted == []
