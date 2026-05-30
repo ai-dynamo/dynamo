@@ -70,11 +70,8 @@ type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 /// engine — so the caller supplies it via `make_first_arg`, which runs
 /// inside the GIL because building either value needs `py`.
 ///
-/// Acquiring the GIL is similar to acquiring a standard lock/mutex, and doing
-/// so in a tokio async task could block the thread for an undefined amount of
-/// time, so the call is offloaded to a blocking task to keep the reactor from
-/// being parked. The Python GIL is the gift that keeps on giving -- performance
-/// hits...
+/// The GIL is acquired on a blocking task rather than inline: under contention
+/// it can block for an unbounded time, which would park the tokio reactor.
 async fn invoke_generator<F>(
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
