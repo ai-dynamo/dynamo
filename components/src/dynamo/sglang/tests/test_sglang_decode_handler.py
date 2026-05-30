@@ -7,10 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_media_urls,
     _extract_sglang_stop_reason,
+    _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _user_stop_token_ids,
 )
@@ -23,6 +25,18 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
+
+
+def _read_zstd_payload(path, payload_format="msgpack"):
+    import zstandard as zstd
+
+    raw = zstd.ZstdDecompressor().decompress(path.read_bytes())
+    if payload_format == "json":
+        return json.loads(raw)
+
+    import msgspec
+
+    return msgspec.msgpack.decode(raw)
 
 
 def test_extract_media_urls_supports_string_and_wire_items():
@@ -121,11 +135,12 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     }
 
 
-def _new_decode_handler(*, use_sglang_tokenizer: bool = False):
+def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.use_sglang_tokenizer = use_sglang_tokenizer
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model")
+        server_args=SimpleNamespace(served_model_name="test-model"),
+        dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
 
     @asynccontextmanager
@@ -227,6 +242,62 @@ def test_extract_logprobs_formats_top_tokens_as_token_ids():
     assert total == 1
 
 
+def test_metadata_uploader_parses_extra_args_nvext():
+    uploader = MetadataUploader.from_backend_request(
+        {
+            "extra_args": {
+                "nvext": {
+                    "metadata_upload": {
+                        "url": "s3://bucket/root/rollouts",
+                        "format": "json",
+                    }
+                }
+            }
+        }
+    )
+
+    assert uploader is not None
+    assert uploader.url == "s3://bucket/root/rollouts"
+    assert uploader.payload_format == "json"
+
+    uploader = MetadataUploader.from_backend_request(
+        {"nvext": {"metadata_upload": {"url": "s3://bucket/root/rollouts"}}}
+    )
+    assert uploader is not None
+    assert uploader.payload_format == "msgpack"
+
+
+def test_nvext_extra_field_requested_supports_raw_and_preprocessed_shapes():
+    assert _nvext_extra_field_requested(
+        {"nvext": {"extra_fields": ["stop_reason"]}}, "stop_reason"
+    )
+    assert _nvext_extra_field_requested(
+        {"extra_args": {"nvext": {"extra_fields": ["stop_reason"]}}},
+        "stop_reason",
+    )
+    assert not _nvext_extra_field_requested(
+        {"extra_args": {"nvext": {"extra_fields": ["engine_data"]}}},
+        "stop_reason",
+    )
+
+
+def test_metadata_upload_requires_enable_rl():
+    request = {
+        "extra_args": {
+            "nvext": {"metadata_upload": {"url": "s3://bucket/root/rollouts/run-1"}}
+        }
+    }
+
+    assert _new_decode_handler()._metadata_uploader_from_request(request) is None
+
+    uploader = _new_decode_handler(enable_rl=True)._metadata_uploader_from_request(
+        request
+    )
+    assert uploader is not None
+    assert uploader.url == "s3://bucket/root/rollouts/run-1"
+    assert uploader.payload_format == "msgpack"
+
+
 @pytest.mark.asyncio
 async def test_process_token_stream_tracks_logprobs_per_choice_index():
     handler = _new_decode_handler()
@@ -274,6 +345,102 @@ async def test_process_token_stream_tracks_logprobs_per_choice_index():
     assert [chunk["index"] for chunk in chunks] == [0, 1, 0]
     assert [chunk["token_ids"] for chunk in chunks] == [[101], [201], [102]]
     assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.2], [-0.3]]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_uploads_large_metadata(tmp_path):
+    handler = _new_decode_handler()
+    recorded = {}
+
+    class RecordingUploader(MetadataUploader):
+        async def upload_choice(self, choice):
+            recorded["choice"] = choice
+            return await super().upload_choice(choice)
+
+    uploader = RecordingUploader(
+        url=(tmp_path / "metadata/rollout-7").as_uri(),
+    )
+    meta_info = {
+        "id": "sglang-1",
+        "finish_reason": {"type": "stop"},
+        "output_token_logprobs": [(-0.1, 101, "a")],
+        "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
+        "routed_experts": b"expert-bytes",
+        "prompt_tokens": 2,
+        "completion_tokens": 1,
+        "cached_tokens": 0,
+    }
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": meta_info,
+                    }
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert "log_probs" not in chunk
+    assert "top_logprobs" not in chunk
+    assert "disaggregated_params" not in chunk
+    assert "engine_data" not in chunk
+    uploaded_path = tmp_path / "metadata/rollout-7/choice_0.msgpack.zst"
+
+    payload = _read_zstd_payload(uploaded_path)
+    assert payload["metadata"]["log_probs"] == [-0.1]
+    assert payload["metadata"]["top_logprobs"][0][1]["token_id"] == 102
+    assert payload["metadata"]["routed_experts"] == b"expert-bytes"
+    assert "output_token_logprobs" not in meta_info
+    assert "output_top_logprobs" not in meta_info
+    assert "routed_experts" not in meta_info
+
+    assert recorded["choice"].log_probs == []
+    assert recorded["choice"].top_logprobs == []
+    assert recorded["choice"].routed_experts is None
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_upload_failure_blocks_final_chunk(tmp_path):
+    handler = _new_decode_handler()
+
+    class FailingUploader(MetadataUploader):
+        async def upload_choice(self, choice):
+            raise RuntimeError("metadata upload failed")
+
+    with pytest.raises(RuntimeError, match="metadata upload failed"):
+        await _collect(
+            handler._process_token_stream(
+                _stream(
+                    [
+                        {
+                            "index": 0,
+                            "output_ids": [101],
+                            "meta_info": {
+                                "id": "sglang-1",
+                                "finish_reason": {"type": "stop"},
+                                "output_token_logprobs": [(-0.1, 101, "a")],
+                                "prompt_tokens": 2,
+                                "completion_tokens": 1,
+                                "cached_tokens": 0,
+                            },
+                        }
+                    ]
+                ),
+                _Context(),
+                metadata_uploader=FailingUploader(
+                    url=(tmp_path / "metadata/rollout-fail").as_uri(),
+                ),
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -371,6 +538,43 @@ async def test_process_text_stream_stop_reason_requires_nvext_extra_field():
 
     assert "stop_reason" not in chunks[0]["choices"][0]
     assert "nvext" not in chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_uploads_routed_experts(tmp_path):
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+    uploader = MetadataUploader(
+        url=(tmp_path / "metadata/rollout-8").as_uri(),
+        payload_format="json",
+    )
+    meta_info = {
+        "id": "sglang-2",
+        "finish_reason": {"type": "stop"},
+        "routed_experts": "base64-experts",
+    }
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": meta_info,
+                    }
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert "nvext" not in chunks[0]
+    payload = _read_zstd_payload(
+        tmp_path / "metadata/rollout-8/choice_0.json.zst", payload_format="json"
+    )
+    assert payload["metadata"]["routed_experts"] == "base64-experts"
+    assert "routed_experts" not in meta_info
 
 
 @pytest.mark.asyncio
