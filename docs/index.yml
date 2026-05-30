@@ -242,12 +242,18 @@ navigation:
             path: fault-tolerance/testing.md
       - page: Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Simulation with Mocker
+      - section: DynoSim Simulation
         contents:
-          - page: Testing with Mocker
+          - page: DynoSim Overview
+            path: benchmarks/dynosim.md
+          - page: Live Simulation with Mocker
             path: mocker/mocker.md
-          - page: Mocker Offline Trace Replay
-            path: benchmarks/mocker-trace-replay.md
+          - page: DynoSim Runs
+            path: benchmarks/dynosim-runs.md
+          - page: DynoSim Sweeps
+            path: benchmarks/dynosim-sweeps.md
+          - page: Planner DynoSim Benchmarking
+            path: benchmarks/planner-dynosim-benchmarking.md
       - page: Writing Python Workers (lower-level)
         path: development/backend-guide.md
       - page: Writing Python Unified Backends
@@ -483,8 +489,8 @@ navigation:
       # -- Benchmarks --
       - page: KV Router A/B Testing
         path: benchmarks/kv-router-ab-testing.md
-      # -- Simulation with Mocker --
-      - page: Simulation with Mocker
+      # -- DynoSim --
+      - page: Live Simulation with Mocker
         path: mocker/mocker.md
       # -- Templates --
       - section: Templates

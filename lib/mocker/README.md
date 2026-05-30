@@ -46,7 +46,7 @@ embedding it directly as a standalone Rust dependency.
 
 - Mocker guide:
   <https://github.com/ai-dynamo/dynamo/blob/main/docs/mocker/mocker.md>
-- Trace replay guide:
-  <https://github.com/ai-dynamo/dynamo/blob/main/docs/benchmarks/mocker-trace-replay.md>
+- DynoSim runs guide:
+  <https://github.com/ai-dynamo/dynamo/blob/main/docs/benchmarks/dynosim-runs.md>
 - Python component README:
   <https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/README.md>

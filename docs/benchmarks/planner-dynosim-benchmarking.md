@@ -1,13 +1,13 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Planner Replay Benchmarking
-subtitle: Drive the planner in the loop against a saved trace to evaluate SLA behavior and scaling decisions
+title: Planner DynoSim Benchmarking
+subtitle: Drive the planner in the simulation loop against a saved trace to evaluate SLA behavior and scaling decisions
 ---
 
-This guide shows how to benchmark the Dynamo Planner against a recorded trace by running it inside the mock replay harness. Use it to compare `agg` vs `disagg` topologies, tune SLA targets, and study how deployment realities (engine startup time, worker counts) affect planner behavior — all without bringing up a live cluster.
+This guide shows how to benchmark the Dynamo Planner against a recorded trace by running it inside DynoSim. Use it to compare `agg` vs `disagg` topologies, tune SLA targets, and study how deployment realities (engine startup time, worker counts) affect planner behavior — all without bringing up a live cluster.
 
-For the general mechanics of trace replay (input format, arrival speedup, router modes, synthetic workloads), see [Mocker Offline Trace Replay](mocker-trace-replay.md). This guide focuses on the `--planner-config` path.
+For the general mechanics of DynoSim runs (input format, arrival speedup, router modes, synthetic workloads), see [DynoSim Runs](dynosim-runs.md). This guide focuses on the `--planner-config` path.
 
 ## 1. Setup
 
@@ -20,7 +20,7 @@ cd lib/bindings/python
 .venv/bin/maturin develop --release
 ```
 
-The `--release` flag is strongly recommended. Replay simulation is largely single-threaded and CPU-bound on the mocker engine core; a debug build can be 5–10× slower, which compounds across sweep runs.
+The `--release` flag is strongly recommended. DynoSim execution is largely single-threaded and CPU-bound on the mocker engine core; a debug build can be 5–10× slower, which compounds across sweep runs.
 
 ### Key Planner Config Knobs
 
@@ -36,12 +36,12 @@ Passed as JSON via `--planner-config`. Uses the same schema as the live planner.
 | `throughput_adjustment_interval_seconds` | Seconds between throughput-scaling decisions. |
 | `load_adjustment_interval_seconds` | Seconds between load-scaling decisions. Short intervals mean faster reaction but more flapping. |
 | `pre_deployment_sweeping_mode` | `"rapid"` uses the AIC analytical model; leave unset to fall back to recorded profile data. |
-| `prefill_engine_num_gpu` / `decode_engine_num_gpu` | GPUs per engine replica. **Must be set explicitly** — both default to `None`, and the replay adapter silently treats `None` as `0`, which collapses the cumulative-GPU-hours metric in the report to zero. |
+| `prefill_engine_num_gpu` / `decode_engine_num_gpu` | GPUs per engine replica. **Must be set explicitly** — both default to `None`, and the simulation adapter silently treats `None` as `0`, which collapses the cumulative-GPU-hours metric in the report to zero. |
 | `report_filename` | Output HTML filename under `./planner_reports/`. |
 
 ### Key Engine Arg Knobs
 
-Passed as JSON via `--extra-engine-args` (agg) or `--prefill-engine-args` / `--decode-engine-args` (disagg). The replay harness uses the mocker engine, so "engine args" means the analytical perf model inputs:
+Passed as JSON via `--extra-engine-args` (agg) or `--prefill-engine-args` / `--decode-engine-args` (disagg). DynoSim uses the mocker engine, so "engine args" means the analytical perf model inputs:
 
 | Field | Purpose |
 |---|---|
@@ -51,7 +51,7 @@ Passed as JSON via `--extra-engine-args` (agg) or `--prefill-engine-args` / `--d
 | `aic_tp_size` | Tensor-parallel size of each engine replica. |
 | `startup_time` | Simulated seconds between a planner scale-up decision and the new worker becoming active. Unset or `0` means workers activate instantly. |
 
-Other fields follow the standard mocker engine protocol (see [Mocker Offline Trace Replay](mocker-trace-replay.md)).
+Other fields follow the standard mocker engine protocol (see [DynoSim Runs](dynosim-runs.md)).
 
 ## 2. Example: Agg vs Disagg On The Mooncake Agentic Trace
 
@@ -74,7 +74,7 @@ Run agg (2 workers, TP=1):
     "pre_deployment_sweeping_mode": "rapid",
     "throughput_adjustment_interval_seconds": 300, "load_adjustment_interval_seconds": 10,
     "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 1,
-    "report_filename": "replay_agg.html"
+    "report_filename": "dynosim_agg.html"
   }' \
   --extra-engine-args '{"aic_backend": "vllm", "aic_system": "h200_sxm", "aic_model_path": "nvidia/Llama-3.1-8B-Instruct-FP8", "aic_tp_size": 1}' \
   --num-workers 2 --arrival-speedup-ratio 1.0
@@ -92,7 +92,7 @@ Run disagg (1P1D, TP=1):
     "pre_deployment_sweeping_mode": "rapid",
     "throughput_adjustment_interval_seconds": 300, "load_adjustment_interval_seconds": 10,
     "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 1,
-    "report_filename": "replay_disagg.html"
+    "report_filename": "dynosim_disagg.html"
   }' \
   --prefill-engine-args '{"aic_backend": "vllm", "aic_system": "h200_sxm", "aic_model_path": "nvidia/Llama-3.1-8B-Instruct-FP8", "aic_tp_size": 1}' \
   --decode-engine-args  '{"aic_backend": "vllm", "aic_system": "h200_sxm", "aic_model_path": "nvidia/Llama-3.1-8B-Instruct-FP8", "aic_tp_size": 1}' \
@@ -115,7 +115,7 @@ mkdir -p "$OUT"
 
 run_one() {
   local s=$1
-  local name=$(printf "replay_agg_startup_%03d.html" "$s")
+  local name=$(printf "dynosim_agg_startup_%03d.html" "$s")
   local extra
   if [[ "$s" -eq 0 ]]; then
     extra='{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1}'
@@ -137,7 +137,7 @@ seq 0 10 300 | xargs -n1 -P12 -I{} bash -c 'run_one "$@"' _ {}
 
 Each run emits the AIPerf metrics table (parse TTFT / ITL avg / p90) and its HTML report (grep `GPU hours: <float>`). Plotting those against `startup_time` gives:
 
-![Planner replay — startup time sweep](../assets/img/planner-replay-startup-sweep.png)
+![Planner DynoSim — startup time sweep](../assets/img/planner-replay-startup-sweep.png)
 
 Observations from this sweep (agg, TTFT SLA 1,500 ms, ITL SLA 50 ms, H200-SXM, Llama-3.1-8B-FP8, TP=1):
 

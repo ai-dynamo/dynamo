@@ -1,10 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Simulation with Mocker
+title: Live Simulation with Mocker
 ---
 
-Mocker is Dynamo's lightweight, high-fidelity simulation of an LLM inference engine, implemented entirely in Rust. It replicates the core scheduling, memory management, and timing behaviors of production engines without requiring a GPU, making it invaluable for testing Dynamo's routing, KV cache events, disaggregated serving, and planner components.
+Mocker is the live simulated engine in DynoSim. It runs as a Dynamo backend, registers workers, publishes KV events, and exercises the real frontend/router/planner path without requiring GPUs.
+
+The mocker core is implemented in Rust and models the scheduling, memory management, and timing behavior of production engines. It can use polynomial timing, profile-derived timing, or AIC-backed timing. AIC predicts prefill/decode duration; Mocker still owns the scheduler, KV cache lifecycle, prefix-cache behavior, and request execution model.
 
 ## Overview
 
@@ -96,7 +98,7 @@ python -m dynamo.mocker \
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
 | `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
 | `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
-| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Opt-in only: default mocker and replay paths do not use AIC. Requires `aiconfigurator` installed and usable AIC systems/perf data for the requested `system/backend/version` tuple |
+| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Opt-in only: default mocker and DynoSim run paths do not use AIC. Requires `aiconfigurator` installed and usable AIC systems/perf data for the requested `system/backend/version` tuple |
 | `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
 | `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
 | `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
@@ -125,14 +127,14 @@ python -m dynamo.mocker \
 
 > **Note:** For local scale tests and router benchmarks, prefer `--num-workers` over launching many separate mocker processes. All workers share one tokio runtime and thread pool, which is both lighter weight and closer to how the test harnesses exercise the mocker.
 
-## Trace Replay
+## DynoSim Runs
 
-The mocker supports replaying Mooncake-style traces through the dedicated replay CLI, which exposes
+Mocker also powers DynoSim runs through the dedicated `python -m dynamo.replay` CLI, which exposes
 `offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, closed-loop concurrency
-admission, synthetic workload generation, and offline disaggregated prefill/decode replay directly:
+admission, synthetic workload generation, and offline disaggregated prefill/decode simulation directly:
 
-The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Aggregated
-replay uses `--extra-engine-args`. Offline disagg replay instead uses
+The DynoSim CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Aggregated
+runs use `--extra-engine-args`. Offline disaggregated runs instead use
 `--prefill-engine-args` plus `--decode-engine-args`, together with
 `--num-prefill-workers` and `--num-decode-workers`.
 
@@ -145,10 +147,10 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --trace-block-size 512 \
     --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"fcfs"}' \
-    --report-json /tmp/replay-report.json
+    --report-json /tmp/dynosim-report.json
 ```
 
-The same CLI also supports synthetic replay without a trace file:
+The same CLI also supports synthetic workloads without a trace file:
 
 ```bash
 python -m dynamo.replay \
@@ -160,10 +162,10 @@ python -m dynamo.replay \
     --replay-mode offline \
     --replay-concurrency 100 \
     --extra-engine-args '{"block_size":512}' \
-    --report-json /tmp/replay-report.json
+    --report-json /tmp/dynosim-report.json
 ```
 
-Synthetic replay also supports workload-style generation for shared-prefix and multi-turn tests:
+Synthetic workloads also support shared-prefix and multi-turn tests:
 
 ```bash
 python -m dynamo.replay \
@@ -177,10 +179,10 @@ python -m dynamo.replay \
     --replay-mode offline \
     --replay-concurrency 32 \
     --extra-engine-args '{"block_size":512}' \
-    --report-json /tmp/replay-report.json
+    --report-json /tmp/dynosim-report.json
 ```
 
-For trace files, replay also understands multi-turn sessions when records share `session_id`. The
+For trace files, DynoSim also understands multi-turn sessions when records share `session_id`. The
 first turn uses `timestamp`/`created_time`; later turns can use `delay` or `delay_ms`:
 
 ```json
@@ -188,12 +190,12 @@ first turn uses `timestamp`/`created_time`; later turns can use `delay` or `dela
 {"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
 ```
 
-For trace-file replay, `--trace-block-size` controls how many tokens each `hash_id` represents in
-the dataset, while engine `block_size` still controls the replay engine and router hashing. Public
+For trace-file runs, `--trace-block-size` controls how many tokens each `hash_id` represents in
+the dataset, while engine `block_size` still controls the simulated engine and router hashing. Public
 Mooncake/toolagent traces use `--trace-block-size 512`; engine `block_size` can still stay at `64`
 to match the live runtime configuration.
 
-The standalone replay CLI prints an AIPerf-style summary table to stdout and writes the full replay
+The standalone DynoSim CLI prints an AIPerf-style summary table to stdout and writes the full
 report JSON to disk.
 
 Timing semantics:
@@ -202,18 +204,18 @@ Timing semantics:
 - concurrency mode ignores first-turn timestamps but still enforces inter-turn delays
 - in concurrency mode, TTFT is measured from actual dispatch under the in-flight cap
 
-For full usage, constraints, and benchmarking guidance, see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md).
+For full usage, constraints, and benchmarking guidance, see [DynoSim Runs](../benchmarks/dynosim-runs.md).
 
-Replay supports aggregated `vllm` and `sglang` engine configs. Internally replay uses canonical
+DynoSim runs support aggregated `vllm` and `sglang` engine configs. Internally the simulator uses canonical
 `block_size`; for `sglang`, `sglang.page_size` is still accepted as a compatibility alias as long
 as it matches `block_size` when both are provided.
 
-Offline replay also supports disaggregated `kv_router` mode. In that mode:
+Offline DynoSim runs also support disaggregated `kv_router` mode. In that mode:
 
 - `--prefill-engine-args` must describe a prefill worker
 - `--decode-engine-args` must describe a decode worker
 - `--router-mode` must be `kv_router`
-- only offline replay is supported
+- only offline mode is supported
 
 Example:
 
@@ -230,7 +232,7 @@ python -m dynamo.replay \
     --prefill-engine-args '{"worker_type":"prefill","block_size":512}' \
     --decode-engine-args '{"worker_type":"decode","block_size":512}' \
     --router-config '{"router_queue_policy":"wspt"}' \
-    --report-json /tmp/replay-report.json
+    --report-json /tmp/dynosim-report.json
 ```
 
 ## Performance Modeling Setup
@@ -281,18 +283,18 @@ Important notes:
 - In development environments, this may require pointing Python at a source checkout of `aiconfigurator` with real Git LFS payloads materialized in its `systems/` directory.
 
 This mocker AIC path is separate from the router-side prefill-load estimator. Live router,
-frontend, and replay all use `router_prefill_load_model="aic"` plus top-level `--aic-*` flags for
-oldest-prefill prompt-load decay. Replay still uses engine-args AIC separately when you want the
+frontend, and DynoSim runs all use `router_prefill_load_model="aic"` plus top-level `--aic-*` flags for
+oldest-prefill prompt-load decay. DynoSim still uses engine-args AIC separately when you want the
 mocked worker timing model itself to come from AIC.
 
-For aggregated replay, engine timing AIC still comes from `--extra-engine-args`:
+For aggregated DynoSim runs, engine timing AIC still comes from `--extra-engine-args`:
 
 ```bash
 python -m dynamo.replay /path/to/trace.jsonl \
     --extra-engine-args '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1}'
 ```
 
-For offline disagg replay, pass the staged engine configs instead:
+For offline disaggregated DynoSim runs, pass the staged engine configs instead:
 
 ```bash
 python -m dynamo.replay /path/to/trace.jsonl \
@@ -306,7 +308,7 @@ python -m dynamo.replay /path/to/trace.jsonl \
 
 The `aic_backend` field enables the AIC perf model and should match `engine_type` (`"vllm"` or `"sglang"`). The `aic_model_path` field is the equivalent of `--model-path` in `dynamo.mocker`.
 
-Replay router-side AIC prompt-load modeling is configured separately with top-level flags:
+DynoSim router-side AIC prompt-load modeling is configured separately with top-level flags:
 
 ```bash
 python -m dynamo.replay /path/to/trace.jsonl \
@@ -323,10 +325,10 @@ python -m dynamo.replay /path/to/trace.jsonl \
 ```
 
 For MoE models that require AIC MoE parallelism, pass the same fields on the router-side AIC surface.
-For Kimi-style TP-only MoE replay, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
+For Kimi-style TP-only MoE simulation, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
 `--aic-moe-ep-size 1`, and `--aic-attention-dp-size 1`.
 
-For offline disagg replay, the same top-level `--aic-*` flags drive the prefill-stage router only;
+For offline disaggregated DynoSim runs, the same top-level `--aic-*` flags drive the prefill-stage router only;
 the decode-stage router keeps prompt tracking disabled.
 
 Example `--reasoning` configuration:
@@ -373,7 +375,7 @@ kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
 
 ## Architecture
 
-The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the replay harness on top of multiple engine cores; see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md) for the component-level diagram and for offline replay internals under [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md).
+The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the DynoSim run harness on top of multiple engine cores; see [DynoSim Runs](../benchmarks/dynosim-runs.md) for the component-level diagram and for offline internals under [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md).
 
 ### Scheduler
 
