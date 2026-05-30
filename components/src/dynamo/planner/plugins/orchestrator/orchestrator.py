@@ -30,6 +30,7 @@ Regression-model access:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
@@ -222,6 +223,10 @@ class LocalPlannerOrchestrator:
                     needs=list(entry.needs),
                 )
                 resp = await self._registry.register(req)
+            except asyncio.CancelledError:
+                # Cancellation must propagate; never swallowed by the
+                # defensive Exception handler below.
+                raise
             except Exception as exc:
                 # Defensive: any unexpected exception (e.g. a transport
                 # factory bug, a Pydantic validation slip) is logged
@@ -364,6 +369,10 @@ class LocalPlannerOrchestrator:
                 await plugin.transport.call("Bootstrap", BootstrapRequest())
             except PluginUnknownMethodError:
                 continue
+            except asyncio.CancelledError:
+                # Cancellation must propagate; never swallowed by the
+                # defensive Exception handler below.
+                raise
             except Exception as exc:  # noqa: BLE001 — defensive
                 log.warning(
                     "bootstrap_plugins: Bootstrap RPC failed plugin_id=%s detail=%s",
