@@ -1088,3 +1088,128 @@ class TestClassifyEmbeddingInput:
     def test_unsupported_element_type_rejected(self):
         with pytest.raises(TypeError, match="Unsupported 'input' element"):
             mod._classify_embedding_input([3.14, 2.71])
+
+
+class TestEmbeddingWorkerHandlerCancellation:
+    """Tests for partial-failure cleanup in ``EmbeddingWorkerHandler.generate``.
+
+    Each prompt's encode runs as its own asyncio task in ``asyncio.gather``.
+    If one task raises, gather re-raises but does NOT cancel the others by
+    default -- they keep consuming vLLM engine capacity for output that the
+    handler would discard. The handler's ``try/finally`` block must cancel
+    every still-pending task and await them with ``return_exceptions=True``
+    before propagating the failure to the frontend.
+    """
+
+    def _make_embedding_handler(self) -> "mod.EmbeddingWorkerHandler":
+        """Construct an ``EmbeddingWorkerHandler`` with the engine monitor
+        stubbed so it does not spawn a real background task during the test.
+        """
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.EmbeddingWorkerHandler(
+                runtime=MagicMock(),
+                engine=MagicMock(),
+                config=MagicMock(served_model_name="test-model"),
+                shutdown_event=None,
+            )
+        # Replace the engine client wholesale: each test installs its own
+        # ``encode`` async generator behaviour. ``abort`` may be called by
+        # the per-prompt ``_monitor_abort`` task on cancellation paths.
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        return handler
+
+    def _make_context(self) -> MagicMock:
+        """Mock dynamo.Context whose ``async_killed_or_stopped()`` never
+        resolves (so the per-prompt ``_monitor_abort`` task parks until
+        cancelled by the wrapping ``_abort_monitor`` context manager).
+        """
+        context = MagicMock()
+        context.id.return_value = "test-req"
+        context.async_killed_or_stopped.return_value = (
+            asyncio.get_event_loop().create_future()
+        )
+        return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_partial_failure_cancels_in_flight_encodes(self):
+        """When one prompt's encode raises, the siblings must be cancelled.
+
+        Mocks ``engine_client.encode`` as a per-prompt async generator. For
+        the failing index it raises immediately; for the others it parks on
+        ``asyncio.sleep`` and records cancellation when it occurs. Without
+        the ``finally``-cancel pass the test would hang on the asleep
+        siblings until the 5s pytest timeout fires.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        cancelled: set[int] = set()
+        started: dict[int, asyncio.Event] = {i: asyncio.Event() for i in range(4)}
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            idx = int(request_id.rsplit("-", 1)[-1])
+            started[idx].set()
+            if idx == 1:
+                raise RuntimeError("boom")
+            try:
+                # Would hang past the 5s pytest timeout if not cancelled.
+                await asyncio.sleep(60)
+                yield MagicMock()  # unreachable
+            except asyncio.CancelledError:
+                cancelled.add(idx)
+                raise
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["a", "b", "c", "d"], "model": "test-model"}
+        with pytest.raises(RuntimeError, match="boom"):
+            async for _ in handler.generate(request, context):
+                pass
+
+        # Sibling encodes (0, 2, 3) must have started (so we know they were
+        # in flight when idx=1 failed) AND been observed as cancelled.
+        assert started[0].is_set()
+        assert started[2].is_set()
+        assert started[3].is_set()
+        assert cancelled == {
+            0,
+            2,
+            3,
+        }, f"sibling encodes were not cancelled: cancelled={cancelled}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_happy_path_yields_response_without_cancelling(self):
+        """When every prompt succeeds, the ``finally`` block sees no pending
+        tasks and exits cleanly; the handler yields the OpenAI-shaped
+        response. Guards against the cleanup pass accidentally aborting
+        completed tasks.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        aborted: list[str] = []
+        handler.engine_client.abort = AsyncMock(side_effect=aborted.append)
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["a", "b"], "model": "test-model"}
+        responses = [r async for r in handler.generate(request, context)]
+
+        assert len(responses) == 1
+        response = responses[0]
+        assert response["object"] == "list"
+        assert response["model"] == "test-model"
+        assert len(response["data"]) == 2
+        assert response["data"][0]["index"] == 0
+        assert response["data"][1]["index"] == 1
+        assert response["data"][0]["embedding"] == pytest.approx([0.1, 0.2, 0.3])
+        # No tasks were in flight at gather completion, so the finally
+        # cancel-and-await pass must not have touched the engine.
+        assert aborted == []

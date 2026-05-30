@@ -2980,10 +2980,7 @@ class EmbeddingWorkerHandler:
         # unique enough to scope a vLLM ``request_id``.
         base_request_id = context.id()
 
-        embedding_objects: list[Dict[str, Any]] = []
-        prompt_tokens = 0
-
-        for idx, prompt in enumerate(prompts):
+        async def _encode_one(idx: int, prompt: Any):
             request_id = f"{base_request_id}-{idx}"
             encode_arg: Any = (
                 prompt
@@ -2998,12 +2995,35 @@ class EmbeddingWorkerHandler:
                     request_id=request_id,
                 ):
                     final_output = out
-
             if final_output is None:
                 raise RuntimeError(
                     f"vLLM engine.encode produced no output for input index {idx}"
                 )
+            return final_output
 
+        # Submit every prompt to the engine in the same event-loop tick so
+        # vLLM's continuous-batching scheduler can coalesce them into a
+        # single forward pass instead of N sequential ones. ``asyncio.gather``
+        # returns results in input order, so ``outputs[k]`` matches ``prompts[k]``
+        # regardless of engine completion order.
+        #
+        # Use explicit tasks + a ``finally`` cancellation pass so that if one
+        # ``_encode_one`` raises, we cancel siblings still in flight instead
+        # of leaving them running -- otherwise vLLM keeps consuming engine
+        # capacity for output that this handler will discard.
+        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
+        try:
+            outputs = await asyncio.gather(*tasks)
+        finally:
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        embedding_objects: list[Dict[str, Any]] = []
+        prompt_tokens = 0
+        for idx, final_output in enumerate(outputs):
             embedding = _pooling_output_to_list(final_output.outputs.data)
             if dimensions is not None:
                 if dimensions > len(embedding):
