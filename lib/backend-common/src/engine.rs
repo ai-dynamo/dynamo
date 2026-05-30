@@ -325,6 +325,76 @@ pub trait LLMEngine: Send + Sync + 'static {
     }
 }
 
+/// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].
+///
+/// Where [`LLMEngine`] sits behind the tokenizer/detokenizer pipeline
+/// (`PreprocessedRequest` in, `LLMEngineOutput` out), `RawEngine` serves
+/// modalities the frontend forwards verbatim: the OpenAI-shaped request JSON
+/// arrives untouched and the engine yields the response JSON directly. This
+/// is the path for image, video, and audio generation
+/// (`/v1/images/generations`, `/v1/videos/generations`, `/v1/audio/speech`).
+///
+/// The contract is deliberately modality-neutral so a new media modality is a
+/// new engine, not a new framework path: `request` and the yielded items are
+/// plain [`serde_json::Value`]s whose schema is the corresponding endpoint's
+/// request/response body.
+///
+/// The lifecycle (`start`/`abort`/`drain`/`cleanup`/`setup_metrics`/
+/// `health_check_payload`) is identical to [`LLMEngine`] — `Worker` drives
+/// both through the same orchestrator. The only differences are the
+/// `generate` request/response shape and the absence of
+/// `kv_event_sources` (raw media engines have no KV cache to route on).
+#[async_trait]
+pub trait RawEngine: Send + Sync + 'static {
+    /// Start the engine and return registration metadata. See
+    /// [`LLMEngine::start`] — same contract. Media engines typically leave
+    /// the KV-related `EngineConfig` fields unset.
+    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>;
+
+    /// Yield response object(s) for a single media-generation request.
+    ///
+    /// `request` is the raw OpenAI-shaped request body. Yield the response
+    /// body as JSON: exactly one (terminal) object for non-streaming
+    /// modalities, or intermediate progress objects ending with a terminal
+    /// one for streaming modalities (e.g. video progress).
+    ///
+    /// As with [`LLMEngine::generate`], poll `ctx.is_stopped()` between
+    /// yields and stop promptly on cancellation. A mid-stream `Err` is
+    /// terminal and forwarded as `Annotated::error`.
+    async fn generate(
+        &self,
+        request: serde_json::Value,
+        ctx: GenerateContext,
+    ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError>;
+
+    /// Abort an in-flight request (optional, default no-op). See
+    /// [`LLMEngine::abort`].
+    async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
+
+    /// Drain in-flight work before shutdown (optional, default no-op). See
+    /// [`LLMEngine::drain`].
+    async fn drain(&self) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
+    /// Release all engine resources. Called exactly once; must be null-safe
+    /// against partial state and idempotent. See [`LLMEngine::cleanup`].
+    async fn cleanup(&self) -> Result<(), DynamoError>;
+
+    /// Wire up Prometheus surfaces (optional, default empty). See
+    /// [`LLMEngine::setup_metrics`]. Media engines that expose per-rank
+    /// gauges use the same `MetricsBindings` handoff.
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        Ok(MetricsBindings::default())
+    }
+
+    /// Canary payload for the runtime's `HealthCheckManager` (optional,
+    /// default `None`). See [`LLMEngine::health_check_payload`].
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        Ok(None)
+    }
+}
+
 /// Marker key stamped on canary payloads. Handlers may inspect it to branch
 /// probe-specific behavior (e.g. skip a synthetic first-yield that would
 /// mask a hung engine rank). Re-exported to Python via

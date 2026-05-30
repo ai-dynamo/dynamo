@@ -99,8 +99,14 @@ class EngineConfig:
     runtime_data: Optional[dict[str, Any]] = None
 
 
-class LLMEngine(ABC):
-    """Abstract base for inference engines.
+class BaseEngine(ABC):
+    """Abstract base for all engines — the modality-agnostic lifecycle.
+
+    ``Worker`` drives every engine through the same lifecycle regardless of
+    modality; only the request/response shape of :meth:`generate` differs.
+    That method is therefore declared on the modality-specific subclasses
+    (:class:`LLMEngine` for token-based inference, :class:`DiffusionEngine`
+    for raw media generation), not here.
 
     Lifecycle:
         1. from_args(argv) -- parse CLI args, return (engine, WorkerConfig)
@@ -117,7 +123,7 @@ class LLMEngine(ABC):
     @abstractmethod
     async def from_args(
         cls, argv: list[str] | None = None
-    ) -> tuple[LLMEngine, WorkerConfig]:
+    ) -> tuple[BaseEngine, WorkerConfig]:
         """Parse CLI args and construct the engine (not yet started).
 
         Args:
@@ -146,21 +152,6 @@ class LLMEngine(ABC):
         part of the contract — engines should treat it as opaque.
         """
         ...
-
-    @abstractmethod
-    async def generate(
-        self, request: GenerateRequest, context: Context
-    ) -> AsyncGenerator[GenerateChunk, None]:
-        """Yield streaming response chunks for a single request.
-
-        Called concurrently for multiple in-flight requests.
-
-        Each chunk: ``{"token_ids": [...], "index": 0}``
-        Final chunk must include: ``{"token_ids": [...], "index": 0,
-        "finish_reason": "...", "completion_usage": {...}}``
-        """
-        ...
-        yield  # type: ignore[misc]
 
     async def abort(self, context: Context) -> None:
         """Abort an in-flight request (optional, default no-op).
@@ -213,11 +204,6 @@ class LLMEngine(ABC):
         """
         ...
 
-    async def kv_event_sources(self) -> list[KvEventSource]:
-        """KV event sources, one per data-parallel rank. Default opts out
-        of KV-aware routing. ``Worker`` calls once after :meth:`start`."""
-        return []
-
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
         """Bridge a vendor-prefixed Prometheus registry into the runtime's
         ``/metrics`` output via :func:`metrics.add_expfmt_callback`. Default
@@ -262,3 +248,69 @@ class LLMEngine(ABC):
         ``DYN_HEALTH_CHECK_PAYLOAD`` / ``--health-check-payload`` overrides
         on top."""
         return None
+
+
+class LLMEngine(BaseEngine):
+    """Abstract base for token-based inference engines (vLLM, SGLang, TRT-LLM).
+
+    The token pipeline: the Rust preprocessor tokenizes the prompt and sets
+    ``token_ids`` on the request; :meth:`generate` yields token chunks that
+    the Rust postprocessor detokenizes. Registered with
+    ``ModelInput.Tokens`` and served through the token request adapter.
+    """
+
+    @abstractmethod
+    async def generate(
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
+        """Yield streaming response chunks for a single request.
+
+        Called concurrently for multiple in-flight requests.
+
+        Each chunk: ``{"token_ids": [...], "index": 0}``
+        Final chunk must include: ``{"token_ids": [...], "index": 0,
+        "finish_reason": "...", "completion_usage": {...}}``
+        """
+        ...
+        yield  # type: ignore[misc]
+
+    async def kv_event_sources(self) -> list[KvEventSource]:
+        """KV event sources, one per data-parallel rank. Default opts out
+        of KV-aware routing. ``Worker`` calls once after :meth:`start`."""
+        return []
+
+
+class DiffusionEngine(BaseEngine):
+    """Abstract base for raw media-generation engines (image, video, audio).
+
+    Unlike :class:`LLMEngine`, there is no token pipeline: the frontend
+    forwards the OpenAI-shaped request (e.g. ``/v1/images/generations``,
+    ``/v1/videos/generations``, ``/v1/audio/speech``) straight through as a
+    JSON object, and :meth:`generate` yields the response object(s) directly.
+    Registered with ``ModelInput.Text`` and served through the raw request
+    adapter — no tokenization, no detokenization, no KV cache.
+
+    The contract is deliberately modality-neutral: ``request`` and the
+    yielded chunks are plain dicts whose schema is the corresponding OpenAI
+    endpoint's request/response body. A single engine may handle multiple
+    modalities (TRT-LLM's VisualGen returns image, video, or audio) by
+    dispatching on the request/output shape. Single-shot generations yield
+    one final chunk; streaming generations (e.g. video progress) yield
+    intermediate chunks followed by a terminal one.
+    """
+
+    @abstractmethod
+    async def generate(
+        self, request: dict[str, Any], context: Context
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Yield response object(s) for a single media-generation request.
+
+        ``request`` is the raw OpenAI-shaped request body (e.g.
+        ``NvCreateImageRequest``/``NvCreateVideoRequest`` fields). Yield the
+        response body dict (e.g. ``NvImagesResponse``/``NvVideosResponse``).
+        For non-streaming modalities yield exactly one (terminal) object; for
+        streaming modalities yield intermediate progress objects ending with
+        the terminal one.
+        """
+        ...
+        yield  # type: ignore[misc]

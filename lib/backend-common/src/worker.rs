@@ -25,9 +25,11 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
 
-use crate::adapter::EngineAdapter;
+use crate::adapter::{EngineAdapter, RawEngineAdapter};
 use crate::disagg::DisaggregationMode;
-use crate::engine::{EngineConfig, LLMEngine};
+use crate::engine::{
+    EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
+};
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
 
@@ -209,13 +211,72 @@ enum LifecycleState {
     Stopped,
 }
 
-/// Runtime host for an [`LLMEngine`].
+/// The engine a [`Worker`] drives, tagged by request modality.
+///
+/// Both variants share the same lifecycle — `Worker` calls `start`,
+/// `setup_metrics`, `drain`, and `cleanup` on either through the forwarders
+/// below. They differ only in the request/response adapter the serve loop
+/// builds: `Llm` runs the token pipeline ([`EngineAdapter`], `token_ids` in /
+/// out), `Raw` runs the JSON passthrough pipeline ([`RawEngineAdapter`]) for
+/// media generation (image/video/audio). A new media modality is a new `Raw`
+/// engine, not a new `EngineKind` — the JSON contract is modality-neutral.
+pub(crate) enum EngineKind {
+    Llm(Arc<dyn LLMEngine>),
+    Raw(Arc<dyn RawEngine>),
+}
+
+impl EngineKind {
+    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.start(worker_id).await,
+            EngineKind::Raw(e) => e.start(worker_id).await,
+        }
+    }
+
+    async fn cleanup(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.cleanup().await,
+            EngineKind::Raw(e) => e.cleanup().await,
+        }
+    }
+
+    async fn drain(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.drain().await,
+            EngineKind::Raw(e) => e.drain().await,
+        }
+    }
+
+    async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.setup_metrics(ctx).await,
+            EngineKind::Raw(e) => e.setup_metrics(ctx).await,
+        }
+    }
+
+    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.kv_event_sources().await,
+            // Raw media engines have no block-structured KV cache to route on.
+            EngineKind::Raw(_) => Ok(Vec::new()),
+        }
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.health_check_payload().await,
+            EngineKind::Raw(e) => e.health_check_payload().await,
+        }
+    }
+}
+
+/// Runtime host for an engine (an [`LLMEngine`] or a [`RawEngine`]).
 ///
 /// `run()` creates the distributed runtime, calls `engine.start()`,
 /// registers the model, serves the endpoint, and calls
 /// `engine.cleanup()` on shutdown (guaranteed once `start()` succeeded).
 pub struct Worker {
-    engine: Arc<dyn LLMEngine>,
+    engine: EngineKind,
     config: WorkerConfig,
     state: LifecycleState,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
@@ -228,7 +289,18 @@ pub struct Worker {
 }
 
 impl Worker {
+    /// Build a `Worker` for a token-pipeline [`LLMEngine`].
     pub fn new(engine: Arc<dyn LLMEngine>, config: WorkerConfig) -> Self {
+        Self::with_engine(EngineKind::Llm(engine), config)
+    }
+
+    /// Build a `Worker` for a raw media-pipeline [`RawEngine`]
+    /// (image/video/audio generation).
+    pub fn new_raw(engine: Arc<dyn RawEngine>, config: WorkerConfig) -> Self {
+        Self::with_engine(EngineKind::Raw(engine), config)
+    }
+
+    fn with_engine(engine: EngineKind, config: WorkerConfig) -> Self {
         Self {
             engine,
             config,
@@ -273,7 +345,7 @@ impl Worker {
         // it here means a user who passes an unsupported `model_input`
         // doesn't pay the cost of installing signal handlers and spawning
         // a listener task just to get an InvalidArgument error.
-        validate_model_input(self.config.model_input)?;
+        validate_model_input(self.config.model_input, &self.engine)?;
 
         // Install the OS signal handlers synchronously, before spawning
         // anything, so a SIGTERM delivered between this point and the
@@ -620,16 +692,41 @@ impl Worker {
             self.config.endpoint
         );
 
-        let engine_adapter = Arc::new(EngineAdapter::new(
-            self.engine.clone(),
-            self.config.disaggregation_mode,
-        ));
-        let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
-            err(
-                ErrorType::Backend(BackendError::Unknown),
-                format!("ingress: {e}"),
-            )
-        })?;
+        // Build the request adapter and a JSON-shaped health-check probe
+        // engine for the worker's modality. The token pipeline
+        // (`EngineAdapter`) needs a `JsonProbeAdapter` wrapper to expose a
+        // `serde_json::Value` probe surface; the raw pipeline
+        // (`RawEngineAdapter`) is already JSON-shaped, so it serves as its
+        // own probe. The tuple annotation drives the trait-object coercions.
+        let (ingress, probe_engine): (
+            Arc<dyn dynamo_runtime::pipeline::network::PushWorkHandler>,
+            dynamo_runtime::local_endpoint_registry::LocalAsyncEngine,
+        ) = match &self.engine {
+            EngineKind::Llm(engine) => {
+                let engine_adapter = Arc::new(EngineAdapter::new(
+                    engine.clone(),
+                    self.config.disaggregation_mode,
+                ));
+                let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("ingress: {e}"),
+                    )
+                })?;
+                let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(engine_adapter));
+                (ingress, probe)
+            }
+            EngineKind::Raw(engine) => {
+                let raw_adapter = Arc::new(RawEngineAdapter::new(engine.clone()));
+                let ingress = Ingress::for_engine(raw_adapter.clone()).map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("ingress: {e}"),
+                    )
+                })?;
+                (ingress, raw_adapter)
+            }
+        };
 
         let metrics_labels = if self.config.metrics_labels.is_empty() {
             None
@@ -676,13 +773,11 @@ impl Worker {
         if let Some(payload) = probe {
             builder = builder.health_check_payload(payload);
             // The runtime's `HealthCheckManager` fires the canary by looking
-            // up a `LocalAsyncEngine` for this endpoint name. Register a
-            // JSON-shaped wrapper over our `EngineAdapter` so the probe
-            // exercises the same `generate()` path as real traffic.
+            // up a `LocalAsyncEngine` for this endpoint name. Register the
+            // modality's JSON-shaped probe engine so the probe exercises the
+            // same `generate()` path as real traffic.
             builder = builder
-                .register_local_engine(Arc::new(crate::adapter::JsonProbeAdapter::new(
-                    engine_adapter,
-                )))
+                .register_local_engine(probe_engine)
                 .map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),
@@ -927,6 +1022,10 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
             "embedding" | "embeddings" => ModelType::Embedding,
             "tensor" => ModelType::TensorBased,
             "prefill" => ModelType::Prefill,
+            // Raw media-generation modalities (served by a RawEngine).
+            "images" | "image" => ModelType::Images,
+            "videos" | "video" => ModelType::Videos,
+            "audios" | "audio" => ModelType::Audios,
             other => {
                 return Err(err(
                     ErrorType::Backend(BackendError::InvalidArgument),
@@ -946,19 +1045,40 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
     Ok(out)
 }
 
-fn validate_model_input(model_input: ModelInput) -> Result<(), DynamoError> {
-    if model_input == ModelInput::Tokens {
-        return Ok(());
+/// Check that the configured `model_input` matches the engine modality. The
+/// token pipeline ([`LLMEngine`]) consumes pre-tokenized input
+/// (`ModelInput::Tokens`); the raw media pipeline ([`RawEngine`]) consumes the
+/// forwarded request verbatim (`ModelInput::Text` / `Tensor`) and has no
+/// tokenizer/detokenizer stages, so `Tokens` would be a misconfiguration.
+fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<(), DynamoError> {
+    match engine {
+        EngineKind::Llm(_) => {
+            if model_input == ModelInput::Tokens {
+                Ok(())
+            } else {
+                Err(err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    format!(
+                        "LLMEngine (token pipeline) requires ModelInput::Tokens; got '{}'. \
+                         Use a RawEngine for ModelInput::Text / Tensor.",
+                        model_input.as_str()
+                    ),
+                ))
+            }
+        }
+        EngineKind::Raw(_) => {
+            if model_input == ModelInput::Tokens {
+                Err(err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    "RawEngine (raw media pipeline) requires ModelInput::Text or ::Tensor; \
+                     got 'tokens'. Use an LLMEngine for the token pipeline."
+                        .to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
     }
-
-    Err(err(
-        ErrorType::Backend(BackendError::InvalidArgument),
-        format!(
-            "dynamo_backend_common::Worker currently supports only ModelInput::Tokens; got '{}'. \
-             ModelInput::Text and ModelInput::Tensor require dedicated raw-request adapters.",
-            model_input.as_str()
-        ),
-    ))
 }
 
 async fn build_local_model(
@@ -1108,21 +1228,66 @@ mod tests {
         assert!(e.to_string().contains("bogus"));
     }
 
-    #[test]
-    fn validate_model_input_accepts_tokens() {
-        validate_model_input(ModelInput::Tokens).unwrap();
+    /// Minimal `RawEngine` for validation tests — never started/served.
+    struct ValidationRawMock;
+
+    #[async_trait]
+    impl RawEngine for ValidationRawMock {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            unreachable!("not used in validation tests")
+        }
+        async fn generate(
+            &self,
+            _request: serde_json::Value,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError>
+        {
+            unreachable!("not used in validation tests")
+        }
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    fn llm_kind() -> EngineKind {
+        let (engine, _) = StateMockEngine::new(false);
+        EngineKind::Llm(engine)
+    }
+
+    fn raw_kind() -> EngineKind {
+        EngineKind::Raw(Arc::new(ValidationRawMock))
     }
 
     #[test]
-    fn validate_model_input_rejects_text_and_tensor() {
+    fn validate_model_input_llm_accepts_tokens() {
+        validate_model_input(ModelInput::Tokens, &llm_kind()).unwrap();
+    }
+
+    #[test]
+    fn validate_model_input_llm_rejects_text_and_tensor() {
         for input in [ModelInput::Text, ModelInput::Tensor] {
-            let e = validate_model_input(input).unwrap_err();
+            let e = validate_model_input(input, &llm_kind()).unwrap_err();
             assert_eq!(
                 e.error_type(),
                 ErrorType::Backend(BackendError::InvalidArgument)
             );
             assert!(e.to_string().contains(input.as_str()));
         }
+    }
+
+    #[test]
+    fn validate_model_input_raw_accepts_text_and_tensor() {
+        validate_model_input(ModelInput::Text, &raw_kind()).unwrap();
+        validate_model_input(ModelInput::Tensor, &raw_kind()).unwrap();
+    }
+
+    #[test]
+    fn validate_model_input_raw_rejects_tokens() {
+        let e = validate_model_input(ModelInput::Tokens, &raw_kind()).unwrap_err();
+        assert_eq!(
+            e.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
     }
 
     #[tokio::test]

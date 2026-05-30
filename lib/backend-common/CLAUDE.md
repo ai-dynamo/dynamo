@@ -1,13 +1,24 @@
 # Backend Common (Rust)
 
-Shared runtime glue for Rust LLM backends. Two-type abstraction:
-`Worker` (runtime lifecycle) and `LLMEngine` (trait for engine-specific
-logic). A reference implementation lives at
-`lib/backend-common/examples/mocker/`.
+Shared runtime glue for Rust backends. `Worker` (runtime lifecycle)
+drives one of two engine traits, selected by request modality:
 
-Engines work directly with `PreprocessedRequest` and `LLMEngineOutput`
-— the same types the rest of the Rust pipeline uses. No separate
-Python-shaped request/response wrappers.
+- `LLMEngine` — token pipeline. `generate` takes `PreprocessedRequest`
+  (`token_ids` in) and yields `LLMEngineOutput` (`token_ids` out), the
+  same types the rest of the Rust pipeline uses. Served through
+  `EngineAdapter`. A reference implementation lives at
+  `lib/backend-common/examples/mocker/`.
+- `RawEngine` — raw media pipeline (image/video/audio generation).
+  `generate` takes the forwarded request as `serde_json::Value` and
+  yields response objects as `serde_json::Value` — no tokenizer,
+  detokenizer, or KV cache. Served through `RawEngineAdapter`. The
+  contract is modality-neutral: a new media modality is a new
+  `RawEngine`, not a new framework path.
+
+`Worker` registration honours `WorkerConfig.model_input`: `LLMEngine`
+requires `ModelInput::Tokens`; `RawEngine` requires `Text`/`Tensor`.
+`endpoint_types` parses `images`/`videos`/`audios` (→ `ModelType`) for
+the raw path alongside the LLM `chat`/`completions`/`embedding`/etc.
 
 ## Engine Lifecycle
 
@@ -159,8 +170,13 @@ aggregates it when present. `usage(prompt, completion)` computes
   exists in another engine. If it does, extract into `Worker` or a
   shared utility.
 
-- **Exactly two types.** `Worker` owns runtime lifecycle. `LLMEngine`
-  owns inference. No intermediate traits or mixins.
+- **One `Worker`, one engine trait per modality.** `Worker` owns
+  runtime lifecycle. `LLMEngine` (token) and `RawEngine` (raw media)
+  own inference; they share the same lifecycle methods and `Worker`
+  drives both via the `EngineKind` forwarders. No intermediate traits
+  or mixins between an engine trait and a concrete backend. A new media
+  modality is a new `RawEngine`, not a new trait or a new `EngineKind`
+  variant.
 
 - **Object-safe trait.** `Arc<dyn LLMEngine>` must work. All methods
   take `&self`. Constructors are backend-specific, not on the trait.
@@ -471,8 +487,8 @@ Also available: `testing::mock_context()` and
 | `snapshot_publisher.rs` | `SnapshotPublisher` — single push surface. `publish(dp_rank, ComponentSnapshot)` fans out inline to `ComponentGauges` and per-rank `WorkerMetricsPublisher`. |
 | `publisher.rs` | `setup_publishers` — constructs `KvEventPublisher`s + `SnapshotPublisher` from engine bindings; owned by `Worker` until shutdown. |
 | `worker.rs` | `Worker` — runtime lifecycle: create `DistributedRuntime`, register model (with `disaggregation_mode` adjustments), serve endpoint, orchestrate drain + cleanup. `WorkerConfig` lives here. |
-| `adapter.rs` | `EngineAdapter` — bridges `LLMEngine` to `AsyncEngine`. Cancellation monitor + debug-build validator wrapping. |
-| `run.rs` | `pub fn run(engine, config)` — entry point used by all per-backend `main.rs`. Non-generic. |
+| `adapter.rs` | `EngineAdapter` — bridges `LLMEngine` to `AsyncEngine` (token telemetry, disagg first-token, debug validator). `RawEngineAdapter` — bridges `RawEngine` to `AsyncEngine` (JSON passthrough, cancellation monitor; no token telemetry/disagg). `JsonProbeAdapter` — JSON health-check wrapper for the LLM path (the raw path is already JSON-shaped). |
+| `run.rs` | `pub fn run(engine, config)` (LLM) and `pub fn run_raw(engine, config)` (raw media) — entry points used by per-backend `main.rs`. Non-generic. |
 | `args.rs` | `CommonArgs` — shared CLI flags (`--namespace`, `--component`, `--disaggregation-mode`, etc.) that every engine's `Args` flattens in. |
 | `disagg.rs` | `DisaggregationMode` enum (`Aggregated` / `Prefill` / `Decode`) with `clap::ValueEnum` derive. |
 | `error.rs` | Re-exports `DynamoError`, `ErrorType`, `BackendError` from `dynamo-runtime`. No custom error types. |

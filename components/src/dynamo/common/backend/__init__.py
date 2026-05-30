@@ -2,10 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from . import telemetry
-from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
+from .engine import (
+    BaseEngine,
+    DiffusionEngine,
+    EngineConfig,
+    GenerateChunk,
+    GenerateRequest,
+    LLMEngine,
+)
 from .worker import Worker, WorkerConfig
 
 __all__ = [
+    "BaseEngine",
+    "DiffusionEngine",
     "EngineConfig",
     "GenerateChunk",
     "GenerateRequest",

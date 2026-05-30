@@ -22,7 +22,7 @@ use dynamo_backend_common::{
     AsyncEngineContext, BackendError, ComponentSnapshot,
     DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
     ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings,
-    MetricsCtx, OnPublisherReady, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
+    MetricsCtx, OnPublisherReady, PreprocessedRequest, RawEngine, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::local_model::runtime_config::{
@@ -406,12 +406,23 @@ pub struct Worker {
     /// `engine.start()` again, which most engines (vLLM, sglang, trtllm)
     /// don't tolerate. We surface a clear `RuntimeError` instead.
     consumed: AtomicBool,
+    /// `true` when `engine` is a `DiffusionEngine` (raw media pipeline).
+    /// Set by the Python `Worker` shim via `isinstance`. Selects the raw
+    /// JSON request adapter (`RsWorker::new_raw`) instead of the token
+    /// adapter (`RsWorker::new`).
+    raw: bool,
 }
 
 #[pymethods]
 impl Worker {
     #[new]
-    fn new(engine: PyObject, config: WorkerConfig, event_loop: PyObject) -> PyResult<Self> {
+    #[pyo3(signature = (engine, config, event_loop, raw = false))]
+    fn new(
+        engine: PyObject,
+        config: WorkerConfig,
+        event_loop: PyObject,
+        raw: bool,
+    ) -> PyResult<Self> {
         // True existing-only check — `runtime_from_existing()` would
         // synthesize a fresh runtime here and falsely mark us as shared.
         let owns_runtime = !rs::Worker::has_existing_runtime();
@@ -450,6 +461,7 @@ impl Worker {
             config: config.inner,
             owns_runtime,
             consumed: AtomicBool::new(false),
+            raw,
         })
     }
 
@@ -475,6 +487,7 @@ impl Worker {
         let event_loop = self.event_loop.clone();
         let config = self.config.clone();
         let owns_runtime = self.owns_runtime;
+        let raw = self.raw;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let runtime = rs::Worker::runtime_from_existing()
@@ -511,8 +524,17 @@ impl Worker {
                 }
             }
 
-            let py_engine = PyLLMEngine::new(engine, event_loop);
-            let worker = RsWorker::new(Arc::new(py_engine), config);
+            // Select the engine modality. A `DiffusionEngine` (raw media
+            // pipeline) routes through `PyRawEngine` + `RsWorker::new_raw`
+            // (JSON adapter); everything else is a token-pipeline
+            // `LLMEngine`.
+            let worker = if raw {
+                let py_engine = PyRawEngine::new(engine, event_loop);
+                RsWorker::new_raw(Arc::new(py_engine), config)
+            } else {
+                let py_engine = PyLLMEngine::new(engine, event_loop);
+                RsWorker::new(Arc::new(py_engine), config)
+            };
 
             let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
 
@@ -582,6 +604,104 @@ impl PyLLMEngine {
         })??;
 
         py_future.await
+    }
+
+    /// Shared request dispatch for both the token and raw `generate` paths.
+    ///
+    /// Records per-request trace/metadata state, pythonizes the request
+    /// (any `Serialize` type — `PreprocessedRequest` for the token path,
+    /// `serde_json::Value` for the raw path), calls Python
+    /// `generate(request, context=ctx)`, and returns the resulting
+    /// async-generator-backed stream of Python chunk objects plus the
+    /// per-request state guard. The caller maps each `PyObject` chunk to
+    /// its own output type (`LLMEngineOutput` vs `serde_json::Value`).
+    ///
+    /// Invariant: must be awaited from within the `engine.generate` span
+    /// (both adapters `.instrument()` the engine's `generate` future), so
+    /// the span capture below sees the correct parent.
+    async fn dispatch_generate<T: serde::Serialize + Send + 'static>(
+        &self,
+        request: T,
+        ctx: dynamo_backend_common::GenerateContext,
+    ) -> Result<(BoxStream<'static, PyResult<PyObject>>, RequestStateGuard), DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let trace_context = get_distributed_tracing_context();
+        let request_id = ctx.id().to_string();
+        self.request_metadata
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(request_id.clone(), ctx.metadata().clone());
+        if let Some(trace_context) = trace_context.as_ref() {
+            self.trace_contexts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(request_id.clone(), trace_context.clone());
+        }
+        let request_state_guard = RequestStateGuard {
+            request_id,
+            trace_contexts: self.trace_contexts.clone(),
+            request_metadata: self.request_metadata.clone(),
+        };
+
+        let first_token = ctx.first_token_sender().cloned();
+        let inner_ctx = ctx.inner_arc();
+        // **Invariant**: `tracing::Span::current()` here MUST be the
+        // `engine.generate` span opened by the adapter. The capture must
+        // happen BEFORE `spawn_blocking` because inside the blocking closure,
+        // `Span::current()` is the worker-thread root, not the auto-span.
+        //
+        // If anyone refactors this dispatch (extra task hop, different
+        // scheduler), they must re-verify the captured span. `Context` stores
+        // this span and routes engine telemetry calls to it via
+        // `current_span` / `start_span` — wrong span = wrong attributes
+        // silently. See the `auto_span_records_*` tests in
+        // `lib/backend-common/src/adapter.rs` for the assertions that depend
+        // on this invariant.
+        debug_assert_eq!(
+            tracing::Span::current().metadata().map(|m| m.name()),
+            Some("engine.generate"),
+            "Span::current() must be engine.generate at PyLLMEngine boundary; \
+             a dispatch refactor likely broke the capture point"
+        );
+        let engine_span = tracing::Span::current();
+
+        // Pythonize the request, call generate(request, context=ctx), and
+        // turn the resulting Python async generator into a Rust stream.
+        let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
+            Python::with_gil(|py| {
+                let py_request = pythonize(py, &request)?;
+                let py_ctx = Py::new(
+                    py,
+                    PyContext::new(
+                        inner_ctx,
+                        trace_context,
+                        first_token,
+                        ctx.metadata().clone(),
+                    )
+                    .with_span(engine_span),
+                )?;
+
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("context", &py_ctx)?;
+
+                let bound = engine.bind(py);
+                let gen_obj = bound.call_method("generate", (py_request,), Some(&kwargs))?;
+
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen_obj)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("generate offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        Ok((stream.boxed(), request_state_guard))
     }
 }
 
@@ -665,83 +785,7 @@ impl LLMEngine for PyLLMEngine {
         request: PreprocessedRequest,
         ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let engine = self.engine.clone();
-        let event_loop = self.event_loop.clone();
-        let trace_context = get_distributed_tracing_context();
-        let request_id = ctx.id().to_string();
-        self.request_metadata
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(request_id.clone(), ctx.metadata().clone());
-        if let Some(trace_context) = trace_context.as_ref() {
-            self.trace_contexts
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(request_id.clone(), trace_context.clone());
-        }
-        let request_state_guard = RequestStateGuard {
-            request_id,
-            trace_contexts: self.trace_contexts.clone(),
-            request_metadata: self.request_metadata.clone(),
-        };
-
-        let first_token = ctx.first_token_sender().cloned();
-        let inner_ctx = ctx.inner_arc();
-        // **Invariant**: `tracing::Span::current()` here MUST be the
-        // `engine.generate` span opened by `EngineAdapter::generate`. The
-        // capture must happen BEFORE `spawn_blocking` because inside the
-        // blocking closure, `Span::current()` is the worker-thread root,
-        // not the auto-span.
-        //
-        // If anyone refactors this dispatch (extra task hop, different
-        // scheduler), they must re-verify the captured span. `Context`
-        // stores this span and routes engine telemetry calls to it via
-        // `current_span` / `start_span` — wrong span = wrong attributes
-        // silently. See the `auto_span_records_*` tests in
-        // `lib/backend-common/src/adapter.rs` for the assertions that depend
-        // on this invariant.
-        debug_assert_eq!(
-            tracing::Span::current().metadata().map(|m| m.name()),
-            Some("engine.generate"),
-            "Span::current() must be engine.generate at PyLLMEngine boundary; \
-             a dispatch refactor likely broke the capture point"
-        );
-        let engine_span = tracing::Span::current();
-
-        // Pythonize the request, call generate(request, context=ctx), and
-        // turn the resulting Python async generator into a Rust stream.
-        let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
-            Python::with_gil(|py| {
-                let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(
-                    py,
-                    PyContext::new(
-                        inner_ctx,
-                        trace_context,
-                        first_token,
-                        ctx.metadata().clone(),
-                    )
-                    .with_span(engine_span),
-                )?;
-
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("context", &py_ctx)?;
-
-                let bound = engine.bind(py);
-                let gen_obj = bound.call_method("generate", (py_request,), Some(&kwargs))?;
-
-                let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen_obj)
-            })
-        })
-        .await
-        .map_err(|e| {
-            DynamoError::builder()
-                .error_type(ErrorType::Backend(BackendError::Unknown))
-                .message(format!("generate offload error: {e}"))
-                .build()
-        })?
-        .map_err(py_err_to_dynamo)?;
+        let (stream, request_state_guard) = self.dispatch_generate(request, ctx).await?;
 
         let mapped = async_stream::stream! {
             let _request_state_guard = request_state_guard;
@@ -990,6 +1034,112 @@ impl PyLLMEngine {
                 ))
                 .build()),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PyRawEngine — the bridge for Python `DiffusionEngine` (raw media pipeline).
+//
+// Wraps a `PyLLMEngine` so the identical lifecycle methods
+// (start/abort/drain/cleanup/setup_metrics/health_check_payload) are shared
+// verbatim. Only `generate` differs: it pythonizes the request as a raw JSON
+// object and maps each yielded Python dict back to `serde_json::Value`, with
+// no token/`LLMEngineOutput` shaping. Not a `#[pyclass]`; lives only in Rust.
+// ---------------------------------------------------------------------------
+
+struct PyRawEngine {
+    inner: PyLLMEngine,
+}
+
+impl PyRawEngine {
+    fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
+        Self {
+            inner: PyLLMEngine::new(engine, event_loop),
+        }
+    }
+}
+
+#[async_trait]
+impl RawEngine for PyRawEngine {
+    async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
+        self.inner.start(worker_id).await
+    }
+
+    async fn generate(
+        &self,
+        request: serde_json::Value,
+        ctx: dynamo_backend_common::GenerateContext,
+    ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError> {
+        let (stream, request_state_guard) = self.inner.dispatch_generate(request, ctx).await?;
+
+        let mapped = async_stream::stream! {
+            let _request_state_guard = request_state_guard;
+            let mut inner = std::pin::pin!(stream);
+            while let Some(item) = inner.next().await {
+                let py_obj = match item {
+                    Ok(obj) => obj,
+                    Err(e) => {
+                        yield Err(py_err_to_dynamo(e));
+                        return;
+                    }
+                };
+
+                // Depythonize the response object to JSON on a blocking
+                // thread — same GIL-contention rationale as the LLM path.
+                // No `LLMEngineOutput` shaping: the media response body
+                // flows through verbatim.
+                let parsed = tokio::task::spawn_blocking(move || {
+                    Python::with_gil(|py| -> PyResult<serde_json::Value> {
+                        let bound = py_obj.into_bound(py);
+                        depythonize(&bound).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "raw engine chunk must be a JSON-serializable object: {e}"
+                            ))
+                        })
+                    })
+                })
+                .await;
+
+                match parsed {
+                    Ok(Ok(value)) => yield Ok(value),
+                    Ok(Err(e)) => {
+                        tracing::error!(error = %e, "failed to parse chunk from python raw engine");
+                        yield Err(py_err_to_dynamo(e));
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "raw chunk parse offload error");
+                        yield Err(DynamoError::builder()
+                            .error_type(ErrorType::Backend(BackendError::Unknown))
+                            .message(format!("raw chunk parse offload error: {e}"))
+                            .build());
+                        return;
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(mapped))
+    }
+
+    async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
+        self.inner.abort(ctx).await
+    }
+
+    async fn drain(&self) -> Result<(), DynamoError> {
+        self.inner.drain().await
+    }
+
+    async fn cleanup(&self) -> Result<(), DynamoError> {
+        self.inner.cleanup().await
+    }
+
+    async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        self.inner.setup_metrics(ctx).await
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        self.inner.health_check_payload().await
     }
 }
 
