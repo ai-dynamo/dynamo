@@ -178,13 +178,12 @@ pub fn try_tool_call_parse_xml(
     // in its reference parser. MiniMax uses the same path to recover complete
     // inner invokes when the outer wrapper opener is missing.
     //
-    // Gated on `function_end_token` being present OR `allow_eof_recovery` set,
-    // mirroring the wrapped path's recovery gate in `extract_tool_calls`. The
-    // lenient inner regex has a `|$` fallback that would otherwise match a
-    // partial `<function=...>` block mid-stream and cause `should_exit_jail_
-    // early` to release the jail before the closing tag arrives.
+    // Streaming recovery needs the orphan outer close marker as well as the
+    // inner close marker. Otherwise a split `</tool_call>` / MiniMax close can
+    // arrive after the jail has already released.
     if config.is_bare_function_mode(message)
         && (message.contains(config.function_end_token.as_str()) || config.allow_eof_recovery)
+        && (message.contains(config.tool_call_end_token.as_str()) || config.allow_eof_recovery)
     {
         let calls = parse_tool_call_block(message, config, tools).unwrap_or_default();
         if !calls.is_empty() {
@@ -340,7 +339,9 @@ fn recover_bare_xml_calls_in_span(
     };
 
     let tail = &span[marker_idx..];
-    if !tail.contains(config.function_end_token.as_str()) && !config.allow_eof_recovery {
+    let has_inner_close = tail.contains(config.function_end_token.as_str());
+    let has_outer_close = tail.contains(config.tool_call_end_token.as_str());
+    if (!has_inner_close || !has_outer_close) && !config.allow_eof_recovery {
         return Ok(None);
     }
 
@@ -1213,10 +1214,21 @@ NYC
     }
 
     #[test]
-    fn test_parse_qwen3_bare_function_complete_streaming_recovers() {
-        // Same scenario but `</function>` has arrived — back-off should fire
-        // even with recovery off (streaming-complete path).
+    fn test_parse_qwen3_bare_function_complete_without_outer_close_waits_in_streaming() {
+        // `</function>` alone is not enough for streaming recovery: the orphan
+        // `</tool_call>` may still arrive in a later chunk and must stay jailed.
         let input = "<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>";
+        let config = XmlParserConfig {
+            backoff_when_no_wrapper: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_qwen3_bare_function_outer_close_streaming_recovers() {
+        let input = "<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>\n</tool_call>";
         let config = XmlParserConfig {
             backoff_when_no_wrapper: true,
             ..XmlParserConfig::default()

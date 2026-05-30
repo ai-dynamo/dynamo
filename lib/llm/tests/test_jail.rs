@@ -3722,11 +3722,41 @@ fahrenheit
                 &["<invoke", "</minimax:tool_call>"][..],
             ),
             (
+                "minimax_m2",
+                "MiniMax delayed outer close",
+                vec![
+                    "I will check that. <invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n",
+                    "</invoke>",
+                    "\n</minimax:tool_call>",
+                ],
+                &["<invoke", "</minimax:tool_call>"][..],
+            ),
+            (
+                "qwen3_coder",
+                "Qwen3-Coder delayed outer close",
+                vec![
+                    "I will check that. <function=get_weather>\n<parameter=location>NYC</parameter>\n",
+                    "</function>",
+                    "\n</tool_call>",
+                ],
+                &["<function=", "</tool_call>"][..],
+            ),
+            (
                 "deepseek_v4",
                 "DeepSeek V4",
                 vec![
                     "I will check that. <｜DSML｜inv",
                     "oke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+                ],
+                &["<｜DSML｜invoke", "</｜DSML｜tool_calls>"][..],
+            ),
+            (
+                "deepseek_v4",
+                "DeepSeek V4 delayed outer close",
+                vec![
+                    "I will check that. <｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n",
+                    "</｜DSML｜invoke>",
+                    "\n</｜DSML｜tool_calls>",
                 ],
                 &["<｜DSML｜invoke", "</｜DSML｜tool_calls>"][..],
             ),
