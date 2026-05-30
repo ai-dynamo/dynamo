@@ -3736,6 +3736,35 @@ fahrenheit
     }
 
     #[tokio::test]
+    async fn test_gemma4_call_prefix_prose_passes_without_waiting_for_eof() {
+        let expected = "I will call: you tomorrow";
+        let cases = [vec![expected], vec!["I will ca", "ll: you tomorrow"]];
+
+        for chunks in cases {
+            let input_chunks = chunks
+                .into_iter()
+                .map(|chunk| test_utils::create_mock_response_chunk(chunk.to_string(), 0))
+                .chain(std::iter::once(test_utils::create_final_response_chunk(0)));
+            let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+            let results: Vec<_> = jail
+                .apply_with_finish_reason(stream::iter(input_chunks))
+                .collect()
+                .await;
+
+            assert_eq!(test_utils::reconstruct_content(&results), expected);
+            let content_before_finish: String = results
+                .iter()
+                .filter_map(|result| result.data.as_ref())
+                .flat_map(|data| data.inner.choices.iter())
+                .filter(|choice| choice.finish_reason.is_none())
+                .filter_map(|choice| choice.delta.content.as_ref())
+                .map(test_utils::extract_text)
+                .collect();
+            assert_eq!(content_before_finish, expected);
+        }
+    }
+
+    #[tokio::test]
     async fn test_split_bare_recovery_markers_are_jailed() {
         let cases = [
             (

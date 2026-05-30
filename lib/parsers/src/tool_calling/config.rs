@@ -313,10 +313,9 @@ impl ParserConfig {
                 tokens.push(config.call_start.clone());
                 tokens
             }
-            ParserConfig::Gemma4 => vec![
-                crate::tool_calling::gemma4::TOOL_CALL_START.to_string(),
-                crate::tool_calling::gemma4::CALL_PREFIX.to_string(),
-            ],
+            ParserConfig::Gemma4 => {
+                vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()]
+            }
         }
     }
 

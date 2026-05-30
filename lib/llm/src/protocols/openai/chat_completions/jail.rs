@@ -8,6 +8,7 @@ use dynamo_protocols::types::{
 };
 
 use dynamo_parsers::tool_calling::config::{JsonParserConfig, ParserConfig};
+use dynamo_parsers::tool_calling::gemma4::split_partial_call_prefix_gemma4;
 use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
@@ -349,17 +350,26 @@ impl ChoiceJailState {
                 }
 
                 MatchResult::None { content } => {
-                    // Check if this content (combined with partial buffer) should start jailing
-                    let combined_content = if self.partial_match_buffer.is_empty() {
-                        content.clone()
-                    } else {
-                        format!("{}{}", self.partial_match_buffer, content)
-                    };
-
-                    if jail_stream.should_start_jail(&combined_content) {
+                    if let Some((prefix, partial)) =
+                        jail_stream.split_partial_tool_call_start(&content)
+                    {
+                        if !prefix.is_empty() {
+                            #[allow(deprecated)]
+                            let prefix_choice = create_choice_stream(
+                                choice.index,
+                                choice.delta.role,
+                                prefix,
+                                None,
+                                choice.finish_reason,
+                                choice.logprobs.clone(),
+                            );
+                            emissions.push(ChoiceEmission::PassThrough(prefix_choice));
+                        }
+                        self.partial_match_buffer = partial.to_string();
+                    } else if jail_stream.should_start_jail(&content) {
                         // Start jailing with the combined content
                         self.is_jailed = true;
-                        self.accumulated_content = combined_content;
+                        self.accumulated_content = content;
                         // Seed accumulated logprobs with this chunk's logprobs
                         self.accumulated_logprobs = choice.logprobs.clone();
                         self.partial_match_buffer.clear();
@@ -864,6 +874,13 @@ impl JailedStream {
     }
 
     /// Check if content matches any jail start patterns
+    fn split_partial_tool_call_start<'a>(&self, content: &'a str) -> Option<(&'a str, &'a str)> {
+        if self.tool_call_parser.as_deref() == Some("gemma4") {
+            return split_partial_call_prefix_gemma4(content);
+        }
+        None
+    }
+
     fn should_start_jail(&self, content: &str) -> bool {
         // Path 1: Check configured start sequences
         let sequence_match = !self.jail_start_sequences.is_empty()

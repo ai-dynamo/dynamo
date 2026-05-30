@@ -178,29 +178,53 @@ pub fn detect_tool_call_start_gemma4(chunk: &str) -> bool {
     if chunk.contains(TOOL_CALL_START) {
         return true;
     }
-    if find_call_prefix_at_boundary(chunk, 0).is_some()
-        && (chunk.contains(TOOL_CALL_END) || chunk.contains(STRING_DELIM))
-    {
-        return true;
+
+    let mut cursor = 0usize;
+    while let Some(idx) = find_call_prefix_at_boundary(chunk, cursor) {
+        let candidate = &chunk[idx..];
+        if parse_recoverable_call_at(candidate, true, true).is_some()
+            || has_bare_call_body_start(candidate)
+        {
+            return true;
+        }
+        cursor = idx + CALL_PREFIX.len();
     }
-    for token in [TOOL_CALL_START, CALL_PREFIX] {
-        for i in 1..token.len() {
-            if !token.is_char_boundary(i) {
-                continue;
-            }
-            if !chunk.ends_with(&token[..i]) {
-                continue;
-            }
-            if token == CALL_PREFIX {
-                let partial_start = chunk.len() - i;
-                if !is_call_prefix_boundary(chunk, partial_start) {
-                    continue;
-                }
-            }
+
+    for i in 1..TOOL_CALL_START.len() {
+        if TOOL_CALL_START.is_char_boundary(i) && chunk.ends_with(&TOOL_CALL_START[..i]) {
             return true;
         }
     }
+
     false
+}
+
+fn has_bare_call_body_start(input: &str) -> bool {
+    let Some(after_prefix) = input.strip_prefix(CALL_PREFIX) else {
+        return false;
+    };
+    let Some(open_brace) = after_prefix.find('{') else {
+        return false;
+    };
+    if open_brace == 0 {
+        return false;
+    }
+    after_prefix[..open_brace]
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+}
+
+pub fn split_partial_call_prefix_gemma4(chunk: &str) -> Option<(&str, &str)> {
+    for i in 1..CALL_PREFIX.len() {
+        if !CALL_PREFIX.is_char_boundary(i) || !chunk.ends_with(&CALL_PREFIX[..i]) {
+            continue;
+        }
+        let partial_start = chunk.len() - i;
+        if is_call_prefix_boundary(chunk, partial_start) {
+            return Some((&chunk[..partial_start], &chunk[partial_start..]));
+        }
+    }
+    None
 }
 
 /// Returns the position immediately after the last *complete* tool-call match
@@ -702,8 +726,13 @@ mod tests {
     fn detect_full_and_partial_start() {
         assert!(detect_tool_call_start_gemma4("<|tool_call>"));
         assert!(detect_tool_call_start_gemma4("blah <|tool_call>"));
+        assert!(detect_tool_call_start_gemma4(
+            "call:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>"
+        ));
+        assert!(detect_tool_call_start_gemma4("call:get_weather{"));
         assert!(detect_tool_call_start_gemma4("<|tool_"));
         assert!(detect_tool_call_start_gemma4("<|"));
+        assert!(!detect_tool_call_start_gemma4("I will call: you tomorrow"));
         assert!(!detect_tool_call_start_gemma4("nothing here"));
         assert!(!detect_tool_call_start_gemma4("toolcall"));
     }
