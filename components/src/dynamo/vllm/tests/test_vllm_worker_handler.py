@@ -1172,9 +1172,11 @@ class TestEmbeddingWorkerHandlerCancellation:
         assert started[0].is_set()
         assert started[2].is_set()
         assert started[3].is_set()
-        assert cancelled == {0, 2, 3}, (
-            f"sibling encodes were not cancelled: cancelled={cancelled}"
-        )
+        assert cancelled == {
+            0,
+            2,
+            3,
+        }, f"sibling encodes were not cancelled: cancelled={cancelled}"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
