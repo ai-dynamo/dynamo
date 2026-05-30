@@ -112,6 +112,23 @@ def test_diff_collection_env_ignores_narrow_logging_allowlist():
     )
 
 
+def test_diff_collection_env_ignores_tensorrt_llm_import_side_effects():
+    # `import tensorrt_llm` (pulled in by trtllm test modules at collection)
+    # sets these as import-time side effects; they are benign and allowlisted.
+    assert "TLLM_LOG_LEVEL" in ALLOWED_COLLECTION_ENV_MUTATIONS
+    assert "OMPI_MCA_coll_ucc_enable" in ALLOWED_COLLECTION_ENV_MUTATIONS
+    assert (
+        diff_collection_env(
+            {},
+            {
+                "TLLM_LOG_LEVEL": "INFO",
+                "OMPI_MCA_coll_ucc_enable": "0",
+            },
+        )
+        == {}
+    )
+
+
 def test_format_collection_env_changes_redacts_sensitive_values():
     message = format_collection_env_changes(
         {
@@ -142,13 +159,17 @@ _REGRESSION_ENV_VAR = "SGLANG_COLLECTION_ENV_GUARD_REGRESSION"
 
 
 def _run_collect_only_with_import_mutation(
-    tmp_path: Path, *, guard_disabled: bool
+    tmp_path: Path, *, guard_disabled: bool, parallel: bool = False
 ) -> subprocess.CompletedProcess[str]:
     """Collect a dummy module that mutates a watched env var at import time.
 
     The real ``tests/conftest.py`` is loaded as a plugin (``-p tests.conftest``)
     so this exercises the wired hooks end-to-end, not just the helpers. If the
     hooks are ever removed from conftest, the failure assertion below breaks.
+
+    With ``parallel=True`` the run uses pytest-xdist workers. The import (and
+    therefore the mutation) happens on a worker, so this covers the worker ->
+    controller reporting path rather than the in-process raise.
     """
     dummy = tmp_path / "test_collection_env_guard_regression_dummy.py"
     dummy.write_text(
@@ -172,6 +193,7 @@ def _run_collect_only_with_import_mutation(
     else:
         env.pop(COLLECTION_ENV_GUARD_DISABLE_ENV, None)
 
+    parallel_args = ["-n", "2"] if parallel else []
     return subprocess.run(
         [
             sys.executable,
@@ -179,6 +201,7 @@ def _run_collect_only_with_import_mutation(
             "pytest",
             "-p",
             "tests.conftest",
+            *parallel_args,
             "--collect-only",
             "-q",
             str(dummy),
@@ -206,3 +229,19 @@ def test_collection_guard_bypass_allows_import_time_env_mutation(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     combined = result.stdout + result.stderr
     assert "pytest collection mutated watched environment variables" not in combined
+
+
+def test_collection_guard_fails_cleanly_under_xdist(tmp_path):
+    # Under xdist the mutation happens on a worker. Raising there used to crash
+    # the worker and surface as an opaque "INTERNALERROR: assert not crashitem"
+    # instead of our message. The worker now reports back to the controller,
+    # which fails the session cleanly with the same USAGE_ERROR exit code.
+    result = _run_collect_only_with_import_mutation(
+        tmp_path, guard_disabled=False, parallel=True
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 4, combined
+    assert "pytest collection mutated watched environment variables" in combined
+    assert _REGRESSION_ENV_VAR in combined
+    assert "INTERNALERROR" not in combined
