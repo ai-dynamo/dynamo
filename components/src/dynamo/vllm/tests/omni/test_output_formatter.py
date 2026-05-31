@@ -115,36 +115,39 @@ def _make_diffusion_formatter():
     )
 
 
+def _make_pil_image(size=(4, 4)):
+    # Use a real PIL image: normalize_image_frames() passes PIL inputs through
+    # unchanged, whereas a MagicMock falls into the np.asarray(item).max() path
+    # and raises "zero-size array to reduction operation maximum".
+    from PIL import Image
+
+    return Image.new("RGB", size, (123, 222, 64))
+
+
 class TestDiffusionFormatterPrepareImages:
     @pytest.mark.asyncio
     async def test_b64_json(self):
         f = _make_diffusion_formatter()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"fake_png_data")
-        results = await f._prepare_images([img], "req-1", "b64_json")
+        results = await f._prepare_images([_make_pil_image()], "req-1", "b64_json")
         assert len(results) == 1
         assert results[0].startswith("data:image/png;base64,")
 
     @pytest.mark.asyncio
     async def test_b64_default_when_none(self):
         f = _make_diffusion_formatter()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"data")
-        results = await f._prepare_images([img], "req-1", None)
+        results = await f._prepare_images([_make_pil_image()], "req-1", None)
         assert results[0].startswith("data:image/png;base64,")
 
     @pytest.mark.asyncio
     async def test_invalid_format(self):
         f = _make_diffusion_formatter()
         with pytest.raises(ValueError, match="Invalid response format"):
-            await f._prepare_images([MagicMock()], "req-1", "invalid")
+            await f._prepare_images([_make_pil_image()], "req-1", "invalid")
 
     @pytest.mark.asyncio
     async def test_multiple_images(self):
         f = _make_diffusion_formatter()
-        imgs = [MagicMock() for _ in range(3)]
-        for img in imgs:
-            img.save = lambda b, format: b.write(b"px")
+        imgs = [_make_pil_image() for _ in range(3)]
         results = await f._prepare_images(imgs, "req-1", "b64_json")
         assert len(results) == 3
 
@@ -155,10 +158,8 @@ class TestDiffusionFormatterImage:
         from dynamo.common.utils.output_modalities import RequestType
 
         f = _make_diffusion_formatter()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
         chunk = await f._encode_image(
-            [img], "req-1", request_type=RequestType.CHAT_COMPLETION
+            [_make_pil_image()], "req-1", request_type=RequestType.CHAT_COMPLETION
         )
         assert chunk["object"] == "chat.completion.chunk"
         assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
@@ -168,10 +169,8 @@ class TestDiffusionFormatterImage:
         from dynamo.common.utils.output_modalities import RequestType
 
         f = _make_diffusion_formatter()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
         chunk = await f._encode_image(
-            [img],
+            [_make_pil_image()],
             "req-1",
             response_format="b64_json",
             request_type=RequestType.IMAGE_GENERATION,
@@ -183,10 +182,8 @@ class TestDiffusionFormatterImage:
         from dynamo.common.utils.output_modalities import RequestType
 
         f = _make_diffusion_formatter()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
         chunk = await f._encode_image(
-            [img],
+            [_make_pil_image()],
             "req-1",
             response_format=None,
             request_type=RequestType.IMAGE_GENERATION,
@@ -381,9 +378,7 @@ class TestOutputFormatter:
         f = OutputFormatter(model_name="test-model")
         stage = MagicMock()
         stage.final_output_type = "image"
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        stage.images = [img]
+        stage.images = [_make_pil_image()]
         chunk = await f.format(
             stage, "req-1", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX
         )
