@@ -234,6 +234,10 @@ impl LoraController {
             }
         }
 
+        // Re-snapshot after cleanup so the logs and Prometheus gauges below reflect the
+        // post-cleanup table and don't surface a capacity-dropped/stale LoRA for an extra tick (RF-1).
+        let table_snapshot = self.routing_table.snapshot_configs();
+
         // Prune the load estimator of LoRAs that are no longer loaded (and any
         // unknown/typo request names), bounding its memory over time (F12).
         self.load_estimator.retain_known(&known_set);

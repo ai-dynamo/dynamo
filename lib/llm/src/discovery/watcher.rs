@@ -507,6 +507,11 @@ impl ModelWatcher {
                     self.manager
                         .lora_state_tracker()
                         .handle_worker_removal(worker);
+                    // Sweep any pending fallback entries for this worker's LoRA cards so they
+                    // can't linger if their own remove events never arrive (RF-2).
+                    let prefix = format!("{}/", mcid.to_path());
+                    self.pending_lora_adds
+                        .retain(|k, _| !k.starts_with(&prefix));
                 } else if let Some((_, lora_name)) = self.pending_lora_adds.remove(&key) {
                     self.manager
                         .lora_state_tracker()
@@ -539,8 +544,15 @@ impl ModelWatcher {
                     .handle_worker_removal(worker),
             }
         }
-        // The card-based cleanup above is authoritative; drop any pending fallback entry.
-        self.pending_lora_adds.remove(&key);
+        // The card-based cleanup above is authoritative; drop the pending fallback entry for a
+        // LoRA card, or sweep all of this worker's suffixed entries for a base card (RF-2).
+        if card.lora.is_some() {
+            self.pending_lora_adds.remove(&key);
+        } else {
+            let prefix = format!("{}/", mcid.to_path());
+            self.pending_lora_adds
+                .retain(|k, _| !k.starts_with(&prefix));
+        }
 
         let worker_namespace = &mcid.namespace;
         let worker_component = &mcid.component;
