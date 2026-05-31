@@ -164,13 +164,16 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     fi
 
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
-# jq for readable curl output just like the upstream omni image does.
+# jq for readable curl output just like the upstream omni image does. git is only
+# pulled in when VLLM_OMNI_GIT_URL is set (installing vllm-omni from an unreleased
+# git ref) — the upstream vllm runtime image does not ship git.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         jq \
         sox \
-        libsox-fmt-all; \
+        libsox-fmt-all \
+        ${VLLM_OMNI_GIT_URL:+git}; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
