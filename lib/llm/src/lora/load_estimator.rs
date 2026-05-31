@@ -273,6 +273,23 @@ impl LoadEstimator {
         }
     }
 
+    /// Replace the full estimator config at runtime (rate window, bucket granularity,
+    /// predictor type/alpha). Applies to counters/predictors created after this call;
+    /// existing per-LoRA counters keep their original bucketing.
+    pub fn set_config(&self, config: LoadEstimatorConfig) {
+        *self.config.write() = config;
+    }
+
+    /// Prune tracking data (and predictors) for any LoRA not in `known`. Bounds memory
+    /// against unloaded adapters and unknown/typo request names that never get allocated.
+    pub fn retain_known(&self, known: &std::collections::HashSet<&str>) {
+        self.data.retain(|name, _| known.contains(name.as_str()));
+        self.predictors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|name, _| known.contains(name.as_str()));
+    }
+
     /// Update the rate window at runtime.
     pub fn set_rate_window(&self, window: Duration) {
         let mut cfg = self.config.write();

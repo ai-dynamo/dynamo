@@ -218,6 +218,10 @@ impl LoraController {
             }
         }
 
+        // Prune the load estimator of LoRAs that are no longer loaded (and any
+        // unknown/typo request names), bounding its memory over time (F12).
+        self.load_estimator.retain_known(&known_set);
+
         tracing::debug!(
             tick = self.tick,
             active = active_loras.len(),
@@ -260,7 +264,15 @@ impl LoraController {
         active_replica_counts: &HashMap<String, usize>,
         worker_slot_usage: &HashMap<WorkerWithDpRank, (usize, usize)>,
     ) {
-        for (lora_name, desired_replicas) in active_replica_counts {
+        // Track residual capacity across LoRAs within this tick so multiple active LoRAs
+        // are not all placed on the same "free" slots and exceed per-worker capacity (F7).
+        // Iterate in a deterministic (sorted) order so every router instance charges
+        // residual capacity identically and converges on the same placement.
+        let mut residual_usage = worker_slot_usage.clone();
+        let mut active_sorted: Vec<(&String, &usize)> = active_replica_counts.iter().collect();
+        active_sorted.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (lora_name, desired_replicas) in active_sorted {
             let current = self.routing_table.get_config(lora_name);
             let current_replicas = current.as_ref().map(|c| c.replica_factor).unwrap_or(0);
 
@@ -271,8 +283,15 @@ impl LoraController {
                 lora_name,
                 workers,
                 final_replicas,
-                worker_slot_usage,
+                &residual_usage,
             );
+
+            // Charge this LoRA's placements against residual capacity for later LoRAs.
+            for w in &replica_set {
+                if let Some(usage) = residual_usage.get_mut(w) {
+                    usage.0 += 1;
+                }
+            }
 
             if self.update_routing_entry(lora_name, final_replicas, replica_set.clone(), true) {
                 tracing::info!(
@@ -389,7 +408,7 @@ impl LoraController {
         );
 
         match solve_result {
-            Ok(result) => {
+            Ok(mut result) => {
                 let total_loads: usize = result.loads.values().map(|s| s.len()).sum();
                 let total_unloads: usize = result.unloads.values().map(|s| s.len()).sum();
 
@@ -429,6 +448,34 @@ impl LoraController {
                             "MCF updated LoRA allocation"
                         );
                     }
+                }
+
+                // F8: the MCF solver omits fully-overflowed LoRAs from `assignment`. A
+                // still-loaded LoRA left unplaced would otherwise keep a stale entry (or have
+                // no route at all). Give each a deterministic HRW cold-start pin so it stays
+                // routable (REQ 7), and record it in the assignment so next tick's delta
+                // detection doesn't see phantom churn.
+                let unplaced: Vec<String> = all_loras
+                    .iter()
+                    .filter(|n| !result.assignment.contains_key(*n))
+                    .cloned()
+                    .collect();
+                for lora_name in unplaced {
+                    let pin = self.allocator.compute_replica_set(&lora_name, workers, 1);
+                    if pin.is_empty() {
+                        continue;
+                    }
+                    let is_active = active_set.contains(lora_name.as_str());
+                    if self.update_routing_entry(&lora_name, 1, pin.clone(), is_active) {
+                        tracing::warn!(
+                            lora = %lora_name,
+                            pinned_worker_id = ?pin.first().map(|w| w.worker_id),
+                            "MCF left LoRA unplaced (capacity overflow); applied HRW fallback pin"
+                        );
+                    }
+                    result
+                        .assignment
+                        .insert(lora_name, pin.into_iter().collect());
                 }
 
                 // Store state for next tick

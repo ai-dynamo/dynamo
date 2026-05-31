@@ -893,8 +893,16 @@ impl ModelManager {
         }
 
         let rate_window_secs = config.effective_rate_window_secs();
+        // F11: apply the full estimator config (rate window + bucket granularity +
+        // predictor type/alpha), not just the rate window.
         self.lora_load_estimator
-            .set_rate_window(std::time::Duration::from_secs(rate_window_secs));
+            .set_config(crate::lora::LoadEstimatorConfig {
+                rate_window: std::time::Duration::from_secs(rate_window_secs),
+                buckets_per_second: config.buckets_per_second,
+                predictor_type: config.predictor_type,
+                ema_alpha: config.ema_alpha,
+                ..Default::default()
+            });
 
         tracing::info!(
             enabled = config.enabled,
