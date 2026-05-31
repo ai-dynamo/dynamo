@@ -484,16 +484,22 @@ impl ModelWatcher {
             Some(card) => card,
             None => {
                 // The card was never durably saved (e.g. an Added event whose handle_put failed
-                // before save, after the pre-spawn tracker addition). Still purge any LoRA
-                // tracker state for this instance so it cannot leak as phantom capacity/loaded
-                // entries that inflate the slot budget (R3-3).
-                use crate::kv_router::protocols::WorkerWithDpRank;
-                self.manager
-                    .lora_state_tracker()
-                    .handle_worker_removal(WorkerWithDpRank::new(mcid.instance_id, 0));
+                // before save, after the pre-spawn tracker addition). Purge phantom tracker state,
+                // but at the right granularity: only a base worker card (`model_suffix == None`)
+                // means the worker instance is gone, so only then clear it entirely. A missing
+                // LoRA-adapter card (`model_suffix == Some`) must NOT wipe a still-live worker's
+                // other adapters/capacity (RR3-3); without the card we lack the adapter name to
+                // remove it precisely, so we leave the bounded phantom entry to be cleared when the
+                // worker's base card is removed.
+                if mcid.model_suffix.is_none() {
+                    use crate::kv_router::protocols::WorkerWithDpRank;
+                    self.manager
+                        .lora_state_tracker()
+                        .handle_worker_removal(WorkerWithDpRank::new(mcid.instance_id, 0));
+                }
                 tracing::warn!(
                     key = %key,
-                    "ModelDeploymentCard absent during removal; purged any LoRA tracker state for instance"
+                    "ModelDeploymentCard absent during removal; purged worker-level LoRA state if base card"
                 );
                 return Ok(None);
             }

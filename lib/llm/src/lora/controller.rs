@@ -374,6 +374,10 @@ impl LoraController {
             self.hysteresis.remove(lora_name);
         }
 
+        // Deterministic solver input order across router instances (RR3-2): active inputs are
+        // built by iterating a HashMap, so sort by name before the MCF solve.
+        lora_inputs.sort_by(|a, b| a.name.cmp(&b.name));
+
         // Detect changes for delta solving
         let current_workers: HashSet<WorkerWithDpRank> = workers.iter().copied().collect();
         let changed_workers: HashSet<WorkerWithDpRank> = current_workers
@@ -471,9 +475,21 @@ impl LoraController {
                 // no route at all). Give each a deterministic HRW cold-start pin so it stays
                 // routable (REQ 7), and record it in the assignment so next tick's delta
                 // detection doesn't see phantom churn.
+                // Only LoRAs we actually intended to place (active with allocated demand, or
+                // inactive cold-start) may receive a fallback pin. LoRAs intentionally dropped by
+                // the capacity cap (active but truncated out of active_replica_counts) must NOT be
+                // re-pinned (RR3-1) — they rely on the runtime loaded-worker fallback, exactly as
+                // in the HRW path; pinning them would reintroduce min-1 placement past the budget.
+                let intended: std::collections::HashSet<&str> = active_replica_counts
+                    .keys()
+                    .map(String::as_str)
+                    .chain(inactive_loras.iter().map(String::as_str))
+                    .collect();
                 let unplaced: Vec<String> = all_loras
                     .iter()
-                    .filter(|n| !result.assignment.contains_key(*n))
+                    .filter(|n| {
+                        intended.contains(n.as_str()) && !result.assignment.contains_key(*n)
+                    })
                     .cloned()
                     .collect();
                 for lora_name in unplaced {

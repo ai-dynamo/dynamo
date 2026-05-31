@@ -188,10 +188,14 @@ fn preprocessed_backend_engine(
         RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => {
+            // These advanced non-KV modes are not LoRA-aware (no 2-stage filtering). Rather than
+            // silently mis-routing adapter requests to workers without the adapter, fail fast when
+            // LoRA serving is enabled (RR3-4): LoRA-aware routing requires KV, Random, or RoundRobin.
             if model_manager.lora_filter().is_some() {
                 anyhow::bail!(
-                    "{router_mode:?} is unsupported when DYN_LORA_ENABLED is set; \
-                     use KV, Random, or RoundRobin"
+                    "LoRA serving (DYN_LORA_ENABLED) is not supported with router mode \
+                     {router_mode:?}; use KV, Random, or RoundRobin for LoRA-aware routing, or \
+                     disable LoRA serving."
                 );
             }
             Arc::new(SessionAffinityPushRouter::new(
