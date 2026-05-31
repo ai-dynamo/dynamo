@@ -427,32 +427,9 @@ impl ModelWatcher {
                         }
                     };
 
-                    // Feed the LoRA state tracker on removal. A LoRA adapter card
-                    // (`card.lora = Some`) unregisters just that adapter. The base worker
-                    // card (`card.lora = None`) means the worker instance itself is gone, so
-                    // drop its capacity and all loaded-LoRA bookkeeping — otherwise dead
-                    // workers leak into the cluster slot budget and the controller
-                    // over-allocates (F4/F5). Worker-level removal also backstops any missed
-                    // per-adapter removal, since it clears every LoRA on that worker.
-                    {
-                        let key = model_card_instance_id.to_path();
-                        if let Some(card) = self.manager.get_model_card(&key) {
-                            use crate::kv_router::protocols::WorkerWithDpRank;
-                            let worker =
-                                WorkerWithDpRank::new(model_card_instance_id.instance_id, 0);
-                            match card.lora {
-                                Some(ref lora_info) => self
-                                    .manager
-                                    .lora_state_tracker()
-                                    .handle_mdc_removal(worker, &lora_info.name),
-                                None => self
-                                    .manager
-                                    .lora_state_tracker()
-                                    .handle_worker_removal(worker),
-                            }
-                        }
-                    }
-
+                    // LoRA state-tracker cleanup runs inside handle_delete, after it waits for
+                    // any in-flight handle_put, so the card is reliably present even when a
+                    // Removed event races an in-flight add (N2).
                     match self
                         .handle_delete(model_card_instance_id, &namespace_filter)
                         .await
@@ -514,6 +491,26 @@ impl ModelWatcher {
             }
         };
         let model_name = card.name().to_string();
+
+        // Feed the LoRA state tracker now that any in-flight handle_put has completed and the
+        // card is available (N2 — avoids the race where a Removed event outran the add). A LoRA
+        // adapter card unregisters just that adapter; the base worker card means the worker
+        // instance is gone, so drop its capacity + all loaded-LoRA bookkeeping (F4/F5).
+        {
+            use crate::kv_router::protocols::WorkerWithDpRank;
+            let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+            match card.lora {
+                Some(ref lora_info) => self
+                    .manager
+                    .lora_state_tracker()
+                    .handle_mdc_removal(worker, &lora_info.name),
+                None => self
+                    .manager
+                    .lora_state_tracker()
+                    .handle_worker_removal(worker),
+            }
+        }
+
         let worker_namespace = &mcid.namespace;
         let worker_component = &mcid.component;
         let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);

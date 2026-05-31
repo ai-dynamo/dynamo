@@ -422,6 +422,12 @@ impl LoraController {
                     );
                 }
 
+                // N7: export churn + overflow gauges (registered but previously never set).
+                crate::http::service::metrics::LORA_CHURN_LOADS_GAUGE.set(total_loads as i64);
+                crate::http::service::metrics::LORA_CHURN_UNLOADS_GAUGE.set(total_unloads as i64);
+                crate::http::service::metrics::LORA_OVERFLOW_COUNT_GAUGE
+                    .set(result.overflow_count as i64);
+
                 // Update routing table from MCF result
                 let active_set: HashSet<&str> =
                     active_loras.iter().map(|(n, _)| n.as_str()).collect();
