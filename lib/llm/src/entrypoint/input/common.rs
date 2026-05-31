@@ -151,24 +151,40 @@ fn preprocessed_backend_engine(
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new(
-            router,
-            session_affinity_ttl,
-            true,
-        )?),
-        RouterMode::Random | RouterMode::RoundRobin => {
-            // Non-KV routing: wrap PushRouter with LoraFilteredRouter for 2-stage routing.
-            // When no LoRAs are registered, the filter is a no-op pass-through.
-            let lora_filter = model_manager
-                .lora_filter()
-                .expect("lora_filter() always returns Some");
-            Arc::new(LoraFilteredRouter::new(
+        RouterMode::Direct => {
+            if model_manager.lora_filter().is_some() {
+                anyhow::bail!(
+                    "RouterMode::Direct is unsupported when DYN_LORA_ENABLED is set; \
+                     use KV, Random, or RoundRobin"
+                );
+            }
+            Arc::new(SessionAffinityPushRouter::new(
                 router,
-                lora_filter,
-                model_manager.lora_load_estimator().clone(),
-                router_mode,
-            ))
+                session_affinity_ttl,
+                true,
+            )?)
         }
+        RouterMode::Random | RouterMode::RoundRobin => match model_manager.lora_filter() {
+            Some(lora_filter) => {
+                if session_affinity_ttl.is_some() {
+                    anyhow::bail!(
+                        "session affinity is unsupported with DYN_LORA_ENABLED and \
+                         Random/RoundRobin routing"
+                    );
+                }
+                Arc::new(LoraFilteredRouter::new(
+                    router,
+                    lora_filter,
+                    model_manager.lora_load_estimator().clone(),
+                    router_mode,
+                ))
+            }
+            None => Arc::new(SessionAffinityPushRouter::new(
+                router,
+                session_affinity_ttl,
+                false,
+            )?),
+        },
         RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => Arc::new(SessionAffinityPushRouter::new(

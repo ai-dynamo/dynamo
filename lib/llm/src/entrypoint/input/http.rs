@@ -187,12 +187,10 @@ async fn run_watcher(
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
 ) -> anyhow::Result<()> {
-    // Start the LoRA allocation controller when LoRA is enabled.
-    let lora_enabled =
-        std::env::var(dynamo_runtime::config::environment_names::llm::DYN_LORA_ENABLED)
-            .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
-            .unwrap_or(false);
-    if lora_enabled {
+    // Start the LoRA allocation controller when LoRA serving is enabled. The
+    // controller itself is additionally gated on the allocation config
+    // (DYN_LORA_ALLOCATION_ENABLED) inside `start_lora_controller`.
+    if crate::lora::lora_serving_enabled() {
         let cancel_token = runtime.primary_token();
         let _controller_handle = model_manager.start_lora_controller(cancel_token);
     }

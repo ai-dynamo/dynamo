@@ -104,11 +104,18 @@ pub struct ModelManager {
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 
-    // LoRA allocation state (always created; only the controller is gated on DYN_LORA_ENABLED)
+    // LoRA allocation state. The state objects are always created so discovery can
+    // populate them, but `lora_filter()` only hands out the filter when LoRA serving is
+    // enabled (DYN_LORA_ENABLED) — so non-LoRA deployments keep the unmodified routing
+    // path. The controller is additionally gated on the allocation config.
     lora_routing_table: LoraRoutingTable,
     lora_state_tracker: LoraStateTracker,
     lora_load_estimator: Arc<LoadEstimator>,
     lora_filter: Arc<LoraFilter>,
+    lora_enabled: bool,
+    /// Decode components that already have a LoRA load feed running, so we start exactly
+    /// one active-sequence subscription per component (avoids double counting on rebuilds).
+    lora_load_feeds: DashMap<String, ()>,
 }
 
 impl Default for ModelManager {
@@ -135,6 +142,8 @@ impl ModelManager {
             lora_state_tracker,
             lora_load_estimator: Arc::new(LoadEstimator::new()),
             lora_filter,
+            lora_enabled: crate::lora::lora_serving_enabled(),
+            lora_load_feeds: DashMap::new(),
         }
     }
 
@@ -811,6 +820,27 @@ impl ModelManager {
             self.lora_filter(),
         )
         .await?;
+
+        // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one decode-scoped
+        // active-sequence subscription per decode component (prefill is a separate
+        // component, so this stays decode-only and avoids double counting). Without this
+        // the estimator is never fed in KV mode and every LoRA stays "inactive" forever.
+        if self.lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
+        {
+            let feed_key = format!("{}/{}", endpoint.id().namespace, endpoint.id().component);
+            if self.lora_load_feeds.insert(feed_key, ()).is_none() {
+                let _feed = self
+                    .lora_load_estimator
+                    .clone()
+                    .start_event_subscription(endpoint.component().clone());
+                tracing::info!(
+                    namespace = %endpoint.id().namespace,
+                    component = %endpoint.id().component,
+                    "Started decode-side LoRA load feed (KV active-sequence subscription)"
+                );
+            }
+        }
+
         Ok(Arc::new(chooser))
     }
 
@@ -839,7 +869,9 @@ impl ModelManager {
     }
 
     pub fn lora_filter(&self) -> Option<Arc<LoraFilter>> {
-        Some(self.lora_filter.clone())
+        // Only expose the filter when LoRA serving is enabled, so non-LoRA deployments
+        // keep the unmodified routing path (no wrapper, no avail-vs-free regression).
+        self.lora_enabled.then(|| self.lora_filter.clone())
     }
 
     /// Start the LoRA allocation controller background loop.
@@ -848,6 +880,17 @@ impl ModelManager {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let config = crate::lora::LoraAllocationConfig::from_env();
+
+        // F10: respect the allocation-enabled config (DYN_LORA_ALLOCATION_ENABLED). When
+        // disabled, skip the controller entirely — routing still works via the filter's
+        // loaded-worker fallback, just without dynamic replica recomputation.
+        if !config.enabled {
+            tracing::info!(
+                "LoRA allocation controller disabled (DYN_LORA_ALLOCATION_ENABLED=false); \
+                 routing uses the loaded-worker fallback without dynamic allocation"
+            );
+            return tokio::spawn(async {});
+        }
 
         let rate_window_secs = config.effective_rate_window_secs();
         self.lora_load_estimator
