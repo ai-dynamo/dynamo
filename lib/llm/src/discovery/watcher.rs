@@ -427,18 +427,29 @@ impl ModelWatcher {
                         }
                     };
 
-                    // Feed LoRA state tracker for worker removal
+                    // Feed the LoRA state tracker on removal. A LoRA adapter card
+                    // (`card.lora = Some`) unregisters just that adapter. The base worker
+                    // card (`card.lora = None`) means the worker instance itself is gone, so
+                    // drop its capacity and all loaded-LoRA bookkeeping — otherwise dead
+                    // workers leak into the cluster slot budget and the controller
+                    // over-allocates (F4/F5). Worker-level removal also backstops any missed
+                    // per-adapter removal, since it clears every LoRA on that worker.
                     {
                         let key = model_card_instance_id.to_path();
-                        if let Some(card) = self.manager.get_model_card(&key)
-                            && let Some(ref lora_info) = card.lora
-                        {
+                        if let Some(card) = self.manager.get_model_card(&key) {
                             use crate::kv_router::protocols::WorkerWithDpRank;
                             let worker =
                                 WorkerWithDpRank::new(model_card_instance_id.instance_id, 0);
-                            self.manager
-                                .lora_state_tracker()
-                                .handle_mdc_removal(worker, &lora_info.name);
+                            match card.lora {
+                                Some(ref lora_info) => self
+                                    .manager
+                                    .lora_state_tracker()
+                                    .handle_mdc_removal(worker, &lora_info.name),
+                                None => self
+                                    .manager
+                                    .lora_state_tracker()
+                                    .handle_worker_removal(worker),
+                            }
                         }
                     }
 
