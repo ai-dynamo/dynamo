@@ -56,6 +56,7 @@ cases:
       sglang:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
+        reason: Dynamo re-enters reasoning on each open marker across chunks and concatenates all spans; SGLang exits at the first end marker and does not re-enter, leaving the later span in normal_text.
   REASONING.stream.3.a:
     description: Start marker split across chunks
     ref: *upstream_ref
@@ -90,6 +91,7 @@ cases:
       sglang:
         reasoning_text: thinking</think>answer
         normal_text: ''
+        reason: Dynamo buffers an end marker split across chunk boundaries and resumes normal_text after it; SGLang streams the partial delimiter as reasoning, so the split marker is never reassembled and the answer stays in reasoning_text.
   REASONING.stream.3.c:
     description: Partial start-marker prefix later resolves as force-reasoning text
     ref: *upstream_ref
@@ -104,6 +106,7 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: plain <thesis answer
+        reason: Dynamo/vLLM keep marker-free chunks in force-reasoning mode; SGLang treats the unresolved partial marker as normal_text.
   REASONING.stream.1.b:
     description: Plain text stays in force-reasoning mode until an end marker
     ref: *upstream_ref
@@ -118,3 +121,4 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: plain answer
+        reason: Dynamo/vLLM keep marker-free stream text in force-reasoning mode; SGLang only enters reasoning after an explicit start marker.
