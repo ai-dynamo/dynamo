@@ -147,6 +147,11 @@ pub struct ModelWatcher {
     /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
     /// can await a racing put before proceeding with cleanup.
     pending_puts: DashMap<String, JoinHandle<()>>,
+    /// Maps an MDC instance path to the LoRA adapter name recorded in the pre-spawn state-tracker
+    /// addition, so a removal whose model card was never durably saved (handle_put failed before
+    /// save) can still remove exactly that adapter from the tracker instead of leaving phantom
+    /// state or wiping a live worker (R4-2 / RR3-3).
+    pending_lora_adds: DashMap<String, String>,
     /// Frontend's `--model-path`. Threaded into `download_config` so
     /// `file://` slots can fall back here when the worker's path is
     /// unreachable on this host.
@@ -232,6 +237,7 @@ impl ModelWatcher {
             registering_worker_sets: DashSet::new(),
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
+            pending_lora_adds: DashMap::new(),
             local_model_path: None,
             tokenizer_backend: None,
         }
@@ -366,6 +372,10 @@ impl ModelWatcher {
                         self.manager
                             .lora_state_tracker()
                             .handle_mdc_addition(worker, lora_info);
+                        // Record the adapter name keyed by instance path so a later removal whose
+                        // card was never durably saved can still remove exactly this adapter (R4-2).
+                        self.pending_lora_adds
+                            .insert(mcid.to_path(), lora_info.name.clone());
                     }
 
                     // Spawn each handle_put into its own task so that a slow
@@ -484,22 +494,27 @@ impl ModelWatcher {
             Some(card) => card,
             None => {
                 // The card was never durably saved (e.g. an Added event whose handle_put failed
-                // before save, after the pre-spawn tracker addition). Purge phantom tracker state,
-                // but at the right granularity: only a base worker card (`model_suffix == None`)
-                // means the worker instance is gone, so only then clear it entirely. A missing
-                // LoRA-adapter card (`model_suffix == Some`) must NOT wipe a still-live worker's
-                // other adapters/capacity (RR3-3); without the card we lack the adapter name to
-                // remove it precisely, so we leave the bounded phantom entry to be cleared when the
-                // worker's base card is removed.
+                // before save, after the pre-spawn tracker addition). Reconcile tracker state at
+                // the right granularity:
+                //   - base worker card (`model_suffix == None`): the worker instance is gone, so
+                //     clear it entirely;
+                //   - LoRA-adapter card (`model_suffix == Some`): remove ONLY that adapter, using
+                //     the name recorded in `pending_lora_adds`, so a still-live worker's other
+                //     adapters/capacity are untouched (RR3-3 / R4-2).
+                use crate::kv_router::protocols::WorkerWithDpRank;
+                let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
                 if mcid.model_suffix.is_none() {
-                    use crate::kv_router::protocols::WorkerWithDpRank;
                     self.manager
                         .lora_state_tracker()
-                        .handle_worker_removal(WorkerWithDpRank::new(mcid.instance_id, 0));
+                        .handle_worker_removal(worker);
+                } else if let Some((_, lora_name)) = self.pending_lora_adds.remove(&key) {
+                    self.manager
+                        .lora_state_tracker()
+                        .handle_mdc_removal(worker, &lora_name);
                 }
                 tracing::warn!(
                     key = %key,
-                    "ModelDeploymentCard absent during removal; purged worker-level LoRA state if base card"
+                    "ModelDeploymentCard absent during removal; reconciled LoRA tracker state from pending add"
                 );
                 return Ok(None);
             }
@@ -524,6 +539,8 @@ impl ModelWatcher {
                     .handle_worker_removal(worker),
             }
         }
+        // The card-based cleanup above is authoritative; drop any pending fallback entry.
+        self.pending_lora_adds.remove(&key);
 
         let worker_namespace = &mcid.namespace;
         let worker_component = &mcid.component;

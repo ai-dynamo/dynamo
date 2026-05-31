@@ -212,13 +212,25 @@ impl LoraController {
         // Cleanup stale entries
         let known_set: std::collections::HashSet<&str> =
             all_loras.iter().map(|s| s.as_str()).collect();
+        // Active LoRAs that received no allocation this tick because they fell outside the slot
+        // budget (capacity cap). Their prior routing-table entry must also be removed, or the
+        // filter would keep routing via the stale replica set and defeat the cap (R4-1). With no
+        // entry, requests fall back to the runtime loaded-worker path.
+        let dropped_active: std::collections::HashSet<&str> = active_loras
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .filter(|n| !active_replica_counts.contains_key(*n))
+            .collect();
         let table_snapshot = self.routing_table.snapshot_configs();
 
         for (name, _) in &table_snapshot {
-            if !known_set.contains(name.as_str()) {
+            if !known_set.contains(name.as_str()) || dropped_active.contains(name.as_str()) {
                 self.routing_table.remove_lora(name);
                 self.hysteresis.remove(name);
-                tracing::debug!(lora = name, "Removed stale routing table entry");
+                tracing::debug!(
+                    lora = name,
+                    "Removed stale/capacity-dropped routing table entry"
+                );
             }
         }
 
