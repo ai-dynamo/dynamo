@@ -24,6 +24,12 @@ pub struct MockerMetrics {
     pub active_decode_blocks: u64,
     pub total_blocks: u64,
     pub gpu_cache_usage_perc: f64,
+    /// Currently-running sequences on this scheduler. Mirrors vLLM's `len(self.running)`
+    /// and sglang's `req_to_token_pool` occupancy on the disaggregated decode side.
+    pub active_seqs: u64,
+    /// Sequence-slot cap from MockEngineArgs.max_num_seqs. 0 means "unlimited"
+    /// (caller treated as no seq gate — mirrors warmup semantics on total_blocks).
+    pub max_num_seqs: u64,
 }
 
 impl MockerMetrics {
@@ -31,6 +37,8 @@ impl MockerMetrics {
         dp_rank: dynamo_kv_router::protocols::DpRank,
         active_decode_blocks: u64,
         total_blocks: u64,
+        active_seqs: u64,
+        max_num_seqs: u64,
     ) -> Self {
         let gpu_cache_usage_perc = if total_blocks == 0 {
             0.0
@@ -42,6 +50,8 @@ impl MockerMetrics {
             active_decode_blocks,
             total_blocks,
             gpu_cache_usage_perc,
+            active_seqs,
+            max_num_seqs,
         }
     }
 }
@@ -112,7 +122,8 @@ impl Scheduler {
     ) -> Self {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
         let total_blocks = args.num_gpu_blocks as u64;
-        let initial_metrics = MockerMetrics::new(dp_rank, 0, total_blocks);
+        let max_num_seqs = args.max_num_seqs.map(|v| v as u64).unwrap_or(0);
+        let initial_metrics = MockerMetrics::new(dp_rank, 0, total_blocks, 0, max_num_seqs);
         let (metrics_tx, metrics_rx) = tokio::sync::watch::channel(initial_metrics);
 
         let cancel_token = cancellation_token.unwrap_or_default();
@@ -167,6 +178,8 @@ impl Scheduler {
                     dp_rank,
                     core.kv_manager.num_active_blocks() as u64,
                     total_blocks,
+                    core.state.running.len() as u64,
+                    max_num_seqs,
                 ));
             }
         });

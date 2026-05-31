@@ -447,11 +447,30 @@ impl MockEngine {
         Ok(())
     }
 
-    /// Wait until the scheduler at `dp_rank` reports any free KV blocks, up to `timeout`.
-    /// Used by the decode side of disagg before connecting to a prefill bootstrap server
-    /// (DIS-2147): models real NIXL behavior where a decode worker only accepts a transfer
-    /// when it has KV capacity available. Returns Ok(()) immediately if schedulers haven't
-    /// reported metrics yet (total_blocks == 0) so the path is graceful during warmup.
+    /// Wait until the scheduler at `dp_rank` reports both **block** and **sequence**
+    /// headroom for admitting a new request, up to `timeout`. Used by the decode side
+    /// of disagg before connecting to a prefill bootstrap server (DIS-2147).
+    ///
+    /// Models real NIXL admission behavior in vLLM v1 and sglang — both engines gate
+    /// the disaggregated KV recv on **two independent budgets**:
+    ///
+    /// - **Block / token budget**: enough KV-cache blocks to absorb the projected
+    ///   sequence (vLLM `kv_cache_manager.allocate_slots(...)`; sglang
+    ///   `_allocatable_token_budgets`).
+    /// - **Sequence-slot budget**: a free slot in the per-request scheduling state
+    ///   (vLLM `max_num_seqs` / `len(self.running)`; sglang `DecodeReqToTokenPool`'s
+    ///   pre-allocated request pool — see decode.py lines 94-104 and the
+    ///   `pop_preallocated` gates at lines 806/809).
+    ///
+    /// Both must have headroom for the request to be admitted; either alone blocks
+    /// the NIXL recv from being armed. Without the seq-slot check, the mocker
+    /// returns Ok as soon as one decode pass freed a block — under tight
+    /// `max-num-seqs` saturation that's not how a real engine behaves, and the
+    /// DIS-2147 abort path becomes unreachable from realistic load shapes.
+    ///
+    /// Returns Ok(()) immediately if schedulers haven't reported metrics yet
+    /// (total_blocks == 0) so warmup is graceful. Also treats `max_num_seqs == 0`
+    /// as "no seq cap configured" (mirrors `MockEngineArgs.max_num_seqs == None`).
     pub async fn wait_for_decode_kv_capacity(&self, dp_rank: u32, timeout: Duration) -> Result<()> {
         let schedulers = self
             ._schedulers
@@ -470,9 +489,15 @@ impl MockEngine {
         loop {
             let metrics = rx.borrow().clone();
             // total_blocks == 0 means the scheduler hasn't published yet (still warming up).
-            // Don't block on warmup — let the request through; the scheduler's own queue
-            // will handle admission once metrics start flowing.
-            if metrics.total_blocks == 0 || metrics.active_decode_blocks < metrics.total_blocks {
+            // Don't block on warmup — the scheduler's own queue will handle admission
+            // once metrics start flowing.
+            let has_block_capacity =
+                metrics.total_blocks == 0 || metrics.active_decode_blocks < metrics.total_blocks;
+            // max_num_seqs == 0 means "no seq cap configured" — mirror vLLM/sglang's
+            // treatment of unset max_running_requests as effectively unbounded.
+            let has_seq_capacity =
+                metrics.max_num_seqs == 0 || metrics.active_seqs < metrics.max_num_seqs;
+            if has_block_capacity && has_seq_capacity {
                 return Ok(());
             }
             let remaining = timeout

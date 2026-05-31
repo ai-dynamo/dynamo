@@ -85,7 +85,8 @@ impl SglangScheduler {
     ) -> Self {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
         let total_blocks = args.num_gpu_blocks as u64;
-        let initial_metrics = MockerMetrics::new(dp_rank, 0, total_blocks);
+        let max_num_seqs = args.max_num_seqs.map(|v| v as u64).unwrap_or(0);
+        let initial_metrics = MockerMetrics::new(dp_rank, 0, total_blocks, 0, max_num_seqs);
         let (metrics_tx, metrics_rx) =
             tokio::sync::watch::channel::<MockerMetrics>(initial_metrics);
 
@@ -142,6 +143,8 @@ impl SglangScheduler {
                     dp_rank,
                     active_decode_blocks,
                     total_blocks,
+                    core.running.len() as u64,
+                    max_num_seqs,
                 ));
             }
         });
