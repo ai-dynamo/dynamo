@@ -48,16 +48,19 @@ pub trait LoraAllocator: Send + Sync {
 
 /// Per-LoRA allocation algorithm selectable via `DYN_LORA_ALLOCATION_ALGORITHM`.
 ///
-/// `MinCostFlow` is intentionally absent: `McfPlacementSolver` operates as a
-/// standalone global solver and has no `LoraAllocator` adapter yet. Accepting
-/// the config string while silently running HRW was misleading; it will be
-/// re-added here once the integration is complete.
+/// `MinCostFlow` selects the global `McfPlacementSolver` churn-aware placement
+/// path, which is driven by `LoraController` (see `controller.rs`). The per-LoRA
+/// `LoraAllocator` returned by [`create_lora_allocator`] for this variant is only
+/// used as a cold-start / fallback allocator; the actual global solve happens in
+/// the controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocationAlgorithmType {
     /// Rendezvous (Highest Random Weight) hashing
     Hrw,
     /// Random selection (for testing)
     Random,
+    /// Min-Cost Flow global placement (churn-aware bipartite assignment)
+    MinCostFlow,
 }
 
 impl FromStr for AllocationAlgorithmType {
@@ -67,11 +70,7 @@ impl FromStr for AllocationAlgorithmType {
         match s.to_lowercase().as_str() {
             "hrw" => Ok(Self::Hrw),
             "random" => Ok(Self::Random),
-            "mcf" | "min_cost_flow" | "mincostflow" => Err(
-                "MCF placement is not yet available as a per-LoRA allocator config value; \
-                 use McfPlacementSolver directly for global MCF placement"
-                    .to_string(),
-            ),
+            "mcf" | "min_cost_flow" | "mincostflow" => Ok(Self::MinCostFlow),
             _ => Err(format!("Unknown allocation algorithm type: {s}")),
         }
     }
@@ -82,6 +81,9 @@ pub fn create_lora_allocator(algo_type: AllocationAlgorithmType) -> Box<dyn Lora
     match algo_type {
         AllocationAlgorithmType::Hrw => Box::new(RendezvousHasher),
         AllocationAlgorithmType::Random => Box::new(RandomAllocation),
+        // MCF uses its own global solver (McfPlacementSolver) in the controller;
+        // the per-LoRA allocator here is only a cold-start / fallback path.
+        AllocationAlgorithmType::MinCostFlow => Box::new(RendezvousHasher),
     }
 }
 
