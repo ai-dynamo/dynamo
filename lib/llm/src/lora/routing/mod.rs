@@ -120,16 +120,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mcf_config_string_is_rejected() {
+    fn test_mcf_config_string_parses_to_min_cost_flow() {
+        // PR4 wires MCF into the controller (McfPlacementSolver), so the config
+        // string is now accepted and maps to the MinCostFlow variant.
         for s in &["mcf", "MCF", "min_cost_flow", "mincostflow"] {
             let result = AllocationAlgorithmType::from_str(s);
-            assert!(
-                result.is_err(),
-                "'{s}' should be rejected until MCF is wired into the allocator path"
-            );
-            assert!(
-                result.unwrap_err().contains("not yet available"),
-                "error message should explain why mcf is rejected"
+            assert_eq!(
+                result,
+                Ok(AllocationAlgorithmType::MinCostFlow),
+                "'{s}' should parse to MinCostFlow"
             );
         }
     }
