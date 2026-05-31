@@ -19,12 +19,11 @@ from typing import Pattern
 TRTLLM_TARGETS: list[tuple[str, Pattern[str], str]] = [
     (
         "container/context.yaml",
-        re.compile(r"^(\s*pip_wheel:\s*tensorrt-llm==).+$", re.M),
-        r"\g<1>{ver}",
-    ),
-    (
-        "container/context.yaml",
-        re.compile(r"^(\s*github_trtllm_commit:\s*v).+$", re.M),
+        # Match runtime_image_tag inside the trtllm: block (first sub-block,
+        # e.g. cuda13.1) without colliding with vllm/sglang earlier in the file.
+        re.compile(
+            r"(?m)(^trtllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s+)\S+",
+        ),
         r"\g<1>{ver}",
     ),
     (

@@ -14,6 +14,8 @@ keywords.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+blake3 = { workspace = true }
+dashmap = { workspace = true }
 fastokens = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

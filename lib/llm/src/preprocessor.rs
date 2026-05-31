@@ -16,6 +16,8 @@ pub mod lightseek_mm;
 pub mod media;
 pub mod prompt;
 pub mod speculative_prefill;
+mod structural_tag;
+mod tool_choice;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
@@ -73,11 +75,23 @@ use crate::protocols::{
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
-
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
+
+/// Encode a slice of `f32` values as a base64 string per the OpenAI
+/// `encoding_format=base64` spec: the raw little-endian byte
+/// representation of each `f32` is concatenated and the resulting byte
+/// buffer is base64-encoded with the standard alphabet.
+fn encode_floats_to_base64(floats: &[f32]) -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(floats));
+    for f in floats {
+        bytes.extend_from_slice(&f.to_le_bytes());
+    }
+    STANDARD.encode(&bytes)
+}
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
@@ -206,6 +220,14 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
             .expect("dim-fetch http client construction failed")
     });
 
+pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
+    "dynamo.llm.preserve_omitted_max_tokens";
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PreprocessRequestOptions {
+    preserve_omitted_max_tokens: bool,
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -240,6 +262,94 @@ pub struct OpenAIPreprocessor {
 }
 
 impl OpenAIPreprocessor {
+    fn omitted_max_tokens_default(
+        prompt_len: usize,
+        context_length: u32,
+        options: PreprocessRequestOptions,
+    ) -> Option<u32> {
+        if context_length == 0 || options.preserve_omitted_max_tokens {
+            return None;
+        }
+        Some(context_length.saturating_sub(prompt_len as u32))
+    }
+
+    fn nvext_passthrough_args<R: NvExtProvider>(
+        request: &R,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let mut nvext_passthrough = serde_json::Map::new();
+
+        if let Some(nvext) = request.nvext() {
+            if let Some(ref fields) = nvext.extra_fields {
+                nvext_passthrough.insert("extra_fields".to_string(), serde_json::json!(fields));
+            }
+            if let Some(ref salt) = nvext.cache_salt {
+                nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
+            }
+            if nvext.token_data.is_some() {
+                nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
+            }
+        }
+
+        if !nvext_passthrough.contains_key("cache_salt")
+            && let Some(salt) = request
+                .unsupported_fields()
+                .and_then(|fields| fields.get("cache_salt"))
+                .and_then(|value| value.as_str())
+        {
+            nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
+        }
+
+        if nvext_passthrough.is_empty() {
+            None
+        } else {
+            Some(nvext_passthrough)
+        }
+    }
+
+    fn sampling_passthrough_args<R: NvExtProvider>(
+        request: &R,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let mut sampling_passthrough = serde_json::Map::new();
+
+        if let Some(fields) = request.unsupported_fields() {
+            for key in ["detokenize", "allowed_token_ids", "bad_words_token_ids"] {
+                if let Some(value) = fields.get(key) {
+                    sampling_passthrough.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+
+        if sampling_passthrough.is_empty() {
+            None
+        } else {
+            Some(sampling_passthrough)
+        }
+    }
+
+    fn backend_extra_args<R: NvExtProvider>(request: &R) -> Option<serde_json::Value> {
+        let mut extra_args = serde_json::Map::new();
+
+        if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
+            extra_args.insert(
+                "nvext".to_string(),
+                serde_json::Value::Object(nvext_passthrough),
+            );
+        }
+
+        if let Some(sampling_passthrough) = Self::sampling_passthrough_args(request) {
+            extra_args.insert(
+                "sampling_options".to_string(),
+                serde_json::Value::Object(sampling_passthrough),
+            );
+        }
+
+        if extra_args.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(extra_args))
+        }
+    }
+
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
@@ -416,6 +526,23 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        self.preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
+            .await
+    }
+
+    async fn preprocess_request_with_options<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        tracker: Option<&RequestTracker>,
+        options: PreprocessRequestOptions,
+    ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
@@ -465,7 +592,28 @@ impl OpenAIPreprocessor {
             .with_label_values(&[STAGE_PREPROCESS])
             .observe(preprocess_start.elapsed().as_secs_f64());
 
-        Ok((builder.build()?, annotations, prompt_injected_reasoning))
+        if let Some(nvext) = request.nvext()
+            && let Some(router_params) = &nvext.router
+        {
+            builder.router(Some(router_params.clone()));
+        }
+
+        let mut preprocessed = builder.build()?;
+
+        // If omitted, allow generation up to the remaining context length. Responses requests
+        // preserve omission so backend adapters can compute the dynamic cap from their
+        // effective prompt length/tokenization.
+        if preprocessed.stop_conditions.max_tokens.is_none()
+            && let Some(max_tokens) = Self::omitted_max_tokens_default(
+                preprocessed.token_ids.len(),
+                self.context_length,
+                options,
+            )
+        {
+            preprocessed.stop_conditions.max_tokens = Some(max_tokens);
+        }
+
+        Ok((preprocessed, annotations, prompt_injected_reasoning))
     }
 
     pub fn builder<
@@ -557,6 +705,10 @@ impl OpenAIPreprocessor {
             }));
         }
 
+        if let Some(extra_args) = Self::backend_extra_args(request) {
+            builder.extra_args(Some(extra_args));
+        }
+
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
@@ -624,7 +776,7 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest + NvExtProvider>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
@@ -858,6 +1010,15 @@ impl OpenAIPreprocessor {
 
             if let Some(ref prompt) = formatted_prompt {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
+            }
+
+            if let Some(serde_json::Value::Object(backend_extra_args)) =
+                Self::backend_extra_args(request)
+            {
+                let extra_args_obj = extra_args
+                    .as_object_mut()
+                    .expect("multimodal extra_args must be an object");
+                extra_args_obj.extend(backend_extra_args);
             }
 
             // Forward routing-side mm_hashes as `multi_modal_uuids` so vLLM
@@ -1517,6 +1678,7 @@ impl OpenAIPreprocessor {
         stream: S,
         request: &NvCreateChatCompletionRequest,
         prompt_injected_reasoning: bool,
+        uses_tool_call_structural_tag: bool,
     ) -> anyhow::Result<
         impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     >
@@ -1612,6 +1774,7 @@ impl OpenAIPreprocessor {
                 .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
                     name: tool.function.name.clone(),
                     parameters: tool.function.parameters.clone(),
+                    strict: tool.function.strict,
                 })
                 .collect()
         });
@@ -1622,6 +1785,7 @@ impl OpenAIPreprocessor {
                 self.tool_call_parser.clone(),
                 request.inner.tool_choice.clone(),
                 tool_definitions,
+                uses_tool_call_structural_tag,
                 stream,
             ))
         } else {
@@ -1636,6 +1800,7 @@ impl OpenAIPreprocessor {
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
         trace_tokens_enabled: bool,
+        trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -1654,6 +1819,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
+            trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
         }
 
         let state = State {
@@ -1666,6 +1832,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: false,
             finished: false,
             trace_tokens_enabled,
+            trace_finish_reason_metadata,
         };
 
         // transform the common response stream into a chat response stream
@@ -1705,6 +1872,13 @@ impl OpenAIPreprocessor {
                         inner.cumulative_output_tokens += chunk_tokens;
 
                         let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
+
+                        crate::agents::trace::record_backend_finish_reason_metadata(
+                            inner.trace_finish_reason_metadata.as_ref(),
+                            backend_output.index,
+                            backend_output.finish_reason.as_ref(),
+                            backend_output.stop_reason.as_ref(),
+                        );
 
                         (chunk_tokens, isl)
                     } else {
@@ -1906,6 +2080,15 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<EmbeddingsEngineOutput>> + Send + 'static,
     {
+        // Honor the OpenAI `encoding_format` field. The default is `Float`;
+        // `Base64` encodes the raw little-endian f32 bytes of each
+        // per-input vector. The engine always returns floats, so the
+        // base64 path runs at the postprocessor seam where we still have
+        // the original request shape in scope.
+        let encode_base64 = matches!(
+            original_request.inner.encoding_format,
+            Some(dynamo_protocols::types::EncodingFormat::Base64)
+        );
         stream.map(move |output| {
             output.map_data(|engine_output| {
                 // Convert engine output to OpenAI response format
@@ -1913,10 +2096,20 @@ impl OpenAIPreprocessor {
                     .embeddings
                     .into_iter()
                     .enumerate()
-                    .map(|(index, embedding)| dynamo_protocols::types::Embedding {
-                        index: index as u32,
-                        object: "embedding".to_string(),
-                        embedding: embedding.into_iter().map(|f| f as f32).collect(),
+                    .map(|(index, embedding)| {
+                        let floats: Vec<f32> = embedding.into_iter().map(|f| f as f32).collect();
+                        let value = if encode_base64 {
+                            dynamo_protocols::types::EmbeddingVector::Base64(
+                                encode_floats_to_base64(&floats),
+                            )
+                        } else {
+                            dynamo_protocols::types::EmbeddingVector::Float(floats)
+                        };
+                        dynamo_protocols::types::Embedding {
+                            index: index as u32,
+                            object: "embedding".to_string(),
+                            embedding: value,
+                        }
                     })
                     .collect();
 
@@ -1974,6 +2167,7 @@ impl OpenAIPreprocessor {
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
         tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
+        uses_tool_call_structural_tag: bool,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
@@ -1990,37 +2184,46 @@ impl OpenAIPreprocessor {
             builder = builder.tool_definitions(tool_definitions);
         }
 
-        // Configure jail based on tool_choice
-        //
-        // For tool_choice=required or named we mirror SGLang / vLLM: assume the
-        // backend applied guided decoding and emit a bare JSON shape, so parse
-        // via the JSON array parser (base_json_parser) rather than the model's
-        // native-format parser.  If a parser is also configured we still carry
-        // it so the Immediate branch can fall back to marker-based parsing for
-        // backends that do not honor guided decoding (e.g. XML-native models
-        // like qwen3_coder — see regression test_tool_choice_required_with_
-        // qwen3_coder_parser).
-        match tool_choice {
-            Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                builder = builder
-                    .tool_choice_named(named.function.name.clone())
-                    .named_tool_filter(named.function.name.clone());
-                if let Some(parser) = tool_call_parser {
-                    builder = builder.tool_call_parser(parser);
-                }
+        // When structural_tag is active, the model output is already constrained by
+        // guided decoding into a model-specific format. Always use the marker-based
+        // parser to extract tool calls from that format.
+        if uses_tool_call_structural_tag {
+            if let Some(parser) = tool_call_parser {
+                builder = builder.tool_call_parser(parser);
             }
-            Some(ChatCompletionToolChoiceOption::Required) => {
-                builder = builder.tool_choice_required();
-                if let Some(parser) = tool_call_parser {
-                    builder = builder.tool_call_parser(parser);
+        } else {
+            // Configure jail based on tool_choice
+            //
+            // For tool_choice=required or named we mirror SGLang / vLLM: assume the
+            // backend applied guided decoding and emit a bare JSON shape, so parse
+            // via the JSON array parser (base_json_parser) rather than the model's
+            // native-format parser.  If a parser is also configured we still carry
+            // it so the Immediate branch can fall back to marker-based parsing for
+            // backends that do not honor guided decoding (e.g. XML-native models
+            // like qwen3_coder — see regression test_tool_choice_required_with_
+            // qwen3_coder_parser).
+            match tool_choice {
+                Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                    builder = builder
+                        .tool_choice_named(named.function.name.clone())
+                        .named_tool_filter(named.function.name.clone());
+                    if let Some(parser) = tool_call_parser {
+                        builder = builder.tool_call_parser(parser);
+                    }
                 }
-            }
-            Some(ChatCompletionToolChoiceOption::Auto)
-            | Some(ChatCompletionToolChoiceOption::None)
-            | None => {
-                // Traditional marker-based jail for auto/none/unspecified
-                if let Some(parser) = tool_call_parser {
-                    builder = builder.tool_call_parser(parser);
+                Some(ChatCompletionToolChoiceOption::Required) => {
+                    builder = builder.tool_choice_required();
+                    if let Some(parser) = tool_call_parser {
+                        builder = builder.tool_call_parser(parser);
+                    }
+                }
+                Some(ChatCompletionToolChoiceOption::Auto)
+                | Some(ChatCompletionToolChoiceOption::None)
+                | None => {
+                    // Traditional marker-based jail for auto/none/unspecified
+                    if let Some(parser) = tool_call_parser {
+                        builder = builder.tool_call_parser(parser);
+                    }
                 }
             }
         }
@@ -2045,7 +2248,8 @@ impl OpenAIPreprocessor {
         // decode the parsers silently produce empty reasoning_content /
         // tool_calls.
         //
-        // - gemma4: `<|think|>` markers (reasoning + tool-call).
+        // - gemma4: `<|think|>` prompt trigger plus parser-visible
+        //   `<|channel>` / `<channel|>` reasoning markers and tool-call markers.
         // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
         // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
         // - kimi_k25: `</think>` (special token id 163607).
@@ -2411,11 +2615,24 @@ impl
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let tracker = Some(response_generator.tracker());
+        let preprocess_options = PreprocessRequestOptions {
+            preserve_omitted_max_tokens: context
+                .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
+                .ok()
+                .is_some_and(|flag| *flag),
+        };
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning) = self
-            .preprocess_request(&request, tracker.as_deref())
+            .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
+
+        let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
+            &request,
+            &mut common_request,
+            prompt_injected_reasoning,
+        )?;
+
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
             &common_request,
@@ -2424,6 +2641,8 @@ impl
             self.kv_cache_block_size,
         );
         let trace_tokens_enabled = trace_state.is_some();
+        let trace_finish_reason_metadata =
+            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -2457,10 +2676,15 @@ impl
             response_generator,
             context.clone(),
             trace_tokens_enabled,
+            trace_finish_reason_metadata,
         );
 
-        let transformed_stream =
-            self.postprocessor_parsing_stream(stream, &request, prompt_injected_reasoning)?;
+        let transformed_stream = self.postprocessor_parsing_stream(
+            stream,
+            &request,
+            prompt_injected_reasoning,
+            uses_tool_call_structural_tag,
+        )?;
 
         // Apply audit aggregation strategy.
         // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
@@ -2495,7 +2719,7 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = crate::agents::trace::wrap_agent_trace_request_end_stream(
+        let final_stream = crate::agents::trace::wrap_agent_trace_chat_request_end_stream(
             final_stream,
             trace_state,
             request_id,
@@ -2579,6 +2803,8 @@ impl
             self.kv_cache_block_size,
         );
         let trace_tokens_enabled = trace_state.is_some();
+        let trace_finish_reason_metadata =
+            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -2614,9 +2840,10 @@ impl
             response_generator,
             context.clone(),
             trace_tokens_enabled,
+            trace_finish_reason_metadata,
         );
 
-        let stream = crate::agents::trace::wrap_agent_trace_request_end_stream(
+        let stream = crate::agents::trace::wrap_agent_trace_completion_request_end_stream(
             Box::pin(stream),
             trace_state,
             request_id,
@@ -2828,6 +3055,69 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+    }
+
+    #[test]
+    fn test_backend_extra_args_preserves_nvext_and_sampling_extensions() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "detokenize": false,
+            "allowed_token_ids": [10, 11],
+            "bad_words_token_ids": [[12, 13]],
+            "nvext": {
+                "cache_salt": "step_7",
+                "extra_fields": ["completion_token_ids"]
+            }
+        }))
+        .unwrap();
+
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request).unwrap();
+
+        assert_eq!(extra_args["nvext"]["cache_salt"], "step_7");
+        assert_eq!(
+            extra_args["nvext"]["extra_fields"],
+            serde_json::json!(["completion_token_ids"])
+        );
+        assert_eq!(extra_args["sampling_options"]["detokenize"], false);
+        assert_eq!(
+            extra_args["sampling_options"]["allowed_token_ids"],
+            serde_json::json!([10, 11])
+        );
+        assert_eq!(
+            extra_args["sampling_options"]["bad_words_token_ids"],
+            serde_json::json!([[12, 13]])
+        );
+    }
+
+    #[test]
+    fn test_internal_preserve_omitted_max_tokens_option() {
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                100,
+                PreprocessRequestOptions::default()
+            ),
+            Some(90)
+        );
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                100,
+                PreprocessRequestOptions {
+                    preserve_omitted_max_tokens: true,
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                0,
+                PreprocessRequestOptions::default()
+            ),
+            None
+        );
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
