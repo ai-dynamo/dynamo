@@ -156,7 +156,11 @@ impl LoraController {
         for lora_name in loads.keys() {
             seen.insert(lora_name.clone());
         }
-        let all_loras: Vec<String> = seen.into_iter().collect();
+        // Sort for deterministic ordering across all router instances (REQ: deterministic
+        // placement). active/inactive/MCF inputs all derive from this order, and the
+        // largest-remainder tie-break below is by name, so every router converges identically.
+        let mut all_loras: Vec<String> = seen.into_iter().collect();
+        all_loras.sort();
 
         let active_loras: Vec<(String, usize)> = all_loras
             .iter()
@@ -332,6 +336,12 @@ impl LoraController {
     ) {
         let churn_weight = self.config.mcf.churn_weight_default;
         let capacities = self.state_tracker.get_worker_capacities();
+
+        // R3-7: reset churn/overflow gauges at tick start so a failed MCF solve does not leave
+        // stale values from a prior successful tick; the success branch sets the actual diff.
+        crate::http::service::metrics::LORA_CHURN_LOADS_GAUGE.set(0);
+        crate::http::service::metrics::LORA_CHURN_UNLOADS_GAUGE.set(0);
+        crate::http::service::metrics::LORA_OVERFLOW_COUNT_GAUGE.set(0);
 
         // Build worker inputs
         let worker_inputs: Vec<WorkerInput> = workers
@@ -622,14 +632,30 @@ impl LoraController {
     ) -> HashMap<String, usize> {
         let mut result = HashMap::new();
 
-        if active_loras.is_empty() || total_load == 0 {
+        if active_loras.is_empty() || total_load == 0 || total_slots == 0 {
             return result;
         }
 
-        let mut raw_counts: Vec<(String, f64)> = active_loras
+        // R3-1: when there are more active LoRAs than the cluster slot budget, we cannot give
+        // every active LoRA a replica without overcommitting workers (the min-1 floor below
+        // would otherwise sum past `total_slots`). Rank by load (desc, tie by name for
+        // determinism) and keep only the top `total_slots`; the remainder get no allocation
+        // here and rely on the runtime loaded-worker fallback. This avoids forcing min-1
+        // placements onto already-full workers.
+        let mut ranked: Vec<(String, usize)> = active_loras.to_vec();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if ranked.len() > total_slots {
+            ranked.truncate(total_slots);
+        }
+        let eff_total_load: usize = ranked.iter().map(|(_, l)| *l).sum();
+        if eff_total_load == 0 {
+            return result;
+        }
+
+        let mut raw_counts: Vec<(String, f64)> = ranked
             .iter()
             .map(|(name, load)| {
-                let fraction = *load as f64 / total_load as f64;
+                let fraction = *load as f64 / eff_total_load as f64;
                 let raw = (fraction * total_slots as f64).ceil().max(1.0);
                 (name.clone(), raw)
             })
@@ -659,7 +685,13 @@ impl LoraController {
             let floored_sum: usize = floored.iter().map(|(_, f, _)| *f).sum();
             let mut leftover = total_slots.saturating_sub(floored_sum);
 
-            floored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            // Sort by fractional remainder descending, breaking ties by LoRA name so the
+            // largest-remainder distribution is deterministic across all router instances.
+            floored.sort_by(|a, b| {
+                b.2.partial_cmp(&a.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
             for (_, count, _) in floored.iter_mut() {
                 if leftover == 0 {
                     break;

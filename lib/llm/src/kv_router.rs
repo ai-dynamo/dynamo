@@ -438,8 +438,15 @@ where
             .filter_worker_ids_for_lora(Some(lora_name), &base)
             .into_iter()
             .collect();
+        // Retain a pinned worker only if it is already within the candidate universe — never
+        // widen the caller's `allowed_worker_ids` (KV-cache / EPP / migration invariants depend
+        // on that set). If the filter excluded an in-universe pinned worker, re-add it so the
+        // pin still wins for cache correctness; if the pin is outside the universe, honor the
+        // caller's constraint and drop it.
         if let Some(p) = pinned_worker {
-            narrowed.insert(p.worker_id);
+            if base.contains(&p.worker_id) {
+                narrowed.insert(p.worker_id);
+            }
         }
         if narrowed.is_empty() {
             return allowed_worker_ids;

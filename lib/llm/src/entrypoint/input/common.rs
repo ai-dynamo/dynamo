@@ -187,11 +187,19 @@ fn preprocessed_backend_engine(
         },
         RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => Arc::new(SessionAffinityPushRouter::new(
-            router,
-            session_affinity_ttl,
-            router_mode.is_direct_routing(),
-        )?),
+        | RouterMode::DeviceAwareWeighted => {
+            if model_manager.lora_filter().is_some() {
+                anyhow::bail!(
+                    "{router_mode:?} is unsupported when DYN_LORA_ENABLED is set; \
+                     use KV, Random, or RoundRobin"
+                );
+            }
+            Arc::new(SessionAffinityPushRouter::new(
+                router,
+                session_affinity_ttl,
+                router_mode.is_direct_routing(),
+            )?)
+        }
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");

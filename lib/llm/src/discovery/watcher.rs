@@ -483,9 +483,17 @@ impl ModelWatcher {
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
+                // The card was never durably saved (e.g. an Added event whose handle_put failed
+                // before save, after the pre-spawn tracker addition). Still purge any LoRA
+                // tracker state for this instance so it cannot leak as phantom capacity/loaded
+                // entries that inflate the slot budget (R3-3).
+                use crate::kv_router::protocols::WorkerWithDpRank;
+                self.manager
+                    .lora_state_tracker()
+                    .handle_worker_removal(WorkerWithDpRank::new(mcid.instance_id, 0));
                 tracing::warn!(
                     key = %key,
-                    "ModelDeploymentCard already absent during removal; ignoring duplicate or stale remove event"
+                    "ModelDeploymentCard absent during removal; purged any LoRA tracker state for instance"
                 );
                 return Ok(None);
             }
