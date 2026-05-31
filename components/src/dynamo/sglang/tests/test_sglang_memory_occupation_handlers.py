@@ -164,6 +164,25 @@ async def test_resume_recovers_generation_pause_after_failed_release_rollback(ha
 
 
 @pytest.mark.asyncio
+async def test_release_reregisters_after_clean_quiesce_rollback(handler):
+    manager = handler.engine.tokenizer_manager
+    manager.release_memory_occupation = AsyncMock(
+        side_effect=RuntimeError("release failed")
+    )
+
+    release_result = await handler.release_memory_occupation({})
+
+    # Rollback continued generation cleanly, so the engine is serving-safe again.
+    assert release_result["status"] == "error"
+    assert handler._quiesce_controller.is_quiesced is False
+    assert handler._quiesce_controller.needs_resume_recovery is False
+    manager.continue_generation.assert_awaited_once()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    # The endpoint must rejoin the routing pool since resume will early-return.
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method_name", "endpoint_method"),
     [

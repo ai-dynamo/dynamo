@@ -737,10 +737,12 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                     "message": "resume_memory_occupation required before retrying release",
                 }
 
+            unregistered = False
             try:
                 # Stop new requests and drain in-flight work before releasing memory.
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
+                    unregistered = True
 
                 await self._quiesce_controller.quiesce(tags)
 
@@ -754,6 +756,24 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 }
             except Exception as e:
                 logging.error(f"Failed to release memory occupation: {e}")
+                # If quiesce rolled back cleanly the engine is serving-safe again,
+                # but discovery still shows us unregistered and resume will
+                # early-return. Re-register so the worker rejoins the routing pool.
+                if (
+                    unregistered
+                    and not self._quiesce_controller.is_quiesced
+                    and not self._quiesce_controller.needs_resume_recovery
+                    and self.generate_endpoint is not None
+                ):
+                    try:
+                        await self.generate_endpoint.register_endpoint_instance()
+                        logging.info(
+                            "Re-registered endpoint after failed memory release rollback"
+                        )
+                    except Exception as reg_err:
+                        logging.error(
+                            f"Failed to re-register endpoint after release failure: {reg_err}"
+                        )
                 return {"status": "error", "message": str(e)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:

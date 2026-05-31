@@ -130,6 +130,23 @@ async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
 
 
 @pytest.mark.asyncio
+async def test_sleep_reregisters_after_clean_quiesce_rollback():
+    handler = _make_handler()
+    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+
+    result = await handler.sleep({"level": 1})
+
+    # Rollback resumed generation cleanly, so the engine is serving-safe again.
+    assert result["status"] == "error"
+    assert handler._quiesce_controller.is_quiesced is False
+    assert handler._quiesce_controller.needs_resume_recovery is False
+    handler.engine_client.resume_generation.assert_awaited_once()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    # The endpoint must rejoin the routing pool since wake_up will early-return.
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sleep_returns_error_for_unregister_failure():
     handler = _make_handler()
     handler.generate_endpoint.unregister_endpoint_instance = AsyncMock(
