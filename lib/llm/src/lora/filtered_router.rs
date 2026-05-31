@@ -167,7 +167,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         });
 
-        let available = self.inner.client.instance_ids_avail();
+        // Prefer free (non-overloaded) workers, matching PushRouter's load-aware random/
+        // round-robin selection; fall back to all routable workers only if every worker is
+        // currently overloaded (so we degrade rather than hard-fail).
+        let mut available = self.inner.client.instance_ids_free();
+        if available.is_empty() {
+            available = self.inner.client.instance_ids_avail();
+        }
 
         let candidates = self
             .filter

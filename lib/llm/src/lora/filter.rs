@@ -46,9 +46,30 @@ impl LoraFilter {
         };
 
         let Some(config) = self.routing_table.get_config(lora_name) else {
+            // No routing-table entry yet (controller disabled, or before the first tick).
+            // Prefer workers that actually have this adapter loaded (from the state tracker)
+            // so we don't scatter to every worker; fall back to all available only when none
+            // are known-loaded. This makes the "loaded-worker fallback" real even when dynamic
+            // allocation (the controller) is disabled.
+            let loaded = self.state_tracker.get_loaded_workers(lora_name);
+            if !loaded.is_empty() {
+                let loaded_ids: Vec<u64> = available
+                    .iter()
+                    .copied()
+                    .filter(|id| loaded.iter().any(|w| w.worker_id == *id))
+                    .collect();
+                if !loaded_ids.is_empty() {
+                    tracing::debug!(
+                        lora = lora_name,
+                        count = loaded_ids.len(),
+                        "LoRA not in routing table; narrowed to known-loaded workers"
+                    );
+                    return loaded_ids;
+                }
+            }
             tracing::debug!(
                 lora = lora_name,
-                "LoRA not in routing table, returning all workers"
+                "LoRA not in routing table and not known-loaded, returning all workers"
             );
             return available.to_vec();
         };
