@@ -8,7 +8,7 @@ import logging
 import os
 import random
 import threading
-import time as _time
+import time
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
@@ -83,17 +83,19 @@ def _create_kv_router_with_timeout(
         except Exception as exc:
             kv_router_error = exc
 
-    _prev_min_workers = os.environ.get(MIN_INITIAL_WORKERS_ENV)
-    os.environ[MIN_INITIAL_WORKERS_ENV] = str(num_workers)
-    try:
+    # NOTE: On timeout or worker death we raise while the daemon thread may
+    # still be blocked inside the uninterruptible KvRouter() FFI call.  This is
+    # intentional — daemon threads don't block process exit, and the next test
+    # reinitializes etcd/NATS state so residual ZMQ handles are harmless.
+    with min_initial_workers_env(num_workers):
         router_thread = threading.Thread(target=_create, daemon=True)
         router_thread.start()
 
-        _router_start = _time.monotonic()
+        _router_start = time.monotonic()
 
         while router_thread.is_alive():
             router_thread.join(timeout=2)
-            elapsed = _time.monotonic() - _router_start
+            elapsed = time.monotonic() - _router_start
             if elapsed > timeout:
                 raise RuntimeError(
                     f"KvRouter initialization timed out after {elapsed:.0f}s "
@@ -107,11 +109,6 @@ def _create_kv_router_with_timeout(
                             f"while waiting for KvRouter to find "
                             f"{num_workers} workers."
                         )
-    finally:
-        if _prev_min_workers is None:
-            os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
-        else:
-            os.environ[MIN_INITIAL_WORKERS_ENV] = _prev_min_workers
 
     if kv_router_error is not None:
         raise kv_router_error
@@ -730,8 +727,6 @@ def _test_remote_indexer_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
-                initial_wait=1.0,
-                max_retries=8,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,
@@ -836,8 +831,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 20,  # Generate exactly 20 tokens
@@ -858,8 +851,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:50],  # Use fewer tokens for second test,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 10,  # Generate exactly 10 tokens for the second test
@@ -881,8 +872,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:30],  # Use fewer tokens for third test,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 5,  # Generate exactly 5 tokens for the third test
@@ -1706,8 +1695,6 @@ def _test_router_indexers_sync(
                             kv_python_router=router,
                             model_name=model_name,
                             token_ids=request_tokens,
-                            initial_wait=1.0,
-                            max_retries=8,
                             stop_conditions={
                                 "ignore_eos": True,  # Don't stop on EOS token
                                 "max_tokens": 10,  # Generate exactly 10 tokens
@@ -2841,8 +2828,9 @@ def _test_router_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
+                # XPU workers have longer startup latency; 1.0s base avoids
+                # spurious retries during the first request after registration.
                 initial_wait=1.0,
-                max_retries=8,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,

@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
-from typing import Any
-
 try:
     import torch
 except ImportError:
@@ -26,19 +23,3 @@ def detect_target_device() -> str:
 def get_default_vllm_block_size() -> int:
     """Return a runtime-compatible default vLLM block size for tests."""
     return 64 if detect_target_device() == "xpu" else 16
-
-
-def build_nixl_kv_transfer_config() -> dict[str, Any]:
-    """Build a runtime-compatible NIXL kv-transfer config for vLLM tests."""
-    config: dict[str, Any] = {
-        "kv_connector": "NixlConnector",
-        "kv_role": "kv_both",
-    }
-    if detect_target_device() == "xpu":
-        config["kv_buffer_device"] = "xpu"
-    return config
-
-
-def build_nixl_kv_transfer_config_json() -> str:
-    """JSON-encode the runtime-compatible NIXL kv-transfer config."""
-    return json.dumps(build_nixl_kv_transfer_config())

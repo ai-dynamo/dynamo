@@ -87,8 +87,15 @@ class XPUVLLMProcess(ManagedEngineProcessMixin):
         store_backend: str = "etcd",
         namespace: Optional[str] = None,
         gpu_start_index: int = 0,
+        single_gpu: bool = False,
         **kwargs,
     ):
+        # XPU cannot run multiple workers on a single card (unlike CUDA).
+        if single_gpu:
+            raise ValueError(
+                "XPU does not support single_gpu mode; "
+                "each worker requires a dedicated card."
+            )
         namespace_suffix = generate_random_suffix()
         self.namespace = namespace or f"test-namespace-{namespace_suffix}"
         self.component_name = "backend"
