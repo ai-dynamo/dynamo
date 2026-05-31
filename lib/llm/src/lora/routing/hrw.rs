@@ -88,17 +88,12 @@ impl LoraAllocator for RendezvousHasher {
             result.push(*worker);
         }
 
-        // If we couldn't fill due to capacity constraints, fall back to basic HRW
-        if result.len() < replica_factor && result.len() < workers.len() {
-            let basic = self.compute_replica_set(lora_name, workers, replica_factor);
-            for w in basic {
-                if result.len() >= replica_factor {
-                    break;
-                }
-                if !result.contains(&w) {
-                    result.push(w);
-                }
-            }
+        // We placed on every non-full worker up to `replica_factor`. If that under-filled
+        // the count, accept the smaller set rather than placing on at-capacity workers
+        // (REQ 6: skip full workers). Only when EVERY worker is full (result is empty) do we
+        // fall back to basic HRW, so the LoRA still has at least one routable home (REQ 7).
+        if result.is_empty() {
+            return self.compute_replica_set(lora_name, workers, replica_factor);
         }
 
         result
