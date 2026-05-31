@@ -50,6 +50,7 @@ from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
 )
+from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import build_sampling_params, get_dp_range_for_worker
 
@@ -211,7 +212,10 @@ class VllmLLMEngine(LLMEngine):
             stat_loggers=[self._stat_logger_factory],
         )
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
-        self._stat_logger_factory.num_gpu_blocks = num_gpu_blocks
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(num_gpu_blocks, self._dp_range[1])
+        if per_rank_num_gpu_blocks is None:
+            raise RuntimeError("per-rank KV block count is not set")
+        self._stat_logger_factory.num_gpu_blocks = per_rank_num_gpu_blocks
         self._model_max_len = getattr(
             getattr(vllm_config, "model_config", None), "max_model_len", None
         )
@@ -229,7 +233,7 @@ class VllmLLMEngine(LLMEngine):
             served_model_name=self.engine_args.served_model_name,
             context_length=self._model_max_len,
             kv_cache_block_size=block_size,
-            total_kv_blocks=num_gpu_blocks,
+            total_kv_blocks=per_rank_num_gpu_blocks,
             max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
             max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
             # Router needs the rank range to enumerate per-rank load.
@@ -240,8 +244,10 @@ class VllmLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        assert self.engine_client is not None, "Engine not initialized"
-        assert self._default_sampling_params is not None, "Engine not initialized"
+        if self.engine_client is None:
+            raise RuntimeError("Engine not initialized")
+        if self._default_sampling_params is None:
+            raise RuntimeError("Engine not initialized")
 
         request_id = context.id()
 
@@ -312,7 +318,7 @@ class VllmLLMEngine(LLMEngine):
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
 
-        num_output_tokens_so_far: dict[int, int] = {}
+        total_output_tokens_by_index: dict[int, int] = {}
         async for res in gen:
             if not res.outputs:
                 yield {
@@ -322,23 +328,30 @@ class VllmLLMEngine(LLMEngine):
                 }
                 break
 
+            prepared_outputs = []
             for output in res.outputs:
                 output_idx = getattr(output, "index", 0) or 0
-                previous_total = num_output_tokens_so_far.get(output_idx, 0)
-                next_total = len(output.token_ids)
+                token_ids = list(output.token_ids or [])
+                total_output_tokens_by_index[
+                    output_idx
+                ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                finish_reason = getattr(output, "finish_reason", None)
+                if not token_ids and not finish_reason:
+                    continue
+                prepared_outputs.append((output_idx, token_ids, finish_reason))
+
+            for output_idx, token_ids, finish_reason in prepared_outputs:
                 out: GenerateChunk = {
                     "index": output_idx,
-                    "token_ids": output.token_ids[previous_total:],
+                    "token_ids": token_ids,
                 }
 
-                if output.finish_reason:
-                    out["finish_reason"] = str(output.finish_reason)
+                if finish_reason:
+                    out["finish_reason"] = str(finish_reason)
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
-                    completion_tokens = sum(
-                        len(choice.token_ids) for choice in res.outputs
-                    )
+                    completion_tokens = sum(total_output_tokens_by_index.values())
                     out["completion_usage"] = {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
@@ -354,7 +367,6 @@ class VllmLLMEngine(LLMEngine):
                             }
 
                 yield out
-                num_output_tokens_so_far[output_idx] = next_total
 
     def _kv_routing_enabled(self) -> bool:
         # Matches the legacy `setup_kv_event_publisher` gate.
@@ -370,8 +382,10 @@ class VllmLLMEngine(LLMEngine):
     async def kv_event_sources(self) -> list[KvEventSource]:
         if not self._kv_routing_enabled():
             return []
-        assert self._vllm_config is not None
-        assert self._dp_range is not None
+        if self._vllm_config is None:
+            raise RuntimeError("Engine not initialized")
+        if self._dp_range is None:
+            raise RuntimeError("Engine not initialized")
         kv_events_config = self.engine_args.kv_events_config
         dp_start, dp_size = self._dp_range
         return [

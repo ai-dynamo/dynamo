@@ -1779,7 +1779,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 	})
 
-	t.Run("ready gms checkpoint injects gms restore sidecars", func(t *testing.T) {
+	t.Run("ready gms checkpoint injects restore clients", func(t *testing.T) {
 		t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
@@ -1787,6 +1787,15 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("ComputeIdentityHash failed: %v", err)
 		}
 		dcd := makeDCD(checkpointName)
+		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
+			Name:    "gms-loader",
+			Image:   "custom-loader:latest",
+			Command: []string{"/bin/custom-loader"},
+		})
+		dcd.Spec.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
+			Mode:                  v1beta1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"gms-loader"},
+		}
 		dcd.Spec.PodTemplate.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
 		ckpt := &v1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1828,15 +1837,15 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 
 		gmsServer := find(gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
-		loader := find(checkpoint.GMSLoaderContainer)
+		loader := find("gms-loader")
 		require.NotNil(t, loader)
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
 			mounts[mount.Name] = mount.MountPath
 		}
-		if got := mounts[snapshotprotocol.CheckpointVolumeName]; got != "/checkpoints" {
-			t.Fatalf("expected gms loader checkpoint mount at /checkpoints, got %q", got)
+		if got := mounts[gms.SharedVolumeName]; got != gms.SharedMountPath {
+			t.Fatalf("expected gms loader socket mount at %s, got %q", gms.SharedMountPath, got)
 		}
 		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.server" { //nolint:goconst
 			t.Fatalf("expected weights server to run python module, got %#v", got)
@@ -1848,12 +1857,98 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if gmsServer.StartupProbe != nil {
 			t.Fatalf("expected restore gms-server to have no StartupProbe")
 		}
-		// gms-loader is a regular sidecar (no container-level RestartPolicy override).
+		// gms-loader is a regular container (no container-level RestartPolicy override).
 		if loader.RestartPolicy != nil {
 			t.Fatalf("expected restore gms-loader to have no container-level RestartPolicy, got %#v", loader.RestartPolicy)
 		}
-		if got := loader.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.snapshot.loader" {
-			t.Fatalf("expected loader to run python module, got %#v", got)
+		if got := loader.Command; len(got) != 1 || got[0] != "/bin/custom-loader" {
+			t.Fatalf("expected loader command to be user-declared, got %#v", got)
+		}
+	})
+
+	t.Run("service gms with non-gms checkpoint is rejected", func(t *testing.T) {
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		dcd.Spec.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
+			Mode:                  v1beta1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"gms-loader"},
+		}
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{
+				Identity: identity,
+			},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		_, err = r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
+	})
+
+	t.Run("ready gms checkpoint wires user-declared loader", func(t *testing.T) {
+		t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		dcd.Spec.PodTemplate.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
+			Name:    "gms-loader",
+			Image:   "custom-loader:latest",
+			Command: []string{"/bin/custom-loader"},
+		})
+		dcd.Spec.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
+			Mode:                  v1beta1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"gms-loader"},
+		}
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{
+				Identity:         identity,
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
+			},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		podTemplateSpec, err := r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		if err != nil {
+			t.Fatalf("generatePodTemplateSpec failed: %v", err)
+		}
+
+		loader := findContainer(podTemplateSpec.Spec.Containers, "gms-loader")
+		require.NotNil(t, loader)
+		if got := loader.Image; got != "custom-loader:latest" {
+			t.Fatalf("loader image = %q, want custom-loader:latest", got)
+		}
+		if got := loader.Command; len(got) != 1 || got[0] != "/bin/custom-loader" {
+			t.Fatalf("loader command = %#v, want [/bin/custom-loader]", got)
 		}
 	})
 

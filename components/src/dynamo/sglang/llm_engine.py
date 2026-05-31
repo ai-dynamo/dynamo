@@ -43,6 +43,7 @@ from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, Zm
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import (
@@ -52,6 +53,11 @@ from dynamo.sglang._disagg import (
     warmup_prefill_engine,
 )
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.capacity import (
+    kv_metrics_block_values,
+    local_dp_rank_bounds,
+    runtime_capacity,
+)
 from dynamo.sglang.publisher import format_zmq_endpoint
 
 if TYPE_CHECKING:
@@ -85,15 +91,7 @@ def _local_dp_rank_range(server_args) -> tuple[int, int]:
     """Per-node local-rank slice for this worker. Under DP attention each
     node owns ``dp_size // nnodes`` ranks starting at
     ``node_rank * local_dp_size``; otherwise rank 0 only."""
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
-    nnodes = getattr(server_args, "nnodes", 1) or 1
-    node_rank = getattr(server_args, "node_rank", 0) or 0
-    if enable_dp_attention and dp_size > 1:
-        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-        start = node_rank * local_dp_size
-        return start, start + local_dp_size
-    return 0, 1
+    return local_dp_rank_bounds(server_args)
 
 
 class SglangLLMEngine(LLMEngine):
@@ -181,32 +179,22 @@ class SglangLLMEngine(LLMEngine):
                     _DYN_SGLANG_SKIP_WARMUP_ENV,
                 )
 
-        # Capacity fields — match register.py in the legacy path.
-        total_kv_blocks = None
         scheduler_info = get_scheduler_info(self.engine)
-        max_total_tokens = scheduler_info.get("max_total_num_tokens")
+        capacity = runtime_capacity(self.server_args, scheduler_info)
         page_size = self.server_args.page_size
-        if max_total_tokens and page_size:
-            total_kv_blocks = (max_total_tokens + page_size - 1) // page_size
-
-        # Prefer max_prefill_tokens; fall back so planner has a signal.
-        max_num_batched_tokens = (
-            getattr(self.server_args, "max_prefill_tokens", None) or max_total_tokens
-        )
 
         self._start_metrics_task()
 
-        dp_start, dp_end = _local_dp_rank_range(self.server_args)
-        self._dp_start = dp_start
-        self._dp_size = dp_end - dp_start
+        self._dp_start = capacity.data_parallel_start_rank
+        self._dp_size = capacity.data_parallel_size
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
             context_length=self.server_args.context_length,
             kv_cache_block_size=page_size,
-            total_kv_blocks=total_kv_blocks,
-            max_num_seqs=getattr(self.server_args, "max_running_requests", None),
-            max_num_batched_tokens=max_num_batched_tokens,
+            total_kv_blocks=capacity.total_kv_blocks,
+            max_num_seqs=capacity.max_num_seqs,
+            max_num_batched_tokens=capacity.max_num_batched_tokens,
             # Router needs the rank range to enumerate per-rank load.
             data_parallel_size=self._dp_size,
             data_parallel_start_rank=self._dp_start,
@@ -262,11 +250,14 @@ class SglangLLMEngine(LLMEngine):
             # versions; older releases (pre-N-1) may omit it.
             hit_rate = getattr(kv_metrics, "cache_hit_rate_perc", None)
             if self._snapshot_publisher is not None:
+                kv_used_blocks, kv_total_blocks = kv_metrics_block_values(
+                    kv_metrics, self.server_args.page_size
+                )
                 self._snapshot_publisher.publish(
                     dp_rank,
                     ComponentSnapshot(
-                        kv_used_blocks=kv_metrics.kv_active_blocks,
-                        kv_total_blocks=kv_metrics.kv_total_blocks,
+                        kv_used_blocks=kv_used_blocks,
+                        kv_total_blocks=kv_total_blocks,
                         gpu_cache_usage=kv_metrics.gpu_cache_usage_perc,
                         kv_cache_hit_rate=hit_rate,
                         dp_rank=dp_rank,
@@ -717,9 +708,7 @@ class SglangLLMEngine(LLMEngine):
                 return {"json_schema": json.dumps(json_schema)}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
-                if hasattr(structural_tag, "model_dump"):
-                    structural_tag = structural_tag.model_dump()
-                return {"structural_tag": json.dumps(structural_tag)}
+                return {"structural_tag": serialize_structural_tag(structural_tag)}
         return {}
 
     def _get_input_param(self, request: GenerateRequest) -> dict:

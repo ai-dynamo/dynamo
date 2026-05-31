@@ -4,9 +4,13 @@
 sidebar-title: Introduction
 ---
 
+<p align="left">
+  <a href="./introduction.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 # Introduction to Dynamo
 
-Dynamo is an open-source, high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
+Dynamo is an open-source, high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments and optimized for production deployments on Kubernetes. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
 
 > [!TIP]
 > Looking to get started right away? See the [Quickstart](quickstart.mdx) to install and run Dynamo in minutes.
@@ -57,7 +61,8 @@ The Dynamo ecosystem includes these additional modular components, and will cont
 | **Scaling / Cloud** | Planner | Automatically tune performance in real time for prefill and decode given SLA constraints (TTFT and TPOT) |
 | | [Grove](https://github.com/ai-dynamo/grove) | Enables gang scheduling and topology awareness required for Kubernetes multi-node disaggregated serving |
 | | [Model Express](https://github.com/ai-dynamo/model-express) | Load model weights fast by caching and transferring them via NIXL to other GPUs. Will also be leveraged for fault tolerance |
-| **Perf** | [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Estimate performance for aggregated vs. disaggregated serving based on model, ISL/OSL, HW, etc. Formerly known as LLMPet |
+| **Perf** | [DynoSim](../dynosim/README.md) | Simulate Dynamo deployment choices with Mocker, workload-driven runs, sweeps, and AIC-backed timing models before validating on GPUs |
+| | [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Provides calibrated performance models and configuration search inputs for rapid DGDR profiling. Formerly known as LLMPet |
 | | [AIPerf](https://github.com/ai-dynamo/aiperf) | Re-architected GenAI-Perf written in Python for maximum extensibility; supports distributed benchmarking |
 | | AITune | Given a model or pipeline, searches for best backend to deploy with (e.g., TensorRT, Torch.compile, etc.) (coming soon) |
 | | Flex Tensor | Stream weights to GPUs from host memory to run very large language models in GPUs with limited memory capacity (coming soon) |
@@ -81,6 +86,16 @@ The full list of supported ecosystem components:
 | Memory management | Dynamo KV Block Manager, [LMCache](../integrations/lmcache-integration.md), [SGLang HiCache](../backends/sglang/sglang-hicache.md), [FlexKV](../integrations/flexkv-integration.md) |
 | Networking and storage | Mooncake, DOCA NetIO, GDS, POSIX, S3, 3FS ([supported via NIXL](../design-docs/kvbm-design.md)) |
 | Multi-HW | Intel XPU, AMD |
+
+## Deployment Modes
+
+Dynamo supports two deployment modes. Both expose the same OpenAI-compatible API and the same backends; they differ in *where* request routing happens.
+
+- **Standalone mode** (default) -- The Dynamo Frontend serves HTTP requests directly, and the integrated Dynamo Router makes KV-aware routing decisions before dispatching to workers. No external gateway is required. This is the mode used by all local installs and the default Kubernetes deployment. Request flow: `client -> Frontend -> Router -> workers`.
+
+- **Gateway mode (GAIE)** -- Dynamo runs behind a Kubernetes [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway. KV-aware routing is performed at the gateway layer by the Dynamo Endpoint Picker Plugin (EPP); the Frontend runs as a sidecar in `--router-mode direct` and forwards requests to the worker the EPP selected. Use this mode when your platform standardizes on the Inference Gateway, or when you want gateway-level policy (auth, rate limiting, observability) co-located with KV-aware routing. Request flow: `client -> Inference Gateway -> EPP (KV-aware) -> Frontend sidecar (direct) -> workers`.
+
+Both modes support disaggregated serving, multimodal, and the same set of backends (vLLM, SGLang, TensorRT-LLM). For full setup, supported features, and configuration of gateway mode, see the [Inference Gateway (GAIE) guide](../kubernetes/inference-gateway.md).
 
 ## Performance
 
@@ -108,7 +123,7 @@ Furthermore, when these three techniques are composed together, they yield compo
 
 Manually finding the optimal parallelism for disaggregated serving can take days of exhaustive configuration sweeps—a challenge that only intensifies at scale.
 
-Dynamo's [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/) solves this by identifying the best-performing configurations in under 30 seconds, providing clear projections of the performance gains over standard aggregated serving. This logic is natively integrated into Kubernetes Custom Resource Definition (CRD), Dynamo Graph Deployment Request (DGDR), allowing users to deploy using automatically generated optimized configs.
+Dynamo uses AIC-backed DynoSim-style modeling to identify strong configurations in under 30 seconds, providing clear projections of the performance gains over standard aggregated serving. This logic is natively integrated into Kubernetes Custom Resource Definition (CRD), Dynamo Graph Deployment Request (DGDR), allowing users to deploy using automatically generated optimized configs.
 
 ### Auto-Adjusting Deployment Based on SLA with Planner
 
@@ -156,6 +171,7 @@ Explore the following resources to go deeper:
 - [KV Cache Offloading](../components/kvbm/kvbm-guide.md) -- Set up multi-tier memory management
 - [Planner](../components/planner/planner-guide.md) -- Configure SLA-based autoscaling
 - [Kubernetes Deployment](../kubernetes/README.md) -- Deploy at scale with Grove
+- [Inference Gateway (GAIE)](../kubernetes/inference-gateway.md) -- Run Dynamo in gateway mode behind the K8s Inference Gateway
 - [Overall Architecture](../design-docs/architecture.md) -- Full technical design
 - [Support Matrix](../reference/support-matrix.md) -- Check hardware and engine compatibility
 
