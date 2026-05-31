@@ -363,12 +363,19 @@ RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
 
 # Install runtime dependencies (common + vllm-specific + benchmarks).
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
+# --reinstall-package imageio-ffmpeg forces a source rebuild of imageio-ffmpeg
+# (honoring the `--no-binary imageio-ffmpeg` directive in requirements.common.txt),
+# replacing the GPL-encumbered prebuilt ffmpeg binary that the upstream
+# vllm/vllm-openai base image ships. vLLM-Omni uses diffusers.export_to_video and
+# doesn't invoke imageio-ffmpeg, so no IMAGEIO_FFMPEG_EXE is needed — this is
+# purely to clear the GPL binary.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
+        --reinstall-package imageio-ffmpeg \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
         --requirement /tmp/requirements.benchmark.txt
