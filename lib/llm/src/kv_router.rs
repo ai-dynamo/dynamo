@@ -226,6 +226,10 @@ where
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
     shared_cache: Option<Box<dyn SharedKvCache>>,
+    /// Optional LoRA filter. When present (LoRA serving enabled), candidate workers are
+    /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
+    /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
+    lora_filter: Option<Arc<crate::lora::LoraFilter>>,
 }
 
 impl<Sel> KvRouter<Sel>
@@ -296,7 +300,6 @@ where
             Some(overloaded_worker_provider),
             model_name.as_deref(),
             worker_type,
-            lora_filter,
         )
         .await?;
 
@@ -344,6 +347,7 @@ where
             is_eagle,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
+            lora_filter,
         })
     }
 
@@ -401,6 +405,46 @@ where
         self.indexer
             .record_routing_decision_hashes(worker, hashes)
             .await
+    }
+
+    /// Narrow the candidate workers to this LoRA's allocated/loaded replicas, staying strictly
+    /// within the existing candidate universe (never widening). Returns the (possibly narrowed)
+    /// `allowed_worker_ids` to pass to the scheduler.
+    ///
+    /// - No filter (LoRA serving disabled) or base-model request (`lora_name` is `None`):
+    ///   returns `allowed_worker_ids` unchanged.
+    /// - Pinned worker: KV-cache correctness wins — it is always retained even if not in the
+    ///   LoRA replica set (the worker lazy-loads the adapter).
+    /// - If narrowing would exclude every candidate, falls back to the original set so the
+    ///   request stays routable (lazy-load path) rather than failing.
+    fn narrow_allowed_by_lora(
+        &self,
+        lora_name: Option<&str>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        pinned_worker: Option<&WorkerWithDpRank>,
+    ) -> Option<HashSet<WorkerId>> {
+        let (Some(filter), Some(lora_name)) = (self.lora_filter.as_ref(), lora_name) else {
+            return allowed_worker_ids;
+        };
+        // Base candidate universe: explicit allow-set if present, else all current workers.
+        let base: Vec<WorkerId> = match &allowed_worker_ids {
+            Some(allowed) => allowed.iter().copied().collect(),
+            None => self.workers_with_configs.borrow().keys().copied().collect(),
+        };
+        if base.is_empty() {
+            return allowed_worker_ids;
+        }
+        let mut narrowed: HashSet<WorkerId> = filter
+            .filter_worker_ids_for_lora(Some(lora_name), &base)
+            .into_iter()
+            .collect();
+        if let Some(p) = pinned_worker {
+            narrowed.insert(p.worker_id);
+        }
+        if narrowed.is_empty() {
+            return allowed_worker_ids;
+        }
+        Some(narrowed)
     }
 
     /// Give these tokens, find the worker with the best weighted cache hit.
@@ -542,6 +586,15 @@ where
         // scheduling returns, since `overlap_blocks` isn't known until then.
         let num_blocks = isl_tokens / self.block_size as usize;
         let sc_hits_for_metrics = shared_cache_hits.clone();
+
+        // LoRA-aware candidate narrowing: restrict to this LoRA's allocated/loaded replicas,
+        // strictly within the existing candidate universe (never widening). Covers both the
+        // decode and prefill routers, since both flow through this method.
+        let allowed_worker_ids = self.narrow_allowed_by_lora(
+            lora_name.as_deref(),
+            allowed_worker_ids,
+            pinned_worker.as_ref(),
+        );
 
         let response = match self
             .scheduler
