@@ -61,7 +61,8 @@ The Dynamo ecosystem includes these additional modular components, and will cont
 | **Scaling / Cloud** | Planner | Automatically tune performance in real time for prefill and decode given SLA constraints (TTFT and TPOT) |
 | | [Grove](https://github.com/ai-dynamo/grove) | Enables gang scheduling and topology awareness required for Kubernetes multi-node disaggregated serving |
 | | [Model Express](https://github.com/ai-dynamo/model-express) | Load model weights fast by caching and transferring them via NIXL to other GPUs. Will also be leveraged for fault tolerance |
-| **Perf** | [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Estimate performance for aggregated vs. disaggregated serving based on model, ISL/OSL, HW, etc. Formerly known as LLMPet |
+| **Perf** | [DynoSim](../dynosim/README.md) | Simulate Dynamo deployment choices with Mocker, workload-driven runs, sweeps, and AIC-backed timing models before validating on GPUs |
+| | [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Provides calibrated performance models and configuration search inputs for rapid DGDR profiling. Formerly known as LLMPet |
 | | [AIPerf](https://github.com/ai-dynamo/aiperf) | Re-architected GenAI-Perf written in Python for maximum extensibility; supports distributed benchmarking |
 | | AITune | Given a model or pipeline, searches for best backend to deploy with (e.g., TensorRT, Torch.compile, etc.) (coming soon) |
 | | Flex Tensor | Stream weights to GPUs from host memory to run very large language models in GPUs with limited memory capacity (coming soon) |
@@ -122,7 +123,7 @@ Furthermore, when these three techniques are composed together, they yield compo
 
 Manually finding the optimal parallelism for disaggregated serving can take days of exhaustive configuration sweeps—a challenge that only intensifies at scale.
 
-Dynamo's [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/) solves this by identifying the best-performing configurations in under 30 seconds, providing clear projections of the performance gains over standard aggregated serving. This logic is natively integrated into Kubernetes Custom Resource Definition (CRD), Dynamo Graph Deployment Request (DGDR), allowing users to deploy using automatically generated optimized configs.
+Dynamo uses AIC-backed DynoSim-style modeling to identify strong configurations in under 30 seconds, providing clear projections of the performance gains over standard aggregated serving. This logic is natively integrated into Kubernetes Custom Resource Definition (CRD), Dynamo Graph Deployment Request (DGDR), allowing users to deploy using automatically generated optimized configs.
 
 ### Auto-Adjusting Deployment Based on SLA with Planner
 
