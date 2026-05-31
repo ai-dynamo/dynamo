@@ -366,16 +366,37 @@ impl LoadEstimator {
         self: Arc<Self>,
         component: Component,
     ) -> tokio::task::JoinHandle<()> {
+        let cancel_token = component.drt().child_token();
         tokio::spawn(async move {
-            if let Err(e) = self.subscribe_to_events(component).await {
-                tracing::error!("Error in LORA load event subscription: {}", e);
+            // Durable feed: reconnect on transient errors / stream end with capped backoff,
+            // stopping only on cancellation. A failed subscribe must not silently disable KV
+            // load tracking for the lifetime of the process.
+            let mut backoff = Duration::from_secs(1);
+            while !cancel_token.is_cancelled() {
+                match self.subscribe_to_events(&component, &cancel_token).await {
+                    Ok(()) => break, // cancelled cleanly
+                    Err(e) => {
+                        tracing::warn!(
+                            "LORA load event subscription error: {e}; reconnecting in {backoff:?}"
+                        );
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            _ = tokio::time::sleep(backoff) => {}
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                }
             }
+            tracing::debug!("LORA load event subscription task exiting");
         })
     }
 
-    async fn subscribe_to_events(&self, component: Component) -> anyhow::Result<()> {
-        let cancel_token = component.drt().child_token();
-        let mut subscriber = EventSubscriber::for_component(&component, ACTIVE_SEQUENCES_SUBJECT)
+    async fn subscribe_to_events(
+        &self,
+        component: &Component,
+        cancel_token: &tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<()> {
+        let mut subscriber = EventSubscriber::for_component(component, ACTIVE_SEQUENCES_SUBJECT)
             .await?
             .typed::<ActiveSequenceEvent>();
 
@@ -383,10 +404,7 @@ impl LoadEstimator {
 
         loop {
             tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::debug!("LORA load event subscription cancelled");
-                    break;
-                }
+                _ = cancel_token.cancelled() => return Ok(()),
                 result = subscriber.next() => {
                     match result {
                         Some(Ok((_envelope, event))) => {
@@ -395,16 +413,11 @@ impl LoadEstimator {
                         Some(Err(e)) => {
                             tracing::warn!("Error receiving LORA load event: {}", e);
                         }
-                        None => {
-                            tracing::warn!("LORA load event stream ended");
-                            break;
-                        }
+                        None => anyhow::bail!("LORA load event stream ended"),
                     }
                 }
             }
         }
-
-        Ok(())
     }
 
     fn handle_event(&self, event: ActiveSequenceEvent) {

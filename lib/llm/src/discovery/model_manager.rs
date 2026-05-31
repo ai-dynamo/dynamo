@@ -113,9 +113,10 @@ pub struct ModelManager {
     lora_load_estimator: Arc<LoadEstimator>,
     lora_filter: Arc<LoraFilter>,
     lora_enabled: bool,
-    /// Decode components that already have a LoRA load feed running, so we start exactly
-    /// one active-sequence subscription per component (avoids double counting on rebuilds).
-    lora_load_feeds: DashMap<String, ()>,
+    /// Per-decode-component LoRA load-feed subscription handles, so we start exactly one feed
+    /// per component and can restart it if the previous one exited (avoids double counting on
+    /// rebuilds while keeping the feed durable).
+    lora_load_feeds: DashMap<String, tokio::task::JoinHandle<()>>,
 }
 
 impl Default for ModelManager {
@@ -828,11 +829,19 @@ impl ModelManager {
         if self.lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
         {
             let feed_key = format!("{}/{}", endpoint.id().namespace, endpoint.id().component);
-            if self.lora_load_feeds.insert(feed_key, ()).is_none() {
-                let _feed = self
+            // Start a feed if none runs for this component yet, or restart it if the previous
+            // one exited (so a dead subscription does not permanently disable load tracking).
+            let needs_feed = self
+                .lora_load_feeds
+                .get(&feed_key)
+                .map(|h| h.is_finished())
+                .unwrap_or(true);
+            if needs_feed {
+                let handle = self
                     .lora_load_estimator
                     .clone()
                     .start_event_subscription(endpoint.component().clone());
+                self.lora_load_feeds.insert(feed_key, handle);
                 tracing::info!(
                     namespace = %endpoint.id().namespace,
                     component = %endpoint.id().component,
