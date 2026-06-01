@@ -132,7 +132,10 @@ async def run(args: argparse.Namespace) -> int:
     pcm16 = _load_pcm16_16k(args.input_audio, args.input_audio_url)
     chunk_bytes = max(INPUT_SAMPLE_RATE * 2 // 1000 * args.chunk_ms, 2)
 
+    # All response.output_audio.delta chunks are concatenated into this single
+    # buffer and written out as one WAV file.
     audio_out = bytearray()
+    audio_delta_count = 0
     transcript = []
     response_id = None
     status = None
@@ -180,6 +183,7 @@ async def run(args: argparse.Namespace) -> int:
                 if etype == "response.output_audio.delta":
                     delta = base64.b64decode(event.get("delta", ""))
                     audio_out.extend(delta)
+                    audio_delta_count += 1
                     print(f"<- response.output_audio.delta ({len(delta)} bytes)")
                 elif etype == "response.output_audio_transcript.delta":
                     transcript.append(event.get("delta", ""))
@@ -201,10 +205,19 @@ async def run(args: argparse.Namespace) -> int:
     print(f"  response_id : {response_id}")
     print(f"  status      : {status}")
     print(f"  transcript  : {''.join(transcript)!r}")
-    print(f"  audio bytes : {len(audio_out)} ({len(audio_out) / 2} samples)")
+    print(
+        f"  audio       : {audio_delta_count} delta(s) joined -> "
+        f"{len(audio_out)} bytes ({len(audio_out) // 2} samples)"
+    )
     if audio_out:
+        # Concatenate every audio delta into one WAV file.
         _write_wav(args.output_wav, bytes(audio_out), args.output_sample_rate)
-        print(f"  saved audio : {args.output_wav} @ {args.output_sample_rate} Hz")
+        print(
+            f"  saved audio : {args.output_wav} @ {args.output_sample_rate} Hz "
+            "(single file)"
+        )
+    else:
+        print("  saved audio : none (no audio modality / no audio returned)")
     return 0 if status == "completed" else 1
 
 
