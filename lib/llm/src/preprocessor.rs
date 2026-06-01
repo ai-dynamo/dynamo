@@ -235,11 +235,17 @@ pub struct OpenAIPreprocessor {
     /// unreadable.
     #[cfg(feature = "lightseek-mm")]
     image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
-    /// Image-placeholder token id resolved from the model's HF JSON configs.
+    /// Image-placeholder token id the routing-side sequence fills per image.
+    /// Resolved from `config.json`'s `image_token_id` field when present,
+    /// otherwise falls back to lightseek's `ModelProcessorSpec` value. This
+    /// is the id the backend's HF processor emits in the expanded sequence
+    /// (per-patch token for Qwen-VL families, the single placeholder for
+    /// LLaVA/Phi-3), so block hashes align bit-for-bit with the worker.
+    ///
     /// `None` disables MM-aware routing for this model and the router falls
     /// back to text-prefix routing.
     #[cfg(feature = "lightseek-mm")]
-    image_token_id: Option<crate::protocols::TokenIdType>,
+    routing_image_token_id: Option<crate::protocols::TokenIdType>,
     /// Per-family flatten-time image placeholder template (e.g.
     /// `"<|image_{n}|>"` for Phi-3, `"<image>"` for LLaVA-1.5). Threaded
     /// through from the formatter so the routing path can reverse the
@@ -247,12 +253,6 @@ pub struct OpenAIPreprocessor {
     /// tokens when the chat template uses numbered markers.
     #[cfg(feature = "lightseek-mm")]
     image_placeholder_template: Option<&'static str>,
-    /// Token id the chat template emits per image. Equals `image_token_id`
-    /// for most VLMs; Qwen2-VL / Qwen2.5-VL emit `<|image_pad|>` here while
-    /// lightseek's `image_token_id` is the per-patch `<|vision_pad|>`.
-    /// Read from `config.json`'s `image_token_id`, fallback to lightseek.
-    #[cfg(feature = "lightseek-mm")]
-    chat_placeholder_token_id: Option<crate::protocols::TokenIdType>,
     /// BOS token id to prepend to the routing-side sequence so per-block
     /// hashes match the backend's HF processor output on models with
     /// `add_bos_token: true` (Phi-3-vision and other `LlamaTokenizer`
@@ -422,7 +422,7 @@ impl OpenAIPreprocessor {
         let context_length = mdc.context_length;
 
         #[cfg(feature = "lightseek-mm")]
-        let (image_token_counter, image_token_id, chat_placeholder_token_id, bos_token_string) =
+        let (image_token_counter, routing_image_token_id, bos_token_string) =
             match image_token_inputs {
                 Some((model_id, model_type, model_dir)) => {
                     // Resolve counter + image-token id independently so the
@@ -439,13 +439,15 @@ impl OpenAIPreprocessor {
                         Err(e) => (None, Some(e.to_string())),
                     };
                     // One-shot config/tokenizer_config read for all
-                    // routing-side token info (image id, chat-template
-                    // placeholder, BOS string). Parsing lives in
+                    // routing-side token info. Parsing lives in
                     // `lightseek_mm`, next to the spec resolution.
                     let routing_tokens =
                         lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
-                    let img_tok = routing_tokens.image_token_id;
-                    let chat_placeholder_tok = routing_tokens.chat_placeholder_token_id;
+                    // `chat_placeholder_token_id` already prefers config.json's
+                    // explicit field and falls back to the spec value, so it's
+                    // the single id used both for the engagement gate and the
+                    // routing-fill below.
+                    let img_tok = routing_tokens.chat_placeholder_token_id;
                     let bos_tok_string = routing_tokens.bos_token_string;
 
                     match (counter.is_some(), img_tok.is_some()) {
@@ -484,14 +486,14 @@ impl OpenAIPreprocessor {
                             );
                         }
                     }
-                    (counter, img_tok, chat_placeholder_tok, bos_tok_string)
+                    (counter, img_tok, bos_tok_string)
                 }
                 None => {
                     tracing::debug!(
                         target: "mm_routing",
                         "model directory not derivable from MDC; MM-aware routing disabled"
                     );
-                    (None, None, None, None)
+                    (None, None, None)
                 }
             };
 
@@ -505,7 +507,7 @@ impl OpenAIPreprocessor {
         // force (both lightseek hooks resolved to `None`) — no point
         // building a client they'll never use.
         #[cfg(feature = "lightseek-mm")]
-        if image_token_counter.is_some() || image_token_id.is_some() {
+        if image_token_counter.is_some() || routing_image_token_id.is_some() {
             std::sync::LazyLock::force(&DIM_FETCH_MEDIA_FETCHER);
             std::sync::LazyLock::force(&DIM_FETCH_HTTP_CLIENT);
         }
@@ -564,11 +566,9 @@ impl OpenAIPreprocessor {
             #[cfg(feature = "lightseek-mm")]
             image_token_counter,
             #[cfg(feature = "lightseek-mm")]
-            image_token_id,
+            routing_image_token_id,
             #[cfg(feature = "lightseek-mm")]
             image_placeholder_template,
-            #[cfg(feature = "lightseek-mm")]
-            chat_placeholder_token_id,
             #[cfg(feature = "lightseek-mm")]
             routing_prepend_bos,
         }))
@@ -1168,16 +1168,13 @@ impl OpenAIPreprocessor {
         if mm_image_entries.is_empty() {
             return Ok(());
         }
-        let Some(image_token_id) = self.image_token_id else {
+        let Some(find_token_id) = self.routing_image_token_id else {
             tracing::debug!(
                 target: "mm_routing",
-                "image_token_id unresolved; skipping MM routing info"
+                "routing_image_token_id unresolved; skipping MM routing info"
             );
             return Ok(());
         };
-        // For Qwen2-VL/2.5-VL, the chat template emits `<|image_pad|>` but
-        // lightseek's `image_token_id` is the per-patch `<|vision_pad|>`.
-        let find_token_id = self.chat_placeholder_token_id.unwrap_or(image_token_id);
         let Some(counter) = self.image_token_counter.as_ref() else {
             tracing::debug!(
                 target: "mm_routing",
@@ -1219,7 +1216,7 @@ impl OpenAIPreprocessor {
                             target: "mm_routing",
                             placeholder_count,
                             image_count = mm_image_entries.len(),
-                            image_token_id = image_token_id,
+                            routing_image_token_id = find_token_id,
                             placeholder_template = tpl,
                             "splice failed for numbered placeholder; \
                              skipping MM routing info (text-prefix routing only)"
@@ -1232,7 +1229,7 @@ impl OpenAIPreprocessor {
                     target: "mm_routing",
                     placeholder_count,
                     image_count = mm_image_entries.len(),
-                    image_token_id = image_token_id,
+                    routing_image_token_id = find_token_id,
                     "placeholder token count in tokenized prompt does not match image count; \
                      skipping MM routing info (text-prefix routing only)"
                 );
