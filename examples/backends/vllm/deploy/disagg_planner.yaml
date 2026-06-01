@@ -55,7 +55,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-cosmos3-dev.1
     Planner:
       componentType: planner
       replicas: 1
@@ -94,7 +94,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-cosmos3-dev.1
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -113,7 +113,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-cosmos3-dev.1
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
