@@ -96,14 +96,15 @@ pub struct EnginePerfLimits {
 impl EnginePerfLimits {
     #[new]
     #[pyo3(signature = (max_num_batched_tokens=8192, max_num_seqs=512, max_kv_tokens=2_000_000))]
-    fn new(max_num_batched_tokens: u32, max_num_seqs: u32, max_kv_tokens: u32) -> Self {
-        Self {
-            inner: rs_engine_perf::EnginePerfLimits {
+    fn new(max_num_batched_tokens: u32, max_num_seqs: u32, max_kv_tokens: u32) -> PyResult<Self> {
+        Ok(Self {
+            inner: rs_engine_perf::EnginePerfLimits::new(
                 max_num_batched_tokens,
                 max_num_seqs,
                 max_kv_tokens,
-            },
-        }
+            )
+            .map_err(|err| PyValueError::new_err(err.to_string()))?,
+        })
     }
 
     #[getter]

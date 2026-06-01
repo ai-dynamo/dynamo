@@ -18,6 +18,7 @@ use aiconfigurator_core::{
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs, WorkerType};
 
@@ -27,10 +28,13 @@ const DEFAULT_AIC_SYSTEM: &str = "h200_sxm";
 ///
 /// These also seed AIC correction bounds when callers do not pass explicit
 /// `ForwardPassPerfOptions`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Validate)]
 pub struct EnginePerfLimits {
+    #[validate(range(min = 1))]
     pub max_num_batched_tokens: u32,
+    #[validate(range(min = 1))]
     pub max_num_seqs: u32,
+    #[validate(range(min = 1))]
     pub max_kv_tokens: u32,
 }
 
@@ -92,6 +96,16 @@ impl AicEngineConfig {
 }
 
 impl EnginePerfLimits {
+    pub fn new(max_num_batched_tokens: u32, max_num_seqs: u32, max_kv_tokens: u32) -> Result<Self> {
+        let limits = Self {
+            max_num_batched_tokens,
+            max_num_seqs,
+            max_kv_tokens,
+        };
+        limits.validate().context("invalid engine perf limits")?;
+        Ok(limits)
+    }
+
     pub fn from_mock_engine_args(args: &MockEngineArgs) -> Result<Self> {
         let max_num_batched_tokens = to_u32(
             args.max_num_batched_tokens.unwrap_or(8192),
@@ -102,11 +116,11 @@ impl EnginePerfLimits {
             .num_gpu_blocks
             .checked_mul(args.block_size)
             .context("num_gpu_blocks * block_size overflows usize")?;
-        Ok(Self {
+        Self::new(
             max_num_batched_tokens,
             max_num_seqs,
-            max_kv_tokens: to_u32(max_kv_tokens, "max_kv_tokens")?,
-        })
+            to_u32(max_kv_tokens, "max_kv_tokens")?,
+        )
     }
 }
 
@@ -341,6 +355,7 @@ impl EnginePerfModel {
     ) -> Result<Self> {
         let aic_config = aic_config.into_aic_config()?;
         let attention_dp_size = aic_config.attention_dp_size.unwrap_or(1).max(1) as usize;
+        limits.validate().context("invalid engine perf limits")?;
         let resolved_options = resolve_options(options, &limits);
         let load_averages = AggLoadAverages::new(resolved_options.max_observations);
         let model = ForwardPassPerfModel::from_native(aic_config, resolved_options)
@@ -360,6 +375,7 @@ impl EnginePerfModel {
         limits: EnginePerfLimits,
         options: Option<ForwardPassPerfOptions>,
     ) -> Result<Self> {
+        limits.validate().context("invalid engine perf limits")?;
         let resolved_options = resolve_options(options, &limits);
         let load_averages = AggLoadAverages::new(resolved_options.max_observations);
         let model = ForwardPassPerfModel::from_regression(resolved_options)
@@ -541,6 +557,10 @@ impl EnginePerfModel {
         if request.isl == 0 {
             return Ok(None);
         }
+        // TODO: Replace worker-specific linear batch-size sweeps with a faster
+        // non-monotonic-safe search. We tried binary search, but the perf model
+        // does not guarantee strictly increasing estimates, which led to bad
+        // capacity choices.
         match self.worker_type {
             WorkerType::Prefill => self.find_prefill_capacity(&request),
             WorkerType::Decode => self.find_decode_capacity(&request),
@@ -951,13 +971,15 @@ fn resolve_limits(
     limits: Option<EnginePerfLimits>,
     engine_args: Option<&MockEngineArgs>,
 ) -> Result<EnginePerfLimits> {
-    match (limits, engine_args) {
+    let limits = match (limits, engine_args) {
         (Some(limits), _) => Ok(limits),
         (None, Some(args)) => EnginePerfLimits::from_mock_engine_args(args),
         (None, None) => Err(anyhow!(
             "limits are required when engine_args is not provided"
         )),
-    }
+    }?;
+    limits.validate().context("invalid engine perf limits")?;
+    Ok(limits)
 }
 
 fn resolve_options(
@@ -1315,6 +1337,31 @@ mod tests {
         };
         let err = snapshot_to_aic_metrics(&snapshot).unwrap_err();
         assert!(err.to_string().contains("scheduled prefill tokens"));
+    }
+
+    #[test]
+    fn engine_perf_limits_reject_zero_values() {
+        for limits in [
+            EnginePerfLimits {
+                max_num_batched_tokens: 0,
+                max_num_seqs: 1,
+                max_kv_tokens: 1,
+            },
+            EnginePerfLimits {
+                max_num_batched_tokens: 1,
+                max_num_seqs: 0,
+                max_kv_tokens: 1,
+            },
+            EnginePerfLimits {
+                max_num_batched_tokens: 1,
+                max_num_seqs: 1,
+                max_kv_tokens: 0,
+            },
+        ] {
+            let err =
+                EnginePerfModel::from_regression(WorkerType::Decode, limits, None).unwrap_err();
+            assert!(err.to_string().contains("invalid engine perf limits"));
+        }
     }
 
     #[test]

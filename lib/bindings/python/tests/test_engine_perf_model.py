@@ -101,3 +101,16 @@ def test_tune_with_fpms_accepts_rank_mapping() -> None:
 def test_capacity_request_rejects_non_finite_sla() -> None:
     with pytest.raises(ValueError, match="finite"):
         _core.EngineCapacityRequest(isl=100, osl=10, ttft_sla_ms=float("nan"))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_num_batched_tokens": 0},
+        {"max_num_seqs": 0},
+        {"max_kv_tokens": 0},
+    ],
+)
+def test_engine_perf_limits_reject_zero_values(kwargs: dict[str, int]) -> None:
+    with pytest.raises(ValueError, match="invalid engine perf limits"):
+        _core.EnginePerfLimits(**kwargs)
