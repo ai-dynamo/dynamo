@@ -147,7 +147,7 @@ runs:
               clearImageStatus: true
               selector:
                 labels:
-                  nvidia.com/gpu.present: "true"
+                  kubernetes.azure.com/mode: "user"
             runtimeClasses:
               enabled: true
         EOF
