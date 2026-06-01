@@ -28,6 +28,10 @@ Usage (omit --input-audio to fetch the sample clip from GitHub):
   # or point at your own audio file:
   python realtime_omni_client.py --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
       --input-audio /path/to/your.wav
+
+  # request transcript only (no audio out):
+  python realtime_omni_client.py --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
+      --output-modalities text
 """
 
 from __future__ import annotations
@@ -137,14 +141,14 @@ async def run(args: argparse.Namespace) -> int:
         async with session.ws_connect(args.url, max_msg_size=64 * 1024 * 1024) as ws:
             print(f"[client] connected to {args.url}")
 
-            # 1) Select the model (the frontend picks the engine on session.update).
+            # 1) Select the model (the frontend picks the engine on
+            #    session.update) and request output modalities. Asking for
+            #    "audio" drives the Omni talker; "text" yields transcript only.
+            session_block = {"type": "realtime", "model": args.model}
+            if args.output_modalities:
+                session_block["output_modalities"] = args.output_modalities
             await ws.send_str(
-                json.dumps(
-                    {
-                        "type": "session.update",
-                        "session": {"type": "realtime", "model": args.model},
-                    }
-                )
+                json.dumps({"type": "session.update", "session": session_block})
             )
 
             # 2) Stream the audio in chunks, then commit to trigger generation.
@@ -215,6 +219,15 @@ def main() -> None:
         "--input-audio-url",
         default=DEFAULT_AUDIO_URL,
         help="sample audio URL fetched when --input-audio is omitted",
+    )
+    parser.add_argument(
+        "--output-modalities",
+        nargs="+",
+        choices=["audio", "text"],
+        default=["audio"],
+        help="output modalities requested via session.update "
+        "('audio' drives the Omni talker). Pass --output-modalities text "
+        "for transcript only, or 'text audio' for both.",
     )
     parser.add_argument("--output-wav", default="realtime_response.wav")
     parser.add_argument(
