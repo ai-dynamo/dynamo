@@ -262,16 +262,20 @@ func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
 }
 
 func (r RollingUpdateContext) InProgress() bool {
-	return len(r.OldWorkerReplicas) > 0
+	return len(r.OldWorkerComponentReplicas) > 0
 }
 
 // RollingUpdateContext provides information about an in-progress rolling update.
 type RollingUpdateContext struct {
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
 	NewWorkerHash string
-	// OldWorkerReplicas maps service name to the desired replica count for old workers.
-	// Used by the controller to patch old worker DCDs directly.
-	OldWorkerReplicas map[string]int32
+	// OldWorkerComponentReplicas maps component name to the aggregate old-worker replica target.
+	// It preserves the component-level rollout decision used for rollout state and status aggregation.
+	OldWorkerComponentReplicas map[string]int32
+	// OldWorkerDCDReplicas maps old worker DCD name to the concrete replica target.
+	// It is derived from OldWorkerComponentReplicas after accounting for availability across old generations,
+	// and is used by the controller to patch each old worker DCD without recomputing allocation.
+	OldWorkerDCDReplicas map[string]int32
 	// NewWorkerReplicas maps service name to the desired replica count for new workers.
 	NewWorkerReplicas map[string]int32
 }

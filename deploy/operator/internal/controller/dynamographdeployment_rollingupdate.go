@@ -781,20 +781,23 @@ func (r *DynamoGraphDeploymentReconciler) getOldWorkerInfo(
 	return status, nil
 }
 
-// getOldWorkerComponentStates returns per-component old DCD state aggregated across all old generations.
-func (r *DynamoGraphDeploymentReconciler) getOldWorkerComponentStates(
+// getOldWorkerDCDsByComponent returns old DCDs grouped by component and per-component state
+// aggregated across all old generations.
+func (r *DynamoGraphDeploymentReconciler) getOldWorkerDCDsByComponent(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	newWorkerHash string,
-) (map[string]dcdComponentState, error) {
+) (map[string][]*nvidiacomv1beta1.DynamoComponentDeployment, map[string]dcdComponentState, error) {
 	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
+	dcdsByComponent := make(map[string][]*nvidiacomv1beta1.DynamoComponentDeployment)
 	states := make(map[string]dcdComponentState)
 	for i := range oldDCDs {
 		componentName := dynamo.GetDCDComponentName(&oldDCDs[i])
+		dcdsByComponent[componentName] = append(dcdsByComponent[componentName], &oldDCDs[i])
 		s := dcdComponentStateFromDCD(&oldDCDs[i])
 		agg := states[componentName]
 		agg.Spec += s.Spec
@@ -803,7 +806,7 @@ func (r *DynamoGraphDeploymentReconciler) getOldWorkerComponentStates(
 		states[componentName] = agg
 	}
 
-	return states, nil
+	return dcdsByComponent, states, nil
 }
 
 // getDesiredWorkerReplicas returns the total desired replicas across all worker components.
@@ -824,9 +827,71 @@ func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
 	return total
 }
 
+type oldWorkerDCDAllocation struct {
+	dcd         *nvidiacomv1beta1.DynamoComponentDeployment
+	currentSpec int32
+	target      int32
+}
+
+func allocateOldWorkerDCDReplicas(
+	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
+	oldNeeded int32,
+) map[*nvidiacomv1beta1.DynamoComponentDeployment]int32 {
+	allocations := make([]oldWorkerDCDAllocation, 0, len(dcds))
+	allocated := int32(0)
+
+	for _, dcd := range dcds {
+		state := dcdComponentStateFromDCD(dcd)
+		target := min(state.Spec, state.Available)
+		allocations = append(allocations, oldWorkerDCDAllocation{
+			dcd:         dcd,
+			currentSpec: state.Spec,
+			target:      target,
+		})
+		allocated += target
+	}
+
+	if surplus := allocated - oldNeeded; surplus > 0 {
+		// Once serving availability exceeds the old target, drain older healthy
+		// generations first, matching Kubernetes Deployment behavior.
+		sort.SliceStable(allocations, func(i, j int) bool {
+			return allocations[i].dcd.CreationTimestamp.Time.Before(allocations[j].dcd.CreationTimestamp.Time)
+		})
+		for i := range allocations {
+			if surplus <= 0 {
+				break
+			}
+			reduced := min(allocations[i].target, surplus)
+			allocations[i].target -= reduced
+			surplus -= reduced
+		}
+	} else if remaining := oldNeeded - allocated; remaining > 0 {
+		// Preserve existing newest-first behavior for non-serving capacity after
+		// all currently available old replicas have been retained.
+		sort.SliceStable(allocations, func(i, j int) bool {
+			return allocations[i].dcd.CreationTimestamp.After(allocations[j].dcd.CreationTimestamp.Time)
+		})
+		for i := range allocations {
+			if remaining <= 0 {
+				break
+			}
+			extraCapacity := allocations[i].currentSpec - allocations[i].target
+			added := min(extraCapacity, remaining)
+			allocations[i].target += added
+			remaining -= added
+		}
+	}
+
+	targets := make(map[*nvidiacomv1beta1.DynamoComponentDeployment]int32, len(allocations))
+	for i := range allocations {
+		targets[allocations[i].dcd] = allocations[i].target
+	}
+	return targets
+}
+
 // scaleOldWorkerDCDs patches the replicas field on old worker DCDs during a rolling update.
-// When multiple old generations exist for the same component, replicas are distributed to the
-// newest old DCD first, with older DCDs drained to 0 (matching K8s Deployment controller behavior).
+// When multiple old generations exist for the same component, unavailable replicas are removed
+// before reducing old generations that are still serving traffic.
 func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -843,61 +908,41 @@ func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
 		return fmt.Errorf("failed to list old worker DCDs: %w", err)
 	}
 
-	// Group old DCDs by logical component name.
-	dcdsByComponent := make(map[string][]*nvidiacomv1beta1.DynamoComponentDeployment)
 	for i := range oldDCDs {
-		componentName := dynamo.GetDCDComponentName(&oldDCDs[i])
-		dcdsByComponent[componentName] = append(dcdsByComponent[componentName], &oldDCDs[i])
-	}
-
-	for componentName, dcds := range dcdsByComponent {
-		oldNeeded, ok := rollingUpdateCtx.OldWorkerReplicas[componentName]
-		if !ok {
+		dcd := &oldDCDs[i]
+		componentName := dynamo.GetDCDComponentName(dcd)
+		if _, ok := rollingUpdateCtx.OldWorkerComponentReplicas[componentName]; !ok {
 			continue
 		}
 
-		// Sort by creation time descending (newest first) so newest old DCDs get replicas first
-		sort.Slice(dcds, func(i, j int) bool {
-			return dcds[i].CreationTimestamp.After(dcds[j].CreationTimestamp.Time)
-		})
-
-		remaining := oldNeeded
-		for _, dcd := range dcds {
-			var desiredReplicas int32
-			if remaining > 0 {
-				currentSpec := int32(1)
-				if dcd.Spec.Replicas != nil {
-					currentSpec = *dcd.Spec.Replicas
-				}
-				// Give this DCD up to its current spec count, but no more than remaining
-				desiredReplicas = min(remaining, currentSpec)
-				remaining -= desiredReplicas
-			}
-
-			currentReplicas := int32(1)
-			if dcd.Spec.Replicas != nil {
-				currentReplicas = *dcd.Spec.Replicas
-			}
-
-			if currentReplicas == desiredReplicas {
-				logger.V(1).Info("Old worker DCD replicas already at desired value",
-					"dcdName", dcd.Name, "replicas", desiredReplicas)
-				continue
-			}
-
-			patch := client.MergeFrom(dcd.DeepCopy())
-			dcd.Spec.Replicas = &desiredReplicas
-
-			if err := r.Patch(ctx, dcd, patch); err != nil {
-				return fmt.Errorf("failed to patch old worker DCD %s replicas: %w", dcd.Name, err)
-			}
-
-			logger.Info("Scaled old worker DCD",
-				"dcdName", dcd.Name,
-				"component", componentName,
-				"oldReplicas", currentReplicas,
-				"newReplicas", desiredReplicas)
+		desiredReplicas, ok := rollingUpdateCtx.OldWorkerDCDReplicas[dcd.Name]
+		if !ok {
+			return fmt.Errorf("missing old worker DCD replica target for %s", dcd.Name)
 		}
+
+		currentReplicas := int32(1)
+		if dcd.Spec.Replicas != nil {
+			currentReplicas = *dcd.Spec.Replicas
+		}
+
+		if currentReplicas == desiredReplicas {
+			logger.V(1).Info("Old worker DCD replicas already at desired value",
+				"dcdName", dcd.Name, "replicas", desiredReplicas)
+			continue
+		}
+
+		patch := client.MergeFrom(dcd.DeepCopy())
+		dcd.Spec.Replicas = &desiredReplicas
+
+		if err := r.Patch(ctx, dcd, patch); err != nil {
+			return fmt.Errorf("failed to patch old worker DCD %s replicas: %w", dcd.Name, err)
+		}
+
+		logger.Info("Scaled old worker DCD",
+			"dcdName", dcd.Name,
+			"component", componentName,
+			"oldReplicas", currentReplicas,
+			"newReplicas", desiredReplicas)
 	}
 
 	return nil
@@ -990,7 +1035,7 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 
 	for _, dcd := range oldDCDs {
 		componentName := dynamo.GetDCDComponentName(&dcd)
-		if _, inRollout := rollingUpdateCtx.OldWorkerReplicas[componentName]; !inRollout {
+		if _, inRollout := rollingUpdateCtx.OldWorkerComponentReplicas[componentName]; !inRollout {
 			continue
 		}
 		if dcd.Status.Component == nil {
@@ -1059,18 +1104,20 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 
 	if currentHashes.contains(newWorkerHash) {
 		return dynamo.RollingUpdateContext{
-			NewWorkerHash:     newWorkerHash,
-			OldWorkerReplicas: make(map[string]int32),
-			NewWorkerReplicas: make(map[string]int32),
+			NewWorkerHash:              newWorkerHash,
+			OldWorkerComponentReplicas: make(map[string]int32),
+			OldWorkerDCDReplicas:       make(map[string]int32),
+			NewWorkerReplicas:          make(map[string]int32),
 		}, nil
 	}
 
-	oldStates, err := r.getOldWorkerComponentStates(ctx, dgd, newWorkerHash)
+	oldDCDsByComponent, oldStates, err := r.getOldWorkerDCDsByComponent(ctx, dgd, newWorkerHash)
 	if err != nil {
 		return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get old worker component states: %w", err)
 	}
 
-	oldWorkerReplicas := make(map[string]int32)
+	oldWorkerComponentReplicas := make(map[string]int32)
+	oldWorkerDCDReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
 
 	for i := range dgd.Spec.Components {
@@ -1111,8 +1158,12 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
 		newTarget := min(desired, newState.Spec+scaleUpBudget)
 
-		oldWorkerReplicas[componentName] = oldTarget
+		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
+
+		for dcd, target := range allocateOldWorkerDCDReplicas(oldDCDsByComponent[componentName], oldTarget) {
+			oldWorkerDCDReplicas[dcd.Name] = target
+		}
 
 		logger.V(1).Info("Rolling update replica calculation",
 			"component", componentName,
@@ -1127,9 +1178,10 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	}
 
 	return dynamo.RollingUpdateContext{
-		NewWorkerHash:     newWorkerHash,
-		OldWorkerReplicas: oldWorkerReplicas,
-		NewWorkerReplicas: newWorkerReplicas,
+		NewWorkerHash:              newWorkerHash,
+		OldWorkerComponentReplicas: oldWorkerComponentReplicas,
+		OldWorkerDCDReplicas:       oldWorkerDCDReplicas,
+		NewWorkerReplicas:          newWorkerReplicas,
 	}, nil
 }
 
