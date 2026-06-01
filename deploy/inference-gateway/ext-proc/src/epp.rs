@@ -177,10 +177,12 @@ impl Router {
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
     /// Lock-free read from the in-memory reflector store — no K8s API calls.
-    /// Port is read from the pod's first container port spec.
+    /// Port is read from the pod's Dynamo HTTP container port.
     pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
         for pod in self.pod_store.state() {
-            let pod_name = pod.metadata.name.as_deref()?;
+            let Some(pod_name) = pod.metadata.name.as_deref() else {
+                continue;
+            };
             if hash_pod_name(pod_name) == worker_id {
                 return pod_endpoint_address(&pod);
             }

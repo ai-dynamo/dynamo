@@ -252,7 +252,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
             &result.endpoint,
             None,
-            &ctx.request_headers,
+            &result.headers,
         ));
         Ok(())
     }
