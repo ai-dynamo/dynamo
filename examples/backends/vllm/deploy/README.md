@@ -55,6 +55,14 @@ Hardware-specific aggregated/disaggregated deployment using Kubernetes Dynamic R
 - GPU allocation via `ResourceClaimTemplate` and pod-level `resourceClaims`
 - Communication via NIXL transfer backend with XPU buffer
 
+### 7. **Aggregated + LMCache MP Deployment** (`agg_lmcache.yaml`)
+Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. See [`docs/components/lmcache/`](../../../../docs/components/lmcache/README.md) for the full integration guide.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `VllmDecodeWorker`: Single worker, `hostIPC: true` + `privileged: true` + `runAsUser: 0` (required for cross-Pod CUDA IPC with the LMCache server)
+- `LMCacheEngine` (separate CR): per-node DaemonSet that imports the worker's KV-cache IPC handles and serves cache hits over ZMQ
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
