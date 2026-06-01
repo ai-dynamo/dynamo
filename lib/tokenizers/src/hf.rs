@@ -46,7 +46,12 @@ impl HuggingFaceTokenizer {
 /// Promote `tokenizer_config.json`'s `special: true` `added_tokens_decoder`
 /// entries onto `tokenizer`. Missing-file / parse errors are swallowed since
 /// the file is optional. See [`HuggingFaceTokenizer::from_file`].
-fn merge_special_tokens_from_config(tokenizer: &mut HfTokenizer, model_dir: &Path) {
+///
+/// `pub` so downstream crates (e.g. `dynamo-llm`'s model_card) can apply
+/// the same promotion before extracting the special-token boundary list
+/// for the L1 prefix cache — otherwise the cache and the wrapped
+/// tokenizer would disagree on which strings are atomic specials.
+pub fn merge_special_tokens_from_config(tokenizer: &mut HfTokenizer, model_dir: &Path) {
     let cfg_path = model_dir.join("tokenizer_config.json");
     let Ok(raw) = std::fs::read_to_string(&cfg_path) else {
         return;

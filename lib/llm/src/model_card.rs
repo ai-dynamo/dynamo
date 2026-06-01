@@ -969,7 +969,7 @@ impl ModelDeploymentCard {
                 // extracting special-token strings. `FastTokenizer` does not re-expose
                 // `get_added_tokens_decoder`, so we must capture specials from the raw
                 // HF tokenizer before any swap.
-                let hf = HfTokenizer::from_file(p)
+                let mut hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
                             && let Ok(contents) = std::fs::read_to_string(p)
@@ -979,6 +979,18 @@ impl ModelDeploymentCard {
                     })
                     .map_err(anyhow::Error::msg)
                     .with_context(|| p.display().to_string())?;
+                // Apply the tokenizer_config.json special-token merge eagerly so
+                // `extract_hf_special_tokens` below sees the same specials the
+                // wrapped tokenizer will use. Without this the L1 prefix cache's
+                // boundary list would diverge from the actual tokenizer
+                // (e.g. Qwen2-VL's `<|image_pad|>` would be in the tokenizer
+                // but missing from the cache specials), letting chat prefixes
+                // straddle a special-token boundary and reducing hit rate.
+                if let Some(model_dir) = p.parent() {
+                    crate::tokenizers::hf::merge_special_tokens_from_config(
+                        &mut hf, model_dir,
+                    );
+                }
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)
@@ -986,16 +998,9 @@ impl ModelDeploymentCard {
                     Vec::new()
                 };
 
-                // Wrap an HfTokenizer, merging sibling tokenizer_config.json
-                // specials when a model_dir is available (needed for Qwen2-VL-2B).
-                let wrap_hf = |hf: HfTokenizer| match p.parent() {
-                    Some(model_dir) => {
-                        crate::tokenizers::HuggingFaceTokenizer::from_tokenizer_with_model_dir(
-                            hf, model_dir,
-                        )
-                    }
-                    None => crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf),
-                };
+                // Merge already applied above; just wrap.
+                let wrap_hf =
+                    |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
 
                 // Pick the inner backend.
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
