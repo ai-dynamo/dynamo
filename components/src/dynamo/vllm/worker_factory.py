@@ -402,7 +402,7 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = snapshot_engine
-            vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+            os.environ["DYN_FPM_WORKER_ID"] = fpm_worker_id
             # Factory is created after unpack so component_gauges is available
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
@@ -648,7 +648,7 @@ class WorkerFactory:
             # because the engine was forked before the runtime existed.
             # Propagating the new ID to the child requires shared memory or
             # a restart of the EngineCore process.
-            vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+            os.environ["DYN_FPM_WORKER_ID"] = fpm_worker_id
         else:
             (
                 engine_client,

@@ -120,6 +120,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FPM_PORT = 20380
 ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
+ENV_FPM_WORKER_ID = "DYN_FPM_WORKER_ID"
+ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +273,7 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
         dp_rank = self._resolve_dp_rank(vllm_config.parallel_config)
-        self._fpm_worker_id = vllm_config.additional_config.get("fpm_worker_id", "")
+        self._fpm_worker_id = os.environ.get(ENV_FPM_WORKER_ID)
         self._fpm_dp_rank = dp_rank
 
         self._schedule_times: deque[float] = deque()
@@ -591,6 +593,10 @@ class InstrumentedScheduler(AsyncScheduler):
         known = {f.name for f in BenchmarkConfig.__dataclass_fields__.values()}
         self._bench_config = BenchmarkConfig(
             **{k: v for k, v in cfg.items() if k in known}
+        )
+        self._bench_config.output_path = os.environ.get(
+            ENV_FPM_BENCHMARK_OUTPUT_PATH,
+            self._bench_config.output_path,
         )
 
         dp_rank = self._fpm_dp_rank
