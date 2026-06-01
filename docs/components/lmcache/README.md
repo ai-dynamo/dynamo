@@ -31,7 +31,7 @@ helm install dynamo-platform oci://nvcr.io/nvidia/ai-dynamo/dynamo-platform \
 > (whose baked-in CRDs an init container re-applies on every restart). Until NGC
 > ships both, the workaround is:
 >
-> 1. **Chart from local clone**: `git clone ai-dynamo/dynamo` and check out
+> 1. **Chart from local clone**: `git clone https://github.com/ai-dynamo/dynamo.git` and check out
 >    commit [`e7eb1c565f`](https://github.com/ai-dynamo/dynamo/commit/e7eb1c565f)
 >    (the version validated for this recipe), then install from the local path
 >    with the NGC `1.1.1` operator image:
