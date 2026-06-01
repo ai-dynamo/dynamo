@@ -11,9 +11,45 @@ sglang scheduler) inherit that and crash on `from vllm.v1 ...`.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 import sys
 from pathlib import Path
+
+_vllm_internals_importable: bool | None = None
+
+
+def _can_import_vllm_internals() -> bool:
+    """Try to import a vllm internal submodule once and cache the result."""
+    global _vllm_internals_importable
+    if _vllm_internals_importable is None:
+        try:
+            importlib.import_module("vllm.v1.engine.async_llm")
+            _vllm_internals_importable = True
+        except Exception:
+            _vllm_internals_importable = False
+    return _vllm_internals_importable
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Skip test files that need optional deps not available in all CI images."""
+    filename = collection_path.name
+    parts = collection_path.parts
+
+    # tests/frontend/test_prepost*.py import vllm.entrypoints.openai which
+    # requires full vllm internals absent in dynamo-runtime.
+    if filename.startswith("test_prepost") and "frontend" in parts:
+        if not _can_import_vllm_internals():
+            return True
+
+    # examples/backends/sglang/test_sglang_expert_info.py requires pybase64
+    # which is not installed in all CI images.
+    if filename == "test_sglang_expert_info.py":
+        if importlib.util.find_spec("pybase64") is None:
+            return True
+
+    return None
+
 
 # Seed sys.modules with the venv copies before pytest collection runs.
 for _name in ("vllm", "sglang"):

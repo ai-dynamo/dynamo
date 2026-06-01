@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from typing import Optional
 
 from prometheus_client import REGISTRY
@@ -59,6 +60,7 @@ from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
+from dynamo.trtllm.machine_id_allocator import DisaggMachineIdAllocator
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
@@ -69,6 +71,66 @@ from dynamo.trtllm.utils.trtllm_utils import deep_update
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+
+# Shared pool directory for all TRT-LLM workers in this process.
+# All connections must allocate from the same pool so that slot numbers are
+# unique across workers — a per-connection pool directory would let every
+# connection receive slot 1 from its own empty pool.
+# Prefer /var/run/dynamo (system-managed, survives reboots) but fall back to
+# a user-writable tmp path when the directory can't be created (e.g. in CI
+# containers that run without root).
+_PREFERRED_POOL_DIR = "/var/run/dynamo/disagg_machine_id"
+_FALLBACK_POOL_DIR = os.path.join(
+    os.environ.get("TMPDIR", "/tmp"), "dynamo", "disagg_machine_id"
+)
+
+
+def _resolve_pool_dir() -> str:
+    """Return the pool directory, falling back to tmp when preferred is non-writable.
+
+    ``os.makedirs(..., exist_ok=True)`` succeeds even for an existing directory
+    that is owned by another user and has no write permission for us, so we probe
+    writability by creating and immediately removing a temporary file.
+    """
+    for candidate in (_PREFERRED_POOL_DIR, _FALLBACK_POOL_DIR):
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            probe = os.path.join(candidate, ".write_probe")
+            fd = os.open(probe, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+            os.unlink(probe)
+            return candidate
+        except OSError:
+            continue
+    return _FALLBACK_POOL_DIR
+
+
+_DEFAULT_POOL_DIR = _resolve_pool_dir()
+_pools: dict[str, DisaggMachineIdAllocator] = {}
+_pool_lock = threading.Lock()
+
+
+def _get_disagg_machine_id(endpoint, pool_dir: str = _DEFAULT_POOL_DIR) -> int:
+    """Return a unique disagg_machine_id for *endpoint*.
+
+    All callers within a process share a single :class:`DisaggMachineIdAllocator`
+    backed by *pool_dir*.  The allocator is cached by pool directory so that
+    the same on-disk pool is reused across connections, guaranteeing that no
+    two live workers receive the same slot.
+    """
+    cid = int(endpoint.connection_id())
+    with _pool_lock:
+        if pool_dir not in _pools:
+            _pools[pool_dir] = DisaggMachineIdAllocator(pool_dir)
+    return _pools[pool_dir].allocate(cid)
+
+
+def _free_disagg_machine_id(endpoint, pool_dir: str = _DEFAULT_POOL_DIR) -> None:
+    """Release the slot held by this endpoint's connection_id."""
+    cid = int(endpoint.connection_id())
+    with _pool_lock:
+        if pool_dir in _pools:
+            _pools[pool_dir].free(cid)
 
 
 def build_kv_connector_config(config: Config):
@@ -617,6 +679,10 @@ async def init_llm_worker(
         )
         logging.debug("DYNAMO_COMPONENT_REGISTRY callback registered successfully")
 
+        # Allocate a unique disagg_machine_id; released in the finally block
+        # below so slot_*.lock files don't persist across worker restarts.
+        _machine_id = _get_disagg_machine_id(endpoint)
+
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             engine=engine,
@@ -634,7 +700,7 @@ async def init_llm_worker(
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
-            disagg_machine_id=int(endpoint.connection_id()) % 1021,
+            disagg_machine_id=_machine_id,
         )
 
         media_decoder = None
@@ -742,11 +808,14 @@ async def init_llm_worker(
                         model_name=model_name_for_metrics,
                         component_name=config.component,
                     )
-                await endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metrics_labels,
-                    health_check_payload=health_check_payload,
-                )
+                try:
+                    await endpoint.serve_endpoint(
+                        handler.generate,
+                        metrics_labels=metrics_labels,
+                        health_check_payload=health_check_payload,
+                    )
+                finally:
+                    _free_disagg_machine_id(endpoint)
 
             # Shutdown consolidator publisher if it was created
             if consolidator_publisher:
@@ -755,6 +824,9 @@ async def init_llm_worker(
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             if config.load_format == "gms":
                 _register_memory_routes(runtime, handler)
-            await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
-            )
+            try:
+                await endpoint.serve_endpoint(
+                    handler.generate, health_check_payload=health_check_payload
+                )
+            finally:
+                _free_disagg_machine_id(endpoint)
