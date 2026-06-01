@@ -148,6 +148,37 @@ def _flatten_args(
         for key, value in worker.items():
             args[f"worker.{key}"] = value
 
+    finish = request.get("finish_reason_metadata")
+    if isinstance(finish, dict):
+        args["finish_reason_metadata"] = finish
+        for key in ("finish_reason", "backend_finish_reason", "stop_reason"):
+            if key in finish:
+                args[f"finish.{key}"] = finish[key]
+
+        tool_calls = finish.get("tool_calls")
+        if isinstance(tool_calls, list):
+            args["finish.tool_call_count"] = len(tool_calls)
+            names = [
+                str(call["name"])
+                for call in tool_calls
+                if isinstance(call, dict) and call.get("name")
+            ]
+            if names:
+                args["finish.tool_call_names"] = ", ".join(names)
+
+        choices = finish.get("choices")
+        if isinstance(choices, list):
+            args["finish.choice_count"] = len(choices)
+            finish_reasons = [
+                f"{choice.get('choice_index')}:{choice.get('finish_reason')}"
+                for choice in choices
+                if isinstance(choice, dict)
+                and choice.get("choice_index") is not None
+                and choice.get("finish_reason") is not None
+            ]
+            if finish_reasons:
+                args["finish.choice_finish_reasons"] = ", ".join(finish_reasons)
+
     return {key: value for key, value in args.items() if value is not None}
 
 

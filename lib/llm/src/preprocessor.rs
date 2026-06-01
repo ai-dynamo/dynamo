@@ -27,10 +27,10 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionToolChoiceOption, EncodingFormat,
 };
+use dynamo_renderer::OAIPromptFormatter;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
-use prompt::OAIPromptFormatter;
 use std::time::{Duration, Instant};
 
 use dynamo_runtime::dynamo_nvtx_range;
@@ -46,7 +46,6 @@ use tracing;
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
-use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
@@ -74,7 +73,9 @@ use crate::protocols::{
 };
 use crate::tokenizers::traits::Tokenizer;
 
-use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
+use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
+use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
+
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
@@ -351,7 +352,7 @@ impl OpenAIPreprocessor {
     }
 
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        let formatter = PromptFormatter::from_mdc(&mdc)?;
+        let formatter = prompt_formatter_from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
         match formatter {
             PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
@@ -516,6 +517,7 @@ impl OpenAIPreprocessor {
     /// - `token_ids`
     pub async fn preprocess_request<
         R: OAIChatLikeRequest
+            + MediaRequestExt
             + AnnotationsProvider
             + SamplingOptionsProvider
             + StopConditionsProvider
@@ -532,6 +534,7 @@ impl OpenAIPreprocessor {
 
     async fn preprocess_request_with_options<
         R: OAIChatLikeRequest
+            + MediaRequestExt
             + AnnotationsProvider
             + SamplingOptionsProvider
             + StopConditionsProvider
@@ -776,7 +779,9 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest + NvExtProvider>(
+    pub async fn gather_multi_modal_data<
+        R: OAIChatLikeRequest + MediaRequestExt + NvExtProvider,
+    >(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
@@ -1800,6 +1805,7 @@ impl OpenAIPreprocessor {
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
         trace_tokens_enabled: bool,
+        trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -1818,6 +1824,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
+            trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
         }
 
         let state = State {
@@ -1830,6 +1837,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: false,
             finished: false,
             trace_tokens_enabled,
+            trace_finish_reason_metadata,
         };
 
         // transform the common response stream into a chat response stream
@@ -1869,6 +1877,13 @@ impl OpenAIPreprocessor {
                         inner.cumulative_output_tokens += chunk_tokens;
 
                         let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
+
+                        crate::agents::trace::record_backend_finish_reason_metadata(
+                            inner.trace_finish_reason_metadata.as_ref(),
+                            backend_output.index,
+                            backend_output.finish_reason.as_ref(),
+                            backend_output.stop_reason.as_ref(),
+                        );
 
                         (chunk_tokens, isl)
                     } else {
@@ -2321,8 +2336,7 @@ impl OpenAIPreprocessor {
             }
             Some("deepseek_r1") | Some("deepseek_v4") | Some("deepseek-v4")
             | Some("deepseekv4") => {
-                if let Some(enabled) =
-                    crate::preprocessor::prompt::thinking_bool_from_args(chat_template_args)
+                if let Some(enabled) = dynamo_renderer::thinking_bool_from_args(chat_template_args)
                 {
                     return !enabled;
                 }
@@ -2334,8 +2348,7 @@ impl OpenAIPreprocessor {
                 false
             }
             Some("gemma4") | Some("gemma-4") => {
-                if let Some(enabled) =
-                    crate::preprocessor::prompt::thinking_bool_from_args(chat_template_args)
+                if let Some(enabled) = dynamo_renderer::thinking_bool_from_args(chat_template_args)
                 {
                     return !enabled;
                 }
@@ -2631,6 +2644,8 @@ impl
             self.kv_cache_block_size,
         );
         let trace_tokens_enabled = trace_state.is_some();
+        let trace_finish_reason_metadata =
+            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -2664,6 +2679,7 @@ impl
             response_generator,
             context.clone(),
             trace_tokens_enabled,
+            trace_finish_reason_metadata,
         );
 
         let transformed_stream = self.postprocessor_parsing_stream(
@@ -2706,7 +2722,7 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = crate::agents::trace::wrap_agent_trace_request_end_stream(
+        let final_stream = crate::agents::trace::wrap_agent_trace_chat_request_end_stream(
             final_stream,
             trace_state,
             request_id,
@@ -2790,6 +2806,8 @@ impl
             self.kv_cache_block_size,
         );
         let trace_tokens_enabled = trace_state.is_some();
+        let trace_finish_reason_metadata =
+            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -2825,9 +2843,10 @@ impl
             response_generator,
             context.clone(),
             trace_tokens_enabled,
+            trace_finish_reason_metadata,
         );
 
-        let stream = crate::agents::trace::wrap_agent_trace_request_end_stream(
+        let stream = crate::agents::trace::wrap_agent_trace_completion_request_end_stream(
             Box::pin(stream),
             trace_state,
             request_id,
