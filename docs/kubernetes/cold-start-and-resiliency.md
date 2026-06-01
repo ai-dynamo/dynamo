@@ -24,8 +24,7 @@ This document tracks backend support across three composable projects in this wo
 
 - ✅ : Supported
 - 🚧 : Work in Progress / Experimental / Limited
-
-Blank cells indicate "not started" or "not supported".
+- ❌ : Not started
 
 ## Support Matrix
 
@@ -64,9 +63,9 @@ See the per-feature sections below for detailed per-backend status.
 
 | Backend | Single Node | Multi-node | KV-Cache Reuse | Hardware Fault Tolerance |
 | :--- | :---: | :---: | :---: | :---: |
-| **vLLM** | ✅ | ✅ | 🚧 | 🚧|
-| **SGLang** | 🚧 | 🚧 | 🚧 | 🚧 |
-| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 | 🚧 |
+| **vLLM** | ✅ | ✅ | ❌ | ❌ |
+| **SGLang** | 🚧 | 🚧 | ❌ | ❌ |
+| **TensorRT-LLM** | 🚧 | 🚧 | ❌ | ❌ |
 
 **Notes:**
 - **KV-Cache Reuse**: whether KV cache is remapped across engines on failover (preserving in-flight requests) rather than each shadow starting from a fresh allocation.
@@ -78,10 +77,10 @@ Dynamo Snapshot uses CRIU and NVIDIA's `cuda-checkpoint` utility to capture a wo
 
 #### Status
 
-| Backend | Single GPU | Multi-GPU, Single Node| Multinode | 
-| :--- | :---: | :---: | :---: | :---: | :---: |
+| Backend | Single GPU | Multi-GPU, Single Node | Multinode |
+| :--- | :---: | :---: | :---: |
 | **vLLM** | ✅ | ✅ (unstable) | 🚧 |
-| **SGLang** |  ✅ | 🚧 | 🚧 | 🚧 |
+| **SGLang** | ✅ | 🚧 | 🚧 |
 | **TensorRT-LLM** | 🚧 | 🚧 | 🚧 |
 
 **Notes:**
