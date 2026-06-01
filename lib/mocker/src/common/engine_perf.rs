@@ -658,7 +658,10 @@ impl EnginePerfModel {
             let Some(ttft) = self.agg_ttft(ttft_prefill_tokens, batch_size, decode_kv)? else {
                 return Ok(None);
             };
-            let e2e = ttft + mul_duration(itl, request.osl.saturating_sub(1));
+            let decode_tail = mul_duration(itl, request.osl.saturating_sub(1))?;
+            let e2e = ttft
+                .checked_add(decode_tail)
+                .ok_or_else(|| anyhow!("aggregate E2E latency overflow"))?;
             let rps = f64::from(batch_size) / (f64::from(request.osl) * itl.as_secs_f64());
             let eligible = sla_ok(Some(ttft), request.ttft_sla)
                 && sla_ok(Some(itl), request.itl_sla)
@@ -1144,8 +1147,10 @@ fn select_capacity(
     }
 }
 
-fn mul_duration(duration: Duration, factor: u32) -> Duration {
-    Duration::from_secs_f64(duration.as_secs_f64() * f64::from(factor))
+fn mul_duration(duration: Duration, factor: u32) -> Result<Duration> {
+    duration
+        .checked_mul(factor)
+        .ok_or_else(|| anyhow!("duration overflow multiplying {duration:?} by {factor}"))
 }
 
 fn to_u32(value: usize, name: &str) -> Result<u32> {
@@ -1571,6 +1576,40 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(capacity.ttft.unwrap().as_secs_f64() > 0.08);
+    }
+
+    #[test]
+    fn aggregated_capacity_returns_error_on_e2e_overflow() {
+        let large_limits = EnginePerfLimits {
+            max_num_batched_tokens: 8192,
+            max_num_seqs: 1,
+            max_kv_tokens: u32::MAX,
+        };
+        let mut model = EnginePerfModel::from_regression(
+            WorkerType::Aggregated,
+            large_limits,
+            Some(fast_options()),
+        )
+        .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![mixed_observation(1, 1, 2_147_483_648, 1.0e12)],
+                vec![mixed_observation(2, 1, 2_147_483_649, 1.0e12)],
+            ])
+            .unwrap();
+
+        let err = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 1,
+                osl: u32::MAX,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("overflow"));
     }
 
     #[test]
