@@ -222,6 +222,71 @@ spec:
                       - name
                     type: object
                   type: array
+                experimental:
+                  description: |-
+                    Experimental groups graph-level preview features whose API shape and
+                    behavior may change in breaking ways between releases.
+                  properties:
+                    kvTransferPolicy:
+                      description: |-
+                        KvTransferPolicy configures topology-aware routing for KV-cache
+                        transfers between prefill and decode workers.
+                      properties:
+                        domain:
+                          description: |-
+                            Domain is the logical name for the topology level to enforce
+                            (e.g. "zone", "rack"). The router uses this to match workers that
+                            share the same value for the label identified by `labelKey`.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                        enforcement:
+                          default: required
+                          description: |-
+                            Enforcement controls how the selected prefill worker's topology is
+                            applied to decode routing. "required" only allows decode workers in the
+                            same topology domain as the selected prefill worker. "preferred" keeps
+                            all decode workers eligible, but biases selection toward workers in the
+                            same topology domain. Defaults to "required".
+                          enum:
+                            - required
+                            - preferred
+                          type: string
+                        labelKey:
+                          description: |-
+                            LabelKey is a Kubernetes node label key (e.g.
+                            "topology.kubernetes.io/zone") whose value identifies the topology
+                            domain for each worker. The operator copies the node label onto worker
+                            pods so the runtime can publish it as worker metadata. The label
+                            should correspond to the topology level named in `domain`.
+                          maxLength: 317
+                          minLength: 1
+                          pattern: ^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$
+                          type: string
+                          x-kubernetes-validations:
+                            - message: labelKey prefix must be 253 characters or less
+                              rule: '!self.contains(''/'') || self.split(''/'')[0].size() <= 253'
+                        preferredWeight:
+                          description: |-
+                            PreferredWeight is required and used only when enforcement is
+                            "preferred". Higher values create a stronger same-domain routing
+                            preference, but do not guarantee same-domain selection. The value is not
+                            a probability; worker selection still depends on load and other routing
+                            inputs. A value of 0 disables the topology preference; 1 is the strongest
+                            supported preference.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                      required:
+                        - domain
+                      type: object
+                      x-kubernetes-validations:
+                        - message: labelKey is required until alternate topology sources are supported
+                          rule: has(self.labelKey)
+                        - message: preferredWeight is required when enforcement is preferred
+                          rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
+                        - message: preferredWeight may only be set when enforcement is preferred
+                          rule: '!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == ''preferred'')'
+                  type: object
                 labels:
                   additionalProperties:
                     type: string
@@ -963,6 +1028,28 @@ spec:
                               - backendFramework
                               - model
                             type: object
+                          job:
+                            description: Job customizes the checkpoint Job that is created in Auto mode.
+                            properties:
+                              gmsClientContainers:
+                                description: |-
+                                  GMSClientContainers lists checkpoint Job containers that should receive
+                                  GMS client wiring. Requires gpuMemoryService on the service.
+                                items:
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: set
+                              podTemplate:
+                                description: |-
+                                  PodTemplate customizes the checkpoint Job pod. The operator starts from the
+                                  selected workload container and merges this template so users can add helper
+                                  containers such as gms-saver.
+                                type: object
+                                x-kubernetes-preserve-unknown-fields: true
+                            type: object
                           mode:
                             default: Auto
                             description: |-
@@ -973,10 +1060,21 @@ spec:
                               - Auto
                               - Manual
                             type: string
+                          targetContainerName:
+                            default: main
+                            description: TargetContainerName is the workload container to snapshot and restore.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
                         type: object
                         x-kubernetes-validations:
                           - message: When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified
                             rule: '!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))'
+                          - message: checkpoint.job cannot be set when checkpointRef is specified
+                            rule: '!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0'
+                          - message: checkpoint.job can only be set in Auto mode
+                            rule: '!has(self.job) || !has(self.mode) || self.mode == ''Auto'''
                       componentType:
                         description: ComponentType indicates the role of this component (for example, "main").
                         type: string
@@ -11015,9 +11113,48 @@ spec:
                             type: string
                           enabled:
                             description: |-
-                              Enabled activates the GMS sidecar. GPU resources on the main container
-                              are replaced with a DRA ResourceClaim for shared GPU access.
+                              Enabled activates GMS wiring. GPU resources on client containers are
+                              replaced with a DRA ResourceClaim for shared GPU access.
                             type: boolean
+                          extraClientContainers:
+                            description: |-
+                              ExtraClientContainers lists additional user-declared containers that should
+                              be wired as GMS clients in pods rendered from the enclosing spec.
+                              DGD/DCD services apply this to service pods; DynamoCheckpoint applies this
+                              to checkpoint Job pods. In each rendered pod, only matching container
+                              names are wired; absent names are ignored.
+                            items:
+                              maxLength: 63
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: set
+                          extraClientPods:
+                            description: |-
+                              ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+                              reserved for future use and is rejected until inter-pod client orchestration is wired.
+                            items:
+                              description: GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+                              properties:
+                                name:
+                                  description: Name identifies this client pod.
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                podTemplate:
+                                  description: PodTemplate configures the pod to run as a GMS client.
+                                  type: object
+                                  x-kubernetes-preserve-unknown-fields: true
+                              required:
+                                - name
+                                - podTemplate
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                              - name
+                            x-kubernetes-list-type: map
                           mode:
                             default: intraPod
                             description: Mode selects the GMS deployment topology.
@@ -11028,6 +11165,13 @@ spec:
                         required:
                           - enabled
                         type: object
+                        x-kubernetes-validations:
+                          - message: extraClientContainers is only supported with mode=intraPod
+                            rule: '!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == ''intraPod'''
+                          - message: extraClientPods is only supported with mode=interPod
+                            rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == ''interPod'''
+                          - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
+                            rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                       ingress:
                         description: Ingress config to expose the component outside the cluster (or through a service mesh).
                         properties:
@@ -12143,6 +12287,28 @@ spec:
                                   - backendFramework
                                   - model
                                 type: object
+                              job:
+                                description: job customizes the checkpoint Job that is created in Auto mode.
+                                properties:
+                                  gmsClientContainers:
+                                    description: |-
+                                      gmsClientContainers lists checkpoint Job containers that should receive
+                                      GMS client wiring. Requires gpuMemoryService on the component.
+                                    items:
+                                      maxLength: 63
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: set
+                                  podTemplate:
+                                    description: |-
+                                      podTemplate customizes the checkpoint Job pod. The operator starts from the
+                                      selected workload container and merges this template so users can add helper
+                                      containers such as gms-saver.
+                                    type: object
+                                    x-kubernetes-preserve-unknown-fields: true
+                                type: object
                               mode:
                                 default: Auto
                                 description: |-
@@ -12153,10 +12319,21 @@ spec:
                                   - Auto
                                   - Manual
                                 type: string
+                              targetContainerName:
+                                default: main
+                                description: targetContainerName is the workload container to snapshot and restore.
+                                maxLength: 63
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
                             type: object
                             x-kubernetes-validations:
                               - message: When checkpoint is configured, either checkpointRef or identity must be specified
                                 rule: (has(self.checkpointRef) && size(self.checkpointRef) > 0) || has(self.identity)
+                              - message: checkpoint.job cannot be set when checkpointRef is specified
+                                rule: '!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0'
+                              - message: checkpoint.job can only be set in Auto mode
+                                rule: '!has(self.job) || !has(self.mode) || self.mode == ''Auto'''
                           failover:
                             description: |-
                               failover configures active-passive GPU failover for this component.
@@ -12187,13 +12364,51 @@ spec:
                             type: object
                           gpuMemoryService:
                             description: |-
-                              gpuMemoryService configures the GPU Memory Service (GMS) sidecar.
-                              When set, a GMS sidecar is injected and GPU access is managed via DRA.
+                              gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU
+                              access for GMS clients is managed via DRA.
                             properties:
                               deviceClassName:
                                 default: gpu.nvidia.com
                                 description: deviceClassName is the DRA `DeviceClass` to request GPUs from.
                                 type: string
+                              extraClientContainers:
+                                description: |-
+                                  extraClientContainers lists additional user-declared containers that should
+                                  be wired as GMS clients in service pods. Checkpoint Job clients are declared
+                                  under checkpoint.job.gmsClientContainers. In each rendered pod, only
+                                  matching container names are wired; absent names are ignored.
+                                items:
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: set
+                              extraClientPods:
+                                description: |-
+                                  extraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+                                  reserved for future use and is rejected until inter-pod client orchestration is wired.
+                                items:
+                                  description: GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+                                  properties:
+                                    name:
+                                      description: name identifies this client pod.
+                                      maxLength: 63
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                      type: string
+                                    podTemplate:
+                                      description: podTemplate configures the pod to run as a GMS client.
+                                      type: object
+                                      x-kubernetes-preserve-unknown-fields: true
+                                  required:
+                                    - name
+                                    - podTemplate
+                                  type: object
+                                type: array
+                                x-kubernetes-list-map-keys:
+                                  - name
+                                x-kubernetes-list-type: map
                               mode:
                                 default: IntraPod
                                 description: mode selects the GMS deployment topology.
@@ -12202,6 +12417,13 @@ spec:
                                   - InterPod
                                 type: string
                             type: object
+                            x-kubernetes-validations:
+                              - message: extraClientContainers is only supported with mode=IntraPod
+                                rule: '!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == ''IntraPod'''
+                              - message: extraClientPods is only supported with mode=InterPod
+                                rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == ''InterPod'''
+                              - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
+                                rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                         type: object
                       frontendSidecar:
                         description: |-
@@ -20559,6 +20781,71 @@ spec:
                       - name
                     type: object
                   type: array
+                experimental:
+                  description: |-
+                    experimental groups graph-level preview features whose API shape and
+                    behavior may change in breaking ways between v1beta1 releases.
+                  properties:
+                    kvTransferPolicy:
+                      description: |-
+                        kvTransferPolicy configures topology-aware routing for KV-cache
+                        transfers between prefill and decode workers.
+                      properties:
+                        domain:
+                          description: |-
+                            domain is the logical name for the topology level to enforce
+                            (e.g. "zone", "rack"). The router uses this to match workers that
+                            share the same value for the label identified by `labelKey`.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                        enforcement:
+                          default: required
+                          description: |-
+                            enforcement controls how the selected prefill worker's topology is
+                            applied to decode routing. "required" only allows decode workers in the
+                            same topology domain as the selected prefill worker. "preferred" keeps
+                            all decode workers eligible, but biases selection toward workers in the
+                            same topology domain. Defaults to "required".
+                          enum:
+                            - required
+                            - preferred
+                          type: string
+                        labelKey:
+                          description: |-
+                            labelKey is a Kubernetes node label key (e.g.
+                            "topology.kubernetes.io/zone") whose value identifies the topology
+                            domain for each worker. The operator copies the node label onto worker
+                            pods so the runtime can publish it as worker metadata. The label
+                            should correspond to the topology level named in `domain`.
+                          maxLength: 317
+                          minLength: 1
+                          pattern: ^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$
+                          type: string
+                          x-kubernetes-validations:
+                            - message: labelKey prefix must be 253 characters or less
+                              rule: '!self.contains(''/'') || self.split(''/'')[0].size() <= 253'
+                        preferredWeight:
+                          description: |-
+                            preferredWeight is required and used only when enforcement is
+                            "preferred". Higher values create a stronger same-domain routing
+                            preference, but do not guarantee same-domain selection. The value is not
+                            a probability; worker selection still depends on load and other routing
+                            inputs. A value of 0 disables the topology preference; 1 is the strongest
+                            supported preference.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                      required:
+                        - domain
+                      type: object
+                      x-kubernetes-validations:
+                        - message: labelKey is required until alternate topology sources are supported
+                          rule: has(self.labelKey)
+                        - message: preferredWeight is required when enforcement is preferred
+                          rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
+                        - message: preferredWeight may only be set when enforcement is preferred
+                          rule: '!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == ''preferred'')'
+                  type: object
                 labels:
                   additionalProperties:
                     type: string

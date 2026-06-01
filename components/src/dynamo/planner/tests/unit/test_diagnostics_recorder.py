@@ -266,6 +266,8 @@ class TestDiagnosticsRecorder:
             assert len(content) > 1000
             assert "plotly" in content.lower()
             assert "Replica Counts" in content
+            assert "Recommended Prefill Replicas" in content
+            assert "Recommended Decode Replicas" in content
             assert "Observed TTFT vs SLA" in content
             assert "Observed ITL vs SLA" in content
             assert "Estimated TTFT vs SLA" in content
@@ -375,6 +377,72 @@ class TestDiagnosticsRecorder:
             assert filepath is not None
             log_path = os.path.splitext(filepath)[0] + ".log.jsonl.gz"
             assert not os.path.exists(log_path)
+
+    def test_report_plots_recommended_replica_events(self, monkeypatch):
+        from plotly.graph_objects import Figure
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir)
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            ticks = [
+                (
+                    TickInput(
+                        now_s=1000.0,
+                        worker_counts=WorkerCounts(
+                            ready_num_prefill=1, ready_num_decode=1
+                        ),
+                    ),
+                    PlannerEffects(diagnostics=TickDiagnostics()),
+                ),
+                (
+                    TickInput(
+                        now_s=1060.0,
+                        worker_counts=WorkerCounts(
+                            ready_num_prefill=1, ready_num_decode=1
+                        ),
+                    ),
+                    PlannerEffects(
+                        scale_to=ScalingDecision(num_prefill=3, num_decode=4),
+                        diagnostics=TickDiagnostics(),
+                    ),
+                ),
+                (
+                    TickInput(
+                        now_s=1120.0,
+                        worker_counts=WorkerCounts(
+                            ready_num_prefill=1, ready_num_decode=1
+                        ),
+                    ),
+                    PlannerEffects(diagnostics=TickDiagnostics()),
+                ),
+            ]
+
+            observed = Metrics(ttft=100.0, itl=10.0, num_req=60, isl=800, osl=120)
+            for tick_input, effects in ticks:
+                recorder.record(tick_input, effects, observed, gpu_hours=1.0)
+
+            traces = []
+            original_add_trace = Figure.add_trace
+
+            def capture_trace(self, trace, *args, **kwargs):
+                traces.append(trace)
+                return original_add_trace(self, trace, *args, **kwargs)
+
+            monkeypatch.setattr(Figure, "add_trace", capture_trace)
+            recorder._build_report_html(list(recorder._snapshots))
+
+            prefill_trace = next(
+                t for t in traces if t.name == "Recommended Prefill Replicas"
+            )
+            decode_trace = next(
+                t for t in traces if t.name == "Recommended Decode Replicas"
+            )
+
+            assert list(prefill_trace.y) == [None, 3, None]
+            assert list(decode_trace.y) == [None, 4, None]
+            assert prefill_trace.mode == "markers"
+            assert decode_trace.mode == "markers"
 
     def test_generate_report_clears_snapshots(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

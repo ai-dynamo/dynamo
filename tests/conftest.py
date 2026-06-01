@@ -263,6 +263,17 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     if config.getoption("skip_service_restart", default=None):
         extra_args.append("--skip-service-restart")
 
+    # Forward pytest-cov flags so orchestrator children record coverage.
+    # Without this, profiled GPU tests run under run_gpu_parallel_tests=true
+    # bypass --cov entirely and contribute no .coverage data to the nightly
+    # coverage-report merge. Per-child COVERAGE_FILE (set in run_parallel)
+    # prevents siblings from clobbering each other's session-end output.
+    if config.pluginmanager.get_plugin("_cov") is not None:
+        for src in config.getoption("cov_source", default=None) or []:
+            extra_args.append(f"--cov={src}")
+        for rpt in config.getoption("cov_report", default=None) or []:
+            extra_args.append(f"--cov-report={rpt}")
+
     # Forward -o cache_dir= so workers don't fall back to <cwd>/.pytest_cache.
     # In CI cwd=/workspace is read-only for the runner uid, and pyproject's
     # filterwarnings=["error"] escalates the resulting PytestCacheWarning into
@@ -1172,15 +1183,27 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
     - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
     """
-    frontend_port = allocate_port(DefaultPort.FRONTEND.value)
-    system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
-    kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
-    all_ports = [frontend_port, *system_port_list, kv_event_port]
+    # Track ports as they are allocated so a failure mid-sequence (e.g. NIXL
+    # allocation raising) still cleans up earlier reservations via finally,
+    # rather than leaking them until stale cleanup and exhausting the xdist pool.
+    all_ports: list[int] = []
     try:
+        frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+        all_ports.append(frontend_port)
+        system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
+        all_ports.extend(system_port_list)
+        kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
+        all_ports.append(kv_event_port)
+        # One NIXL side-channel port per worker (avoids xdist collisions on shared hosts).
+        nixl_side_channel_ports = allocate_ports(
+            num_system_ports, DefaultPort.SYSTEM1.value
+        )
+        all_ports.extend(nixl_side_channel_ports)
         yield ServicePorts(
             frontend_port=frontend_port,
             system_ports=system_port_list,
             kv_event_port=kv_event_port,
+            nixl_side_channel_ports=nixl_side_channel_ports,
         )
     finally:
         deallocate_ports(all_ports)

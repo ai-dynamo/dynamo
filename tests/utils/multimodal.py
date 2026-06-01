@@ -96,7 +96,7 @@ def make_image_payload_cached_tokens(
                     ],
                 }
             ],
-            "max_tokens": 100,
+            "max_tokens": 50,
             "temperature": 0.0,
             "stream": False,
         },

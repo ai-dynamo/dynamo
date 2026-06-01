@@ -127,6 +127,12 @@ class LoadScalingMixin:
             self._diag_load_reason_prefill = "no_fpm_data"
             self._diag_load_reason_decode = "no_fpm_data"
             return None
+        if self._scaling_in_progress("prefill") or self._scaling_in_progress("decode"):
+            logger.info("Scaling in progress for disagg deployment, observing only")
+            self._diag_load_reason = "scaling_in_progress"
+            self._diag_load_reason_prefill = "scaling_in_progress"
+            self._diag_load_reason_decode = "scaling_in_progress"
+            return None
         if p_stats and not self._reconcile_fpm_worker_count(
             p_stats, self._num_p_workers, "prefill"
         ):

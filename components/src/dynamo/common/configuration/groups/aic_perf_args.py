@@ -15,6 +15,9 @@ _AIC_PERF_FIELDS: tuple[str, ...] = (
     "aic_backend_version",
     "aic_tp_size",
     "aic_model_path",
+    "aic_moe_tp_size",
+    "aic_moe_ep_size",
+    "aic_attention_dp_size",
 )
 
 
@@ -24,6 +27,9 @@ class AicPerfConfigBase(ConfigBase):
     aic_backend_version: Optional[str]
     aic_tp_size: int
     aic_model_path: Optional[str]
+    aic_moe_tp_size: Optional[int]
+    aic_moe_ep_size: Optional[int]
+    aic_attention_dp_size: Optional[int]
 
     def aic_perf_kwargs(self) -> dict:
         return {field: getattr(self, field) for field in _AIC_PERF_FIELDS}
@@ -77,4 +83,34 @@ class AicPerfArgGroup(ArgGroup):
                 "[EXPERIMENTAL] Model path or model identifier to use for "
                 "AIC perf lookup."
             ),
+        )
+        add_argument(
+            g,
+            flag_name="--aic-moe-tp-size",
+            env_var="DYN_AIC_MOE_TP_SIZE",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] MoE tensor-parallel size to model in AIC. "
+                "Required by some MoE models."
+            ),
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--aic-moe-ep-size",
+            env_var="DYN_AIC_MOE_EP_SIZE",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] MoE expert-parallel size to model in AIC. "
+                "Required by some MoE models."
+            ),
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--aic-attention-dp-size",
+            env_var="DYN_AIC_ATTENTION_DP_SIZE",
+            default=None,
+            help="[EXPERIMENTAL] Attention data-parallel size to model in AIC.",
+            arg_type=int,
         )

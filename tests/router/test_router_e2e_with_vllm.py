@@ -109,7 +109,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             num_workers: Number of vLLM worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
             durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
@@ -645,7 +645,7 @@ def test_router_decisions_vllm_disagg(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
+@pytest.mark.timeout(690)  # 3x ~230s under new scheduler (3d1554f)
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [

@@ -37,6 +37,7 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 
@@ -98,7 +99,7 @@ def test_parse_args_returns_config_with_expected_attrs(monkeypatch):
     assert isinstance(config, Config)
     assert config.model == "Qwen/Qwen3-0.6B"
     assert config.namespace == "testns"
-    assert config.component == "tensorrt_llm"
+    assert config.component == "backend"
     assert config.endpoint == "generate"
 
 
