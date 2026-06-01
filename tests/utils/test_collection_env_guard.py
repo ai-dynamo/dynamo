@@ -72,9 +72,7 @@ def test_watched_prefixes_cover_backend_and_dynamo_env():
     # The #9724 leak key is now covered by the broad "DYNAMO_" prefix, so the
     # exact-key set is empty.
     assert WATCHED_ENV_KEYS == frozenset()
-    assert "DYNAMO_SKIP_PYTHON_LOG_INIT".startswith(
-        tuple(WATCHED_ENV_PREFIXES)
-    )
+    assert "DYNAMO_SKIP_PYTHON_LOG_INIT".startswith(tuple(WATCHED_ENV_PREFIXES))
 
 
 def test_diff_collection_env_reports_added_changed_and_removed_values():
