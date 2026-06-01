@@ -786,6 +786,19 @@ spec:
                         - Auto
                         - Manual
                       type: string
+                    startupPolicy:
+                      default: Immediate
+                      description: |-
+                        StartupPolicy defines when normal worker replicas are started relative to
+                        automatic checkpoint readiness.
+                        - Immediate: start workers cold immediately; later Pods restore from the
+                          checkpoint once it is Ready.
+                        - WaitForCheckpoint: keep worker replicas at zero until the checkpoint is
+                          Ready, then start them from the checkpoint.
+                      enum:
+                        - Immediate
+                        - WaitForCheckpoint
+                      type: string
                     targetContainerName:
                       default: main
                       description: TargetContainerName is the workload container to snapshot and restore.
@@ -11812,10 +11825,9 @@ spec:
                     In v1beta1 this block holds `gpuMemoryService` and `failover` (which
                     remain tightly coupled -- failover requires GMS -- and are expected to
                     evolve together as the DRA-based GPU sharing story matures), and
-                    `checkpoint` (whose interaction with the standalone DynamoCheckpoint
-                    resource and identity-hash computation is still settling). Fields here
-                    are explicitly NOT covered by the normal v1beta1 deprecation policy;
-                    do not depend on them for production workloads.
+                    `checkpoint` (whose API shape is still settling). Fields here are
+                    explicitly NOT covered by the normal v1beta1 deprecation policy; do not
+                    depend on them for production workloads.
                   properties:
                     checkpoint:
                       description: |-
@@ -11930,6 +11942,19 @@ spec:
                           enum:
                             - Auto
                             - Manual
+                          type: string
+                        startupPolicy:
+                          default: Immediate
+                          description: |-
+                            startupPolicy defines when normal worker replicas are started relative to
+                            automatic checkpoint readiness.
+                            `Immediate` (default): start workers cold immediately; later Pods restore
+                            from the checkpoint once it is Ready.
+                            `WaitForCheckpoint`: keep worker replicas at zero until the checkpoint is
+                            Ready, then start them from the checkpoint.
+                          enum:
+                            - Immediate
+                            - WaitForCheckpoint
                           type: string
                         targetContainerName:
                           default: main

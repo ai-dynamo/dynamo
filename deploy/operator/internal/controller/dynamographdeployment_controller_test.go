@@ -1914,6 +1914,81 @@ func TestDynamoGraphDeploymentReconciler_checkpointWorkerHashForComponentUsesAct
 	}
 }
 
+func TestApplyDCDCheckpointStartupPolicy(t *testing.T) {
+	t.Run("immediate stamps stable restore candidate metadata", func(t *testing.T) {
+		dcd := &v1beta1.DynamoComponentDeployment{
+			Spec: v1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					Replicas: ptr.To(int32(2)),
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{
+								snapshotprotocol.CheckpointIDLabel: "stale",
+							},
+							Annotations: map[string]string{
+								snapshotprotocol.CheckpointStatusAnnotation: "stale",
+							},
+						},
+					},
+				},
+			},
+		}
+		info := &checkpoint.CheckpointInfo{
+			Enabled:        true,
+			Exists:         true,
+			Ready:          true,
+			Hash:           "checkpoint-id",
+			CheckpointName: "checkpoint-name",
+			StartupPolicy:  v1alpha1.CheckpointStartupPolicyImmediate,
+		}
+
+		if err := applyDCDCheckpointStartupPolicy(dcd, info); err != nil {
+			t.Fatalf("applyDCDCheckpointStartupPolicy() error = %v", err)
+		}
+
+		require.NotNil(t, dcd.Spec.Experimental)
+		require.NotNil(t, dcd.Spec.Experimental.Checkpoint)
+		require.NotNil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+		assert.Equal(t, "checkpoint-name", *dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+		assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Identity)
+		assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Job)
+		assert.Equal(t, v1beta1.CheckpointStartupPolicyImmediate, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
+		assert.Equal(t, int32(2), *dcd.Spec.Replicas)
+		assert.Empty(t, dcd.Spec.PodTemplate.Labels[snapshotprotocol.CheckpointIDLabel])
+		assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
+		assert.Equal(t, "checkpoint-name", dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
+		assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])
+	})
+
+	t.Run("wait for checkpoint gates replicas until ready", func(t *testing.T) {
+		dcd := &v1beta1.DynamoComponentDeployment{
+			Spec: v1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					Replicas: ptr.To(int32(3)),
+				},
+			},
+		}
+		info := &checkpoint.CheckpointInfo{
+			Enabled:        true,
+			Exists:         true,
+			Ready:          false,
+			CheckpointName: "checkpoint-name",
+			StartupPolicy:  v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		}
+
+		if err := applyDCDCheckpointStartupPolicy(dcd, info); err != nil {
+			t.Fatalf("applyDCDCheckpointStartupPolicy() error = %v", err)
+		}
+
+		require.NotNil(t, dcd.Spec.Experimental)
+		require.NotNil(t, dcd.Spec.Experimental.Checkpoint)
+		require.NotNil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+		assert.Equal(t, "checkpoint-name", *dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+		assert.Equal(t, v1beta1.CheckpointStartupPolicyWaitForCheckpoint, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
+		assert.Equal(t, int32(0), *dcd.Spec.Replicas)
+	})
+}
+
 // mockScaleClient implements scale.ScalesGetter for testing
 type mockScaleClient struct{}
 
@@ -2494,6 +2569,56 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).NotTo(gomega.BeNil())
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).To(gomega.Equal(int32(6)))
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[2].Replicas).To(gomega.Equal(int32(7)))
+}
+
+func TestPreserveGrovePodCliqueSetReplicasSkipsCheckpointGatedComponents(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	desired := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{
+						Name: "worker",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "worker",
+						},
+						Spec: grovev1alpha1.PodCliqueSpec{Replicas: 0},
+					},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode", Replicas: ptr.To(int32(0))},
+				},
+			},
+		},
+	}
+	existing := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 5}},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode", Replicas: ptr.To(int32(7))},
+				},
+			},
+		},
+	}
+
+	preserveGrovePodCliqueSetReplicas(desired, existing, map[string]*checkpoint.CheckpointInfo{
+		"worker": {
+			Enabled:       true,
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+		"decode": {
+			Enabled:       true,
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+	})
+
+	g.Expect(desired.Spec.Template.Cliques[0].Spec.Replicas).To(gomega.Equal(int32(0)))
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).NotTo(gomega.BeNil())
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.Equal(int32(0)))
 }
 
 func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_KeepsNativeWorkerSelectors(t *testing.T) {

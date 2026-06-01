@@ -624,6 +624,7 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 						},
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
 							Mode:                v1beta1.CheckpointModeAuto,
+							StartupPolicy:       v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
 							CheckpointRef:       &ref,
 							TargetContainerName: "worker",
 							Job: &v1beta1.ComponentCheckpointJobConfig{
@@ -662,7 +663,8 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 						ExtraClientContainers: []string{"gms-loader"},
 					},
 					Checkpoint: &ServiceCheckpointConfig{
-						Enabled: true,
+						Enabled:       true,
+						StartupPolicy: CheckpointStartupPolicyWaitForCheckpoint,
 						Identity: &DynamoCheckpointIdentity{
 							Model:            "model",
 							BackendFramework: "vllm",
@@ -914,6 +916,7 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 			Checkpoints: map[string]v1beta1.ComponentCheckpointStatus{
 				"worker": {
 					CheckpointName: "ckpt-abc",
+					CheckpointID:   "ckpt-deadbeef",
 					IdentityHash:   "sha256:deadbeef",
 					Ready:          true,
 				},
