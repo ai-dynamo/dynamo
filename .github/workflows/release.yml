@@ -130,7 +130,8 @@ jobs:
           # cargo and maturin stamp into the wheel filename / METADATA.
           BASE_VERSION=$(awk '/^version = / {gsub(/"/, "", $3); print $3; exit}' pyproject.toml)
           # Accept X.Y.Z or X.Y.Z + one PEP 440 suffix: .postN, .devN, aN, bN, rcN.
-          # The SEMVER_BASE sed below must stay in lockstep with this regex.
+          # Validates the wheel version (what cargo/maturin stamp); container
+          # images and Helm charts derive their version from VERSION instead.
           if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+|\.dev[0-9]+|a[0-9]+|b[0-9]+|rc[0-9]+)?$ ]]; then
             echo "Error: cannot parse base version from pyproject.toml (got '${BASE_VERSION}')"
             exit 1
@@ -175,29 +176,17 @@ jobs:
             fi
           fi
 
-          # Convert PEP 440 suffix on BASE_VERSION to SemVer pre-release so the
-          # Helm chart and NGC tag stay valid SemVer. Mapping:
-          #   .postN → -post.N    .devN → -dev.N
-          #   aN     → -alpha.N   bN    → -beta.N    rcN → -rc.N
-          # The auto-incremented RC counter is appended as -rc.NEXT_RC even when
-          # BASE_VERSION already contains rcN — those stack (e.g. 1.2.0-rc.1-rc.0).
-          SEMVER_BASE=$(echo "${BASE_VERSION}" | sed -E \
-            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)\.post([0-9]+)$/\1-post.\2/' \
-            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)\.dev([0-9]+)$/\1-dev.\2/' \
-            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)a([0-9]+)$/\1-alpha.\2/' \
-            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)b([0-9]+)$/\1-beta.\2/' \
-            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)$/\1-rc.\2/')
+          # Container images and Helm charts are versioned from the release-branch
+          # version (VERSION, e.g. release/1.2.0 -> 1.2.0), NOT from the pyproject
+          # base version. This decouples the image/chart tag from the wheel's
+          # PEP 440 suffix: the wheel can stay e.g. 1.2.0.post1 while images and
+          # charts publish under the clean 1.2.0 line. VERSION off a release/*
+          # branch is a plain X.Y.Z, so we keep the established plain-version tag
+          # shapes (Helm: 1.2.0-rcN, NGC: 1.2.0rcN).
+          HELM_CHART_VERSION="${VERSION}-rc${NEXT_RC}"
+          NGC_VERSION_TAG="${VERSION}rc${NEXT_RC}"
 
-          if [[ "${SEMVER_BASE}" == *-* ]]; then
-            # Suffixed base: dotted SemVer form, identical for Helm and NGC.
-            HELM_CHART_VERSION="${SEMVER_BASE}-rc.${NEXT_RC}"
-            NGC_VERSION_TAG="${SEMVER_BASE}-rc.${NEXT_RC}"
-          else
-            # Plain X.Y.Z: preserve the existing tag shape exactly.
-            HELM_CHART_VERSION="${SEMVER_BASE}-rc${NEXT_RC}"
-            NGC_VERSION_TAG="${VERSION}rc${NEXT_RC}"
-          fi
-
+          # Wheel keeps the exact PEP 440 version pinned in pyproject.toml.
           WHEEL_VERSION="${BASE_VERSION}"
 
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
