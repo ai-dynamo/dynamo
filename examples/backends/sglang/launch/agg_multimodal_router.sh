@@ -62,10 +62,11 @@ EOF
     esac
 done
 
-echo "=== Lightseek MM Exact Routing Launch (SGLang) ==="
-echo "MODEL=${MODEL}"
-echo "NUM_WORKERS=${NUM_WORKERS}, BLOCK_SIZE=${BLOCK_SIZE}"
-echo "HTTP_PORT=${HTTP_PORT}, NAMESPACE=${NAMESPACE}"
+print_launch_banner --multimodal --no-curl \
+    "Lightseek MM Exact Routing (SGLang)" "${MODEL}" "${HTTP_PORT}" \
+    "NUM_WORKERS:  ${NUM_WORKERS}" \
+    "BLOCK_SIZE:   ${BLOCK_SIZE}" \
+    "NAMESPACE:    ${NAMESPACE}"
 
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
@@ -99,12 +100,14 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 # DYN_VLLM_KV_EVENT_PORT so deriving `base + (i-1)` from it would collide
 # with adjacent test slots.
 WORKER_PORTS=()
+KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
     DEFAULT_WORKER_PORT=$((SGLANG_SYSTEM_PORT_BASE + (i - 1) * 2))
     HARNESS_VAR="DYN_SYSTEM_PORT${i}"
     WORKER_PORT="${!HARNESS_VAR:-${DEFAULT_WORKER_PORT}}"
     WORKER_PORTS+=("${WORKER_PORT}")
     KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
+    KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
 
     KV_EVENTS_CONFIG="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
@@ -158,8 +161,11 @@ echo
 echo "=== All services are ready ==="
 echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i health: http://127.0.0.1:$((SGLANG_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
-    echo "Worker $i kv-events: tcp://*:$((KV_EVENTS_PORT_BASE + (i - 1)))"
+    # Use the actual port values from the launch loop above so the
+    # summary reflects DYN_SYSTEM_PORT{i} / KV_EVENTS_PORT_BASE overrides
+    # the harness may have applied (instead of the default formula).
+    echo "Worker $i health: http://127.0.0.1:${WORKER_PORTS[i-1]}/health"
+    echo "Worker $i kv-events: tcp://*:${KV_EVENTS_PORTS[i-1]}"
 done
 echo
 echo "Architecture: Rust frontend + lightseek -> ${NUM_WORKERS}x SGLang workers"
