@@ -514,9 +514,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         logprob_kwargs = self._build_logprob_kwargs(request)
         extra_args = request.get("extra_args")
         remote_kv_reuse_plan = _extract_remote_kv_reuse_plan(request, extra_args)
+        cache_hints = (
+            {"shared_hicache": remote_kv_reuse_plan}
+            if remote_kv_reuse_plan is not None
+            else None
+        )
         if remote_kv_reuse_plan is not None:
             logging.debug(
-                "Forwarding router remote_kv_reuse_plan as SGLang shared_hicache_plan: "
+                "Forwarding router remote_kv_reuse_plan as SGLang cache_hints.shared_hicache: "
                 "plan_id=%s source_worker_id=%s source_endpoint=%s extra_arg_keys=%s",
                 remote_kv_reuse_plan.get("plan_id"),
                 remote_kv_reuse_plan.get("source_worker_id"),
@@ -575,7 +580,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                shared_hicache_plan=remote_kv_reuse_plan,
+                cache_hints=cache_hints,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
@@ -621,7 +626,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                shared_hicache_plan=remote_kv_reuse_plan,
+                cache_hints=cache_hints,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
