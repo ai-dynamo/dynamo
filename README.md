@@ -107,6 +107,19 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 - **K8s Inference Gateway plugin:** KV-aware routing inside the standard Kubernetes gateway
 - **Storage-tier KV offload:** S3/Azure blob support + global KV events for cluster-wide cache visibility
 
+## Deployment Modes
+
+Dynamo can run in two deployment modes. Both expose an OpenAI-compatible API and support the same backends, disaggregated serving, and KV-aware routing.
+
+| Mode | What it is | When to use |
+|------|------------|-------------|
+| **Standalone** *(default)* | Dynamo's own Frontend serves HTTP and the integrated Dynamo Router makes KV-aware routing decisions. No external gateway required. | Local development, single-cluster deployments, and any environment where you want Dynamo to own the request entry point end to end. |
+| **Gateway (GAIE)** | Dynamo runs behind a Kubernetes [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway. KV-aware routing is performed at the gateway layer by the Dynamo Endpoint Picker Plugin (EPP); the Frontend runs as a sidecar in `--router-mode direct` and respects the EPP's per-request worker selection. | Production Kubernetes platforms that already standardize on the Inference Gateway, mixed-tenant clusters, or when you need gateway-level policy (auth, rate limiting, observability) co-located with KV-aware routing. |
+
+In **standalone** mode, request flow is `client → Frontend → Router → workers`. In **gateway** mode, request flow is `client → Inference Gateway → EPP (KV-aware routing) → Frontend sidecar (direct) → workers`.
+
+See the [Inference Gateway (GAIE) guide](docs/kubernetes/inference-gateway.md) for the full setup, supported features, and configuration of gateway mode.
+
 ## Quick Start
 
 ### Option A: Container (fastest)

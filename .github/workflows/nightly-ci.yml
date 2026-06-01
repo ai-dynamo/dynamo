@@ -6,11 +6,6 @@ name: Nightly CI Pipeline
 on:
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
-  # TODO: REVERT — testing only. Triggers full nightly on push to this dev
-  # branch. MUST be removed before merging to main.
-  push:
-    branches:
-      - pvijayakrish/nightly-notifications
   workflow_dispatch:  # Allow manual triggering for testing
     inputs:
       release:
@@ -129,13 +124,6 @@ jobs:
           case "${GITHUB_EVENT_NAME}" in
             schedule)
               # cron must keep tests on so a failing nightly blocks the release.
-              echo "release=true" >> "$GITHUB_OUTPUT"
-              echo "run_tests=true" >> "$GITHUB_OUTPUT"
-              ;;
-            push)
-              # TODO: REVERT — testing only. Treats push to the dev branch like
-              # schedule so the full nightly (incl. release.yml + GitLab) runs.
-              # MUST be removed before merging to main.
               echo "release=true" >> "$GITHUB_OUTPUT"
               echo "run_tests=true" >> "$GITHUB_OUTPUT"
               ;;

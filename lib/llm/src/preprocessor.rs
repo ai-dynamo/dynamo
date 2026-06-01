@@ -1800,6 +1800,7 @@ impl OpenAIPreprocessor {
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
         trace_tokens_enabled: bool,
+        trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -1818,6 +1819,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
+            trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
         }
 
         let state = State {
@@ -1830,6 +1832,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: false,
             finished: false,
             trace_tokens_enabled,
+            trace_finish_reason_metadata,
         };
 
         // transform the common response stream into a chat response stream
@@ -1869,6 +1872,13 @@ impl OpenAIPreprocessor {
                         inner.cumulative_output_tokens += chunk_tokens;
 
                         let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
+
+                        crate::agents::trace::record_backend_finish_reason_metadata(
+                            inner.trace_finish_reason_metadata.as_ref(),
+                            backend_output.index,
+                            backend_output.finish_reason.as_ref(),
+                            backend_output.stop_reason.as_ref(),
+                        );
 
                         (chunk_tokens, isl)
                     } else {
@@ -2631,6 +2641,8 @@ impl
             self.kv_cache_block_size,
         );
         let trace_tokens_enabled = trace_state.is_some();
+        let trace_finish_reason_metadata =
+            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -2664,6 +2676,7 @@ impl
             response_generator,
             context.clone(),
             trace_tokens_enabled,
+            trace_finish_reason_metadata,
         );
 
         let transformed_stream = self.postprocessor_parsing_stream(
@@ -2706,7 +2719,7 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = crate::agents::trace::wrap_agent_trace_request_end_stream(
+        let final_stream = crate::agents::trace::wrap_agent_trace_chat_request_end_stream(
             final_stream,
             trace_state,
             request_id,
@@ -2790,6 +2803,8 @@ impl
             self.kv_cache_block_size,
         );
         let trace_tokens_enabled = trace_state.is_some();
+        let trace_finish_reason_metadata =
+            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -2825,9 +2840,10 @@ impl
             response_generator,
             context.clone(),
             trace_tokens_enabled,
+            trace_finish_reason_metadata,
         );
 
-        let stream = crate::agents::trace::wrap_agent_trace_request_end_stream(
+        let stream = crate::agents::trace::wrap_agent_trace_completion_request_end_stream(
             Box::pin(stream),
             trace_state,
             request_id,
