@@ -19,6 +19,7 @@ use super::{
     bus,
     config::{self, AuditPolicy},
     handle::AuditRecord,
+    otel_sink::OtelSink,
 };
 
 #[async_trait]
@@ -194,6 +195,10 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn AuditSink>>> {
                     Arc::new(JsonlGzipAuditSink::from_policy(policy).await?);
                 out.push(sink);
             }
+            "otel" => {
+                let sink: Arc<dyn AuditSink> = Arc::new(OtelSink::from_policy(policy).await?);
+                out.push(sink);
+            }
             other => tracing::warn!(%other, "audit: unknown sink ignored"),
         }
     }
@@ -205,6 +210,9 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn AuditSink>>> {
 pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Result<()> {
     let sinks = parse_sinks_from_env().await?;
     let sink_count = sinks.len();
+    if sink_count == 0 {
+        anyhow::bail!("audit is enabled but no valid audit sinks were configured");
+    }
     for sink in sinks {
         let name = sink.name();
         let mut rx: broadcast::Receiver<AuditRecord> = bus::subscribe();
@@ -256,6 +264,7 @@ mod tests {
     use flate2::read::MultiGzDecoder;
     use tempfile::tempdir;
 
+    use crate::audit::handle::AuditEventType;
     use crate::telemetry::jsonl_gz::segment_path;
 
     use super::*;
@@ -263,11 +272,13 @@ mod tests {
     fn sample_record() -> AuditRecord {
         AuditRecord {
             schema_version: 1,
+            event_type: AuditEventType::Response,
             request_id: "req-abc".to_string(),
             requested_streaming: false,
             model: "test-model".to_string(),
             request: None,
             response: None,
+            otel_http_headers: None,
         }
     }
 

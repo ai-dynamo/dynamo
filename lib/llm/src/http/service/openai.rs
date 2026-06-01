@@ -508,6 +508,25 @@ fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, heade
     }
 }
 
+fn attach_audit_otel_http_headers<T: Send + Sync + 'static>(
+    request: &mut Context<T>,
+    headers: &HeaderMap,
+    request_store: bool,
+) {
+    if !crate::audit::config::otel_sink_capture_enabled() {
+        return;
+    }
+    let policy = crate::audit::config::policy();
+    if !policy.force_logging && !request_store {
+        return;
+    }
+
+    request.insert(
+        crate::audit::handle::OTEL_HTTP_HEADERS_CONTEXT_KEY,
+        crate::audit::handle::AuditHttpRequestHeaders::new(Arc::new(headers.clone())),
+    );
+}
+
 fn context_from_headers<T: Send + Sync + 'static>(
     request: T,
     request_id: String,
@@ -1191,13 +1210,15 @@ async fn handler_chat_completions(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
+    let request_store = request.inner.store.unwrap_or(false);
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(resolved_model).to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
+    attach_audit_otel_http_headers(&mut request, &headers, request_store);
     let context = request.context();
 
     // create the connection handles

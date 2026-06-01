@@ -1713,11 +1713,15 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
 
         response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
 
-        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
-        // TODO: add a flag to control what is returned in the SSE stream
+        // ANNOTATION_LLM_METRICS is audit-only: strip all fields so this chunk
+        // is never forwarded to the client SSE stream.  The audit DeltaAggregator
+        // sees the raw data before EventConverter runs.  The client-facing usage
+        // chunk (when stream_options.include_usage=true) is emitted as a separate
+        // plain data chunk in the preprocessor.
         if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
             annotated.event = None;
             annotated.comment = None;
+            annotated.data = None;
         }
     }
 

@@ -380,8 +380,7 @@ pub mod llm {
     /// Audit sink configuration
     pub mod audit {
         /// Audit sink selection. Comma-separated values: `stderr`, `nats`,
-        /// `jsonl`, `jsonl_gz`. Setting any non-empty value enables audit
-        /// recording.
+        /// `jsonl`, `jsonl_gz`, `otel`. Unset disables audit recording.
         pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
 
         /// Force audit emission even when the request `store` flag is `false`.
@@ -410,6 +409,15 @@ pub mod llm {
 
         /// Rotating gzip JSONL audit sink roll threshold in record lines.
         pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
+
+        /// Maximum serialized OTEL audit payload bytes. Oversized records emit
+        /// an incomplete marker payload instead of the full request/response.
+        pub const DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES: &str = "DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES";
+
+        /// Comma-separated HTTP header names whose values are redacted in the
+        /// OTEL audit payload. Defaults always redact common credential headers.
+        pub const DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST: &str =
+            "DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST";
     }
 
     /// Per-request replay trace configuration
@@ -719,6 +727,8 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
+            llm::audit::DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
