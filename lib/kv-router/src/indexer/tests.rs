@@ -19,8 +19,8 @@ use crate::test_utils::{
     assert_exact_scores, assert_no_scores, assert_overlap_scores_eq, assert_score,
     flush_and_settle, make_clear_event, make_clear_event_with_dp_rank, make_remove_event,
     make_remove_event_with_parent, make_store_event, make_store_event_with_dp_rank,
-    make_store_event_with_parent, make_store_event_with_start_position, query_scores,
-    remove_event, router_event, snapshot_events, snapshot_tree, stored_blocks_with_sequence_hashes,
+    make_store_event_with_parent, make_store_event_with_start_position, query_scores, remove_event,
+    router_event, snapshot_events, snapshot_tree, stored_blocks_with_sequence_hashes,
 };
 
 // ============================================================================
@@ -30,8 +30,7 @@ use crate::test_utils::{
 #[template]
 #[rstest]
 fn indexer_template(
-    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")]
-    variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -45,8 +44,7 @@ fn tree_size_indexer_template(
 #[template]
 #[rstest]
 fn approx_indexer_template(
-    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")]
-    variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -2969,7 +2967,9 @@ async fn positional_binary_matches_strided_differential() {
 
     // Workers that share a base prefix then diverge with a unique random tail. Divergence at a
     // position d makes such a worker drain at d for any query that follows the base past d.
-    let divergence_points = [1usize, 5, 31, 32, 33, 63, 64, 65, 100, 128, 500, 999, 1024, 1299];
+    let divergence_points = [
+        1usize, 5, 31, 32, 33, 63, 64, 65, 100, 128, 500, 999, 1024, 1299,
+    ];
     for (i, &d) in divergence_points.iter().enumerate() {
         let worker_id = (i + 1) as u64;
         let tail_len = 1 + rng.random_range(0..40usize);

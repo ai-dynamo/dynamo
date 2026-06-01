@@ -826,7 +826,12 @@ impl PositionalIndexer {
             // Fast path: do all active workers survive to the final position? If so, they all
             // matched through the end and are scored `len` by the final loop below.
             if self
-                .count_workers_at(len - 1, local_hashes[len - 1], &mut seq_hashes, local_hashes)
+                .count_workers_at(
+                    len - 1,
+                    local_hashes[len - 1],
+                    &mut seq_hashes,
+                    local_hashes,
+                )
                 .unwrap_or(0)
                 == active.len()
             {
