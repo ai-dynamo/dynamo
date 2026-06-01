@@ -466,6 +466,7 @@ class ThunderAgentScheduler:
                 + self._cfg.buffer_per_program
             )
 
+            resumed_this_tick = 0
             for program in resumable_programs:
                 if not backend_caps:
                     break
@@ -476,12 +477,22 @@ class ThunderAgentScheduler:
                 if required > remaining:
                     continue
                 self._resume_program(program, worker_id)
+                resumed_this_tick += 1
                 updated_remaining = remaining - required
                 if updated_remaining > self._cfg.buffer_per_program:
                     backend_caps[0] = (worker_id, updated_remaining)
                     backend_caps.sort(key=lambda x: -x[1])
                 else:
                     backend_caps.pop(0)
+
+            # INFO summary symmetric to the pause-side scheduler.tick log, so
+            # resume is observable at INFO (per-program detail stays at debug).
+            if resumed_this_tick:
+                logger.info(
+                    "scheduler.tick resumed=%d still_paused=%d",
+                    resumed_this_tick,
+                    len(self._table.paused),
+                )
 
     def _resume_program(
         self, program: Program, target_worker_id: Optional[int]
