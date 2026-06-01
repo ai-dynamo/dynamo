@@ -631,14 +631,31 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
+        // Harmony's `<|call|>` is BOTH the tool-call terminator the parser needs in the
+        // decoded text AND a gpt-oss EOS token. Hiding it like other EOS tokens strips the
+        // terminator before the harmony parser sees it, so tool calls are silently dropped
+        // (vLLM >=0.22 correctly stops on `<|call|>`, which is when this surfaces). Keep it
+        // visible — out of the hidden stop set — when the harmony tool-call parser is active.
+        // Generation still stops on it via the worker's own EOS; we only avoid *hiding* it.
+        let visible_eos: Vec<u32> = if matches!(self.tool_call_parser.as_deref(), Some("harmony")) {
+            dynamo_parsers::harmony_terminator_token_ids()
+        } else {
+            Vec::new()
+        };
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
             for eos_token in self.model_info.eos_token_ids() {
-                if !stop_tokens.contains(&eos_token) {
+                if !visible_eos.contains(&eos_token) && !stop_tokens.contains(&eos_token) {
                     stop_tokens.push(eos_token);
                 }
             }
         } else {
-            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+            stop_conditions.stop_token_ids_hidden = Some(
+                self.model_info
+                    .eos_token_ids()
+                    .into_iter()
+                    .filter(|t| !visible_eos.contains(t))
+                    .collect(),
+            );
         }
 
         // apply ignore eos if not already set
