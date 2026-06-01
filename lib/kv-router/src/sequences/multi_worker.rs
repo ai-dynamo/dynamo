@@ -615,14 +615,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Return modeled remaining prefill time by worker from the derived read model.
     ///
-    /// Values are signed milliseconds. For workers whose active prefills all have
-    /// modeled durations, the formula is:
-    /// `oldest_expected_ms - elapsed_since_oldest_anchor_ms + sum(non_oldest_expected_ms)`.
+    /// Values are non-negative milliseconds. For workers whose active prefills
+    /// all have modeled durations, the formula is:
+    /// `total_modeled_prefill_ms.saturating_sub(elapsed_since_oldest_anchor_ms)`.
     ///
-    /// The oldest term is intentionally not clipped at zero. Negative values are
-    /// advisory spillover for singleton predictions that have run past their
-    /// modeled duration; this allows elapsed time to reduce later modeled backlog
-    /// and accounts for engines that batch or overlap multiple prefills.
+    /// Elapsed time from the oldest active prefill can reduce later modeled
+    /// backlog, then the final worker backlog is clipped at zero. This accounts
+    /// for engines that batch or overlap multiple prefills.
     ///
     /// `Err(MissingExpectedDuration)` is expected for workers with any active
     /// prefill that lacks an AIC prediction, including the default no-AIC path or
@@ -1066,7 +1065,7 @@ mod tests {
     fn modeled_time_loads_by_worker(
         sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
         now: Instant,
-    ) -> HashMap<WorkerWithDpRank, Result<i64, PrefillTimeLoadError>> {
+    ) -> HashMap<WorkerWithDpRank, Result<u64, PrefillTimeLoadError>> {
         sequences
             .modeled_remaining_prefill_time_loads_at(now)
             .into_iter()

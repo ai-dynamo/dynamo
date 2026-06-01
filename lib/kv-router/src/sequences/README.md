@@ -72,10 +72,15 @@ This value is computed from admission-time prefill duration hints already stored
 then projected through `PromptRegistry` with the same advisory read semantics as token load.
 
 This read is not a routing input, protocol payload, metric, or authoritative engine timing signal.
-It returns signed milliseconds because negative values are meaningful: if the oldest active prefill
-has exceeded its singleton modeled duration, the negative spillover reduces later modeled backlog.
-That behavior is intentional because engines may batch or overlap multiple prefills faster than the
-per-request model represents.
+It returns non-negative milliseconds. Elapsed time from the oldest active prefill is applied to the
+aggregate modeled backlog, so spillover can reduce later modeled prefills before the final worker
+backlog clips at zero. That behavior is intentional because engines may batch or overlap multiple
+prefills faster than the per-request model represents.
+
+The active-token load view uses the same aggregate spillover only when all active prefills have
+modeled durations. If any active prefill lacks an expected duration, token load falls back to
+anchor-only decay so unmodeled no-AIC/default requests do not decay. A zero-duration anchor is treated
+as completing its own tokens immediately without inventing token spillover into later requests.
 
 When any active prefill for a worker lacks an expected duration, the modeled-time read returns
 `Err(MissingExpectedDuration)`. That is the normal default/no-AIC or prediction-failed state, and the

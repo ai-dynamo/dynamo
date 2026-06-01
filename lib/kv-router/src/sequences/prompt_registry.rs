@@ -31,7 +31,7 @@ impl WorkerLoadSnapshot {
     pub(super) fn modeled_remaining_prefill_time_ms(
         &self,
         now: Instant,
-    ) -> Result<i64, PrefillTimeLoadError> {
+    ) -> Result<u64, PrefillTimeLoadError> {
         self.prefill.modeled_remaining_prefill_time_ms_at(now)
     }
 }
@@ -170,7 +170,7 @@ impl PromptRegistry {
     pub(super) fn modeled_remaining_prefill_times_ms(
         &self,
         now: Instant,
-    ) -> HashMap<WorkerWithDpRank, Result<i64, PrefillTimeLoadError>> {
+    ) -> HashMap<WorkerWithDpRank, Result<u64, PrefillTimeLoadError>> {
         self.loads
             .iter()
             .map(|entry| {
@@ -273,7 +273,8 @@ mod tests {
                     expected_prefill_duration,
                     anchored_since,
                 }),
-                modeled_non_anchored_prefill_time_ms: expected_prefill_duration.map(|_| 0),
+                total_modeled_prefill_time_ms: expected_prefill_duration
+                    .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64),
             },
         }
     }
