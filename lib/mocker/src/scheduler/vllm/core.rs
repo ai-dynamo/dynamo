@@ -26,6 +26,7 @@ use crate::kv_manager::KvManager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::replay::TraceCollector;
+use crate::scheduler::trtllm;
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
     MockerMetrics, RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
@@ -55,7 +56,7 @@ pub(crate) struct SchedulerState {
     pub(crate) preemptions_total: u64,
 }
 
-struct PreemptedRequest {
+pub(super) struct PreemptedRequest {
     uuid: Uuid,
     signals: Vec<MoveBlock>,
 }
@@ -172,7 +173,7 @@ impl SchedulerState {
             .map(|request| &mut request.sequence)
     }
 
-    fn preempt(&mut self, mode: PreemptionMode) -> Option<PreemptedRequest> {
+    pub(super) fn preempt(&mut self, mode: PreemptionMode) -> Option<PreemptedRequest> {
         let uuid = loop {
             let candidate = match mode {
                 PreemptionMode::Lifo => self.running.pop_back(),
@@ -243,7 +244,7 @@ enum SwapInAdmissionAttempt {
 }
 
 pub(crate) struct VllmCore {
-    args: MockEngineArgs,
+    pub(super) args: MockEngineArgs,
     dp_rank: u32,
     pub(super) state: SchedulerState,
     pub(super) kv_manager: KvManager,
@@ -357,6 +358,13 @@ impl VllmCore {
 
     pub(crate) fn num_requests(&self) -> usize {
         self.state.requests.len()
+    }
+
+    /// Read-only view of the scheduler state, for tests in sibling modules
+    /// (e.g. `crate::scheduler::trtllm`) that assert on queue membership.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &SchedulerState {
+        &self.state
     }
 
     pub(super) fn mocker_metrics(&self) -> MockerMetrics {
@@ -661,10 +669,46 @@ impl VllmCore {
         }
 
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
+        let trtllm_no_evict = trtllm::is_no_evict(self.args.scheduling_policy());
         while !preempted_any && self.state.running.len() < max_num_running {
             let Some(uuid) = self.state.next_waiting_uuid() else {
                 break;
             };
+            // TRT-LLM GUARANTEED_NO_EVICT capacity gate: only admit a waiting
+            // request if its prompt + max_output footprint fits after the
+            // to-completion reservations of all running requests. Halt at the
+            // first non-fitting candidate (no skip-ahead) to preserve FIFO
+            // fairness, matching TRT-LLM's `capacityScheduler.cpp`.
+            if trtllm_no_evict {
+                let needed = self
+                    .state
+                    .requests
+                    .get(&uuid)
+                    .map(|request| {
+                        trtllm::blocks_needed_to_finish(
+                            &request.sequence,
+                            self.args.block_size,
+                            &self.kv_manager,
+                        )
+                    })
+                    .unwrap_or(0);
+                let running_seqs = self
+                    .state
+                    .running
+                    .iter()
+                    .filter_map(|running_uuid| self.state.requests.get(running_uuid))
+                    .map(|request| &request.sequence);
+                if needed
+                    > trtllm::available_blocks(
+                        running_seqs,
+                        self.args.num_gpu_blocks,
+                        self.args.block_size,
+                        &self.kv_manager,
+                    )
+                {
+                    break;
+                }
+            }
             #[cfg(feature = "kvbm-offload")]
             match self.try_park_for_swap_in(uuid, now_ms) {
                 SwapInAdmissionAttempt::Parked => continue,
@@ -754,6 +798,21 @@ impl VllmCore {
             self.kv_manager.process(&signal);
         }
         self.state.complete(&uuid);
+    }
+
+    /// Preempt a running request under the active scheduling policy.
+    ///
+    /// Under vLLM semantics this evicts a running request on KV pressure. Under
+    /// TRT-LLM `GUARANTEED_NO_EVICT` preemption must never happen — the capacity
+    /// gate reserves blocks for every admitted request up front — so reaching
+    /// this path is reported as a hard error (see
+    /// [`trtllm::report_no_evict_violation`]) and nothing is evicted.
+    pub(super) fn policy_preempt(&mut self) -> Option<PreemptedRequest> {
+        if trtllm::is_no_evict(self.args.scheduling_policy()) {
+            trtllm::report_no_evict_violation();
+            return None;
+        }
+        self.state.preempt(self.args.preemption_mode)
     }
 
     /// Compute a forward pass metrics snapshot from the just-completed pass.
@@ -906,7 +965,7 @@ impl VllmCore {
                 break;
             }
 
-            let Some(preempted) = self.state.preempt(self.args.preemption_mode) else {
+            let Some(preempted) = self.policy_preempt() else {
                 actual_computed_after = current_computed_tokens;
                 break;
             };
@@ -1046,7 +1105,7 @@ impl VllmCore {
                 }
                 sequence.pop();
 
-                let Some(preempted) = self.state.preempt(self.args.preemption_mode) else {
+                let Some(preempted) = self.policy_preempt() else {
                     break;
                 };
                 running_changed = true;
