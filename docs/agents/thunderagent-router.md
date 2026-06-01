@@ -80,6 +80,30 @@ program from being paused and immediately resumed within one tick.
   re-enter ahead of fresh admissions, and a forced-resume cap
   (`--resume-timeout-seconds`) guarantees no program is starved indefinitely.
 
+### Program Close (trajectory_final)
+
+A program is created on its first turn (keyed by `trajectory_id`) and otherwise
+lives ACTIVE↔PAUSED for the process lifetime — a single LLM `finish_reason` cannot
+mark a *program* done, since the agent typically keeps issuing turns. To release a
+program deterministically, the harness sets the optional terminal marker
+**`nvext.agent_context.trajectory_final: true`** on a final request (e.g. on the
+agent's `agent_end`). When the router sees it, it **deletes the program from its
+table (and paused set) and short-circuits the request — it is never forwarded to a
+worker** (the response is an empty completion). This frees the program's scheduling
+bookkeeping so its tokens stop counting against worker utilization.
+
+```jsonc
+// final request — released, no inference
+{ "model": "...", "max_tokens": 1, "messages": [{"role":"user","content":"."}],
+  "nvext": { "agent_context": { "session_type_id": "...", "session_id": "...",
+                                "trajectory_id": "abc", "trajectory_final": true } } }
+```
+
+The close is best-effort from the harness side; if it never arrives (crash, black-box
+harness) the program lingers, discounted by decay — a future idle-TTL backstop is the
+intended safety net. `pi-dynamo-provider` fires this automatically on `agent_end` /
+`session_shutdown`.
+
 ## Utilization-Driven Control Loop
 
 Pause/resume is driven by per-worker utilization — the program working set as a

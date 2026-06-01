@@ -411,6 +411,29 @@ class ThunderAgentScheduler:
         logger.debug("Paused program %s (tokens=%d)", program_id, program.token_total)
         return True
 
+    async def end_program(self, program_id: str) -> bool:
+        """Release a finished program (the A1 close signal).
+
+        Deletes it from the program table + paused set and wakes any waiter,
+        so its tokens stop counting against worker utilization. Mirrors
+        upstream TA's ``release_program``. Idempotent: returns False if unknown.
+        """
+        async with self._lock:
+            program = self._table.programs.get(program_id)
+            if program is None:
+                return False
+            program.lifecycle = ProgramLifecycle.TERMINATED
+            if program.waiting is not None:
+                program.waiting.set()  # unblock any coroutine paused on this program
+                program.waiting = None
+            self._table.release(program_id)
+            logger.info(
+                "Released program %s (%d remaining)",
+                program_id,
+                len(self._table.programs),
+            )
+            return True
+
     async def _greedy_resume(self, capacities: dict[int, int]) -> None:
         if not self._table.paused:
             return

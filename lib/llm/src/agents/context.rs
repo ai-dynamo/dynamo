@@ -37,6 +37,13 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_trajectory_id: Option<String>,
+
+    /// Optional terminal marker: when true, this request signals that the
+    /// trajectory is complete. Program-aware schedulers (thunderagent_router)
+    /// use it to release/delete the program's bookkeeping. Other backends ignore it.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trajectory_final: Option<bool>,
 }
 
 impl AgentContext {

@@ -52,6 +52,13 @@ def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _is_trajectory_final(request: dict[str, Any]) -> bool:
+    """A1 close signal: ``nvext.agent_context.trajectory_final`` marks the
+    trajectory's last turn -> release the program after this request runs."""
+    ctx = request.get("agent_context")
+    return isinstance(ctx, dict) and bool(ctx.get("trajectory_final"))
+
+
 def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
     # Duplicated from dynamo.router/__main__.py since neither package exports
     # it. TODO(idhanani): file follow-up to lift this into dynamo.router as a
@@ -126,6 +133,12 @@ class ThunderAgentRouterHandler:
                 "ThunderAgentRouterHandler used before initialize() was called"
             )
         program_id = _extract_program_id(request)
+
+        # A1 close signal: a request marked trajectory_final just releases the
+        # program from the table and is NOT forwarded to the engine (short-circuit).
+        if program_id is not None and _is_trajectory_final(request):
+            await self._scheduler.end_program(program_id)
+            return
 
         # Path A: no program_id -> behave like the standalone router.
         # Backward compat for clients that don't send agent_context.
