@@ -7,7 +7,6 @@ Provides helpers for parsing video request parameters and encoding numpy
 video frames to MP4 format.
 """
 
-import io
 import logging
 import os
 from typing import Tuple
@@ -205,6 +204,29 @@ def encode_to_mp4(
         raise RuntimeError(f"Video encoding failed: {e}") from e
 
 
+def _rgb_to_yuv420p(frames: np.ndarray) -> bytes:
+    """Convert RGB frames (N, H, W, 3) uint8 to planar YUV420p bytes.
+
+    Done in numpy (BT.601, full range) so ffmpeg never performs the RGB->YUV
+    conversion itself: the in-tree LGPL ffmpeg's libswscale RGB->YUV path is
+    broken and collapses chroma (greens render as magenta). H and W must be even.
+    """
+    rgb = frames.astype(np.float32)
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    y = 0.299 * r + 0.587 * g + 0.114 * b
+    u = -0.168736 * r - 0.331264 * g + 0.5 * b + 128.0
+    v = 0.5 * r - 0.418688 * g - 0.081312 * b + 128.0
+    n, h, w = y.shape
+    y = y.round().clip(0, 255).astype(np.uint8)
+    # 4:2:0 -- box-average each 2x2 chroma block
+    u = u.reshape(n, h // 2, 2, w // 2, 2).mean((2, 4)).round().clip(0, 255).astype(np.uint8)
+    v = v.reshape(n, h // 2, 2, w // 2, 2).mean((2, 4)).round().clip(0, 255).astype(np.uint8)
+    out = bytearray()
+    for i in range(n):
+        out += y[i].tobytes() + u[i].tobytes() + v[i].tobytes()
+    return bytes(out)
+
+
 def encode_to_video_bytes(
     frames: np.ndarray,
     fps: int = 16,
@@ -222,51 +244,43 @@ def encode_to_video_bytes(
         Encoded video as bytes.
 
     Raises:
-        ImportError: If imageio is not available.
         RuntimeError: If encoding fails.
     """
-    try:
-        import imageio.v3 as iio
-    except ImportError:
+    import subprocess
+    import tempfile
+
+    codec = {"mp4": "h264_nvenc", "webm": "libvpx-vp9"}.get(output_format)
+    if codec is None:
+        raise ValueError(f"No codec specified for response format: {output_format}")
+
+    frames = np.asarray(frames)
+    if frames.ndim != 4 or frames.shape[-1] != 3:
+        raise ValueError(f"Expected frames of shape (N, H, W, 3), got {frames.shape}")
+    n, h, w, _ = frames.shape
+    h, w = h & ~1, w & ~1  # yuv420p needs even dimensions
+    frames = frames[:, :h, :w, :]
+
+    logger.info(f"Encoding {n} frames to {output_format} bytes at {fps} fps")
+
+    # Pre-convert RGB->YUV420p in numpy and feed planar YUV directly, bypassing
+    # the in-tree ffmpeg's broken libswscale RGB->YUV path.
+    yuv = _rgb_to_yuv420p(frames)
+    ffmpeg = os.environ.get("IMAGEIO_FFMPEG_EXE", "ffmpeg")
+    cmd = [
+        ffmpeg, "-y", "-v", "error",
+        "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{w}x{h}",
+        "-r", str(fps), "-color_range", "pc", "-i", "-",
+        "-c:v", codec, "-pix_fmt", "yuv420p", "-color_range", "pc",
+    ]
+    with tempfile.NamedTemporaryFile(suffix=f".{output_format}") as tmp:
         try:
-            import imageio as iio  # type: ignore[no-redef]
-        except ImportError:
-            raise ImportError(
-                "imageio is required for video encoding. "
-                "Install with: pip install imageio[ffmpeg]"
-            )
+            subprocess.run(cmd + [tmp.name], input=yuv, check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Video encoding to bytes failed: {e.stderr.decode(errors='replace')}"
+            ) from e
+        tmp.seek(0)
+        video_bytes = tmp.read()
 
-    logger.info(f"Encoding {len(frames)} frames to {output_format} bytes at {fps} fps")
-
-    try:
-        buffer = io.BytesIO()
-
-        kwargs: dict = {"fps": fps}
-        if output_format == "webm":
-            kwargs["codec"] = "libvpx-vp9"
-        elif output_format == "mp4":
-            kwargs["codec"] = "h264_nvenc"
-        else:
-            raise ValueError(f"No codec specified for response format: {output_format}")
-
-        if hasattr(iio, "imwrite"):
-            # v3 API
-            iio.imwrite(buffer, frames, extension=f".{output_format}", **kwargs)
-        else:
-            # v2 API
-            writer = iio.get_writer(  # type: ignore[attr-defined]
-                buffer, format="FFMPEG", mode="I", **kwargs
-            )
-            try:
-                for frame in frames:
-                    writer.append_data(frame)
-            finally:
-                writer.close()
-
-        video_bytes = buffer.getvalue()
-        logger.info(f"Encoded video to {len(video_bytes)} bytes")
-        return video_bytes
-
-    except Exception as e:
-        logger.error(f"Failed to encode video to bytes: {e}")
-        raise RuntimeError(f"Video encoding to bytes failed: {e}") from e
+    logger.info(f"Encoded video to {len(video_bytes)} bytes")
+    return video_bytes
