@@ -25,6 +25,7 @@ rules:
   - ""
   resources:
   - nodes
+  - pods/log
   verbs:
   - get
 - apiGroups:

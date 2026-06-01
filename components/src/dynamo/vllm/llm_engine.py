@@ -50,6 +50,7 @@ from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
 )
+from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import build_sampling_params, get_dp_range_for_worker
 
@@ -211,7 +212,10 @@ class VllmLLMEngine(LLMEngine):
             stat_loggers=[self._stat_logger_factory],
         )
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
-        self._stat_logger_factory.num_gpu_blocks = num_gpu_blocks
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(num_gpu_blocks, self._dp_range[1])
+        if per_rank_num_gpu_blocks is None:
+            raise RuntimeError("per-rank KV block count is not set")
+        self._stat_logger_factory.num_gpu_blocks = per_rank_num_gpu_blocks
         self._model_max_len = getattr(
             getattr(vllm_config, "model_config", None), "max_model_len", None
         )
@@ -229,7 +233,7 @@ class VllmLLMEngine(LLMEngine):
             served_model_name=self.engine_args.served_model_name,
             context_length=self._model_max_len,
             kv_cache_block_size=block_size,
-            total_kv_blocks=num_gpu_blocks,
+            total_kv_blocks=per_rank_num_gpu_blocks,
             max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
             max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
             # Router needs the rank range to enumerate per-rank load.
@@ -240,8 +244,10 @@ class VllmLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        assert self.engine_client is not None, "Engine not initialized"
-        assert self._default_sampling_params is not None, "Engine not initialized"
+        if self.engine_client is None:
+            raise RuntimeError("Engine not initialized")
+        if self._default_sampling_params is None:
+            raise RuntimeError("Engine not initialized")
 
         request_id = context.id()
 
@@ -376,8 +382,10 @@ class VllmLLMEngine(LLMEngine):
     async def kv_event_sources(self) -> list[KvEventSource]:
         if not self._kv_routing_enabled():
             return []
-        assert self._vllm_config is not None
-        assert self._dp_range is not None
+        if self._vllm_config is None:
+            raise RuntimeError("Engine not initialized")
+        if self._dp_range is None:
+            raise RuntimeError("Engine not initialized")
         kv_events_config = self.engine_args.kv_events_config
         dp_start, dp_size = self._dp_range
         return [

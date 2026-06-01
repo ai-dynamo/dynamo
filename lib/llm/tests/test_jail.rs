@@ -1920,7 +1920,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_harmony_bare_commentary_marker_split() {
-        // PARSER.stream.3: gpt-oss may start a tool call directly at the
+        // TOOLCALLING.stream.3: gpt-oss may start a tool call directly at the
         // commentary channel marker, and the marker can split across chunks.
         let chunks = vec![
             create_mock_response_chunk("<|".to_string(), 0),
@@ -2219,6 +2219,7 @@ mod tests {
                     "filter": {"type": "string"},
                 },
             })),
+            strict: None,
         }];
 
         let input_stream = stream::iter(chunks);
@@ -3339,6 +3340,7 @@ fahrenheit
             Some("qwen3_coder".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             input_stream,
         )
         .collect()
@@ -3426,6 +3428,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             input_stream,
         )
         .collect()
@@ -3518,6 +3521,7 @@ fahrenheit
             Some("minimax_m2".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3582,8 +3586,8 @@ fahrenheit
     #[tokio::test]
     async fn test_minimax_m2_stream_finalize_zero_call_truncation_drops_markup() {
         // These are jail/finalize regression checks for existing parser parity cases:
-        // the first and prefix-preservation rows cover PARSER.stream.4.a, and
-        // the mid-call body truncation row covers PARSER.stream.4.b.
+        // the first and prefix-preservation rows cover TOOLCALLING.stream.4.a, and
+        // the mid-call body truncation row covers TOOLCALLING.stream.4.b.
         let cases = [
             (
                 "complete body without outer close",
@@ -3620,6 +3624,7 @@ fahrenheit
                 Some("minimax_m2".to_string()),
                 None,
                 None,
+                false,
                 stream::iter(input_chunks),
             )
             .collect()
@@ -3670,6 +3675,7 @@ fahrenheit
             Some("hermes".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3723,6 +3729,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3781,6 +3788,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3826,6 +3834,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()

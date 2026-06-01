@@ -17,8 +17,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>
       vllm: *d_s0
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_s0
   REASONING.stream.2.a:
     description: First streamed chunk gets the synthetic think opener
     ref: *upstream_ref
@@ -31,8 +30,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>reasoning content</think>answer
       vllm: *d_s1
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_s1
   REASONING.stream.2.b:
     description: Multiple append-think-looking spans remain normal text
     ref: *upstream_ref
@@ -45,8 +43,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>first</think> middle second</think> done
       vllm: *d_s5
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_s5
   REASONING.stream.3.a:
     description: Single chunk without a model-emitted think opener
     ref: *upstream_ref
@@ -57,8 +54,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>reasoning content
       vllm: *d_s2
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_s2
   REASONING.stream.3.b:
     description: End marker split across chunks is still normal text
     ref: *upstream_ref
@@ -70,8 +66,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>reasoning</think>answer
       vllm: *d_s3
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_s3
   REASONING.stream.3.c:
     description: Partial marker-looking prefix remains normal text
     ref: *upstream_ref
@@ -83,8 +78,7 @@ cases:
         reasoning_text: ''
         normal_text: <think>plain <thesis answer
       vllm: *d_s6
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_s6
   REASONING.stream.1.b:
     description: Plain text is passed through after the synthetic opener
     ref: *upstream_ref
@@ -96,5 +90,4 @@ cases:
         reasoning_text: ''
         normal_text: <think>plain answer
       vllm: *d_s4
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'minimax_append_think'
+      sglang: *d_s4

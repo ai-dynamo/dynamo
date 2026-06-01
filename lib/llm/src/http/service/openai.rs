@@ -35,6 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
+    metadata::extract_metadata_from_http,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
         process_response_and_observe_metrics,
@@ -135,6 +136,22 @@ fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     classify_error_for_metrics(response.0, &response.1.message)
 }
 
+fn find_dynamo_error_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+    error_type: dynamo_runtime::error::ErrorType,
+) -> Option<&'a dynamo_runtime::error::DynamoError> {
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && dynamo_err.error_type() == error_type
+        {
+            return Some(dynamo_err);
+        }
+        current = e.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -223,6 +240,19 @@ impl ErrorMessage {
         )
     }
 
+    pub fn request_headers_too_large(msg: &str) -> ErrorResponse {
+        let code = StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
@@ -230,20 +260,32 @@ impl ErrorMessage {
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
         // Check for ResourceExhausted anywhere in the error chain → HTTP 503
         if super::metrics::request_was_rejected(err.as_ref()) {
+            let message = find_dynamo_error_in_chain(
+                err.as_ref(),
+                dynamo_runtime::error::ErrorType::ResourceExhausted,
+            )
+            .map(|dynamo_err| dynamo_err.message().to_string())
+            .unwrap_or_else(|| err.to_string());
+
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorMessage {
-                    message: format!("{}. {}", err, ADMISSION_CONTROL_REJECTION_HINT),
+                    message: format!("{}. {}", message, ADMISSION_CONTROL_REJECTION_HINT),
                     error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
                     code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 }),
             );
         }
 
-        // Check for DynamoError with InvalidArgument → HTTP 400
-        if let Some(dynamo_err) = err.downcast_ref::<dynamo_runtime::error::DynamoError>()
-            && dynamo_err.error_type() == dynamo_runtime::error::ErrorType::InvalidArgument
-        {
+        // Check for DynamoError with InvalidArgument anywhere in the chain → HTTP 400.
+        // This matches *any* nested InvalidArgument DynamoError, not only the NATS
+        // oversized-payload case, so previously-opaque nested InvalidArgument errors
+        // now surface as 400 instead of 500. Intentional: 400 is the correct class
+        // for a malformed/invalid request.
+        if let Some(dynamo_err) = find_dynamo_error_in_chain(
+            err.as_ref(),
+            dynamo_runtime::error::ErrorType::InvalidArgument,
+        ) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
@@ -400,6 +442,18 @@ fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, heade
     }
 }
 
+fn context_from_headers<T: Send + Sync + 'static>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+) -> Result<Context<T>, ErrorResponse> {
+    let metadata = extract_metadata_from_http(headers)
+        .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
+    let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    attach_x_request_id(&mut request, headers);
+    Ok(request)
+}
+
 fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
@@ -445,8 +499,7 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -714,7 +767,11 @@ async fn completions_batch(
 
         // Generate unique request_id for each prompt: original_id-{prompt_idx}
         let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
-        let mut single_request_context = Context::with_id(single_request, unique_request_id);
+        let mut single_request_context = Context::with_id_and_metadata(
+            single_request,
+            unique_request_id,
+            request.metadata().clone(),
+        );
         copy_x_request_id(&request, &mut single_request_context);
 
         // Generate stream for this prompt
@@ -857,8 +914,22 @@ async fn embeddings(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
+
+    // The worker always emits base64-encoded vectors over NATS so we
+    // avoid serializing/parsing a JSON float array on the internal hop.
+    // If the client asked for float (the default), decode back at the
+    // HTTP boundary so the public response shape matches their
+    // ``encoding_format`` choice. See the PR description / DIS-2154 for
+    // measured impact.
+    // Borrow rather than move ``encoding_format`` out of ``request`` so the
+    // request value remains intact for the later ``engine.generate(request)``
+    // call below.
+    let client_wants_float = !matches!(
+        request.inner.encoding_format.as_ref(),
+        Some(dynamo_protocols::types::EncodingFormat::Base64)
+    );
 
     // Embeddings are typically not streamed, so we default to non-streaming
     let streaming = false;
@@ -923,7 +994,7 @@ async fn embeddings(
 
     // Embeddings are typically returned as a single response (non-streaming)
     // so we fold the stream into a single response
-    let response = NvCreateEmbeddingResponse::from_annotated_stream(stream)
+    let mut response = NvCreateEmbeddingResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -937,11 +1008,59 @@ async fn embeddings(
             err_response
         })?;
 
+    // Worker always emits Base64 -- convert back to Float when the client
+    // asked for float (or didn't specify, defaulting to float per spec).
+    if client_wants_float {
+        for embedding_obj in response.inner.data.iter_mut() {
+            if let dynamo_protocols::types::EmbeddingVector::Base64(s) = &embedding_obj.embedding {
+                match decode_base64_embedding_to_floats(s) {
+                    Ok(floats) => {
+                        embedding_obj.embedding =
+                            dynamo_protocols::types::EmbeddingVector::Float(floats);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to decode base64 embedding for request {}: {:?}",
+                            request_id,
+                            e
+                        );
+                        let err_response = ErrorMessage::internal_server_error(
+                            "Failed to decode embedding payload",
+                        );
+                        inflight.mark_error(extract_error_type_from_response(&err_response));
+                        return Err(err_response);
+                    }
+                }
+            }
+        }
+    }
+
     state
         .metrics_clone()
         .observe_embedding_latency(&model_name, embedding_start.elapsed().as_secs_f64());
     inflight.mark_ok();
     Ok(Json(response).into_response())
+}
+
+/// Decode a base64-encoded little-endian f32 byte string back into a float
+/// vector. The byte length must be a multiple of 4; trailing bytes are
+/// rejected. Mirrors the encoder in `lib/llm/src/preprocessor.rs` and the
+/// Python `_encode_floats_to_base64` helper in
+/// `components/src/dynamo/vllm/handlers.py`.
+fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let bytes = STANDARD.decode(s)?;
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+        anyhow::bail!(
+            "base64-decoded byte length {} is not a multiple of 4",
+            bytes.len()
+        );
+    }
+    let mut floats = Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
+    for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
+        floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(floats)
 }
 
 async fn handler_chat_completions(
@@ -963,8 +1082,7 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -1639,8 +1757,7 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
-    attach_x_request_id(&mut request, &headers);
+    let request = context_from_headers(request, request_id, &headers)?;
     let context = request.context();
 
     // create the connection handles
@@ -2233,7 +2350,7 @@ async fn images(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // Images are typically not streamed, so we default to non-streaming
@@ -2365,7 +2482,7 @@ async fn videos(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     let streaming = request.stream.unwrap_or(false);
@@ -2485,7 +2602,7 @@ async fn video_stream(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let model = request.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -2649,7 +2766,7 @@ async fn audio_speech(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     let streaming = false;
@@ -2849,10 +2966,46 @@ mod tests {
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.1.message,
-            format!(
-                "ResourceExhausted: All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}"
-            )
+            format!("All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}")
         );
+    }
+
+    #[test]
+    fn test_nested_invalid_argument_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        #[derive(Debug)]
+        struct WrappedError {
+            source: DynamoError,
+        }
+
+        impl std::fmt::Display for WrappedError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "outer routing failure")
+            }
+        }
+
+        impl std::error::Error for WrappedError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        let source = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message(
+                "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.",
+            )
+            .build();
+        let err: anyhow::Error = WrappedError { source }.into();
+
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(response.1.message.contains("Request payload is too large"));
+        assert!(!response.1.message.contains("NATS"));
+        assert!(!response.1.message.contains("payload_bytes"));
     }
 
     #[test]
@@ -4752,6 +4905,60 @@ mod tests {
         assert!(
             !is_empty_completion_stream_response(&make_completion_chunk("", None, Some(usage))),
             "usage present → not empty",
+        );
+    }
+
+    // ── decode_base64_embedding_to_floats ────────────────────────────────
+    //
+    // The Python embedding worker always emits ``embedding`` as a base64
+    // string in the new internal wire format; the HTTP handler decodes
+    // back to ``Vec<f32>`` at the response boundary when the client
+    // requested float. These tests cover the decoder's three invariants:
+    // little-endian f32 byte-for-byte equivalence, invalid base64
+    // rejection, and non-multiple-of-4 byte length rejection.
+
+    #[test]
+    fn decode_base64_embedding_to_floats_round_trips_little_endian_f32() {
+        use base64::Engine as _;
+        // Avoid 3.14 to side-step ``clippy::approx_constant`` -- the lint
+        // would force importing ``std::f32::consts::PI``, which isn't the
+        // point of the test.
+        let floats: Vec<f32> = vec![0.0, 1.0, -1.0, 2.5, -42.5, f32::MIN, f32::MAX];
+        let mut bytes: Vec<u8> = Vec::with_capacity(floats.len() * 4);
+        for f in &floats {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let decoded = decode_base64_embedding_to_floats(&encoded)
+            .expect("valid base64 of f32 bytes should decode");
+        assert_eq!(decoded, floats);
+    }
+
+    #[test]
+    fn decode_base64_embedding_to_floats_rejects_invalid_base64() {
+        // Padding and alphabet violations: standard base64 alphabet is
+        // A-Za-z0-9+/= -- the '!' byte forces a decode error.
+        let result = decode_base64_embedding_to_floats("not!valid!base64");
+        assert!(
+            result.is_err(),
+            "non-base64 input should fail decode, got Ok({:?})",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn decode_base64_embedding_to_floats_rejects_non_multiple_of_4_byte_length() {
+        // 5 raw bytes -> base64 string. The handler must reject because
+        // 5 is not a whole number of f32 values.
+        use base64::Engine as _;
+        let bytes: Vec<u8> = vec![1, 2, 3, 4, 5];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let result = decode_base64_embedding_to_floats(&encoded);
+        assert!(result.is_err(), "5-byte payload must fail, got Ok");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not a multiple of 4"),
+            "error should mention the multiple-of-4 check, got: {err_msg}"
         );
     }
 }

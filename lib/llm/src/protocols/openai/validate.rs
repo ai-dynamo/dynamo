@@ -489,7 +489,48 @@ pub fn validate_tools(
         if tool.function.name.trim().is_empty() {
             anyhow::bail!("Function name at index {} cannot be empty", i);
         }
+        if !tool
+            .function
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            anyhow::bail!(
+                "Function at index {} has an invalid name: \"{}\". \
+                 Only a-z, A-Z, 0-9, underscores, and dashes are allowed.",
+                i,
+                tool.function.name,
+            );
+        }
     }
+    Ok(())
+}
+
+/// Validates that forced tool_choice requests refer to available tools.
+pub fn validate_tool_choice(
+    tool_choice: &Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
+    tools: Option<&[dynamo_protocols::types::ChatCompletionTool]>,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ChatCompletionToolChoiceOption;
+
+    let tools_empty = tools.is_none_or(|tools| tools.is_empty());
+
+    match tool_choice {
+        Some(ChatCompletionToolChoiceOption::Required) if tools_empty => {
+            anyhow::bail!("tool_choice is \"required\" but tools is empty");
+        }
+        Some(ChatCompletionToolChoiceOption::Named(named)) => {
+            let tools = tools.unwrap_or(&[]);
+            if !tools.iter().any(|t| t.function.name == named.function.name) {
+                anyhow::bail!(
+                    "tool named \"{}\" in tool_choice is not present in tools",
+                    named.function.name
+                );
+            }
+        }
+        _ => {}
+    }
+
     Ok(())
 }
 

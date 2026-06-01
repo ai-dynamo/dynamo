@@ -846,6 +846,27 @@ mod interface_tests {
     }
 
     #[tokio::test]
+    async fn test_concurrent_compressed_approx_rejects_mismatched_hash_lengths() {
+        let index = ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            4,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        );
+        let worker = WorkerWithDpRank::new(7, 0);
+        let local_hashes = [LocalBlockHash(1), LocalBlockHash(2)];
+        let sequence_hashes = [1];
+
+        let result = index
+            .process_routing_decision_hash_slices(worker, &local_hashes, &sequence_hashes)
+            .await;
+
+        assert!(matches!(result, Err(KvRouterError::IndexerDroppedRequest)));
+    }
+
+    #[tokio::test]
     #[apply(approx_indexer_template)]
     async fn test_approx_ttl_expiry_removes_match(variant: &str) {
         let ttl = Duration::from_millis(25);
