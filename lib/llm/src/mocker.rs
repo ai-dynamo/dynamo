@@ -448,8 +448,8 @@ impl MockEngine {
     }
 
     /// Wait until the scheduler at `dp_rank` reports both **block** and **sequence**
-    /// headroom for admitting a new request, up to `timeout`. Used by the decode side
-    /// of disagg before connecting to a prefill bootstrap server (DIS-2147).
+    /// headroom for admitting a new request. Used by the decode side of disagg
+    /// before connecting to a prefill bootstrap server (DIS-2147).
     ///
     /// Models real NIXL admission behavior in vLLM v1 and sglang — both engines gate
     /// the disaggregated KV recv on **two independent budgets**:
@@ -463,15 +463,25 @@ impl MockEngine {
     ///   `pop_preallocated` gates at lines 806/809).
     ///
     /// Both must have headroom for the request to be admitted; either alone blocks
-    /// the NIXL recv from being armed. Without the seq-slot check, the mocker
-    /// returns Ok as soon as one decode pass freed a block — under tight
-    /// `max-num-seqs` saturation that's not how a real engine behaves, and the
-    /// DIS-2147 abort path becomes unreachable from realistic load shapes.
+    /// the NIXL recv from being armed.
+    ///
+    /// **No timeout on this side.** Real vLLM and sglang decode workers do not run
+    /// an independent "give up waiting for capacity" timer — a WAITING_FOR_REMOTE_KVS
+    /// request stays WAITING until the scheduler admits it, or the request context
+    /// is dropped, or the prefill side's `kv_transfer_abort_timeout_ms` fires and
+    /// closes the bootstrap room (which surfaces to the decode side later, when it
+    /// attempts the actual `connect_to_prefill(room_id)` — that connect then fails
+    /// with a closed-room error). The earlier version of this function timed out
+    /// alongside the prefill abort using the same `abort_timeout` value, which
+    /// produced a redundant decode-side error path that doesn't exist in real
+    /// engines. Removed in F1.
     ///
     /// Returns Ok(()) immediately if schedulers haven't reported metrics yet
     /// (total_blocks == 0) so warmup is graceful. Also treats `max_num_seqs == 0`
     /// as "no seq cap configured" (mirrors `MockEngineArgs.max_num_seqs == None`).
-    pub async fn wait_for_decode_kv_capacity(&self, dp_rank: u32, timeout: Duration) -> Result<()> {
+    /// Cancellation is delegated to the surrounding request context (the future
+    /// is dropped when the FE drops the request).
+    pub async fn wait_for_decode_kv_capacity(&self, dp_rank: u32) -> Result<()> {
         let schedulers = self
             ._schedulers
             .get()
@@ -485,7 +495,6 @@ impl MockEngine {
         }
         let mut rx = schedulers[scheduler_idx].metrics_receiver();
 
-        let start = std::time::Instant::now();
         loop {
             let metrics = rx.borrow().clone();
             // total_blocks == 0 means the scheduler hasn't published yet (still warming up).
@@ -500,20 +509,11 @@ impl MockEngine {
             if has_block_capacity && has_seq_capacity {
                 return Ok(());
             }
-            let remaining = timeout
-                .checked_sub(start.elapsed())
-                .ok_or_else(|| anyhow::anyhow!("decode KV wait timed out after {timeout:?}"))?;
-            match tokio::time::timeout(remaining, rx.changed()).await {
-                Ok(Ok(())) => continue,
-                Ok(Err(_)) => {
-                    return Err(anyhow::anyhow!("scheduler metrics channel closed"));
-                }
-                Err(_) => {
-                    return Err(anyhow::anyhow!(
-                        "decode KV wait timed out after {timeout:?}"
-                    ));
-                }
-            }
+            // Wait indefinitely for the next metrics update — no decode-side timer.
+            // Cancellation lands via the request context being dropped.
+            rx.changed()
+                .await
+                .map_err(|_| anyhow::anyhow!("scheduler metrics channel closed"))?;
         }
     }
 
@@ -763,12 +763,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         if let Some(bootstrap_info) = &request.bootstrap_info
             && self.engine_args.is_decode()
         {
-            // DIS-2147: when abort_timeout is configured, the decode worker must wait for
-            // its own KV cache to have capacity before connecting to the prefill bootstrap
-            // server. The act of connecting is decode's signal that it is ready to receive.
-            // Backward-compatible: with abort_timeout=None we skip the wait (pre-DIS-2147).
-            if let Some(timeout) = abort_timeout {
-                self.wait_for_decode_kv_capacity(dp_rank, timeout)
+            // DIS-2147 (F1): the decode worker waits for its own KV cache + seq slot
+            // to have capacity before connecting to the prefill bootstrap server.
+            // Gated only by capacity (block + seq) — there is no decode-side timer.
+            // The prefill side's `kv_transfer_abort_timeout_ms` is the authoritative
+            // DIS-2147 timeout; if it fires, the prefill bootstrap room closes and
+            // a later `connect_to_prefill` surfaces a closed-room error. This matches
+            // real vLLM (WAITING_FOR_REMOTE_KVS stays until admitted) and sglang
+            // (PreallocQueue blocks until req_to_token_pool + token budget have room).
+            // Only run the wait when abort_timeout is configured at all — preserves
+            // the pre-DIS-2147 "skip the wait entirely" behavior for legacy DGDs.
+            if abort_timeout.is_some() {
+                self.wait_for_decode_kv_capacity(dp_rank)
                     .await
                     .map_err(|e| Error::msg(format!("Decode KV wait failed: {e}")))?;
             }
