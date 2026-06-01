@@ -142,9 +142,7 @@ impl Router {
         // Router. The KV chooser, prefill router, prefill discovery watcher,
         // and pod reflector all clone whatever they need from these
         // constructor-locals before this scope ends, so dropping them here
-        // does not tear down any background work. Keeping them on the
-        // struct as `#[allow(dead_code)]` keep-alive fields was only
-        // defensive boilerplate.
+        // does not tear down any background work.
         Ok(Self {
             prefill_router,
             decode_router,

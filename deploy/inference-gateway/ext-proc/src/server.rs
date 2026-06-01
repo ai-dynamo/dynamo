@@ -13,8 +13,6 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
-
 use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
@@ -38,8 +36,6 @@ enum StreamState {
     ResponseReceived,
     HeaderResponseResponseComplete,
     BodyResponseResponsesComplete,
-    #[allow(dead_code)]
-    TrailerResponseResponsesComplete,
     RequestEvicted,
 }
 
@@ -50,8 +46,6 @@ struct RequestContext {
     incoming_model_name: String,
     target_model_name: String,
     request_id: String,
-    #[allow(dead_code)]
-    request_received_at: Option<Instant>,
     request_size: usize,
     response_size: usize,
     response_complete: bool,
@@ -85,7 +79,6 @@ impl RequestContext {
             incoming_model_name: String::new(),
             target_model_name: String::new(),
             request_id: String::new(),
-            request_received_at: None,
             request_size: 0,
             response_size: 0,
             response_complete: false,
@@ -210,8 +203,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     /// Handle request headers phase.
     /// Mirrors Go LW-EPP `handleRequestHeaders` in `server.go`.
     fn handle_request_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
-        ctx.request_received_at = Some(Instant::now());
-
         if hdr.end_of_stream {
             // Body-less request (e.g. GET) — will be picked in header-only path
             return;
