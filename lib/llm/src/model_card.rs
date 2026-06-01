@@ -170,15 +170,9 @@ impl PromptFormatterArtifact {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptContextMixin {
-    /// Support OAI Chat Messages and Tools
-    OaiChat,
-
-    /// Enables templates with `{{datetime}}` to be rendered with the current date and time.
-    Llama3DateTime,
-}
+// `PromptContextMixin` is owned by the `dynamo-renderer` crate (it drives
+// chat-template rendering); the MDC's `prompt_context` field is typed with it.
+use dynamo_renderer::PromptContextMixin;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]

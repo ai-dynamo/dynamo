@@ -63,6 +63,7 @@ dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-tokenizers = { workspace = true }
+dynamo-renderer = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
@@ -166,7 +167,6 @@ galil-seiferas = { version = "0.1" }
 # preprocessor
 bs62 = { version = "0.1" }
 minijinja = { version = "2.20.0", features = ["loader", "loop_controls"] }
-minijinja-contrib = { version = "2.20.0", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor

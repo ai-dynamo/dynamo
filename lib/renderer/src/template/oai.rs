@@ -3,18 +3,14 @@
 
 use super::*;
 
+use crate::{OAIChatLikeRequest, TextInput};
 use minijinja::{context, value::Value};
 use std::result::Result::Ok;
 
-use crate::preprocessor::media::MediaDecoder;
-use crate::protocols::openai::{
-    chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
-};
-use tracing;
-
-use crate::preprocessor::prompt::{PromptInput, TextInput, TokenInput};
-
-fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
+/// Fix a tool schema that is missing `type`/`properties`. `pub` so consumers
+/// can normalize their own `tools` value when implementing
+/// [`crate::OAIChatLikeRequest::tools`].
+pub fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
     // No need to validate or enforce other schema checks as the basic Named function schema is already validated while creating the request.
     // Empty parameters is allowed by OpenAI at request level. Need to enforce it at template level.
     // Whenever parameters is empty, insert "type": "object" and "properties": {}
@@ -355,139 +351,58 @@ fn inject_reasoning_content_into_messages(messages: &mut serde_json::Value) {
     }
 }
 
-impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
+/// Default [`OAIChatLikeRequest`] impl for the bare `dynamo-protocols` chat
+/// request. Lets any consumer (e.g. a standalone OpenAI frontend over an
+/// engine) render HF chat templates directly from the wire type, without
+/// defining their own wrapper. Consumers with extra fields (Dynamo's
+/// `NvCreateChatCompletionRequest`) provide their own impl.
+impl OAIChatLikeRequest for dynamo_protocols::types::CreateChatCompletionRequest {
     fn model(&self) -> String {
-        self.inner.model.clone()
+        self.model.clone()
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let messages_json = serde_json::to_value(&self.messages).unwrap();
         Value::from_serialize(&messages_json)
     }
 
     fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
-        Some(self.inner.messages.as_slice())
+        Some(self.messages.as_slice())
     }
 
     fn tools(&self) -> Option<Value> {
-        if self.inner.tools.is_none() {
+        if self.tools.is_none() {
             None
         } else {
-            // Try to fix the tool schema if it is missing type and properties
             Some(may_be_fix_tool_schema(
-                serde_json::to_value(&self.inner.tools).unwrap(),
+                serde_json::to_value(&self.tools).unwrap(),
             )?)
         }
     }
 
     fn tool_choice(&self) -> Option<Value> {
-        if self.inner.tool_choice.is_none() {
+        if self.tool_choice.is_none() {
             None
         } else {
-            Some(Value::from_serialize(&self.inner.tool_choice))
+            Some(Value::from_serialize(&self.tool_choice))
         }
     }
 
     fn response_format(&self) -> Option<Value> {
-        self.inner
-            .response_format
-            .as_ref()
-            .map(Value::from_serialize)
+        self.response_format.as_ref().map(Value::from_serialize)
     }
 
     fn should_add_generation_prompt(&self) -> bool {
         // Using vLLM default behavior
         true
-        // // Only add generation prompt if the last message was not assistant (default to true when no last message)
-        // self.inner
-        //     .messages
-        //     .last()
-        //     .map(|last| {
-        //         !matches!(
-        //             last,
-        //             dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(_)
-        //         )
-        //     })
-        //     .unwrap_or(true)
     }
 
     fn extract_text(&self) -> Option<TextInput> {
         Some(TextInput::Single(String::new()))
     }
 
-    fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
-        self.chat_template_args.as_ref()
-    }
-
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
-        self.media_io_kwargs.as_ref()
-    }
-
     fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
-        self.inner.mm_processor_kwargs.as_ref()
-    }
-}
-
-impl OAIChatLikeRequest for NvCreateCompletionRequest {
-    fn model(&self) -> String {
-        self.inner.model.clone()
-    }
-    fn messages(&self) -> minijinja::value::Value {
-        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
-            dynamo_protocols::types::ChatCompletionRequestUserMessage {
-                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
-                    crate::protocols::openai::completions::prompt_to_string(&self.inner.prompt),
-                ),
-                name: None,
-            },
-        );
-
-        minijinja::value::Value::from_serialize(vec![message])
-    }
-
-    fn should_add_generation_prompt(&self) -> bool {
-        true
-    }
-
-    fn prompt_input_type(&self) -> PromptInput {
-        match &self.inner.prompt {
-            dynamo_protocols::types::Prompt::IntegerArray(_) => {
-                PromptInput::Tokens(TokenInput::Single(vec![]))
-            }
-            dynamo_protocols::types::Prompt::ArrayOfIntegerArray(_) => {
-                PromptInput::Tokens(TokenInput::Batch(vec![]))
-            }
-            dynamo_protocols::types::Prompt::String(_) => {
-                PromptInput::Text(TextInput::Single(String::new()))
-            }
-            dynamo_protocols::types::Prompt::StringArray(_) => {
-                PromptInput::Text(TextInput::Batch(vec![]))
-            }
-        }
-    }
-
-    fn extract_tokens(&self) -> Option<TokenInput> {
-        match &self.inner.prompt {
-            dynamo_protocols::types::Prompt::IntegerArray(tokens) => {
-                Some(TokenInput::Single(tokens.clone()))
-            }
-            dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arrays) => {
-                Some(TokenInput::Batch(arrays.clone()))
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_text(&self) -> Option<TextInput> {
-        match &self.inner.prompt {
-            dynamo_protocols::types::Prompt::String(text) => {
-                Some(TextInput::Single(text.to_string()))
-            }
-            dynamo_protocols::types::Prompt::StringArray(texts) => {
-                Some(TextInput::Batch(texts.to_vec()))
-            }
-            _ => None,
-        }
+        self.mm_processor_kwargs.as_ref()
     }
 }
 
@@ -602,6 +517,9 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
 mod tests {
     use super::*;
     use dynamo_protocols::types::ChatCompletionRequestMessage as Msg;
+    // The crate's renderer tests exercise the bare-protocol request type via the
+    // default `OAIChatLikeRequest` impl above; Dynamo's `Nv*` wrapper lives in lib/llm.
+    use dynamo_protocols::types::CreateChatCompletionRequest as NvCreateChatCompletionRequest;
     use minijinja::{Environment, context};
 
     /// Tests that media URL content parts are converted to empty placeholders.
