@@ -32,6 +32,9 @@ pub use sequences::single as sequence;
 #[cfg(feature = "standalone-indexer")]
 pub mod standalone_indexer;
 
+#[cfg(feature = "uds-raw-bench")]
+pub mod shard_router;
+
 #[cfg(feature = "standalone-indexer")]
 pub mod standalone_shared_cache;
 

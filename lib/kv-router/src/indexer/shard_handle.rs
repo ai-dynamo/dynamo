@@ -6,17 +6,20 @@
 //! [`BranchShardedIndexer`] is parameterised over `S: AsyncShardHandle` so that
 //! the same routing-trie logic can drive either:
 //!
-//! - **In-process shards**: `ThreadPoolIndexer<T>` with `T: AnchorCapableSyncIndexer`.
-//! - **Remote shards**: a velo-backed client that sends requests over UDS/TCP
+//! - **In-process shards**: `ThreadPoolIndexer<T>` with `T: AnchorCapableSyncIndexer`,
+//!   where writes are Tokio channel sends and reads run on a blocking thread pool.
+//! - **Remote shards**: `RawUdsShardClient` (feature-gated behind `uds-raw-bench`),
+//!   which communicates over a raw Unix Domain Socket using a length-prefixed
+//!   msgpack frame protocol.
 //!
 //! ## Write vs. read semantics
 //!
 //! * **Write operations** (`apply_event`, `enqueue_anchor`, `remove_worker`) are
 //!   fire-and-forget: the caller does not wait for the shard to apply the event.
-//!   For in-process shards this is a channel send; for remote shards it is an
-//!   active-messaging (AM) send over velo.
+//!   For in-process shards this is a Tokio channel send; for UDS shards it is a
+//!   non-blocking enqueue to the client's writer task.
 //!
-//! * **Read operations** (`find_matches_from_anchor`, `dump_events`) are
+//! * **Read operations** (`find_matches_from_anchor`, `dump_events`, `flush`) are
 //!   request-response: the caller awaits the result.
 
 use std::future::Future;

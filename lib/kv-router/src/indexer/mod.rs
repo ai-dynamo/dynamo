@@ -88,3 +88,7 @@ pub use types::*;
 
 // Re-export RadixTree (was `pub use crate::radix_tree::RadixTree` in old indexer.rs)
 pub use radix_tree::RadixTree;
+
+// Re-export AsyncShardHandle so code outside the indexer module can use it
+// without reaching into the private `shard_handle` sub-module.
+pub use shard_handle::AsyncShardHandle;
