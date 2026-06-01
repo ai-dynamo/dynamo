@@ -59,10 +59,11 @@ type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 /// returns into a Rust [`Stream`] of `PyObject` items.
 ///
 /// `to_python_input` converts this engine's `generate` input into the Python
-/// object passed as the generator's positional argument. `to_python_context`,
-/// when `Some`, builds the `context=` keyword argument; `None` selects the
-/// legacy positional-only call. Both run inside the GIL because constructing
-/// their Python objects needs `py`.
+/// object passed as the generator's positional argument.
+/// `to_python_context` when `Some`, builds the `context=` keyword argument; `None` selects the
+/// legacy positional-only call.
+/// Note: functions instead of Python objects are passed because the construction
+/// of the Python objects needs to run inside the GIL.
 ///
 /// The GIL is acquired on a blocking task rather than inline: under contention
 /// it can block for an unbounded time, which would park the tokio reactor.
@@ -333,11 +334,10 @@ const RESPONSE_CHANNEL_DEPTH: usize = 128;
 /// over an mpsc channel. Returns the receiver, to be wrapped in a
 /// [`ResponseStream`].
 ///
-/// Shared by both engines. Errors raised by the Python generator are mapped
-/// to typed backend errors and emitted as annotated error frames, so a
-/// failing generator surfaces a structured error to the client rather than a
-/// silently truncated stream. On a deserialize mismatch the request context
-/// is told to stop generating.
+/// Errors raised by the Python generator are mapped to typed backend errors
+/// and emitted as annotated error frames, so a failing generator returns as
+/// an error to the client rather than a silently truncated stream.
+/// On a deserialize mismatch the request context is told to stop generating.
 fn spawn_response_forwarder<Resp>(
     stream: PyItemStream,
     ctx: Arc<dyn AsyncEngineContext>,
@@ -426,33 +426,23 @@ where
 const BIDIRECTIONAL_INPUT_CHANNEL_DEPTH: usize = 8;
 
 /// Rust-side adapter that bridges a Python `async def generate(request_stream, context)`
-/// callable into an [`AsyncEngine`] of the streaming-input / streaming-output
-/// shape (`ManyIn<serde_json::Value>` →
-/// `ManyOut<Annotated<serde_json::Value>>`).
+/// callable into an [`AsyncEngine`] of the ManyIn / ManyOut
+/// shape (Req=serde_json::Value, Resp=Annotated<serde_json::Value>).
 ///
 /// The adapter:
 ///
-/// 1. Takes ownership of the inbound `RequestStream<serde_json::Value>` and
-///    spawns a forwarder that pythonizes each frame and pushes it onto an
-///    mpsc consumed by a [`PyAsyncRequestStream`]. Cancellation is not
-///    threaded through the forwarder — when the engine returns and the
-///    `PyAsyncRequestStream` is dropped, the receiver closes and the
-///    forwarder exits passively on the next `tx.send`. Cancellation
-///    observation is the Python engine's responsibility via the `context`
-///    argument, matching the unary engine pattern.
+/// 1. Transforms the inbound `RequestStream<serde_json::Value>` into a
+///    `PyAsyncRequestStream` and `context`. Similar to unary engine,
+///    cancellation observation is the Python engine's responsibility via the
+///    `context` argument. Input stream can end early if no more inputs are expected.
 /// 2. Invokes the Python generator with `(request_stream, context)`, then
-///    wraps the returned async generator with
-///    [`pyo3_async_runtimes::tokio::into_stream_with_locals_v1`] to obtain
-///    a Rust `Stream<Item = PyResult<PyObject>>`.
-/// 3. Depythonizes each item into a `serde_json::Value`, wraps it as
-///    `Annotated::from_data(value)`, and forwards it on the response
-///    stream. The `Annotated` envelope satisfies the `MaybeError` bound
-///    on the response side; the Python user still writes engines that
-///    yield plain dicts.
+///    wraps the returned async generator into a Rust `Stream<Item = PyResult<PyObject>>`.
+/// 3. Depythonizes each item and wraps it as `Annotated<serde_json::Value>`,
+///    and forwards it on the response stream.
 ///
 /// Wire types are fixed to `serde_json::Value` on the request side and
-/// `Annotated<serde_json::Value>` on the response side — the Python user
-/// works with dicts on both sides and any schema enforcement lives in
+/// `Annotated<serde_json::Value>` on the response side. The Python user
+/// works with dicts on both sides and any schema enforcement is handled in
 /// Python.
 pub struct PythonBidirectionalEngine {
     generator: Arc<PyObject>,
