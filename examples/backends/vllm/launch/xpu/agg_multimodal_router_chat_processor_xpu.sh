@@ -37,7 +37,7 @@ NAMESPACE="${NAMESPACE:-dynamo}"
 # Honor DYN_HTTP_PORT (set by the tests/serve harness for dynamic
 # port allocation) when HTTP_PORT isn't explicitly given.
 HTTP_PORT="${HTTP_PORT:-${DYN_HTTP_PORT:-8000}}"
-BLOCK_SIZE="${BLOCK_SIZE:-64}"            # Must match vLLM backend KV block size
+BLOCK_SIZE="${BLOCK_SIZE:-16}"            # Must match vLLM backend KV block size
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.40}"  # Split GPU between 2 workers
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"   # Reduced for 2 workers on 1 GPU
 NUM_WORKERS="${NUM_WORKERS:-2}"          # Number of backend workers
@@ -170,6 +170,9 @@ COMMON_ENV=(
     "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
 )
 
+# Phase 1: launch all workers in parallel.
+# Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
+# requested_vllm_kv_cache_bytes marker) - otherwise vLLM's 0.9 default races.
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + i - 1))
@@ -194,8 +197,11 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
             $GPU_MEM_ARGS \
             --max-model-len "${MAX_MODEL_LEN}" \
             ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
-    # trap 'kill 0' handles cleanup
-    # Wait for this worker before starting the next one to avoid ZMQ port races.
+done
+
+# Phase 2: wait for all workers to be ready.
+for i in $(seq 1 "${NUM_WORKERS}"); do
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
 done
 
