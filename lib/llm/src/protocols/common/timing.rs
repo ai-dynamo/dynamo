@@ -167,7 +167,18 @@ pub struct RequestTracker {
     /// When the prefill result arrived at the router (disaggregated, original path only).
     /// Set in execute_prefill() after the first output is received from the prefill worker.
     prefill_complete_time: OnceLock<Instant>,
+
+    /// Timing computed in another process — a standalone router built on the
+    /// KV-router bindings (`PushRouter`) — and injected here so `get_timing_info()`
+    /// reports it even though the local `record_*` timestamps were never set in this
+    /// process. First-write-wins.
+    external_timing: OnceLock<TimingInfo>,
 }
+
+/// Annotation event name carrying a `TimingInfo` from a standalone KV-router back to
+/// the frontend, so per-request timing is populated when routing and the frontend run
+/// in separate processes (the `timing` nvext field, Prometheus metrics, traces).
+pub const ANNOTATION_ROUTER_TIMING: &str = "router_timing";
 
 impl RequestTracker {
     /// Create a new request tracker, capturing the current time as request received.
@@ -203,6 +214,7 @@ impl RequestTracker {
             detokenize_count: AtomicU64::new(0),
             router_queue_depth: OnceLock::new(),
             prefill_complete_time: OnceLock::new(),
+            external_timing: OnceLock::new(),
         }
     }
 
@@ -584,7 +596,17 @@ impl RequestTracker {
         }
     }
 
+    /// Inject timing computed in another process (e.g. a standalone router).
+    /// Once set, `get_timing_info()` returns it verbatim. First-write-wins.
+    pub fn set_external_timing(&self, timing: TimingInfo) {
+        let _ = self.external_timing.set(timing);
+    }
+
     pub fn get_timing_info(&self) -> TimingInfo {
+        // Prefer timing injected from another process (split router topology).
+        if let Some(external) = self.external_timing.get() {
+            return external.clone();
+        }
         TimingInfo {
             request_received_ms: self.request_received_epoch_ms,
             prefill_wait_time_ms: self.prefill_wait_time_ms(),

@@ -159,6 +159,19 @@ impl LLMMetricAnnotation {
     }
 }
 
+/// Extract a `TimingInfo` forwarded by a standalone KV-router via an
+/// `ANNOTATION_ROUTER_TIMING` annotation (routing and frontend in separate processes).
+/// Returns None for normal items.
+fn extract_llm_timing<T>(
+    item: &Annotated<T>,
+) -> Option<crate::protocols::common::timing::TimingInfo> {
+    if item.event.as_deref() != Some(crate::protocols::common::timing::ANNOTATION_ROUTER_TIMING) {
+        return None;
+    }
+    let comment = item.comment.as_ref()?.first()?;
+    serde_json::from_str(comment).ok()
+}
+
 // Reasoning State for reasoning parsing transformation step
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
@@ -1849,7 +1862,22 @@ impl OpenAIPreprocessor {
                     return None;
                 }
 
-                if let Some(response) = inner.response_stream.next().await {
+                if let Some(mut response) = inner.response_stream.next().await {
+                    // Split-topology timing: a standalone KV-router (running the PushRouter
+                    // bindings in its own process) forwards its TimingInfo as a trailing
+                    // annotation. Inject it into this request's tracker so the frontend's
+                    // timing surfaces (the `timing` nvext field, metrics, traces) populate
+                    // even though the local record_* timestamps were never set here. Then
+                    // consume the annotation so this internal control event is never
+                    // forwarded to clients via SSE.
+                    if let Some(timing) = extract_llm_timing(&response) {
+                        if let Some(tracker) = inner.response_generator.tracker() {
+                            tracker.set_external_timing(timing);
+                        }
+                        response.event = None;
+                        response.comment = None;
+                    }
+
                     if inner.cancelled {
                         tracing::debug!(
                             request_id = inner.context.id(),
