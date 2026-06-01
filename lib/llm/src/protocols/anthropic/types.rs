@@ -32,6 +32,28 @@ use crate::protocols::openai::common_ext::CommonExt;
 // ---------------------------------------------------------------------------
 // Conversion: AnthropicCreateMessageRequest -> NvCreateChatCompletionRequest
 // ---------------------------------------------------------------------------
+fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequestMessage>) {
+    messages.push(ChatCompletionRequestMessage::System(
+        ChatCompletionRequestSystemMessage {
+            content: ChatCompletionRequestSystemMessageContent::Text(content),
+            name: None,
+        },
+    ));
+}
+
+fn system_message_content(content: &AnthropicMessageContent) -> String {
+    match content {
+        AnthropicMessageContent::Text { content } => content.clone(),
+        AnthropicMessageContent::Blocks { content } => content
+            .iter()
+            .filter_map(|block| match block {
+                AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -40,19 +62,16 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 
         // Prepend system message if present
         if let Some(system_content) = &req.system {
-            messages.push(ChatCompletionRequestMessage::System(
-                ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(
-                        system_content.text.clone(),
-                    ),
-                    name: None,
-                },
-            ));
+            push_system_message(system_content.text.clone(), &mut messages);
         }
 
         // Convert each Anthropic message
         for msg in &req.messages {
             match (&msg.role, &msg.content) {
+                // System messages may appear in messages[] from agent clients.
+                (AnthropicRole::System, content) => {
+                    push_system_message(system_message_content(content), &mut messages);
+                }
                 // User with plain text
                 (AnthropicRole::User, AnthropicMessageContent::Text { content }) => {
                     messages.push(ChatCompletionRequestMessage::User(
@@ -632,6 +651,48 @@ mod tests {
         ));
         assert!(matches!(
             &chat_req.inner.messages[1],
+            ChatCompletionRequestMessage::User(_)
+        ));
+    }
+
+    #[test]
+    fn test_message_level_system_role_conversion() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Keep answers short."},
+                        {"type": "text", "text": "Use the available shell."}
+                    ]
+                },
+                {"role": "user", "content": "List files"}
+            ]
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req.messages[1].role, AnthropicRole::System));
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat_req.inner.messages.len(), 3);
+        assert!(matches!(
+            &chat_req.inner.messages[0],
+            ChatCompletionRequestMessage::User(_)
+        ));
+        match &chat_req.inner.messages[1] {
+            ChatCompletionRequestMessage::System(system) => match &system.content {
+                ChatCompletionRequestSystemMessageContent::Text(text) => {
+                    assert_eq!(text, "Keep answers short.\nUse the available shell.");
+                }
+                other => panic!("expected text content, got {other:?}"),
+            },
+            other => panic!("expected system message, got {other:?}"),
+        }
+        assert!(matches!(
+            &chat_req.inner.messages[2],
             ChatCompletionRequestMessage::User(_)
         ));
     }

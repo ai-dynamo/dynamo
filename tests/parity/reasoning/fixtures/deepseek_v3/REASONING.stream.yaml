@@ -19,11 +19,11 @@ cases:
         reasoning_text: ''
         normal_text: ''
       vllm: *d_s0
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
+      sglang: *d_s0
   REASONING.stream.2.a:
     description: Single reasoning block across chunks
     ref: *upstream_ref
+    spec_ref: lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     chunks:
     - <think>thin
     - king</think>
@@ -35,27 +35,32 @@ cases:
       vllm:
         reasoning_text: <think>thinking
         normal_text: answer
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
+        reason: Dynamo strips reasoning delimiters even when the block is streamed across chunks; vLLM leaks the start delimiter.
+      sglang: *d_s1
   REASONING.stream.2.b:
     description: Multiple reasoning spans across chunks
     ref: *upstream_ref
+    spec_ref: lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     chunks:
     - <think>first</think>
     - ' middle '
     - <think>second</think> done
     expected:
-      dynamo: &d_s5
+      dynamo:
         reasoning_text: firstsecond
         normal_text: ' middle  done'
       vllm:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
+        reason: Dynamo extracts each complete reasoning span across chunks; vLLM leaves the later complete span in normal_text.
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
+        reasoning_text: first
+        normal_text: ' middle <think>second</think> done'
+        reason: Dynamo re-enters reasoning on each open marker across chunks and concatenates all spans; SGLang exits at the first end marker and does not re-enter, leaving the later span in normal_text.
   REASONING.stream.3.a:
     description: Start marker split across chunks
     ref: *upstream_ref
+    spec_ref: lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     chunks:
     - <th
     - ink>thinking</think>answer
@@ -66,23 +71,27 @@ cases:
       vllm:
         reasoning_text: <think>thinking
         normal_text: answer
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
+        reason: Dynamo buffers a split start delimiter and strips it; vLLM leaks the reconstructed delimiter.
+      sglang: *d_s2
   REASONING.stream.3.b:
     description: End marker split across chunks
     ref: *upstream_ref
+    spec_ref: lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     chunks:
     - <think>thinking</th
     - ink>answer
     expected:
-      dynamo: &d_s3
+      dynamo:
         reasoning_text: thinking
         normal_text: answer
       vllm:
         reasoning_text: <think>thinking</think>answer
         normal_text: ''
+        reason: Dynamo buffers a split end delimiter and resumes normal_text after it; vLLM keeps the delimiter and answer in reasoning_text.
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
+        reasoning_text: thinking</think>answer
+        normal_text: ''
+        reason: Dynamo buffers an end marker split across chunk boundaries and resumes normal_text after it; SGLang streams the partial delimiter as reasoning, so the split marker is never reassembled and the answer stays in reasoning_text.
   REASONING.stream.3.c:
     description: Partial start-marker prefix later resolves as force-reasoning text
     ref: *upstream_ref
@@ -95,7 +104,9 @@ cases:
         normal_text: ''
       vllm: *d_s6
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
+        reasoning_text: ''
+        normal_text: plain <thesis answer
+        reason: Dynamo/vLLM keep marker-free chunks in force-reasoning mode; SGLang treats the unresolved partial marker as normal_text.
   REASONING.stream.1.b:
     description: Plain text stays in force-reasoning mode until an end marker
     ref: *upstream_ref
@@ -108,4 +119,6 @@ cases:
         normal_text: ''
       vllm: *d_s4
       sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_v3'
+        reasoning_text: ''
+        normal_text: plain answer
+        reason: Dynamo/vLLM keep marker-free stream text in force-reasoning mode; SGLang only enters reasoning after an explicit start marker.
