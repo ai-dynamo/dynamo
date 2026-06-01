@@ -987,9 +987,7 @@ impl ModelDeploymentCard {
                 // but missing from the cache specials), letting chat prefixes
                 // straddle a special-token boundary and reducing hit rate.
                 if let Some(model_dir) = p.parent() {
-                    crate::tokenizers::hf::merge_special_tokens_from_config(
-                        &mut hf, model_dir,
-                    );
+                    crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {

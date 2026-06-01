@@ -1257,13 +1257,10 @@ impl OpenAIPreprocessor {
         // prepend BOS here. Avoids the prior split-brain where the leading
         // push was here and the mid-segment pushes lived inside the helper.
         let splice_owns_bos = matches!(normalized_token_ids, std::borrow::Cow::Owned(_));
-        let bos_extra =
-            (!splice_owns_bos && self.routing_prepend_bos.is_some()) as usize;
+        let bos_extra = (!splice_owns_bos && self.routing_prepend_bos.is_some()) as usize;
         let mut expanded: Vec<crate::protocols::TokenIdType> =
             Vec::with_capacity(normalized_token_ids.len() + n_total + bos_extra);
-        if !splice_owns_bos
-            && let Some(bos) = self.routing_prepend_bos
-        {
+        if !splice_owns_bos && let Some(bos) = self.routing_prepend_bos {
             expanded.push(bos);
         }
         let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
