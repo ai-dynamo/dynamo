@@ -336,6 +336,11 @@ def build_load_config(
 
     s = rung.shape or shape
 
+    # aiperf RNG seed override (per-rung). None => LoadConfig keeps the
+    # historical default (100), so existing scenarios are byte-identical.
+    if s.random_seed is not None:
+        kwargs["random_seed"] = s.random_seed
+
     if s.type == "no_prefix":
         kwargs["seq_dist"] = s.seq_dist or _PROD_SEQ_DIST
 

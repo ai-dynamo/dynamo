@@ -1,0 +1,70 @@
+# E1 real-GPU Stage-0 saturation-discovery deployment (single FE).
+#
+# Same Best-LL 1.2 config as e1rg_arm2_bestll_n3.yaml (image
+# release-1.2.0-mocker-prefill-pinning-a5c93b3331-neelays, least-loaded,
+# 0.85 thresholds, the admission knobs) EXCEPT the replica shape is a
+# single Frontend over the N=3 worker pool (6 prefill + 3 decode). One FE
+# is what we sweep against to find per-FE C_max; the arms then run 3 FE,
+# so arm-level total concurrency = 3 x (0.8 x C_max).
+#
+# This scenario is consumed by test_saturation_discovery.py via
+# --sat-deploy-scenario e1rg_sweep_1fe. The sweep supplies its OWN load
+# (aiperf --search-space), so the load block here is a trivial placeholder
+# that the sweep ignores. It exists only to satisfy the schema and is
+# never driven (no events reference it).
+
+kind: router_memory
+name: e1rg_sweep_1fe
+
+labels:
+  purpose: e1_imbalance_real_gpu_sweep
+  arm: e1rg_sweep_1fe
+  router_mode: least_loaded
+  deployment: disagg
+  backend: vllm
+  cluster: aws-dev-02
+
+deployment:
+  backend: vllm
+  topology: disagg
+  template: disagg_qwen3_30b_unit_e1
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-mocker-prefill-pinning-a5c93b3331-neelays
+  model_cache_pvc: shared-model-cache
+  log_pvc: dynamo-ft-logs
+  # Single FE over the N=3 worker pool. Exact service names come from the
+  # template (Frontend / VllmPrefillWorker / VllmDecodeWorker).
+  replicas:
+    Frontend: 1
+    VllmPrefillWorker: 6
+    VllmDecodeWorker: 3
+
+router:
+  mode: least-loaded
+  knobs:
+    DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
+    DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
+
+admission:
+  knobs:
+    DYN_TCP_WORKER_POOL_SIZE: "128"
+    DYN_TCP_WORK_QUEUE_SIZE: "5"
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "30"
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30"
+
+# Trivial placeholder load. The saturation sweep ignores this and drives
+# its own aiperf --search-space load; no events reference these rungs.
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 5
+    prefix_prompt_length: 740
+    seq_dist: "100,20:1;100,80:2;100,130:2;100,180:1;100,200:1;500,20:2;500,80:5;500,130:5;500,180:2;500,200:1;1000,20:3;1000,80:5;1000,130:5;1000,180:3;1000,200:2;1600,20:5;1600,80:8;1600,130:8;1600,180:5;1600,200:3;3400,20:3;3400,80:6;3400,130:6;3400,180:3;3400,200:2;7000,20:2;7000,80:3;7000,130:3;7000,180:2;7000,200:1"
+  rungs:
+    - name: unused_sweep_supplies_own_load
+      concurrency: 16
+      duration_minutes: 1.0
+  common:
+    request_timeout_seconds: 30
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never

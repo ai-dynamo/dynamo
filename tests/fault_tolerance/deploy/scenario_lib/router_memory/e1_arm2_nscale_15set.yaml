@@ -1,42 +1,41 @@
-# E1 Imbalance — Arm 5: 93 FE / KV + replica-sync (Recommended config)
+# E1 Imbalance — Arm 2 (NSCALE 15-set variant, 1 FE / LL H2-isolation)
 #
-# Both H1 and H2 mitigated. KV-aware routing + cross-FE state sync. The target config
-# we'd recommend for the production deployment. If imbalance flattens here vs Arm 4,
-# replica-sync was the missing piece. If still imbalanced, KV+sync alone isn't enough.
+# H1 isolation: single FE has perfect cross-FE visibility (there's only one),
+# so any decode-side imbalance observed here MUST come from LL being KV-unaware
+# (H1), not from cross-FE blind spot (H2). Compared to arm3 (15 FE / LL same
+# image+knobs) decode-side CV / max-to-mean delta isolates H2 contribution.
+#
+# Same cascade-test image as arm3 + arm5; same admission thresholds. Only
+# diff vs arm3: replicas.Frontend = 1 (vs 15).
 
 kind: router_memory
-name: e1_arm5_93fe_kv_sync
+name: e1_arm2_nscale_15set
 description: |
-  E1 Arm 5 (93 FE / KV + replica-sync): 93F+186P+93D mocker, KV routing with replica-sync.
-  Recommended config. H1 and H2 both mitigated. Target migration config.
+  E1 Arm 2 (1 FE / LL, cascade-test): 1F+30P+15D mocker, LL routing.
+  H2 (cross-FE blind spot) eliminated — any imbalance here is pure H1 (KV-unaware LL).
 
 labels:
   purpose: e1_imbalance_attribution
-  arm: arm5_93fe_kv_sync
-  router_mode: kv_recommended
+  arm: arm2_nscale_15set
+  router_mode: least_loaded
   deployment: disagg
   backend: mocker
   image_label: cascade-test
+  cluster: nscale-dev-cluster
 
 deployment:
   backend: mocker
   topology: disagg
   image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-cascade-test-ead461faa6-neelays
   replicas:
-    Frontend: 46
-    prefill: 92
-    decode: 46
+    Frontend: 1   # <-- THE DIFF vs arm3 (which has 15)
+    prefill: 30
+    decode: 15
 
 router:
-  mode: kv
+  mode: least-loaded
   knobs:
-    # Recommended config — KV + replica-sync + load-aware (no prefix routing, no KV events)
-    DYN_ROUTER_USE_KV_EVENTS: "false"
-    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "0.0"
-    DYN_ROUTER_PREFILL_LOAD_SCALE: "1.0"
-    DYN_ROUTER_QUEUE_THRESHOLD: "4.0"
-    DYN_ROUTER_QUEUE_POLICY: "fcfs"
-    DYN_ROUTER_REPLICA_SYNC: "true"   # <-- THE DIFF vs Arm 4
+    # Same thresholds as arm3 + arm5; only the FE count differs.
     DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
     DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
     DYN_EVENT_PLANE: "zmq"
@@ -57,27 +56,23 @@ load:
     num_prefix_prompts: 5
     prefix_prompt_length: 740
     seq_dist: "100,20:1;100,80:2;100,130:2;100,180:1;100,200:1;500,20:2;500,80:5;500,130:5;500,180:2;500,200:1;1000,20:3;1000,80:5;1000,130:5;1000,180:3;1000,200:2;1600,20:5;1600,80:8;1600,130:8;1600,180:5;1600,200:3;3400,20:3;3400,80:6;3400,130:6;3400,180:3;3400,200:2;7000,20:2;7000,80:3;7000,130:3;7000,180:2;7000,200:1"
-  # Shared E1/E2/E3 load profile: ramp-up → steady-1 → spike → steady-2 → ramp-down.
-  # Mocker --speedup-ratio=5.0 (set in disagg.yaml template) means engine-side sim
-  # advances 5× faster than wall-clock; aiperf still drives load over wall-clock,
-  # so the visible effect is higher per-pod request throughput at the same target
-  # concurrency. Total wall ≈ 13.5 min per arm.
+  # Identical load profile to arm1/arm3/arm5 — only deployment shape differs.
   rungs:
     - name: ramp-up
-      concurrency: 200
-      duration_minutes: 1.5
-    - name: steady-1
-      concurrency: 600  # Conservative pre-Stage-0 — revisit after saturation discovery
-      duration_minutes: 5.0
-    - name: spike
-      concurrency: 1200
-      duration_minutes: 1.5
-    - name: steady-2
-      concurrency: 600
-      duration_minutes: 5.0
-    - name: ramp-down
-      concurrency: 150
+      concurrency: 50
       duration_minutes: 1.0
+    - name: steady-1
+      concurrency: 120
+      duration_minutes: 3.0
+    - name: spike
+      concurrency: 240
+      duration_minutes: 1.0
+    - name: steady-2
+      concurrency: 120
+      duration_minutes: 3.0
+    - name: ramp-down
+      concurrency: 30
+      duration_minutes: 0.5
   common:
     request_timeout_seconds: 30
     streaming: true
@@ -118,7 +113,7 @@ reports:
 checks:
   - kind: LoadApplied
     load_name: steady-1
-    min_requests: 5000
+    min_requests: 500
   - kind: WorkerPanics
     services: [Frontend, prefill, decode]
     acceptable: true

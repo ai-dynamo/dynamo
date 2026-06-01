@@ -1902,7 +1902,7 @@ class WaitForModelReady(Event):
 # Post-PR-#8254: WARN line instead.
 #
 # This is the upstream-blessed shape from
-# dynamo-observe/.../2026-05-03-tcp-client-panic-repro/arm_b_rst.py.
+# an internal TCP-client-panic reproducer (in-pod RST injection).
 # iptables-FORWARD REJECT (RstInjection) is not on the packet path on
 # AWS VPC CNI; this in-pod approach connects directly to the target
 # pod IP and is reliable.
@@ -2394,6 +2394,127 @@ class PodMemoryPoller(Event):
     @property
     def description(self) -> str:
         return f"PodMemoryPoller {self.services} every {self.interval_s}s"
+
+
+@dataclass
+class PodMemoryPoller2(Event):
+    """In-pod memory sampler — the deterministic-cadence successor to
+    :class:`PodMemoryPoller` (vault task #60, "option d").
+
+    The original poller samples from the *host*: a single asyncio loop that,
+    each tick, walks every pod doing one ``metrics.k8s.io`` GET + one
+    ``kubectl exec`` of ``/proc/1/status``. At 60 pods that serialised walk
+    takes longer than the nominal ``interval_s``, so the effective cadence
+    drifts (the "14s stutter" seen on sanity Run 1), and the working-set
+    column is additionally quantised to metrics-server's ~15s scrape.
+
+    ``PodMemoryPoller2`` instead launches a **detached in-pod daemon** once
+    per pod at ``execute()`` time:
+
+    .. code-block:: sh
+
+        nohup sh -c 'while true; do
+            printf "%s\\t%s\\t%s\\n" "$(date +%s.%N)" "$HOSTNAME" \\
+                "$(awk "/VmRSS/{print \\$2*1024}" /proc/1/status)" \\
+                >> "$OUTDIR/$HOSTNAME.tsv"
+            sleep 5
+        done' &
+
+    The sampling loop and its 5 s timer live **inside** the pod, so the
+    cadence is exact regardless of pod count or host scheduling, and RSS is
+    read straight from ``/proc/1/status`` (no metrics-server quantisation).
+    Output is written to the already-mounted shared log PVC, so the existing
+    ``PvcExtractor`` pulls the per-pod TSVs back with the rest of
+    ``/tmp/service_logs`` — no new volume or extraction path needed.
+
+    Columns (no header — appended rows only): ``epoch_s, pod, pid1_rss_bytes``.
+    ``epoch_s`` is fractional (``date +%s.%N``) so inter-sample spacing can be
+    verified to confirm the deterministic cadence.
+
+    This runs in the main container (reads its own ``/proc/1``), so it needs
+    neither a sidecar container nor ``shareProcessNamespace`` — it is
+    functionally the option-d in-pod sampler with a far smaller blast radius.
+    Do not run it concurrently with ``PodMemoryPoller`` on the same pods
+    (both attribute pid1 RSS; one is enough).
+    """
+
+    services: list[str]
+    interval_s: float = 5.0
+    # Subdir under the run's service_logs root on the shared PVC. Derived
+    # in-pod from $DYN_LOG_DIR so samples co-locate with the run's logs and
+    # don't collide across runs on a reused PVC.
+    name: str = ""
+    _started_pods: Any = field(default=None, init=False, repr=False)
+
+    async def execute(self, ctx: "ScenarioContext") -> None:
+        self._started_pods = []
+        interval = int(self.interval_s) if self.interval_s >= 1 else 1
+        # In-pod sampler. Write straight into the pod's own service_logs dir
+        # ($DYN_LOG_DIR = .../service_logs/<role>) as `<pod>.mempoller2.tsv`, so
+        # the existing end-of-test service_logs extraction carries it back with
+        # the pod's logs — it lands locally at <role>/<pod>.mempoller2.tsv,
+        # beside that pod's other artifacts. (Previously it wrote to a sibling
+        # <run_root>/mempoller2/ dir that the extractor never pulled.)
+        # Marker file lets stop() find+kill exactly this daemon.
+        # NOTE on the nohup child shell: the sampling loop runs in a *new*
+        # `sh -c '...'` whose single-quoted body is NOT expanded by the parent.
+        # That child shell does not inherit non-exported parent variables, so
+        # OUT must be `export`ed. We export OUT and use `$(hostname)` so the
+        # loop body resolves them in its own env.
+        launch_script = (
+            "set -e; "
+            'OUTDIR="${DYN_LOG_DIR:-/tmp/service_logs}"; mkdir -p "$OUTDIR"; '
+            'export OUT="$OUTDIR/$(hostname).mempoller2.tsv"; '
+            "rm -f /tmp/.mempoller2.stop; "
+            'printf "# PodMemoryPoller2\\tepoch_s\\tpod\\tpid1_rss_bytes\\n" > "$OUT"; '
+            # date +%s.%N is fractional on GNU coreutils (the runtime images);
+            # busybox date lacks %N and would emit a literal ".%N", so strip a
+            # trailing non-numeric tail back to whole seconds as a fallback.
+            "nohup sh -c 'while [ ! -f /tmp/.mempoller2.stop ]; do "
+            'TS="$(date +%s.%N)"; case "$TS" in *N) TS="$(date +%s)";; esac; '
+            'printf "%s\\t%s\\t%s\\n" "$TS" "$(hostname)" '
+            '"$(awk "/VmRSS/{print \\$2*1024}" /proc/1/status 2>/dev/null)" '
+            '>> "$OUT" 2>/dev/null; '
+            f"sleep {interval}; done' >/dev/null 2>&1 & "
+            'echo "mempoller2 started pid $!"'
+        )
+        started = 0
+        for svc in self.services:
+            pods_by_svc = await asyncio.to_thread(ctx.deployment.get_pods, [svc])
+            for pod in pods_by_svc.get(svc) or []:
+                try:
+                    await asyncio.to_thread(pod.exec, ["sh", "-c", launch_script])
+                    self._started_pods.append((svc, pod.name))
+                    started += 1
+                except Exception as e:
+                    ctx.logger.warning(
+                        f"PodMemoryPoller2: failed to start sampler on {pod.name}: {e}"
+                    )
+        ctx.logger.info(
+            f"PodMemoryPoller2: launched in-pod samplers on {started} pods "
+            f"across {self.services}, interval={interval}s. "
+            f"Output: service_logs/<role>/<pod>.mempoller2.tsv on the log PVC "
+            f"(extracted to <role>/<pod>.mempoller2.tsv)."
+        )
+
+    async def stop(self, ctx: "ScenarioContext") -> None:
+        # Signal the in-pod loops to exit, then they flush their last sample.
+        stop_script = "touch /tmp/.mempoller2.stop 2>/dev/null || true"
+        for svc in self.services:
+            try:
+                pods_by_svc = await asyncio.to_thread(ctx.deployment.get_pods, [svc])
+            except Exception:
+                continue
+            for pod in pods_by_svc.get(svc) or []:
+                try:
+                    await asyncio.to_thread(pod.exec, ["sh", "-c", stop_script])
+                except Exception:
+                    pass
+        ctx.logger.info("PodMemoryPoller2: signalled in-pod samplers to stop")
+
+    @property
+    def description(self) -> str:
+        return f"PodMemoryPoller2 (in-pod) {self.services} every {self.interval_s}s"
 
 
 @dataclass

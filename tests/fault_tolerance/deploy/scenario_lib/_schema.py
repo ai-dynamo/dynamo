@@ -72,6 +72,10 @@ class Shape:
     input_tokens_stddev: Optional[int] = None
     output_tokens_mean: Optional[int] = None
     output_tokens_stddev: Optional[int] = None
+    # aiperf RNG seed override (per-rung via this shape). None => framework
+    # default (100). Lets concurrent same-shape loads draw disjoint prompt
+    # corpora (e2-pressure P-D: 3 loads, pool=5 each, seeds 1/2/3).
+    random_seed: Optional[int] = None
 
 
 @dataclass

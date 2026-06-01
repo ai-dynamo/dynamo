@@ -15,12 +15,16 @@ spec:
     Frontend:
       componentType: frontend
       replicas: 1
-      # Bump CPU/memory requests so kai-scheduler spreads pods naturally
-      # (otherwise tiny mocker pods all pack onto one node — exactly the
-      # failure mode from 2026-05-29 arm5 where 372 pods on one node took
-      # the test down when that node died). Grove operator rejects explicit
-      # topologySpreadConstraints in the user-supplied pod spec, so we
-      # achieve spread via resource pressure instead.
+      # Resources sized for cross-cluster portability — CPU pool topologies
+      # range from 4 × 192-CPU/192-Gi (aws-dev-02) to 10 × 32-CPU/64-Gi (nscale).
+      # `cpu: 1` and `memory: 3Gi` requests keep the pod schedulable even when
+      # kai-scheduler bin-packs onto a small node (3 Gi × 20 pods = 60 Gi fits
+      # in 64 Gi nscale node). Limits at cpu=4/mem=10Gi allow bursting; mocker
+      # itself typically uses 2-4 GiB resident, so OOMKill on the 10 Gi limit
+      # is unlikely. Earlier disagg.yaml used cpu=2 / mem=6Gi which on the
+      # aws-dev-02 4-node CPU pool saturated nodes at 46-set scale (2026-05-29),
+      # and on nscale's 64-GiB-per-node CPU pool triggered OutOfMemory
+      # admission rejections when kai bin-packed.
       extraPodSpec:
         # Constrain to CPU-only nodes (no GPU label). Frees expensive GPU nodes
         # for actual GPU workloads. The label discriminator is
@@ -46,8 +50,8 @@ spec:
           image: my-dynamo-image:my-tag
           resources:
             requests:
-              cpu: "2"
-              memory: "6Gi"
+              cpu: "1"
+              memory: "3Gi"
             limits:
               cpu: "4"
               memory: "10Gi"
@@ -96,8 +100,8 @@ spec:
           image: my-dynamo-image:my-tag
           resources:
             requests:
-              cpu: "2"
-              memory: "6Gi"
+              cpu: "1"
+              memory: "3Gi"
             limits:
               cpu: "4"
               memory: "10Gi"
@@ -159,8 +163,8 @@ spec:
           image: my-dynamo-image:my-tag
           resources:
             requests:
-              cpu: "2"
-              memory: "6Gi"
+              cpu: "1"
+              memory: "3Gi"
             limits:
               cpu: "4"
               memory: "10Gi"

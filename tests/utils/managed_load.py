@@ -178,6 +178,20 @@ class LoadConfig:
     # Extra inference parameters
     extra_inputs: Optional[Dict[str, Any]] = None
 
+    # Raw passthrough for aiperf CLI flags that the framework doesn't model
+    # as first-class fields. Items are appended verbatim to the aiperf
+    # invocation after all framework-built args. Used by callers that need
+    # access to aiperf's experimental flags (e.g. `--search-space`,
+    # `--search-sla`, `--search-planner`) without bloating LoadConfig
+    # with per-flag fields. None = no passthrough.
+    extra_aiperf_args: Optional[list[str]] = None
+
+    # aiperf synthetic-dataset / prefix-pool RNG seed. None preserves the
+    # historical default (100) so existing runs are byte-identical. Set
+    # per-load to de-correlate the prompt corpus across otherwise-identical
+    # concurrent loads (e.g. e2-pressure P-D's 3 disjoint-seed clients).
+    random_seed: Optional[int] = None
+
     # Pin every request to a specific (service, replica_index) pair via
     # nvext.worker_id. Resolved at StartLoad.execute() time by reading
     # the matching pod's DynamoWorkerMetadata CR. None = no pinning.
@@ -328,7 +342,7 @@ class ManagedLoad:
                 "--num-dataset-entries",
                 "12800",
                 "--random-seed",
-                "100",
+                str(cfg.random_seed if cfg.random_seed is not None else 100),
                 "--workers-max",
                 "252",
                 "--record-processors",
@@ -474,6 +488,10 @@ class ManagedLoad:
                 args.extend(["--extra-inputs", json.dumps({key: value})])
             else:
                 args.extend(["--extra-inputs", f"{key}:{value}"])
+
+        # Raw passthrough — append last so callers can override / extend.
+        if cfg.extra_aiperf_args:
+            args.extend(cfg.extra_aiperf_args)
 
         # shlex.join quotes args that contain whitespace (e.g. --goodput's
         # 'request_latency:30000 ttft:5000' string) so they survive the
@@ -930,6 +948,30 @@ class ManagedLoad:
                 self._logger.info(
                     f"Available result files: {[f.name for f in available_files]}"
                 )
+
+                # Reclaim PVC space between arms: on a SHARED (reuse) PVC the
+                # raw aiperf .jsonl (profile_export.jsonl + server_metrics ≈
+                # several GB/arm) accumulates and eventually fills the PVC,
+                # crash-looping the next arm's pods. Now that the extract
+                # succeeded AND the data is verified present locally (≥1
+                # non-empty file), drop this arm's sub-path from the PVC. If
+                # anything is off (no/empty local files), deliberately SKIP
+                # the clear so the data is retained for a manual pull.
+                if self.pvc_run_id:
+                    local_ok = any(
+                        f.is_file() and f.stat().st_size > 0 for f in available_files
+                    )
+                    if local_ok:
+                        await extractor.clear_subpath(self.pvc_name, sub_path)
+                    else:
+                        self._logger.warning(
+                            "clear-after-extract: extract reported success but "
+                            "no non-empty local files in %s — RETAINING %s/%s "
+                            "on the PVC for manual pull.",
+                            output_path,
+                            self.pvc_name,
+                            sub_path,
+                        )
 
                 json_file = output_path / "profile_export_aiperf.json"
                 if json_file.exists():

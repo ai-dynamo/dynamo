@@ -14,6 +14,7 @@ import os
 import secrets
 import shutil
 import tarfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -71,7 +72,7 @@ class PvcExtractor:
         file_patterns: list[str],
         local_output_dir: str,
         job_prefix: str = "pvc-extract",
-        ready_timeout: int = 60,
+        ready_timeout: int = 240,
         tar_timeout: int = 1800,
         cat_timeout: int = 120,
     ) -> dict:
@@ -109,13 +110,26 @@ class PvcExtractor:
                     "output_dir": local_output_dir,
                 }
 
-            # Step 2: Create download job
-            await self._create_download_job(
-                job_name, pvc_name, sub_path, container_path
-            )
+            # Steps 2+3: Create download job and wait for its pod to be ready,
+            # with one retry. A single download pod can get wedged on transient
+            # scheduling / image-pull stalls on a busy node; rather than lose
+            # the (already-collected) data, tear the stuck job down and try once
+            # more with a fresh job before giving up.
+            pod = None
+            for create_attempt in range(2):
+                await self._create_download_job(
+                    job_name, pvc_name, sub_path, container_path
+                )
+                pod = await self._wait_for_ready(job_name, ready_timeout)
+                if pod is not None:
+                    break
+                self._logger.warning(
+                    f"Download job {job_name} not ready (attempt "
+                    f"{create_attempt + 1}/2); recreating."
+                )
+                await self._delete_job(job_name)
+                job_name = f"{job_prefix}-{secrets.token_hex(4)}"
 
-            # Step 3: Wait for pod to be ready
-            pod = await self._wait_for_ready(job_name, ready_timeout)
             if pod is None:
                 return {
                     "success": False,
@@ -455,6 +469,102 @@ echo "TAR_BYTES:$TAR_BYTES"
                     f"_download_archive_chunked: cleanup of parts failed (non-fatal): {e}"
                 )
 
+    async def clear_subpath(self, pvc_name: str, sub_path: str) -> bool:
+        """Delete everything under ``sub_path`` on ``pvc_name`` (RW mount).
+
+        Used to reclaim space after a *verified* extract — the download job
+        mounts read-only, so freeing the raw aiperf .jsonl needs a separate
+        read-write job. Caller is responsible for only invoking this once the
+        data is confirmed safe locally; on any failure here we simply leave
+        the data on the PVC (returns False) so nothing is lost.
+        """
+        job_name = f"pvc-clear-{secrets.token_hex(4)}"
+        mount_path = "/data"
+        script = (
+            f'echo "clearing {mount_path}"; '
+            f"rm -rf {mount_path}/* {mount_path}/.[!.]* 2>/dev/null; "
+            "echo CLEAR_DONE"
+        )
+        job_spec = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": job_name,
+                "namespace": self.namespace,
+                "labels": {"app": "pvc-extractor", "managed-by": "pvc-extractor"},
+            },
+            "spec": {
+                "backoffLimit": 0,
+                "ttlSecondsAfterFinished": 120,
+                "template": {
+                    "metadata": {"labels": {"app": "pvc-extractor"}},
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "containers": [
+                            {
+                                "name": "clear",
+                                "image": "busybox:1.35",
+                                "command": ["/bin/sh", "-c", script],
+                                "volumeMounts": [
+                                    {
+                                        "name": "pvc-volume",
+                                        "mountPath": mount_path,
+                                        "subPath": sub_path,
+                                    }
+                                ],
+                                "resources": {
+                                    "requests": {"cpu": "50m", "memory": "64Mi"},
+                                    "limits": {"cpu": "500m", "memory": "256Mi"},
+                                },
+                            }
+                        ],
+                        "volumes": [
+                            {
+                                "name": "pvc-volume",
+                                "persistentVolumeClaim": {"claimName": pvc_name},
+                            }
+                        ],
+                    },
+                },
+            },
+        }
+        try:
+            assert self._batch_api is not None
+            self._active_jobs.append(job_name)
+            await self._batch_api.create_namespaced_job(
+                namespace=self.namespace, body=job_spec
+            )
+            # Wait for completion (rm of even a few GB is fast on a mounted PVC).
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                job = await self._batch_api.read_namespaced_job(
+                    name=job_name, namespace=self.namespace
+                )
+                if job.status.succeeded:
+                    self._logger.info(f"Cleared PVC sub-path {pvc_name}/{sub_path}")
+                    await self._delete_job(job_name)
+                    return True
+                if job.status.failed:
+                    self._logger.warning(
+                        f"Clear job {job_name} failed; leaving "
+                        f"{pvc_name}/{sub_path} on the PVC."
+                    )
+                    await self._delete_job(job_name)
+                    return False
+                await asyncio.sleep(2)
+            self._logger.warning(
+                f"Clear job {job_name} did not finish in 120s; leaving "
+                f"{pvc_name}/{sub_path} on the PVC."
+            )
+            await self._delete_job(job_name)
+            return False
+        except Exception as e:  # noqa: BLE001
+            self._logger.warning(
+                f"clear_subpath({pvc_name}/{sub_path}) failed: {e}; "
+                "data retained on PVC."
+            )
+            return False
+
     @staticmethod
     def _build_find_expr(patterns: list[str]) -> str:
         """Build a find -name expression from glob patterns.
@@ -567,9 +677,28 @@ done
             else:
                 raise
 
-    async def _wait_for_ready(self, job_name: str, timeout: int = 60):
-        """Wait for the download job pod to be ready and return it."""
-        for attempt in range(timeout):
+    async def _wait_for_ready(self, job_name: str, timeout: int = 240):
+        """Wait for the download job pod to be ready and return it.
+
+        Deadline-based (wall-clock), not iteration-based: each poll does an
+        ``exec`` that can itself take several seconds, so a fixed iteration
+        count silently under-spends the budget. We loop until ``timeout``
+        seconds of real time have elapsed.
+
+        The download pod has to be scheduled, pull the busybox image, and
+        start before it can write ``job_ready.txt``. On a busy node (e.g. a
+        60-pod deployment competing for the same CPU nodes) scheduling +
+        image-pull alone can exceed a minute, so the default is generous.
+
+        On timeout we log the pod's actual phase and any warning events so
+        the failure is diagnosable (FailedScheduling, ImagePullBackOff, …)
+        instead of an opaque "did not become ready".
+        """
+        deadline = time.monotonic() + timeout
+        last_phase = None
+        next_progress = time.monotonic() + 15
+        pod = None
+        while time.monotonic() < deadline:
             try:
                 pods = list(
                     kr8s.get(
@@ -581,31 +710,66 @@ done
 
                 if pods:
                     pod = pods[0]
-                    try:
-                        result = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                pod.exec,
-                                ["test", "-f", "/tmp/download/job_ready.txt"],
-                            ),
-                            timeout=5.0,
-                        )
-                        if result.returncode == 0:
-                            return pod
-                    except Exception:
-                        pass
+                    phase = (getattr(pod, "status", None) or {}).get("phase")
+                    if phase != last_phase:
+                        self._logger.info(f"Download job {job_name} pod phase: {phase}")
+                        last_phase = phase
+                    # Only probe for the ready marker once the container is
+                    # actually running — exec into a Pending pod just throws.
+                    if phase == "Running":
+                        try:
+                            result = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    pod.exec,
+                                    ["test", "-f", "/tmp/download/job_ready.txt"],
+                                ),
+                                timeout=5.0,
+                            )
+                            if result.returncode == 0:
+                                return pod
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
-            if attempt % 10 == 9:
+            if time.monotonic() >= next_progress:
+                remaining = int(deadline - time.monotonic())
                 self._logger.info(
-                    f"Waiting for download job... (attempt {attempt + 1}/{timeout})"
+                    f"Waiting for download job {job_name}... "
+                    f"(phase={last_phase}, {remaining}s left)"
                 )
-            await asyncio.sleep(1)
+                next_progress = time.monotonic() + 15
+            await asyncio.sleep(2)
 
+        # Timed out — surface the pod's real state for diagnosis.
         self._logger.warning(
-            f"Download job {job_name} did not become ready in {timeout}s"
+            f"Download job {job_name} did not become ready in {timeout}s "
+            f"(last phase={last_phase})"
         )
+        await self._log_pod_diagnostics(job_name, pod)
         return None
+
+    async def _log_pod_diagnostics(self, job_name: str, pod):
+        """Best-effort dump of pod status + warning events on a stuck job."""
+        try:
+            if pod is not None:
+                status = getattr(pod, "status", None) or {}
+                self._logger.warning(
+                    f"  pod phase={status.get('phase')} "
+                    f"conditions={status.get('conditions')}"
+                )
+                for cs in status.get("containerStatuses", []) or []:
+                    self._logger.warning(f"  container state: {cs.get('state')}")
+            assert self._core_api is not None
+            events = await self._core_api.list_namespaced_event(
+                namespace=self.namespace,
+                field_selector=f"involvedObject.name={job_name}",
+            )
+            for ev in events.items[-10:]:
+                if ev.type == "Warning":
+                    self._logger.warning(f"  event: {ev.reason}: {ev.message}")
+        except Exception as e:  # noqa: BLE001
+            self._logger.debug(f"_log_pod_diagnostics failed (non-fatal): {e}")
 
     async def _delete_job(self, job_name: str):
         """Delete a job with foreground propagation."""
