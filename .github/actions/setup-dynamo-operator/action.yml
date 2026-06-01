@@ -37,6 +37,10 @@ inputs:
     description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
     required: false
     default: 'v1.32.13'
+  checkpoint_enabled:
+    description: 'Enable operator checkpoint/restore injection'
+    required: false
+    default: 'false'
 
 outputs:
   namespace:
@@ -173,6 +177,7 @@ runs:
       env:
         REGISTRY: ${{ inputs.registry }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
+        CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
         set -x
@@ -188,6 +193,7 @@ runs:
           --set dynamo-operator.controllerManager.manager.image.repository=${OPERATOR_REPO} \
           --set dynamo-operator.controllerManager.manager.image.tag=${OPERATOR_TAG} \
           --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.checkpoint.enabled=${CHECKPOINT_ENABLED} \
           --set global.grove.install=true \
           --set global.kai-scheduler.install=false \
           --debug
