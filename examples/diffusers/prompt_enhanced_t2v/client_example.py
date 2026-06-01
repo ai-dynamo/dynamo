@@ -48,9 +48,7 @@ def _parse_args() -> argparse.Namespace:
         help="Bypass the LLM enhancer when set to 'off'.",
     )
     p.add_argument("--steps", type=int, default=25, help="num_inference_steps.")
-    p.add_argument(
-        "--size", default="832x480", help="Output resolution, e.g. 832x480."
-    )
+    p.add_argument("--size", default="832x480", help="Output resolution, e.g. 832x480.")
     p.add_argument("--frames", type=int, default=33, help="num_frames.")
     return p.parse_args()
 

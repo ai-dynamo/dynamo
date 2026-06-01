@@ -193,7 +193,9 @@ class T2VEnhancedClient:
                 f"Unexpected enhancer response shape: {data!r}"
             ) from exc
 
-    async def _t2v(self, prompt: str, t2v_params: Mapping[str, Any]) -> Mapping[str, Any]:
+    async def _t2v(
+        self, prompt: str, t2v_params: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
         session = self._session_or_raise()
         payload = {"model": self._t2v_model, "prompt": prompt, **t2v_params}
         async with session.post(f"{self._t2v_url}/v1/videos", json=payload) as resp:
