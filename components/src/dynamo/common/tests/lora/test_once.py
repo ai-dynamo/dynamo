@@ -44,11 +44,8 @@ class TestOnceLockBasicAPI:
 
 class TestOnceLockConcurrency:
     def test_get_or_init_runs_factory_exactly_once_under_concurrent_threads(self):
-        """Regression guard for the singleton-race pattern fixed in DIS-1840.
-
-        Without proper double-checked locking, the slow factory would be
-        invoked by multiple threads and `calls` would exceed 1.
-        """
+        """Without double-checked locking the slow factory would be invoked
+        by multiple threads and `calls` would exceed 1."""
         num_threads = 50
         once: OnceLock[int] = OnceLock()
         calls = 0
@@ -63,10 +60,14 @@ class TestOnceLockConcurrency:
             return 42
 
         results: list[int | None] = [None] * num_threads
+        errors: list[Exception | None] = [None] * num_threads
 
         def worker(idx: int) -> None:
-            barrier.wait()  # release all threads at once
-            results[idx] = once.get_or_init(factory)
+            try:
+                barrier.wait()  # release all threads at once
+                results[idx] = once.get_or_init(factory)
+            except Exception as exc:
+                errors[idx] = exc
 
         threads = [
             threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
@@ -75,6 +76,10 @@ class TestOnceLockConcurrency:
             t.start()
         for t in threads:
             t.join()
+
+        for idx, exc in enumerate(errors):
+            if exc is not None:
+                raise AssertionError(f"worker {idx} raised") from exc
 
         assert calls == 1, f"factory called {calls} times under {num_threads} threads"
         assert all(r == 42 for r in results)

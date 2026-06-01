@@ -53,9 +53,11 @@ class TestGetLoraManagerSingleton:
         assert first is second
         assert instance_count == 1
 
-    def test_init_failure_returns_none_and_allows_retry(
+    def test_init_failure_propagates_and_allows_retry(
         self, fresh_singleton, monkeypatch
     ):
+        """Init exceptions bubble up to the caller. OnceLock does not cache
+        failures, so a subsequent call retries and can succeed."""
         attempts = 0
 
         class FlakyLoRAManager:
@@ -68,7 +70,8 @@ class TestGetLoraManagerSingleton:
         monkeypatch.setattr(manager_module, "LoRAManager", FlakyLoRAManager)
         monkeypatch.setenv("DYN_LORA_ENABLED", "true")
 
-        assert get_lora_manager() is None
+        with pytest.raises(RuntimeError, match="first attempt fails"):
+            get_lora_manager()
         assert attempts == 1
 
         second = get_lora_manager()
@@ -79,12 +82,8 @@ class TestGetLoraManagerSingleton:
 
 class TestGetLoraManagerConcurrency:
     def test_no_race_under_concurrent_init(self, fresh_singleton, monkeypatch):
-        """Regression guard for DIS-1840.
-
-        Reverting the OnceLock fix (commit c15cb28663) should cause this test
-        to fail with instance_count > 1 — multiple worker threads observing
-        the singleton as None and each constructing their own LoRAManager.
-        """
+        """Without the OnceLock adoption multiple worker threads would each
+        observe the singleton as None and construct their own LoRAManager."""
         num_threads = 50
         instance_count = 0
         count_lock = threading.Lock()
@@ -101,10 +100,14 @@ class TestGetLoraManagerConcurrency:
         monkeypatch.setenv("DYN_LORA_ENABLED", "true")
 
         results: list[object] = [None] * num_threads
+        errors: list[Exception | None] = [None] * num_threads
 
         def worker(idx: int) -> None:
-            barrier.wait()  # release all threads at once
-            results[idx] = get_lora_manager()
+            try:
+                barrier.wait()  # release all threads at once
+                results[idx] = get_lora_manager()
+            except Exception as exc:
+                errors[idx] = exc
 
         threads = [
             threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
@@ -113,6 +116,10 @@ class TestGetLoraManagerConcurrency:
             t.start()
         for t in threads:
             t.join()
+
+        for idx, exc in enumerate(errors):
+            if exc is not None:
+                raise AssertionError(f"worker {idx} raised") from exc
 
         assert instance_count == 1, (
             f"expected 1 LoRAManager instance, got {instance_count} — "

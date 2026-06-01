@@ -7,14 +7,13 @@ Minimal Python wrapper around Rust LoRA core with extension points for custom so
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Protocol
 
+from dynamo.common.lora.once import OnceLock
+from dynamo.common.utils.env import env_bool
 from dynamo.llm import LoRADownloader
-
-from .once import OnceLock
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +131,11 @@ class LoRAInfo:
 _lora_manager: OnceLock[LoRAManager] = OnceLock()
 
 
+def _lora_enabled() -> bool:
+    """Return True when DYN_LORA_ENABLED is set to a truthy value."""
+    return env_bool("DYN_LORA_ENABLED")
+
+
 def _init_lora_manager() -> LoRAManager:
     manager = LoRAManager()
     logger.info("LoRAManager initialized successfully")
@@ -139,18 +143,14 @@ def _init_lora_manager() -> LoRAManager:
 
 
 def get_lora_manager() -> Optional[LoRAManager]:
-    """Get the LoRAManager singleton, initializing it on first call if enabled."""
+    """Return the LoRAManager singleton, or None when DYN_LORA_ENABLED is unset.
+
+    Initializes on first call. Initialization errors propagate to the caller —
+    OnceLock does not cache failures, so subsequent calls will retry.
+    """
     existing = _lora_manager.get()
     if existing is not None:
         return existing
-
-    if os.environ.get("DYN_LORA_ENABLED", "").lower() not in ("true", "1", "yes"):
+    if not _lora_enabled():
         return None
-
-    try:
-        return _lora_manager.get_or_init(_init_lora_manager)
-    except Exception as e:
-        logger.warning(
-            f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
-        )
-        return None
+    return _lora_manager.get_or_init(_init_lora_manager)
