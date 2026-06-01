@@ -273,10 +273,12 @@ pub struct EnginePerfModel {
 impl EnginePerfModel {
     /// Build the best available model from whatever inputs the caller has.
     ///
-    /// Explicit `aic_config` takes precedence. If it is absent, the shim derives
-    /// the AIC fields available on `engine_args`; fields not present on
-    /// `MockEngineArgs` are left unset. Without any native config, the model
-    /// starts in regression-only mode. `bootstrap_fpms` are tuned after construction.
+    /// Explicit `aic_config` takes precedence. If it is absent and
+    /// `engine_args.aic_backend` is set, `engine_args.aic_model_path` must also
+    /// be set so the shim can derive a native AIC config. This side API does not
+    /// receive the loaded `LocalModel`, so it cannot recover the source model path
+    /// used by the live mocker entrypoint. Without `aic_backend`, the model starts
+    /// in regression-only mode. `bootstrap_fpms` are tuned after construction.
     pub fn best_available(inputs: EnginePerfModelInputs) -> Result<Self> {
         let worker_type = resolve_worker_type(inputs.worker_type, inputs.engine_args.as_ref())?;
         let limits = resolve_limits(inputs.limits, inputs.engine_args.as_ref())?;
@@ -889,6 +891,10 @@ fn aic_identity_from_snapshot(snapshot: &ForwardPassSnapshot) -> ForwardPassMetr
     }
 }
 
+/// Derive native AIC config fields from serialized mocker engine args.
+///
+/// `aic_backend` opts into native AIC modeling, and `aic_model_path` is required
+/// in this side API because no loaded `LocalModel` is available as a fallback.
 pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<EngineConfig>> {
     let Some(backend) = args.aic_backend.as_deref() else {
         return Ok(None);

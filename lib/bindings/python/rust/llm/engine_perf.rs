@@ -260,7 +260,11 @@ pub struct RustEnginePerfModel {
 
 #[pymethods]
 impl RustEnginePerfModel {
-    /// Build from all available inputs; explicit AIC config is preferred, then engine args, then regression-only.
+    /// Build from all available inputs.
+    ///
+    /// Explicit AIC config is preferred. If deriving AIC config from engine_args,
+    /// engine_args.aic_model_path is required whenever engine_args.aic_backend is set.
+    /// Without aic_backend, the model starts in regression-only mode.
     #[staticmethod]
     #[pyo3(signature = (
         *,
