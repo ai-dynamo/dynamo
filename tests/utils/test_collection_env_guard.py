@@ -46,10 +46,11 @@ def test_snapshot_collection_env_filters_to_watched_prefixes():
         "PATH": "/usr/bin",
     }
 
-    # DYNAMO_SKIP_PYTHON_LOG_INIT is watched as an exact key even though the
-    # broad "DYNAMO_" prefix is intentionally not watched (DYNAMO_TEST_FRAMEWORK
-    # is dropped).
+    # The broad "DYNAMO_" prefix is watched, so any DYNAMO_* var (including
+    # DYNAMO_TEST_FRAMEWORK) is captured -- nothing should set these during
+    # collection, which is exactly what the guard is meant to catch.
     assert snapshot_collection_env(env) == {
+        "DYNAMO_TEST_FRAMEWORK": "vllm",
         "DYNAMO_SKIP_PYTHON_LOG_INIT": "1",
         "DYN_SYSTEM_PORT": "9090",
         "SGLANG_LOGGING_LEVEL": "debug",
@@ -63,16 +64,16 @@ def test_snapshot_collection_env_filters_to_watched_prefixes():
     }
 
 
-def test_watched_prefixes_cover_backend_env_without_long_dynamo_prefix():
+def test_watched_prefixes_cover_backend_and_dynamo_env():
     assert "DYN_" in WATCHED_ENV_PREFIXES
+    assert "DYNAMO_" in WATCHED_ENV_PREFIXES
     assert "SGLANG_" in WATCHED_ENV_PREFIXES
     assert "TRTLLM_" in WATCHED_ENV_PREFIXES
-    assert "DYNAMO_" not in WATCHED_ENV_PREFIXES
-    # The #9724 leak key is watched exactly, since "DYNAMO_" is not a prefix.
-    assert "DYNAMO_SKIP_PYTHON_LOG_INIT" in WATCHED_ENV_KEYS
-    assert not any(
-        "DYNAMO_SKIP_PYTHON_LOG_INIT".startswith(prefix)
-        for prefix in WATCHED_ENV_PREFIXES
+    # The #9724 leak key is now covered by the broad "DYNAMO_" prefix, so the
+    # exact-key set is empty.
+    assert WATCHED_ENV_KEYS == frozenset()
+    assert "DYNAMO_SKIP_PYTHON_LOG_INIT".startswith(
+        tuple(WATCHED_ENV_PREFIXES)
     )
 
 

@@ -10,6 +10,7 @@ from collections.abc import Mapping
 
 WATCHED_ENV_PREFIXES = (
     "DYN_",
+    "DYNAMO_",
     "CUDA_",
     "NCCL_",
     "HF_",
@@ -39,15 +40,14 @@ WATCHED_ENV_PREFIXES = (
     "NEMOTRON_",
 )
 
-# Exact keys to watch that fall outside WATCHED_ENV_PREFIXES. The broad
-# "DYNAMO_" prefix is intentionally excluded (it would catch this guard's own
-# bypass flag and other test-harness vars), but specific runtime keys under it
-# still leak from imports -- e.g. the log-init env fixed in #9724.
-WATCHED_ENV_KEYS = frozenset(
-    {
-        "DYNAMO_SKIP_PYTHON_LOG_INIT",
-    }
-)
+# Exact keys to watch that fall outside WATCHED_ENV_PREFIXES. Empty by default:
+# the "DYNAMO_" prefix is watched, so import-time leaks under it (e.g. the
+# log-init env from #9724) are caught without enumerating individual keys.
+# Nothing should mutate a watched var during collection -- legitimate harness
+# vars (DYNAMO_MODELS_DIR, DYNAMO_GPU_PARALLEL_DOWNLOADS_READY) are set in
+# fixtures, after the collection-finish snapshot, and the guard's own bypass
+# flag is only ever read, never written, during collection.
+WATCHED_ENV_KEYS: frozenset[str] = frozenset()
 
 SENSITIVE_PATTERNS = (
     "TOKEN",
