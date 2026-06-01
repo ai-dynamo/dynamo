@@ -489,7 +489,13 @@ class CachedTokensChatPayload(ChatPayload):
         except Exception as e:
             logger.warning("Failed to scrape %s: %s", url, e)
             return {}
-        full = "dynamo_component_router_kv_hit_rate"
+        # Compose from canonical constants so a metric rename in
+        # prometheus_names cascades here instead of silently breaking
+        # the kv_hit_rate strong gate.
+        full = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.router.KV_HIT_RATE}"
+        )
         return {
             "router_kv_hit_rate": (
                 sum_metric_samples(text, f"{full}_sum"),
