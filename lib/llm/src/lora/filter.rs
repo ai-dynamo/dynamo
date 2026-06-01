@@ -206,6 +206,39 @@ mod tests {
     }
 
     #[test]
+    fn test_not_in_routing_table_narrows_to_loaded_workers() {
+        // No routing-table entry (controller disabled / pre-first-tick), but the state
+        // tracker knows the adapter is loaded on a subset of workers. The fallback must
+        // narrow to those known-loaded workers rather than scattering to all available.
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        st.handle_mdc_addition(make_worker(2), &make_lora_info("lora-a"));
+
+        let filter = LoraFilter::new(rt, st);
+        let workers = make_workers_map(&[1, 2, 3]);
+
+        let result = filter.filter_workers_for_lora(Some("lora-a"), &workers);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&2));
+    }
+
+    #[test]
+    fn test_not_in_routing_table_loaded_worker_unavailable_falls_back_to_all() {
+        // The adapter is known-loaded, but on a worker that is not in the available set.
+        // With no usable loaded worker, the fallback returns all available workers so the
+        // request stays routable.
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        st.handle_mdc_addition(make_worker(9), &make_lora_info("lora-a"));
+
+        let filter = LoraFilter::new(rt, st);
+        let workers = make_workers_map(&[1, 2, 3]);
+
+        let result = filter.filter_workers_for_lora(Some("lora-a"), &workers);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
     fn test_active_lora_filters_to_loaded_workers() {
         let rt = LoraRoutingTable::new();
         let st = LoraStateTracker::new();
