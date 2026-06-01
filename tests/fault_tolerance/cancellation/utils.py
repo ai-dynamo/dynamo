@@ -435,6 +435,8 @@ def verify_runtime_cancellation_metrics(
     worker_system_port: int,
     expected_count: int = 0,
     component: str = "backend",
+    max_wait_ms: int = 0,
+    poll_interval_ms: int = 100,
 ) -> None:
     """
     Verify runtime (worker) cancellation metrics.
@@ -443,6 +445,65 @@ def verify_runtime_cancellation_metrics(
         worker_system_port: Port where the worker /metrics is served
         expected_count: Expected cumulative cancellation count
         component: The dynamo_component label value (e.g. "backend", "prefill")
+        max_wait_ms: If > 0, retry the scrape until the metric matches
+            expected_count or the timeout expires. Use this when the counter
+            increment is asynchronous to whatever signal triggered the check
+        poll_interval_ms: Interval between retries when max_wait_ms > 0.
+    """
+    worker_metrics_url = f"http://localhost:{worker_system_port}/metrics"
+
+    deadline = time.monotonic() + max_wait_ms / 1000.0
+    count = -1
+    while True:
+        try:
+            response = requests.get(worker_metrics_url, timeout=5)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            pytest.fail(
+                f"Failed to fetch worker metrics from {worker_metrics_url}: {e}"
+            )
+
+        worker_text = response.text
+        count = _parse_runtime_cancellation_metric(worker_text, component=component)
+        if count == expected_count or time.monotonic() >= deadline:
+            break
+        time.sleep(poll_interval_ms / 1000.0)
+
+    logger.info(f"Runtime cancellation metrics (component={component}): {count}")
+
+    assert count == expected_count, (
+        f"Runtime (component={component}): expected {expected_count} cancellations, "
+        f"but got {count}"
+    )
+
+
+def _parse_labeled_metric(
+    metrics_text: str, metric_name: str, label_filters: Dict[str, str]
+) -> float | None:
+    """Return the first matching line's value, or None if not found."""
+    for line in metrics_text.splitlines():
+        if not line.startswith(f"{metric_name}{{"):
+            continue
+        if not all(f'{k}="{v}"' in line for k, v in label_filters.items()):
+            continue
+        parts = line.rsplit(None, 1)
+        if len(parts) == 2:
+            try:
+                return float(parts[1])
+            except ValueError:
+                pass
+    return None
+
+
+def read_worker_generate_summary(
+    worker_system_port: int,
+    component: str,
+) -> Dict[str, float]:
+    """
+    Read the dynamo-runtime ingress summary metrics for the worker `generate`
+    endpoint. `duration_count` increments only after RequestMetricsGuard::drop,
+    so it confirms the response stream fully drained (i.e. the request wasn't
+    aborted mid-flight).
     """
     worker_metrics_url = f"http://localhost:{worker_system_port}/metrics"
     try:
@@ -451,15 +512,22 @@ def verify_runtime_cancellation_metrics(
     except requests.RequestException as e:
         pytest.fail(f"Failed to fetch worker metrics from {worker_metrics_url}: {e}")
 
-    worker_text = response.text
-    count = _parse_runtime_cancellation_metric(worker_text, component=component)
-
-    logger.info(f"Runtime cancellation metrics (component={component}): {count}")
-
-    assert count == expected_count, (
-        f"Runtime (component={component}): expected {expected_count} cancellations, "
-        f"but got {count}"
-    )
+    text = response.text
+    filters = {"dynamo_component": component, "dynamo_endpoint": "generate"}
+    return {
+        "duration_sum": _parse_labeled_metric(
+            text, "dynamo_component_request_duration_seconds_sum", filters
+        )
+        or 0.0,
+        "duration_count": _parse_labeled_metric(
+            text, "dynamo_component_request_duration_seconds_count", filters
+        )
+        or 0.0,
+        "response_bytes": _parse_labeled_metric(
+            text, "dynamo_component_response_bytes_total", filters
+        )
+        or 0.0,
+    }
 
 
 def read_log_content(log_path: str | None) -> str:

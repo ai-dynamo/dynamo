@@ -110,19 +110,19 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         dimensions: Optional[int] = None,
         encoding_format: str = "float",
     ) -> Dict[str, Any]:
-        """Transform SGLang response to OpenAI embedding format.
-
-        Honors two optional request fields:
+        """Transform SGLang response to the internal worker->frontend
+        embedding format.
 
         - ``dimensions``: Matryoshka-style truncation; keeps the first N
           values of each embedding vector.
-        - ``encoding_format``: wire format of ``data[].embedding``.
-          ``"float"`` (default) emits a JSON array of floats;
-          ``"base64"`` emits a base64-encoded little-endian ``float32``
-          byte string per the OpenAI spec.
-
-        When both are set, truncation runs first so the base64 byte
-        count matches the requested dimensionality.
+        - ``encoding_format``: validated upstream in ``generate`` for
+          spec compliance, but no longer branches the worker's output.
+          The ``embedding`` field is always emitted as a base64-encoded
+          little-endian ``float32`` byte string; the Rust HTTP frontend
+          decodes back to a JSON array of floats at the HTTP boundary
+          when the client asked for float. Truncation runs before
+          encoding so the base64 byte count matches the requested
+          dimensionality.
         """
         if not isinstance(ret, list):
             ret = [ret]
@@ -142,16 +142,18 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
                     )
                 embedding = embedding[:dimensions]
 
-            embedding_payload: Any
-            if encoding_format == "base64":
-                embedding_payload = _encode_floats_to_base64(embedding)
-            else:
-                embedding_payload = embedding
-
+            # Always emit base64 over the worker->frontend wire format,
+            # mirroring the vLLM embedding handler. The Rust HTTP frontend
+            # decodes back to a float array when the client's
+            # ``encoding_format`` is float (the OpenAI default); when the
+            # client asked for base64 the payload is passed through. JSON
+            # float arrays of 15 x 1024 floats cost ~115 ms per request in
+            # Python ``json.dumps`` + Rust ``serde_json`` parse across NATS;
+            # base64 bytes avoid both halves of that cost.
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": embedding_payload,
+                    "embedding": _encode_floats_to_base64(embedding),
                     "index": idx,
                 }
             )
