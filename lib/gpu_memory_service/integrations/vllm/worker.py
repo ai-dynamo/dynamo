@@ -162,10 +162,27 @@ class GMSWorker(Worker):
         if not is_scratch_kv_enabled():
             return super().determine_available_memory()
 
+        import vllm.envs as envs
+        from vllm.config import CUDAGraphMode
+        from vllm.platforms import current_platform
+
         torch.cuda.reset_peak_memory_stats()
         self.model_runner.profile_run()
         torch.cuda.synchronize()
         torch_peak = torch.cuda.max_memory_allocated()
+
+        cudagraph_memory_estimate = 0
+        if (
+            current_platform.is_cuda()
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+        cudagraph_memory_estimate_applied = (
+            cudagraph_memory_estimate
+            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            else 0
+        )
+        self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         # GMS weights mapped via cuMemMap are invisible to PyTorch's memory
         # stats on RO engines. Add them explicitly. On RW engines, torch_peak
@@ -176,18 +193,26 @@ class GMSWorker(Worker):
         else:
             non_kv_cache_memory = torch_peak
 
-        projected_available = self.requested_memory - non_kv_cache_memory
+        projected_available = (
+            self.requested_memory
+            - non_kv_cache_memory
+            - cudagraph_memory_estimate_applied
+        )
+        self.available_kv_cache_memory_bytes = int(projected_available)
 
         msg = (
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
-            "torch_peak=%.2f GiB, weights=%.2f GiB)"
+            "torch_peak=%.2f GiB, weights=%.2f GiB, "
+            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)"
             % (
                 projected_available / (1 << 30),
                 self.requested_memory / (1 << 30),
                 non_kv_cache_memory / (1 << 30),
                 torch_peak / (1 << 30),
                 weights_memory / (1 << 30),
+                cudagraph_memory_estimate / (1 << 30),
+                cudagraph_memory_estimate_applied / (1 << 30),
             )
         )
         logger.info(msg)
@@ -240,20 +265,30 @@ class GMSWorker(Worker):
         try:
             from gpu_memory_service.integrations.vllm.model_loader import (
                 get_imported_weights_bytes,
+                get_model_memory_usage_offset_bytes,
             )
 
-            imported_bytes = int(get_imported_weights_bytes())
-            if (
-                imported_bytes > 0
-                and hasattr(self, "model_runner")
-                and self.model_runner is not None
-            ):
+            imported_weights_bytes = get_imported_weights_bytes()
+            memory_usage_offset_bytes = get_model_memory_usage_offset_bytes()
+            # The offset is not committed/restored GMS weight state. It is the
+            # load-time allocation footprint pruned before commit. vLLM uses
+            # model_memory_usage for KV-cache sizing, not only as a literal
+            # live-weight counter; reporting committed GMS bytes only can
+            # overestimate safe KV capacity and allocate an oversized cache.
+            model_memory_usage_bytes = int(
+                imported_weights_bytes + memory_usage_offset_bytes
+            )
+            if model_memory_usage_bytes > 0 and self.model_runner is not None:
                 old_usage = getattr(self.model_runner, "model_memory_usage", 0)
-                self.model_runner.model_memory_usage = imported_bytes
+                self.model_runner.model_memory_usage = model_memory_usage_bytes
                 logger.info(
-                    "[GMS] Corrected model_memory_usage: %.2f GiB -> %.2f GiB",
+                    "[GMS] Corrected vLLM model_memory_usage for KV sizing: "
+                    "%.2f GiB -> %.2f GiB "
+                    "(weights %.2f GiB + offset %.2f GiB)",
                     old_usage / (1 << 30),
-                    imported_bytes / (1 << 30),
+                    model_memory_usage_bytes / (1 << 30),
+                    imported_weights_bytes / (1 << 30),
+                    memory_usage_offset_bytes / (1 << 30),
                 )
         except Exception as e:
             logger.debug("[GMS] Could not correct memory accounting: %s", e)

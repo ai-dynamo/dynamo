@@ -20,28 +20,17 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
+      dynamo: &d_4_a
         calls: []
-        normal_text: |-
-          <tool_call>
-          random text without function tag
-          </tool_call>
+        normal_text: ''
       vllm:
         calls: []
         normal_text: |-
           <tool_call>
           random text without function tag
           </tool_call>
-        reason: impl-defined recovery contract (see TOOLCALLING_CASES.md)
-      sglang:
-        calls: []
-        normal_text: ''
-        reason: |-
-          SGLang consumes the <tool_call>...</tool_call> wrapper into the parsed
-          region (normal_text=text[:start_idx_of_<tool_call>]) before scanning for
-          <function=...> bodies; when no body is found it emits zero calls and an
-          empty normal_text. Dynamo/vLLM preserve the unrecognized wrapper as
-          normal_text per impl-defined recovery contract (see TOOLCALLING_CASES.md).
+        reason: vLLM preserves a <tool_call> wrapper with no <function=...> body as content; Dynamo/SGLang strip the invalid wrapper.
+      sglang: *d_4_a
   TOOLCALLING.batch.4.d:
     description: Missing </parameter> closing tag
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_qwen3coder_tool_parser.py#L729
@@ -92,14 +81,9 @@ cases:
           command:
             type: string
     expected:
-      dynamo:
+      dynamo: &d_4_f
         calls: []
-        normal_text: |-
-          <tool_call>
-          <terminal>
-          echo hello
-          </function>
-          </tool_call>
+        normal_text: ''
       vllm:
         calls: []
         normal_text: |-
@@ -108,8 +92,5 @@ cases:
           echo hello
           </function>
           </tool_call>
-        reason: <terminal> is not valid Qwen3-Coder grammar; the function opener must be <function=Terminal>.
-      sglang:
-        calls: []
-        normal_text: ''
-        reason: SGLang consumes the outer <tool_call> region before scanning for <function=...>; with no valid function opener it emits no calls and no normal_text.
+        reason: <terminal> is not valid Qwen3-Coder grammar; vLLM preserves the invalid wrapper as content, while Dynamo/SGLang strip it.
+      sglang: *d_4_f

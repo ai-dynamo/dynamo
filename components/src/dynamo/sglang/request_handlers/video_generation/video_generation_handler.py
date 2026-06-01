@@ -259,7 +259,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         return video_bytes
 
     async def _frames_to_video(
-        self, frames: list, fps: int, codec: str = "libx264"
+        self, frames: list, fps: int, codec: str = "h264_nvenc"
     ) -> bytes:
         """Convert list of frames to video bytes.
 
