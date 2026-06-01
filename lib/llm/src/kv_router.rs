@@ -443,10 +443,10 @@ where
         // on that set). If the filter excluded an in-universe pinned worker, re-add it so the
         // pin still wins for cache correctness; if the pin is outside the universe, honor the
         // caller's constraint and drop it.
-        if let Some(p) = pinned_worker {
-            if base.contains(&p.worker_id) {
-                narrowed.insert(p.worker_id);
-            }
+        if let Some(p) = pinned_worker
+            && base.contains(&p.worker_id)
+        {
+            narrowed.insert(p.worker_id);
         }
         if narrowed.is_empty() {
             return allowed_worker_ids;
