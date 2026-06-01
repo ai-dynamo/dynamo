@@ -64,11 +64,13 @@ type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 /// Shared by the unary and bidirectional engines. Both build a per-request
 /// [`Context`], call the user callable with a single positional argument
 /// plus an optional `context=` kwarg, and wrap the result with
-/// [`pyo3_async_runtimes::tokio::into_stream_with_locals_v1`]. The only
-/// thing that differs is the positional argument — a pythonized request for
-/// the unary engine, a [`PyAsyncRequestStream`] handle for the bidirectional
-/// engine — so the caller supplies it via `make_first_arg`, which runs
-/// inside the GIL because building either value needs `py`.
+/// [`pyo3_async_runtimes::tokio::into_stream_with_locals_v1`].
+///
+/// `to_python_input` is the per-engine closure that converts this engine's
+/// `generate` input into the Python object passed as the generator's
+/// positional argument — a pythonized request for the unary engine, a
+/// [`PyAsyncRequestStream`] handle for the bidirectional engine. It runs
+/// inside the GIL because constructing that object needs `py`.
 ///
 /// The GIL is acquired on a blocking task rather than inline: under contention
 /// it can block for an unbounded time, which would park the tokio reactor.
@@ -79,14 +81,14 @@ async fn invoke_generator<F>(
     ctx: Arc<dyn AsyncEngineContext>,
     trace_context: Option<DistributedTraceContext>,
     metadata: BTreeMap<String, String>,
-    make_first_arg: F,
+    to_python_input: F,
 ) -> Result<PyItemStream>
 where
     F: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
 {
     let stream = tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| {
-            let first_arg = make_first_arg(py)?;
+            let python_input = to_python_input(py)?;
 
             // Build the per-request context handle, carrying the captured
             // trace context and metadata.
@@ -95,10 +97,10 @@ where
             let gen_result = if has_context {
                 let kwarg = PyDict::new(py);
                 kwarg.set_item("context", &py_ctx)?;
-                generator.call(py, (first_arg,), Some(&kwarg))
+                generator.call(py, (python_input,), Some(&kwarg))
             } else {
                 // Legacy: no `context` arg.
-                generator.call1(py, (first_arg,))
+                generator.call1(py, (python_input,))
             }?;
 
             let locals = TaskLocals::new(event_loop.bind(py).clone());
