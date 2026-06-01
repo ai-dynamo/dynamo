@@ -142,6 +142,7 @@ def cached_tokens_chat_payload(
 def router_selection_chat_payload_default(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
     max_tokens: int = 1000,
     temperature: float = 0.0,
     stream: bool = False,
@@ -149,6 +150,7 @@ def router_selection_chat_payload_default(
     return chat_payload_default(
         repeat_count=repeat_count,
         expected_response=expected_response,
+        expected_log=expected_log,
         max_tokens=max_tokens,
         temperature=temperature,
         stream=stream,
@@ -274,6 +276,7 @@ def metric_payload_default(
     expected_log: Optional[List[str]] = None,
     backend: Optional[str] = None,
     port: int = DefaultPort.SYSTEM1.value,
+    check_lifecycle_gauges: bool = False,
 ) -> MetricsPayload:
     """Create a metrics payload for the specified backend.
 
@@ -283,6 +286,10 @@ def metric_payload_default(
         expected_log: Expected log messages
         backend: Backend type ('vllm', 'sglang', 'trtllm', 'lmcache')
         port: Port to use for metrics endpoint
+        check_lifecycle_gauges: Assert the unified-only lifecycle gauges
+            (``cleanup_time_seconds``, ``drain_time_seconds``,
+            ``kv_cache_hit_rate``) are registered. Default False because
+            legacy entry points don't emit them.
 
     Returns:
         Backend-specific MetricsPayload subclass based on backend parameter
@@ -294,6 +301,7 @@ def metric_payload_default(
         "expected_response": [],
         "min_num_requests": min_num_requests,
         "port": port,
+        "check_lifecycle_gauges": check_lifecycle_gauges,
     }
 
     # Return backend-specific payload class
@@ -430,11 +438,15 @@ def embedding_payload_default(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> EmbeddingPayload:
+    body: Dict[str, Any] = {
+        "input": ["The sky is blue.", "Machine learning is fascinating."],
+    }
+    if extra_body:
+        body.update(extra_body)
     return EmbeddingPayload(
-        body={
-            "input": ["The sky is blue.", "Machine learning is fascinating."],
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response
@@ -447,6 +459,7 @@ def embedding_payload(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> EmbeddingPayload:
     # Normalize input to list for consistent processing
     if isinstance(input_text, str):
@@ -456,10 +469,14 @@ def embedding_payload(
         input_list = input_text
         expected_count = len(input_text)
 
+    body: Dict[str, Any] = {
+        "input": input_list,
+    }
+    if extra_body:
+        body.update(extra_body)
+
     return EmbeddingPayload(
-        body={
-            "input": input_list,
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response

@@ -5,10 +5,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo Rust Backend (`dynamo-backend-common`)
 
-> **Work in progress.** The unified backend supports aggregated and
-> disaggregated (prefill/decode) inference; multimodal, LoRA, logprobs,
-> guided decoding, and engine-level metrics are still on the
-> non-unified path. The Python `Worker`
+> **Work in progress.** The unified backend covers aggregated and
+> disaggregated (prefill/decode) inference, metrics + Prometheus
+> bridging, KV event publishing, KV-aware (DP-rank) routing,
+> health-check canaries, OpenTelemetry tracing, and request-side
+> guided decoding. Logprob response wire, multimodal, diffusion
+> (image/video/DLLM), LoRA, engine routes (sleep/wake, profiling,
+> weight updates), text-in-text-out, and snapshot/CRIU are still on
+> the non-unified path. See the
+> [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
+> for the per-engine matrix. The Python `Worker`
 > ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
 > is a thin shim over this crate.
 
@@ -287,6 +293,81 @@ The kit asserts:
 
 `testing::mock_context()` and `testing::cancelling_context(after)` are
 available for hand-written tests.
+
+## Telemetry
+
+`EngineAdapter` opens an `engine.generate` `tracing` span around every
+`generate()` call. The span nests under the runtime's `handle_payload`
+parent, so the full trace tree (frontend → NATS → worker → engine) is
+contiguous. Attributes are auto-recorded across the stream lifecycle.
+
+Set `OTEL_EXPORT_ENABLED=1` to enable OTLP export (default off). When off,
+the span still exists locally so `tracing` log events carry the `trace_id`,
+but per-chunk recording is skipped for cost.
+
+### `engine.generate` attributes
+
+| Attribute | When | Source |
+|---|---|---|
+| `model`, `input_tokens`, `disagg_role` | Entry | request fields + adapter mode |
+| `ttft_ms` | First non-empty chunk | adapter timing |
+| `output_tokens` | Terminal | sum of `chunk.token_ids.len()` across the stream |
+| `finish_reason`, `cancelled` | Terminal | engine's terminal chunk + ctx.is_stopped() |
+| `avg_itl_ms`, `itl_p50_ms`, `itl_p99_ms`, `itl_max_ms` | Terminal | per-chunk timestamp aggregation |
+| `error_kind` | Mid-stream typed error | Debug-formatted `ErrorType`, e.g. `Backend(InvalidArgument)` — search by substring |
+| `migration_trace_id`, `migration_span_id` | Entry, when request has a predecessor | typed `migration_link` (set by framework on disagg-decode / migration retry) |
+
+The span also gets `OpenTelemetrySpanExt::set_status(Status::error(...))`
+on the error paths so Tempo / Jaeger render the span as failed natively.
+
+### Cross-worker trace linking
+
+When a request hops between workers (prefill→decode, or a migration
+retry), the downstream `engine.generate` span carries an OTel `Link`
+back to the predecessor. Two framework-owned fields drive this:
+`BackendOutput.worker_trace_link` (stamped on the first non-empty
+chunk) and `PreprocessedRequest.migration_link` (set by `PrefillRouter`
+and migration's `RetryManager`). See `TraceLink` in `preprocessor.rs`
+and the adapter source for the full contract.
+
+### Engine-side instrumentation
+
+Two surfaces. Pick by whether the span name is known at compile time:
+
+**Static name → `tracing` directly.** Spans opened inside `generate()`
+nest under `engine.generate` automatically:
+
+```rust
+async_stream::stream! { ... }
+    .instrument(tracing::info_span!("engine.decode_loop", blocks_held = 8))
+```
+
+**Dynamic name → `dynamo_backend_common::telemetry::start_span`.** The
+`tracing` macro requires compile-time names; this helper goes through OTel
+directly while still inheriting the bridged parent context:
+
+```rust
+use dynamo_backend_common::telemetry;
+
+let mut span = telemetry::start_span(format!("kv_load_rank_{rank}"));
+span.set_attribute("blocks", 8);
+// closes on drop
+```
+
+Both paths land in the same OTel trace tree and the same JSONL trace_id.
+
+Two footguns to remember:
+- Prefer `.instrument(span)` on futures / streams over
+  `let _g = span.entered();` — the `Entered` guard pins the span to the
+  current thread; holding it across `.await` either fails to compile or
+  leaves the span entered on the wrong task.
+- `tokio::spawn(fut.in_current_span())` — bare `tokio::spawn` does NOT
+  inherit the current span, so logs from spawned tasks lose `trace_id`
+  correlation.
+
+For outbound calls that need to carry trace context (HTTP, custom
+transports), use `dynamo_runtime::logging::inject_trace_headers_into_map`
+or `get_distributed_tracing_context`. NATS egress is auto-injected.
 
 ## File Index
 

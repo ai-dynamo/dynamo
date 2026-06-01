@@ -84,6 +84,8 @@ pub struct AgentRequestMetrics {
     pub worker: Option<WorkerInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<AgentReplayMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason_metadata: Option<FinishReasonMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,6 +105,104 @@ pub struct WorkerInfo {
     pub decode_worker_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_dp_rank: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FinishReasonMetadata {
+    /// Final OpenAI-compatible finish reason after parser/post-processing rewrites.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<dynamo_protocols::types::FinishReason>,
+
+    /// Raw backend finish reason before parser/post-processing rewrites.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_finish_reason: Option<String>,
+
+    /// Backend-provided stop condition that caused `finish_reason=stop`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<dynamo_protocols::types::StopReason>,
+
+    /// Complete tool calls emitted by the model. Arguments are intentionally
+    /// omitted so agent traces remain metadata, not payload logs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallMetadata>,
+
+    /// Per-choice finish metadata for multi-choice requests. The top-level
+    /// fields remain as a compact summary for the common single-choice case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<ChoiceFinishReasonMetadata>,
+}
+
+impl FinishReasonMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.finish_reason.is_none()
+            && self.backend_finish_reason.is_none()
+            && self.stop_reason.is_none()
+            && self.tool_calls.is_empty()
+            && self.choices.is_empty()
+    }
+
+    pub fn record_choice_finish_reason(
+        &mut self,
+        choice_index: u32,
+        finish_reason: dynamo_protocols::types::FinishReason,
+    ) {
+        self.choice_metadata_mut(choice_index).finish_reason = Some(finish_reason);
+    }
+
+    pub fn record_choice_backend_finish_reason(
+        &mut self,
+        choice_index: u32,
+        backend_finish_reason: Option<String>,
+        stop_reason: Option<dynamo_protocols::types::StopReason>,
+    ) {
+        let choice = self.choice_metadata_mut(choice_index);
+        if let Some(backend_finish_reason) = backend_finish_reason {
+            choice.backend_finish_reason = Some(backend_finish_reason);
+        }
+        if let Some(stop_reason) = stop_reason {
+            choice.stop_reason = Some(stop_reason);
+        }
+    }
+
+    fn choice_metadata_mut(&mut self, choice_index: u32) -> &mut ChoiceFinishReasonMetadata {
+        if let Some(position) = self
+            .choices
+            .iter()
+            .position(|choice| choice.choice_index == choice_index)
+        {
+            return &mut self.choices[position];
+        }
+
+        let position = self.choices.len();
+        self.choices.push(ChoiceFinishReasonMetadata {
+            choice_index,
+            finish_reason: None,
+            backend_finish_reason: None,
+            stop_reason: None,
+        });
+        &mut self.choices[position]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCallMetadata {
+    pub choice_index: u32,
+    pub tool_call_index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChoiceFinishReasonMetadata {
+    pub choice_index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<dynamo_protocols::types::FinishReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<dynamo_protocols::types::StopReason>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

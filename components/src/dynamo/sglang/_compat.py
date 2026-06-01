@@ -13,6 +13,11 @@ Policy: support current SGLang release + 1 version back (N and N-1). Each
 fallback branch must document which version it covers and when it can be
 removed. When the old version falls outside the support window, delete the
 fallback and any associated polyfills.
+
+Runtime data-contract notes (not code-level shims):
+
+* ``meta_info["routed_experts"]`` is a base64 UTF-8 string from sglang
+  >= 0.5.11. Pass through; do not re-encode.
 """
 
 import inspect

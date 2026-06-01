@@ -93,7 +93,8 @@ def _prepare_log_dir(request, suffix: str) -> str:
 
 
 _COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    "display_output": True,
+    # Keep logs file-only; live tee can lag under GPU-parallel CI while tests poll files.
+    "display_output": False,
     "terminate_all_matching_process_names": False,
 }
 

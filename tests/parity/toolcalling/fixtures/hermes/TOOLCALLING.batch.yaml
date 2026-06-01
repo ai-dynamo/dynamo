@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: hermes
+model_label: Hermes-3 / Llama variants
+mode: batch
+cases:
+  TOOLCALLING.batch.1:
+    description: Single tool call (happy path)
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  TOOLCALLING.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm: *id003
+      sglang: *id003
+  TOOLCALLING.batch.9.a:
+    description: Empty model text
+    model_text: ''
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  TOOLCALLING.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
+      sglang:
+        calls: []
+        normal_text: '   '
+  TOOLCALLING.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_weather",
+      "arguments": {"location": "LA"}}</tool_call>'
+    tools:
+    - *id002
+    expected:
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id005
+      sglang: *id005
+  TOOLCALLING.batch.13.a:
+    description: Unknown-only call under default behavior
+    ref: originated from https://github.com/sgl-project/sglang/blob/612785ffdcaf35552f1ed433a981d596ca9fe900/test/registered/unit/function_call/test_unknown_tool_name.py#L29
+    model_text: '<tool_call>{"name": "unknown_tool", "arguments": {"location": "NYC"}}</tool_call>'
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
+  TOOLCALLING.batch.13.c:
+    description: Mixed known and unknown calls in one response
+    ref: dynamo
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "unknown_tool",
+      "arguments": {"location": "LA"}}</tool_call>'
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+        reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
+  TOOLCALLING.batch.30:
+    description: Separator-character case not applicable
+    reason: |-
+      This case is not applicable to hermes because it wraps each JSON object in <tool_call>, not a delimiter-separated call body.
+  TOOLCALLING.batch.31:
+    description: Multi-call separator-character case not applicable
+    reason: |-
+      This case is not applicable to hermes because it wraps each JSON object in <tool_call>, not a delimiter-separated call body.

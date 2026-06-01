@@ -108,6 +108,10 @@ class frontend_service:
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Inter-token latency in seconds
     INTER_TOKEN_LATENCY_SECONDS = "inter_token_latency_seconds"
+    # End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
+    # Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
+    # pooling-model latencies (sub-second) without sacrificing resolution.
+    EMBEDDING_LATENCY_SECONDS = "embedding_latency_seconds"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
     # Total KV blocks available for a worker serving the model
@@ -233,6 +237,16 @@ class kvstats:
     TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
     GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
+    # Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    KV_CACHE_HIT_RATE = "kv_cache_hit_rate"
+
+
+class lifecycle:
+    """Worker-lifecycle timing gauges. Set once per worker run by the
+    framework, not by the engine."""
+
+    CLEANUP_TIME_SECONDS = "cleanup_time_seconds"
+    DRAIN_TIME_SECONDS = "drain_time_seconds"
 
 
 class labels:
@@ -259,7 +273,7 @@ class labels:
     # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
     # When a metric already has a label, injection does not overwrite it (original is preserved).
     MODEL_NAME = "model_name"
-    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"

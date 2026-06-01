@@ -63,10 +63,11 @@ mod namespace;
 mod registry;
 pub mod service;
 
-pub use client::Client;
 pub(crate) use client::EndpointDiscoverySource;
+pub(crate) use client::RoutingInstances;
 pub(crate) use client::RoutingOccupancyState;
 pub(crate) use client::get_or_create_routing_occupancy_state;
+pub use client::{Client, RoutingInstanceCounts};
 pub use endpoint::build_transport_type;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -74,16 +75,13 @@ pub use endpoint::build_transport_type;
 pub enum TransportType {
     #[serde(rename = "nats_tcp")]
     Nats(String),
-    Http(String),
     Tcp(String),
 }
 
 impl TransportType {
     pub fn address(&self) -> &str {
         match self {
-            TransportType::Nats(address)
-            | TransportType::Http(address)
-            | TransportType::Tcp(address) => address,
+            TransportType::Nats(address) | TransportType::Tcp(address) => address,
         }
     }
 }

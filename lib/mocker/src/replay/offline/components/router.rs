@@ -547,9 +547,11 @@ impl OfflineReplayRouter {
         );
         let scheduling_request =
             request.scheduling_request(self.block_size as usize, decode_blocks, prefill_tokens);
+        let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
             &scheduling_request,
+            eligibility,
             self.block_size,
         )?;
         let worker_idx = usize::try_from(selection.worker.worker_id)

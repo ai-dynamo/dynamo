@@ -254,7 +254,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 
 ```bash
 # Encode endpoint for Prefill → Encode communication
-export ENCODE_ENDPOINT="dyn://dynamo.tensorrt_llm_encode.generate"
+export ENCODE_ENDPOINT="dyn://dynamo.encode.generate"
 
 # Security: Allowed directory for embedding files (default: /tmp)
 export ALLOWED_LOCAL_MEDIA_PATH="/tmp"

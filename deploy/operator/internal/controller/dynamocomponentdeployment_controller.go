@@ -39,6 +39,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -562,6 +563,10 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	if labels == nil {
 		labels = make(map[string]string)
 	}
+	podLabels, err := r.getDCDWorkloadPodLabels(ctx, opt.dynamoComponentDeployment)
+	if err != nil {
+		return nil, false, err
+	}
 
 	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -572,7 +577,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	leaderPodLabels := make(map[string]string)
-	for k, v := range labels {
+	for k, v := range podLabels {
 		leaderPodLabels[k] = v
 	}
 	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, leaderPodLabels)
@@ -581,7 +586,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	workerPodLabels := make(map[string]string)
-	for k, v := range labels {
+	for k, v := range podLabels {
 		workerPodLabels[k] = v
 	}
 	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, workerPodLabels)
@@ -606,6 +611,30 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	return leaderWorkerSet, false, nil
+}
+
+// getDCDWorkloadPodLabels keeps LWS pod labels aligned with the workload
+// component type used by Deployment and Service rendering.
+func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadPodLabels(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (map[string]string, error) {
+	labels := dynamo.GetDCDKubeLabels(dcd)
+	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
+	if err != nil {
+		return nil, err
+	}
+	if componentType == "" {
+		return labels, nil
+	}
+	labels[commonconsts.KubeLabelDynamoComponentType] = componentType
+	specType := string(dcd.Spec.ComponentType)
+	if componentType == commonconsts.ComponentTypeWorker &&
+		(specType == commonconsts.ComponentTypePrefill || specType == commonconsts.ComponentTypeDecode) &&
+		labels[commonconsts.KubeLabelDynamoSubComponentType] == "" {
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = specType
+	}
+	return labels, nil
 }
 
 // leaderWorkerSetName keeps the native LWS at <dcd-name>-0 so it can adopt
@@ -954,6 +983,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 		if dynamo.IsIntraPodFailoverEnabled(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) {
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+		}
+		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
+			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
 		}
 		checkpointInfo = info
 		if err := checkpoint.EnsureStoragePVC(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, r.Config.Checkpoint.Storage); err != nil {

@@ -121,7 +121,8 @@ mod tests {
             .clone();
 
         // set up the other rank
-        let context_rank1 = Context::with_id((), context_rank0.id().to_string());
+        let context_rank1 =
+            Context::with_id_and_metadata((), context_rank0.id().to_string(), Default::default());
 
         // connect to the server socket
         let mut send_stream = client::TcpClient::create_response_stream(

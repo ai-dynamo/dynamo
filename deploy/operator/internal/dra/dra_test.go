@@ -9,7 +9,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -100,6 +99,20 @@ func TestApplyClaim_ReplacesMIGResourceWithDRAClaim(t *testing.T) {
 	assert.Equal(t, ClaimName, main.Resources.Claims[0].Name)
 }
 
+func TestApplyClaimOverridesOperatorOwnedClaim(t *testing.T) {
+	oldTemplate := "old-template"
+	ps := basePodSpec()
+	ps.ResourceClaims = []corev1.PodResourceClaim{{
+		Name:                      ClaimName,
+		ResourceClaimTemplateName: &oldTemplate,
+	}}
+
+	require.NoError(t, ApplyClaim(&ps, "new-template"))
+
+	require.Len(t, ps.ResourceClaims, 1)
+	assert.Equal(t, "new-template", *ps.ResourceClaims[0].ResourceClaimTemplateName)
+}
+
 func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
 	ps := basePodSpec()
 	ps.Containers = append(ps.Containers, corev1.Container{Name: "sidecar", Image: "sidecar:latest"})
@@ -110,21 +123,6 @@ func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
 	require.Len(t, ps.Containers[0].Resources.Claims, 1)
 	assert.Equal(t, ClaimName, ps.Containers[0].Resources.Claims[0].Name)
 	assert.Empty(t, ps.Containers[1].Resources.Claims)
-}
-
-func TestExtractGPUParamsFromResourceRequirements_MIGResource(t *testing.T) {
-	gpuCount, deviceClassName, err := ExtractGPUParamsFromResourceRequirements(
-		&v1beta1.GPUMemoryServiceSpec{DeviceClassName: "gpu.nvidia.com"},
-		corev1.ResourceRequirements{
-			Limits: corev1.ResourceList{
-				corev1.ResourceName("nvidia.com/mig-3g.20gb"): resource.MustParse("1"),
-			},
-		},
-	)
-
-	require.NoError(t, err)
-	assert.Equal(t, 1, gpuCount)
-	assert.Equal(t, "gpu.nvidia.com", deviceClassName)
 }
 
 func TestExtractGPUCountFromResourceRequirements_DeterministicResourceSelection(t *testing.T) {
