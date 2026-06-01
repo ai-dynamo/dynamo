@@ -51,7 +51,9 @@ class _MockAsyncOmni:
 
     default_sampling_params_list: list = []
 
-    async def generate(self, *, prompt, request_id, sampling_params_list=None):
+    async def generate(
+        self, *, prompt, request_id, sampling_params_list=None, output_modalities=None
+    ):
         chunks = [chunk async for chunk in prompt]
         full = np.concatenate(chunks) if chunks else np.zeros(1, dtype=np.float32)
         yield SimpleNamespace(

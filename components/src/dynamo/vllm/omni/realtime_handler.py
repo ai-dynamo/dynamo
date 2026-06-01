@@ -93,12 +93,15 @@ class _Turn:
     deltas.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, output_modalities: list[str] | None = None) -> None:
         self.response_id = f"resp_{uuid.uuid4().hex}"
         self.item_id = f"item_{uuid.uuid4().hex}"
         self.audio_queue: asyncio.Queue[Optional[np.ndarray]] = asyncio.Queue()
         self.audio_ref: np.ndarray | None = None
         self.task: asyncio.Task | None = None
+        # Output modalities for this turn, snapshotted from the latest
+        # session.update; None defers to the engine's launch-time default.
+        self.output_modalities = output_modalities
 
 
 class RealtimeOmniHandler:
@@ -131,6 +134,9 @@ class RealtimeOmniHandler:
         out_queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
         active_turn: _Turn | None = None
         turns: list[_Turn] = []
+        # Latest output modalities requested by the client via session.update;
+        # snapshotted into each turn so the engine emits text/audio accordingly.
+        session_output_modalities: list[str] | None = None
 
         async def emit(event: dict) -> None:
             await out_queue.put(event)
@@ -138,7 +144,7 @@ class RealtimeOmniHandler:
         def ensure_turn() -> _Turn:
             nonlocal active_turn
             if active_turn is None:
-                active_turn = _Turn()
+                active_turn = _Turn(output_modalities=session_output_modalities)
                 turns.append(active_turn)
                 active_turn.task = asyncio.create_task(
                     self._run_turn(active_turn, context, emit)
@@ -146,7 +152,7 @@ class RealtimeOmniHandler:
             return active_turn
 
         async def pump() -> None:
-            nonlocal active_turn
+            nonlocal active_turn, session_output_modalities
             try:
                 async for client_event in request_stream:
                     if context.is_stopped():
@@ -158,11 +164,15 @@ class RealtimeOmniHandler:
                     )
 
                     if etype == "session.update":
+                        session = client_event.get("session")
+                        modalities = _parse_output_modalities(session)
+                        if modalities is not None:
+                            session_output_modalities = modalities
                         await emit(
                             {
                                 "type": "session.updated",
                                 "event_id": _event_id(),
-                                "session": client_event.get("session"),
+                                "session": session,
                             }
                         )
                     elif etype == "input_audio_buffer.append":
@@ -297,6 +307,11 @@ class RealtimeOmniHandler:
             generate_kwargs["sampling_params_list"] = list(
                 self._default_sampling_params_list
             )
+        # Client-requested output modalities (session.update) select the final
+        # pipeline stage: include "audio" to drive the talker. Omitted ->
+        # AsyncOmni.generate uses the engine's launch-time default.
+        if turn.output_modalities is not None:
+            generate_kwargs["output_modalities"] = turn.output_modalities
 
         async for output in self.engine_client.generate(**generate_kwargs):
             token_ids = self._thinker_token_ids(output)
@@ -390,6 +405,23 @@ class RealtimeOmniHandler:
         if arr is None or arr.size == 0:
             return []
         return _raw_waveform_to_deltas(turn, arr)
+
+
+def _parse_output_modalities(session: Any) -> list[str] | None:
+    """Extract requested output modalities from a session.update `session` block.
+
+    Reads OpenAI Realtime ``output_modalities`` (falling back to the older
+    ``modalities``); returns a list of strings, or None when unset/malformed so
+    the engine's launch-time default applies.
+    """
+    if not isinstance(session, dict):
+        return None
+    modalities = session.get("output_modalities")
+    if modalities is None:
+        modalities = session.get("modalities")
+    if isinstance(modalities, list) and all(isinstance(m, str) for m in modalities):
+        return modalities
+    return None
 
 
 def _decode_pcm16(audio_b64: str) -> np.ndarray | None:

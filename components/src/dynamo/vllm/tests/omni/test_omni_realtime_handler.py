@@ -70,8 +70,12 @@ class _FakeEngine:
     def __init__(self, text: str = "hello") -> None:
         self.text = text
         self.seen_chunks: list = []
+        self.seen_output_modalities: list = []
 
-    async def generate(self, *, prompt, request_id, sampling_params_list=None):
+    async def generate(
+        self, *, prompt, request_id, sampling_params_list=None, output_modalities=None
+    ):
+        self.seen_output_modalities.append(output_modalities)
         async for chunk in prompt:
             self.seen_chunks.append(chunk)
         full = (
@@ -195,3 +199,37 @@ def test_stopped_context_emits_no_turn():
     ]
     out = asyncio.run(_drive(handler, events, _FakeContext(stopped=True)))
     assert out == []
+
+
+def test_session_output_modalities_forwarded_to_engine():
+    audio_b64 = base64.b64encode(
+        np.linspace(-8000, 8000, 16, dtype=np.int16).tobytes()
+    ).decode()
+    engine = _FakeEngine()
+    handler = _make_handler(engine)
+    events = [
+        {
+            "type": "session.update",
+            "session": {"model": MODEL_NAME, "output_modalities": ["audio"]},
+        },
+        {"type": "input_audio_buffer.append", "audio": audio_b64},
+        {"type": "input_audio_buffer.commit"},
+    ]
+    asyncio.run(_drive(handler, events, _FakeContext()))
+    assert engine.seen_output_modalities == [["audio"]]
+
+
+def test_output_modalities_default_none_when_unset():
+    audio_b64 = base64.b64encode(
+        np.linspace(-8000, 8000, 16, dtype=np.int16).tobytes()
+    ).decode()
+    engine = _FakeEngine()
+    handler = _make_handler(engine)
+    events = [
+        {"type": "session.update", "session": {"model": MODEL_NAME}},
+        {"type": "input_audio_buffer.append", "audio": audio_b64},
+        {"type": "input_audio_buffer.commit"},
+    ]
+    asyncio.run(_drive(handler, events, _FakeContext()))
+    # No output_modalities requested -> engine sees None (its launch default).
+    assert engine.seen_output_modalities == [None]
