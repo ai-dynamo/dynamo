@@ -232,41 +232,7 @@ def run_serve_deployment(
                 merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
                 merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
 
-        # Multi-GPU device assignment for 2-card tests.
-        # XPU uses ZE_AFFINITY_MASK, CUDA uses CUDA_VISIBLE_DEVICES.
-        # They don't coexist but each environment needs its own var set.
-        if len(dynamic_system_ports) >= 2:
-            cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-            existing_mask = os.environ.get("ZE_AFFINITY_MASK", "")
-            if cvd and "," in cvd:
-                # CUDA env with multiple devices (e.g. "2,3")
-                merged_env.setdefault("CUDA_VISIBLE_DEVICES", cvd)
-            elif cvd:
-                # CUDA env with single device (e.g. "2") — derive two devices
-                base = int(cvd)
-                merged_env.setdefault("CUDA_VISIBLE_DEVICES", f"{base},{base + 1}")
-            elif existing_mask and "," in existing_mask:
-                # XPU env with multiple devices already set
-                merged_env.setdefault("ZE_AFFINITY_MASK", existing_mask)
-            else:
-                # Default: devices 0 and 1
-                merged_env.setdefault("CUDA_VISIBLE_DEVICES", "0,1")
-
-            # Log which device IDs will be used by vLLM workers
-            _ze = merged_env.get("ZE_AFFINITY_MASK", "")
-            _cvd = merged_env.get("CUDA_VISIBLE_DEVICES", "")
-            logger.info(
-                "2-card device assignment: ZE_AFFINITY_MASK=%s, CUDA_VISIBLE_DEVICES=%s",
-                _ze or "(unset)",
-                _cvd or "(unset)",
-            )
-
-            # Allocate unique NIXL side channel port for worker 2
-            nixl_port = allocate_port(20097)
-            _extra_allocated_ports.append(nixl_port)
-            merged_env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(nixl_port)
-
-        # Per-worker NIXL side-channel ports, indexed to match DYN_SYSTEM_PORT{idx}.
+        # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
@@ -297,13 +263,6 @@ def run_serve_deployment(
         merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
 
     try:
-        # Log device-related env vars for debugging card assignment
-        logger.info(
-            "Launching engine: script=%s, ZE_AFFINITY_MASK=%s, CUDA_VISIBLE_DEVICES=%s",
-            config.script_name,
-            merged_env.get("ZE_AFFINITY_MASK", "(unset)"),
-            merged_env.get("CUDA_VISIBLE_DEVICES", "(unset)"),
-        )
         with EngineProcess.from_script(
             config, request, extra_env=merged_env
         ) as server_process:

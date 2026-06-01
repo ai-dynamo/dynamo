@@ -9,7 +9,8 @@
 #                      First device → worker 1, second → worker 2. Default: "0,1"
 #
 # Port configuration:
-#   VLLM_NIXL_SIDE_CHANNEL_PORT - NIXL side channel port (default: 20097)
+#   DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1 - NIXL side channel port for worker 1 (default: 20097)
+#   DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2 - NIXL side channel port for worker 2 (default: 20098)
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -28,8 +29,9 @@ IFS=',' read -ra _GPU_IDS <<< "${ZE_AFFINITY_MASK:-0,1}"
 GPU_WORKER1="${_GPU_IDS[0]:-0}"
 GPU_WORKER2="${_GPU_IDS[1]:-1}"
 
-# NIXL side channel port
-NIXL_PORT="${VLLM_NIXL_SIDE_CHANNEL_PORT:-20097}"
+# NIXL side channel ports (per-worker, avoids collisions in parallel test runs)
+NIXL_PORT1="${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1:-20097}"
+NIXL_PORT2="${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2:-20098}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + Approximate KV Routing (2 GPUs: $GPU_WORKER1, $GPU_WORKER2)" "$MODEL" "$HTTP_PORT"
@@ -46,13 +48,14 @@ python -m dynamo.frontend \
 # Use DYN_SYSTEM_PORT{1,2} so tests/launchers can provide a simple numbered port set.
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT1 \
 ZE_AFFINITY_MASK=$GPU_WORKER1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-events-config '{"enable_kv_cache_events": false}' &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT2 \
 ZE_AFFINITY_MASK=$GPU_WORKER2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
