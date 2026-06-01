@@ -428,6 +428,13 @@ class CachedTokensChatPayload(ChatPayload):
         # Asserts the post-R1 mean of router_kv_hit_rate >= threshold. Catches
         # router/worker hash divergence (overlap=0) that cached_tokens alone
         # can miss via load-balance luck on vLLM's per-worker prefix cache.
+        #
+        # TODO(mm-routing): this field + _metrics_baseline + the kv_hit_rate
+        # delta assertion in final_validation() are router-metric-specific
+        # logic accreting onto a general-purpose Cached*Payload base. If
+        # more strong-gate metrics get added (decode-imbalance, routing-
+        # block-count, etc.), move into a RouterMetricsAssertion
+        # mixin/subclass.
         self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
         self._metrics_baseline: Optional[tuple[float, float]] = None
 
