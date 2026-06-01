@@ -1402,7 +1402,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             request,
             tokenizer=NoTemplateTokenizer(),
             tool_call_parser_name=None,
-            reasoning_parser_name="deepseek_v4",
+            reasoning_parser_name="deepseek-v4",
         )
 
         assert result.prompt_token_ids == [1, 2, 3]
