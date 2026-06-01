@@ -11,7 +11,6 @@ output without creating an engine or loading model weights.
 import asyncio
 import base64
 import logging
-import tempfile
 import time
 import uuid
 from io import BytesIO
@@ -20,7 +19,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 import soundfile as sf
 import torch
-from diffusers.utils.export_utils import export_to_video
 
 from dynamo.common.protocols.audio_protocol import AudioData, NvAudioSpeechResponse
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
@@ -29,8 +27,9 @@ from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.common.utils.video_utils import (
+    encode_to_video_bytes,
+    frames_to_numpy,
     normalize_image_frames,
-    normalize_video_frames,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,12 +141,16 @@ class DiffusionFormatter:
             )
         try:
             start_time = time.time()
-            frame_list = normalize_video_frames(images)
-            with tempfile.NamedTemporaryFile(
-                suffix=f".{output_format}", delete=True
-            ) as tmp:
-                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
-                video_bytes = tmp.read()
+            # Encode through the shared LGPL-safe encoder: it uses the in-tree
+            # ffmpeg's h264_nvenc (NVIDIA HW) encoder rather than the GPL libx264
+            # that diffusers.export_to_video would default to for MP4.
+            frames_np = frames_to_numpy(normalize_image_frames(images))
+            video_bytes = await asyncio.to_thread(
+                encode_to_video_bytes,
+                frames_np,
+                fps=fps,
+                output_format=output_format,
+            )
 
             if response_format == "b64_json":
                 video_data = VideoData(
