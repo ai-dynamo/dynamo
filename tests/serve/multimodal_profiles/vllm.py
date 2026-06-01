@@ -209,8 +209,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
                 # Qwen2-VL / Qwen2.5-VL: chat template emits `<|image_pad|>`
-                # (151655) but vLLM expands it to N `<|vision_pad|>` (151654);
-                # routing-side needs to handle the dual-token mapping.
+                # (151655) and vLLM's HF processor expands the same id N
+                # times in the prompt sequence — routing-side fills with
+                # this id so block hashes align with what the worker
+                # stores. (lightseek's per-spec id is `<|vision_pad|>`
+                # 151654; the routing path now uses config.json's
+                # `image_token_id` instead, see preprocessor.rs splice.)
                 tests=[
                     MmCase(
                         payload=make_image_payload_cached_tokens(
