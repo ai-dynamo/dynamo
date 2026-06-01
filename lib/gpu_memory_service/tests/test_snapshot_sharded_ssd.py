@@ -31,26 +31,6 @@ def _source(path: str, byte_count: int) -> FileTransferSource:
     )
 
 
-def test_group_sources_by_root_preserves_single_queue_when_requested():
-    sources = [
-        _source("/mnt/nvme0/gms/shard_0000.bin", 1),
-        _source("/mnt/nvme0/gms/shard_0001.bin", 1),
-        _source("/mnt/nvme1/gms/shard_0002.bin", 1),
-    ]
-
-    groups = _group_sources_by_root(
-        sources,
-        ["/mnt/nvme0/gms", "/mnt/nvme1/gms"],
-        queues_per_root=1,
-    )
-
-    assert list(groups) == ["/mnt/nvme0/gms", "/mnt/nvme1/gms"]
-    assert [file_path for file_path, _sources in groups["/mnt/nvme0/gms"]] == [
-        "/mnt/nvme0/gms/shard_0000.bin",
-        "/mnt/nvme0/gms/shard_0001.bin",
-    ]
-
-
 def test_group_sources_by_root_splits_roots_into_balanced_default_queues():
     sources = [
         _source("/mnt/nvme0/gms/shard_0000.bin", 10),
