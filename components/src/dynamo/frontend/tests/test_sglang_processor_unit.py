@@ -33,6 +33,7 @@ from dynamo.frontend.sglang_prepost import (
     convert_tools,
     create_parsers,
     preprocess_chat_request,
+    resolve_request_force_reasoning,
 )
 from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
@@ -1575,6 +1576,26 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
         assert result.force_reasoning is True
         assert result.reasoning_parser is not None
+
+    @pytest.mark.parametrize("parser_name", ["deepseek-v3", "deepseek-v4"])
+    def test_deepseek_v3_v4_thinking_opt_in(self, parser_name):
+        """deepseek-v3/v4 opt into reasoning via chat_template_kwargs.thinking.
+
+        deepseek-v4 maps to the same _DeepSeekV3Detector as deepseek-v3 in
+        sglang, so both must honor the `thinking` kwarg (off by default).
+        """
+        assert (
+            resolve_request_force_reasoning(
+                {"chat_template_kwargs": {"thinking": True}},
+                parser_name,
+                template_default=False,
+            )
+            is True
+        )
+        assert (
+            resolve_request_force_reasoning({}, parser_name, template_default=False)
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
