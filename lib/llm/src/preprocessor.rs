@@ -495,13 +495,13 @@ impl OpenAIPreprocessor {
                             target: "mm_routing",
                             model = %model_id,
                             model_dir = %model_dir.display(),
-                            "MM-aware KV routing enabled (lightseek)"
+                            "MM-aware KV routing enabled"
                         ),
                         (counter_ok, img_ok) => {
                             let mut reasons: Vec<String> = Vec::new();
                             if !counter_ok {
                                 reasons.push(format!(
-                                    "model not supported by the lightseek registry ({})",
+                                    "model not supported by the MM-routing registry ({})",
                                     counter_err.as_deref().unwrap_or("unknown error")
                                 ));
                             }

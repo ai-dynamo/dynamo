@@ -411,7 +411,7 @@ class CachedTokensChatPayload(ChatPayload):
     ):
         log_patterns: List[str] = list(expected_log or [])
         if require_rust_processor_init:
-            log_patterns.append(r"MM-aware KV routing enabled \(lightseek\)")
+            log_patterns.append(r"MM-aware KV routing enabled")
         if require_vllm_mm_processor_init:
             log_patterns.append(r"\[mm-routing\] Transfer mode:")
         super().__init__(
