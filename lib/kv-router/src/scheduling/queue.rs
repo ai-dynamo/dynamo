@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::config::RouterQueueDepthTiers;
+use super::filter::RoutingEligibility;
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, read_overlap_refresh_after,
     refresh_overlap,
@@ -20,12 +21,11 @@ use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, RoutingEligibility, SchedulingContext,
-    SchedulingRequest, SchedulingResponse, pinned_worker_config,
+    KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
+    SchedulingResponse,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
 };
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
@@ -706,12 +706,9 @@ impl<
         let configs = self.workers_with_configs.borrow();
 
         if let Some(worker) = eligibility.pinned_worker() {
-            let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
+            let Ok(config) = eligibility.validate_worker_rank(&configs, worker) else {
                 return false;
             };
-            if !eligibility.allows_worker(worker.worker_id, config) {
-                return false;
-            }
 
             let max_batched = config
                 .max_num_batched_tokens()
@@ -721,26 +718,16 @@ impl<
         }
 
         let mut checked_any = false;
-        for (&worker_id, config) in configs.iter() {
-            if !eligibility.allows_worker(worker_id, config) {
-                continue;
-            }
-            let dp_size = config.data_parallel_size();
-            let dp_start_rank = config.data_parallel_start_rank();
+        let has_available = eligibility.any_eligible_worker_rank(&configs, |worker, config| {
+            checked_any = true;
             let max_batched = config
                 .max_num_batched_tokens()
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+            (tokens as f64) <= threshold * (max_batched as f64)
+        });
 
-            for dp_rank in dp_start_rank..dp_start_rank + dp_size {
-                checked_any = true;
-                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-                if (tokens as f64) <= threshold * (max_batched as f64) {
-                    return false;
-                }
-            }
-        }
-        checked_any
+        checked_any && !has_available
     }
 }
 
@@ -822,24 +809,20 @@ mod tests {
                 rendezvous.wait_for_peer();
             }
 
-            let Some(worker) = workers
-                .iter()
-                .filter(|(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
-                .flat_map(|(worker_id, config)| {
-                    let dp_start = config.data_parallel_start_rank();
-                    let dp_end = dp_start + config.data_parallel_size();
-                    (dp_start..dp_end)
-                        .map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
-                })
-                .min_by_key(|worker| {
-                    (
-                        request.prefill_tokens_for(*worker),
-                        request.decode_blocks.get(worker).copied().unwrap_or(0),
-                        worker.worker_id,
-                        worker.dp_rank,
-                    )
-                })
-            else {
+            let mut best_worker = None;
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                let key = (
+                    request.prefill_tokens_for(worker),
+                    request.decode_blocks.get(&worker).copied().unwrap_or(0),
+                    worker.worker_id,
+                    worker.dp_rank,
+                );
+                if best_worker.is_none_or(|(_, best_key)| key < best_key) {
+                    best_worker = Some((worker, key));
+                }
+            });
+
+            let Some((worker, _)) = best_worker else {
                 return Err(KvSchedulerError::NoEndpoints);
             };
 

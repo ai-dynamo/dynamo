@@ -12,7 +12,7 @@ import pytest
 
 from .common import check_module_available
 
-HAS_VLLM = check_module_available("vllm")
+HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
 if HAS_VLLM:
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,

@@ -162,7 +162,10 @@ def verify_response_timing(timing_info: dict[str, Any], disagg: bool = False) ->
 
 
 async def wait_for_frontend_ready(
-    frontend_url: str, expected_num_workers: int = 2, timeout: int = 120
+    frontend_url: str,
+    expected_num_workers: int = 2,
+    timeout: int = 120,
+    test_payload: dict[str, Any] | None = None,
 ):
     """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API).
 
@@ -177,6 +180,8 @@ async def wait_for_frontend_ready(
         frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
         expected_num_workers: Number of workers to wait for (currently logs but doesn't enforce)
         timeout: Maximum time to wait in seconds for both phases combined
+        test_payload: Optional chat completions payload for the phase 2 readiness probe.
+            Use this when readiness must satisfy the same routing constraints as the test.
 
     Raises:
         TimeoutError: If workers don't register or pipeline doesn't become ready within timeout
@@ -225,12 +230,16 @@ async def wait_for_frontend_ready(
 
     # Phase 2: Wait for chat completions pipeline to be ready
     logger.info("Waiting for chat completions pipeline to be built...")
-    test_payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": "test"}],
-        "max_tokens": 1,
-        "stream": False,
-    }
+    if test_payload is None:
+        test_payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+    else:
+        test_payload = {**test_payload}
+        test_payload.setdefault("model", model_name)
 
     while True:
         elapsed = asyncio.get_event_loop().time() - start_time
