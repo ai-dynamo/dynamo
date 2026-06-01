@@ -398,10 +398,15 @@ impl RustEnginePerfModel {
     /// Current FPM queued-prefill fields carry raw queued prompt tokens and no
     /// KV-cache reuse estimate. Apply prefix-cache reuse outside the shim by
     /// adjusting queued prefill tokens before calling this helper.
-    fn get_queued_prefill_time(&self, metrics_by_rank: &Bound<'_, PyAny>) -> PyResult<Option<f64>> {
-        Ok(self
-            .inner
-            .get_queued_prefill_time(&metrics_by_rank_from_py(metrics_by_rank)?)
+    fn get_queued_prefill_time(
+        &self,
+        py: Python<'_>,
+        metrics_by_rank: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<f64>> {
+        let metrics_by_rank = metrics_by_rank_from_py(metrics_by_rank)?;
+        let model = self.inner.clone();
+        Ok(py
+            .allow_threads(move || model.get_queued_prefill_time(&metrics_by_rank))
             .map_err(to_pyerr)?
             .map(|duration| duration.as_secs_f64()))
     }

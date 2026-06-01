@@ -276,6 +276,32 @@ impl AggLoadAverages {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PrefillChunkPlan {
+    full_chunks: u64,
+    tail_tokens: u64,
+}
+
+impl PrefillChunkPlan {
+    fn new(tokens: u64, max_chunk: u64) -> Self {
+        debug_assert!(max_chunk > 0);
+        Self {
+            full_chunks: tokens / max_chunk,
+            tail_tokens: tokens % max_chunk,
+        }
+    }
+
+    fn chunk_at(&self, iteration: u64, max_chunk: u64) -> u64 {
+        if iteration < self.full_chunks {
+            max_chunk
+        } else if iteration == self.full_chunks {
+            self.tail_tokens
+        } else {
+            0
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EnginePerfModel {
     model: ForwardPassPerfModel,
@@ -455,6 +481,10 @@ impl EnginePerfModel {
     /// snapshots accepted as `version == 0`, carry raw queued prompt tokens and
     /// no KV-cache reuse estimate. Callers that want prefix-cache reuse included
     /// must adjust `queued_requests.sum_prefill_tokens` before calling this shim.
+    /// FPM v1 exposes aggregate queued prefill load, not per-request queued state,
+    /// so this helper uses a compressed full-chunks-plus-tail approximation.
+    /// TODO: switch to iteration-level queue simulation when FPM includes accurate
+    /// per-request queued prefill state and KV-cache reuse information.
     pub fn get_queued_prefill_time(
         &self,
         metrics_by_rank: &[ForwardPassSnapshot],
@@ -464,7 +494,7 @@ impl EnginePerfModel {
         }
         self.validate_metrics_by_rank(metrics_by_rank)?;
 
-        let mut remaining = metrics_by_rank
+        let remaining = metrics_by_rank
             .iter()
             .map(|snapshot| snapshot.sum_queued_prefill_tokens)
             .collect::<Vec<_>>();
@@ -472,13 +502,33 @@ impl EnginePerfModel {
             return Ok(Some(Duration::ZERO));
         }
 
-        let max_chunk = u64::from(self.limits.max_num_batched_tokens.max(1));
+        let max_chunk = u64::from(self.limits.max_num_batched_tokens);
+        let plans = remaining
+            .iter()
+            .map(|tokens| PrefillChunkPlan::new(*tokens, max_chunk))
+            .collect::<Vec<_>>();
+        let mut breakpoints = vec![0];
+        for plan in &plans {
+            if plan.full_chunks > 0 {
+                breakpoints.push(plan.full_chunks);
+            }
+            if plan.tail_tokens > 0 {
+                breakpoints.push(plan.full_chunks + 1);
+            }
+        }
+        breakpoints.sort_unstable();
+        breakpoints.dedup();
+
         let mut total = Duration::ZERO;
-        while remaining.iter().any(|tokens| *tokens > 0) {
+        for window in breakpoints.windows(2) {
+            let iteration = window[0];
+            let repeat_count = window[1] - window[0];
+            if repeat_count == 0 {
+                continue;
+            }
             let mut chunk_metrics = Vec::with_capacity(metrics_by_rank.len());
-            for (snapshot, remaining_tokens) in metrics_by_rank.iter().zip(remaining.iter_mut()) {
-                let chunk = (*remaining_tokens).min(max_chunk);
-                *remaining_tokens -= chunk;
+            for (snapshot, plan) in metrics_by_rank.iter().zip(plans.iter()) {
+                let chunk = plan.chunk_at(iteration, max_chunk);
                 let mut metrics = aic_identity_from_snapshot(snapshot);
                 metrics.scheduled_requests.num_prefill_requests =
                     estimate_prefill_request_count(snapshot.num_queued_prefill, chunk);
@@ -495,7 +545,8 @@ impl EnginePerfModel {
             let Some(duration) = self.estimate_aic_metrics(&chunk_metrics)? else {
                 return Ok(None);
             };
-            total += duration;
+            let repeated = mul_duration(duration, repeat_count)?;
+            total = checked_add_duration(total, repeated, "queued prefill time")?;
         }
         Ok(Some(total))
     }
@@ -680,10 +731,8 @@ impl EnginePerfModel {
             let Some(ttft) = self.agg_ttft(ttft_prefill_tokens, batch_size, decode_kv)? else {
                 return Ok(None);
             };
-            let decode_tail = mul_duration(itl, request.osl.saturating_sub(1))?;
-            let e2e = ttft
-                .checked_add(decode_tail)
-                .ok_or_else(|| anyhow!("aggregate E2E latency overflow"))?;
+            let decode_tail = mul_duration(itl, u64::from(request.osl.saturating_sub(1)))?;
+            let e2e = checked_add_duration(ttft, decode_tail, "aggregate E2E latency")?;
             let rps = f64::from(batch_size) / (f64::from(request.osl) * itl.as_secs_f64());
             let eligible = sla_ok(Some(ttft), request.ttft_sla)
                 && sla_ok(Some(itl), request.itl_sla)
@@ -701,19 +750,10 @@ impl EnginePerfModel {
     }
 
     fn prefill_time_for_tokens(&self, tokens: u32) -> Result<Option<Duration>> {
-        let max_chunk = self.limits.max_num_batched_tokens.max(1);
-        let mut remaining = tokens;
-        let mut total = Duration::ZERO;
-        while remaining > 0 {
-            let chunk = remaining.min(max_chunk);
-            remaining -= chunk;
+        self.prefill_chunk_time(u64::from(tokens), |chunk| {
             let metrics = synthetic_prefill_by_rank(chunk, self.attention_dp_size)?;
-            let Some(duration) = self.estimate_aic_metrics(&metrics)? else {
-                return Ok(None);
-            };
-            total += duration;
-        }
-        Ok(Some(total))
+            self.estimate_aic_metrics(&metrics)
+        })
     }
 
     fn decode_time_for_batch(
@@ -750,22 +790,36 @@ impl EnginePerfModel {
         current_decode_requests: u32,
         current_decode_kv: u32,
     ) -> Result<Option<Duration>> {
-        let max_chunk = self.limits.max_num_batched_tokens.max(1);
-        let mut remaining = queued_prefill_tokens;
-        let mut total = Duration::ZERO;
-        while remaining > 0 {
-            let chunk = remaining.min(max_chunk);
-            remaining -= chunk;
+        self.prefill_chunk_time(u64::from(queued_prefill_tokens), |chunk| {
             let metrics = synthetic_mixed_by_rank(
                 chunk,
                 current_decode_requests,
                 current_decode_kv,
                 self.attention_dp_size,
             )?;
-            let Some(duration) = self.estimate_aic_metrics(&metrics)? else {
+            self.estimate_aic_metrics(&metrics)
+        })
+    }
+
+    fn prefill_chunk_time<F>(&self, tokens: u64, mut estimate_chunk: F) -> Result<Option<Duration>>
+    where
+        F: FnMut(u32) -> Result<Option<Duration>>,
+    {
+        let plan = PrefillChunkPlan::new(tokens, u64::from(self.limits.max_num_batched_tokens));
+        let mut total = Duration::ZERO;
+        if plan.full_chunks > 0 {
+            let Some(duration) = estimate_chunk(self.limits.max_num_batched_tokens)? else {
                 return Ok(None);
             };
-            total += duration;
+            let repeated = mul_duration(duration, plan.full_chunks)?;
+            total = checked_add_duration(total, repeated, "prefill chunk time")?;
+        }
+        if plan.tail_tokens > 0 {
+            let tail = u64_to_u32(plan.tail_tokens, "prefill tail tokens")?;
+            let Some(duration) = estimate_chunk(tail)? else {
+                return Ok(None);
+            };
+            total = checked_add_duration(total, duration, "prefill chunk time")?;
         }
         Ok(Some(total))
     }
@@ -1186,10 +1240,29 @@ fn select_capacity(
     }
 }
 
-fn mul_duration(duration: Duration, factor: u32) -> Result<Duration> {
-    duration
-        .checked_mul(factor)
-        .ok_or_else(|| anyhow!("duration overflow multiplying {duration:?} by {factor}"))
+fn checked_add_duration(lhs: Duration, rhs: Duration, context: &str) -> Result<Duration> {
+    lhs.checked_add(rhs)
+        .ok_or_else(|| anyhow!("{context} overflow"))
+}
+
+fn mul_duration(duration: Duration, factor: u64) -> Result<Duration> {
+    let seconds = u128::from(duration.as_secs())
+        .checked_mul(u128::from(factor))
+        .ok_or_else(|| anyhow!("duration overflow multiplying {duration:?} by {factor}"))?;
+    let nanos = u128::from(duration.subsec_nanos())
+        .checked_mul(u128::from(factor))
+        .ok_or_else(|| anyhow!("duration overflow multiplying {duration:?} by {factor}"))?;
+    let total_seconds = seconds
+        .checked_add(nanos / 1_000_000_000)
+        .ok_or_else(|| anyhow!("duration overflow multiplying {duration:?} by {factor}"))?;
+    ensure!(
+        total_seconds <= u128::from(u64::MAX),
+        "duration overflow multiplying {duration:?} by {factor}"
+    );
+    Ok(Duration::new(
+        total_seconds as u64,
+        (nanos % 1_000_000_000) as u32,
+    ))
 }
 
 fn to_u32(value: usize, name: &str) -> Result<u32> {
@@ -1402,6 +1475,41 @@ mod tests {
     }
 
     #[test]
+    fn prefill_chunk_plan_uses_full_chunks_plus_tail() {
+        let plan = PrefillChunkPlan::new(250, 100);
+        assert_eq!(plan.full_chunks, 2);
+        assert_eq!(plan.tail_tokens, 50);
+        assert_eq!(plan.chunk_at(0, 100), 100);
+        assert_eq!(plan.chunk_at(1, 100), 100);
+        assert_eq!(plan.chunk_at(2, 100), 50);
+        assert_eq!(plan.chunk_at(3, 100), 0);
+    }
+
+    #[test]
+    fn prefill_time_uses_compressed_full_chunks_and_tail() {
+        let small_limits = EnginePerfLimits {
+            max_num_batched_tokens: 100,
+            max_num_seqs: 4,
+            max_kv_tokens: 1_000_000,
+        };
+        let mut model = EnginePerfModel::from_regression(
+            WorkerType::Prefill,
+            small_limits,
+            Some(fast_options()),
+        )
+        .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![prefill_observation(50, 0.005)],
+                vec![prefill_observation(100, 0.010)],
+            ])
+            .unwrap();
+
+        let duration = model.prefill_time_for_tokens(250).unwrap().unwrap();
+        assert!((duration.as_secs_f64() - 0.025).abs() < 1e-9);
+    }
+
+    #[test]
     fn regression_model_returns_none_until_bootstrapped() {
         let model = EnginePerfModel::from_regression(WorkerType::Decode, limits(), None).unwrap();
         let snapshot = ForwardPassSnapshot {
@@ -1501,6 +1609,35 @@ mod tests {
         let left = model.get_queued_prefill_time(&[base]).unwrap().unwrap();
         let right = model.get_queued_prefill_time(&[noisy]).unwrap().unwrap();
         assert!((left.as_secs_f64() - right.as_secs_f64()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn queued_prefill_helper_handles_large_aggregate_chunk_count() {
+        let small_limits = EnginePerfLimits {
+            max_num_batched_tokens: 1,
+            max_num_seqs: 4,
+            max_kv_tokens: 1_000_000,
+        };
+        let mut model = EnginePerfModel::from_regression(
+            WorkerType::Prefill,
+            small_limits,
+            Some(fast_options()),
+        )
+        .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![prefill_observation(1, 0.001)],
+                vec![prefill_observation(2, 0.002)],
+            ])
+            .unwrap();
+
+        let snapshot = ForwardPassSnapshot {
+            num_queued_prefill: 1,
+            sum_queued_prefill_tokens: 1_000,
+            ..Default::default()
+        };
+        let duration = model.get_queued_prefill_time(&[snapshot]).unwrap().unwrap();
+        assert!((duration.as_secs_f64() - 1.0).abs() < 1e-9);
     }
 
     #[test]
