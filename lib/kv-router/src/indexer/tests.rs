@@ -62,14 +62,16 @@ fn make_indexer_with_metrics(
 
     let indexer: Box<dyn KvIndexerInterface> = match variant {
         "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics.clone())),
+        // Pin the mode explicitly (not via `new`, which reads DYN_ROUTER_POSITIONAL_SEARCH_MODE)
+        // so the matrix always exercises both strided and binary regardless of the ambient env.
         "flat" => Box::new(ThreadPoolIndexer::new_with_metrics(
-            PositionalIndexer::new(32),
+            PositionalIndexer::new_with_mode(32, SearchMode::Strided),
             4,
             kv_block_size,
             Some(metrics.clone()),
         )),
         "flat_binary" => Box::new(ThreadPoolIndexer::new_with_metrics(
-            PositionalIndexer::new(32).with_search_mode(SearchMode::Binary),
+            PositionalIndexer::new_with_mode(32, SearchMode::Binary),
             4,
             kv_block_size,
             Some(metrics.clone()),
@@ -106,14 +108,15 @@ fn make_approx_indexer(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterfa
             metrics,
             Some(prune_config),
         )),
+        // Pin the mode explicitly (see make_indexer_with_metrics) so coverage stays deterministic.
         "flat" => Box::new(ThreadPoolIndexer::new_with_pruning(
-            PositionalIndexer::new(32),
+            PositionalIndexer::new_with_mode(32, SearchMode::Strided),
             4,
             kv_block_size,
             prune_config,
         )),
         "flat_binary" => Box::new(ThreadPoolIndexer::new_with_pruning(
-            PositionalIndexer::new(32).with_search_mode(SearchMode::Binary),
+            PositionalIndexer::new_with_mode(32, SearchMode::Binary),
             4,
             kv_block_size,
             prune_config,

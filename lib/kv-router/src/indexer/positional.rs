@@ -43,9 +43,14 @@ pub const DYN_ROUTER_POSITIONAL_SEARCH_MODE: &str = "DYN_ROUTER_POSITIONAL_SEARC
 
 /// Selects which algorithm [`PositionalIndexer::find_matches`] uses.
 ///
-/// Both modes produce identical [`OverlapScores`]; they differ only in how many index probes
-/// they perform. `Strided` jumps by `jump_size`; `Binary` binary-searches the monotone
-/// "all active workers still match" predicate (with a linear-scan base case for tight windows).
+/// `Strided` jumps by `jump_size`; `Binary` binary-searches the monotone "all active workers
+/// still match" predicate (with a linear-scan base case for tight windows). The two produce
+/// identical [`OverlapScores`] whenever the worker set matching the query is monotonically
+/// non-increasing with position — i.e. for contiguous-from-zero stores and tail removals. Both
+/// modes rely on this `count == active.len() ⟹ set equality` property (`Strided` via its
+/// per-`jump_size` count check); sparse absolute-position stores (e.g. front eviction or a
+/// partial snapshot restore that leaves a worker at a later position without its prefix) can
+/// violate it, and there `Binary`'s coarser probing can diverge from `Strided`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
     /// Strided jump-search (the original behavior).
@@ -758,9 +763,22 @@ impl PositionalIndexer {
 
     /// Binary-search variant of [`Self::jump_search_matches`].
     ///
-    /// Produces output identical to the strided search, but the number of index probes scales
-    /// with the number of distinct drain points (`O(W · log L)`, `W` = workers at position 0)
-    /// rather than `O(len / jump_size)`.
+    /// Produces output identical to the strided search for any query whose matching-worker set is
+    /// monotonically non-increasing with position (contiguous-from-zero stores and tail removals),
+    /// but the number of index probes scales with the number of distinct drain points
+    /// (`O(W · log L)`, `W` = workers at position 0) rather than `O(len / jump_size)`.
+    ///
+    /// # Preconditions
+    ///
+    /// Both this and [`Self::jump_search_matches`] use a count-only predicate
+    /// (`count_workers_at(p) == active.len()`) that assumes `workers(p) ⊆ active` for `p` past the
+    /// frontier. Sparse absolute-position stores (`start_position` writes, e.g. front eviction or a
+    /// partial snapshot restore that leaves a worker at a later position without its prefix) can
+    /// break that subset property. Because this search probes far fewer positions than the strided
+    /// scan (notably the `len - 1` fast path below), a non-active worker that only exists late in
+    /// the sequence can short-circuit it to a full match where the strided scan would still drain
+    /// an active worker earlier — so the two can diverge in that regime. The bench/test event
+    /// streams that drive [`PositionalIndexer`] today are all contiguous, so the property holds.
     ///
     /// # Algorithm
     ///
