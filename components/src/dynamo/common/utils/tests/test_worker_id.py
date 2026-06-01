@@ -10,6 +10,7 @@ from dynamo.common.utils.worker_id import make_fpm_worker_id
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.core,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
 
