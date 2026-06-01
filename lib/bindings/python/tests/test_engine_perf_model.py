@@ -67,6 +67,7 @@ def test_regression_decode_helpers_and_capacity() -> None:
     )
 
     assert model.estimate_forward_pass_time([base]) is not None
+    assert model.estimate_forward_pass_time({0: base}) is not None
     assert model.get_scheduled_decode_itl([base]) == pytest.approx(
         model.get_scheduled_decode_itl([noisy_queue])
     )
@@ -82,3 +83,21 @@ def test_regression_decode_helpers_and_capacity() -> None:
     assert capacity.rps > 0.0
     assert capacity.itl_ms is not None
     assert capacity.ttft_ms is None
+
+
+def test_tune_with_fpms_accepts_rank_mapping() -> None:
+    model = _core.RustEnginePerfModel.best_available(
+        worker_type="decode",
+        limits=_core.EnginePerfLimits(),
+        options=_core.RustEnginePerfOptions(min_observations=2, max_observations=16),
+    )
+
+    model.tune_with_fpms({0: decode_fpm(1, 100, 0.010)})
+    model.tune_with_fpms({0: decode_fpm(2, 200, 0.020)})
+
+    assert model.estimate_forward_pass_time({0: decode_fpm(1, 100)}) is not None
+
+
+def test_capacity_request_rejects_non_finite_sla() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        _core.EngineCapacityRequest(isl=100, osl=10, ttft_sla_ms=float("nan"))

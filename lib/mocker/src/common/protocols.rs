@@ -124,6 +124,9 @@ impl KvEventPublishers {
 #[derive(Debug, Clone, Default)]
 pub struct ForwardPassSnapshot {
     // -- identity --
+    // `Default::default()` leaves `version == 0` and identity fields empty or
+    // zero, which means an unstamped local snapshot. Runtime publishers may
+    // stamp or overwrite these fields at the serialization boundary.
     pub version: u32,
     pub worker_id: String,
     pub dp_rank: u32,

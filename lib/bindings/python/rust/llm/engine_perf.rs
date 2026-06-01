@@ -11,7 +11,7 @@ use dynamo_mocker::common::engine_perf as rs_engine_perf;
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, WorkerType as RsWorkerType};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyAnyMethods;
+use pyo3::types::{PyAnyMethods, PyMapping, PyMappingMethods};
 
 use super::replay::MockEngineArgs;
 
@@ -202,17 +202,17 @@ impl EngineCapacityRequest {
         itl_sla_ms: Option<f64>,
         e2e_latency_sla_ms: Option<f64>,
         optimization_target: OptimizationTarget,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        Ok(Self {
             inner: rs_engine_perf::EngineCapacityRequest {
                 isl,
                 osl,
-                ttft_sla: ttft_sla_ms.map(ms_to_duration),
-                itl_sla: itl_sla_ms.map(ms_to_duration),
-                e2e_latency_sla: e2e_latency_sla_ms.map(ms_to_duration),
+                ttft_sla: ttft_sla_ms.map(ms_to_duration).transpose()?,
+                itl_sla: itl_sla_ms.map(ms_to_duration).transpose()?,
+                e2e_latency_sla: e2e_latency_sla_ms.map(ms_to_duration).transpose()?,
                 optimization_target: optimization_target.into(),
             },
-        }
+        })
     }
 }
 
@@ -430,25 +430,62 @@ fn metrics_by_rank_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Vec<ForwardPassSn
     if obj.hasattr("scheduled_requests")? {
         return Ok(vec![snapshot_from_py_fpm(obj)?]);
     }
-    obj.try_iter()?
-        .map(|item| snapshot_from_py_fpm(&item?))
-        .collect()
+
+    if let Ok(mapping) = obj.downcast::<PyMapping>() {
+        return mapping
+            .values()?
+            .try_iter()?
+            .map(|item| snapshot_from_py_fpm(&item?))
+            .collect();
+    }
+
+    let iter = obj.try_iter().map_err(|err| {
+        PyValueError::new_err(format!(
+            "metrics_by_rank must be a ForwardPassMetrics object, a mapping of rank to FPM, or an iterable of FPM objects: {err}"
+        ))
+    })?;
+    iter.map(|item| snapshot_from_py_fpm(&item?)).collect()
 }
 
 fn iterations_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<ForwardPassSnapshot>>> {
     if obj.hasattr("scheduled_requests")? {
         return Ok(vec![vec![snapshot_from_py_fpm(obj)?]]);
     }
-    obj.try_iter()?
-        .map(|item| {
-            let item = item?;
-            if item.hasattr("scheduled_requests")? {
-                Ok(vec![snapshot_from_py_fpm(&item)?])
-            } else {
-                metrics_by_rank_from_py(&item)
-            }
-        })
-        .collect()
+
+    if let Ok(mapping) = obj.downcast::<PyMapping>() {
+        if mapping_values_are_fpms(mapping)? {
+            return Ok(vec![metrics_by_rank_from_py(obj)?]);
+        }
+        return mapping
+            .values()?
+            .try_iter()?
+            .map(|item| iteration_from_py_item(&item?))
+            .collect();
+    }
+
+    let iter = obj.try_iter().map_err(|err| {
+        PyValueError::new_err(format!(
+            "iterations must be a ForwardPassMetrics object, a mapping of iteration to FPM/rank-list, or an iterable of FPM/rank-list items: {err}"
+        ))
+    })?;
+    iter.map(|item| iteration_from_py_item(&item?)).collect()
+}
+
+fn iteration_from_py_item(item: &Bound<'_, PyAny>) -> PyResult<Vec<ForwardPassSnapshot>> {
+    if item.hasattr("scheduled_requests")? {
+        Ok(vec![snapshot_from_py_fpm(item)?])
+    } else {
+        metrics_by_rank_from_py(item)
+    }
+}
+
+fn mapping_values_are_fpms(mapping: &Bound<'_, PyMapping>) -> PyResult<bool> {
+    for item in mapping.values()?.try_iter()? {
+        if !item?.hasattr("scheduled_requests")? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn snapshot_from_py_fpm(fpm: &Bound<'_, PyAny>) -> PyResult<ForwardPassSnapshot> {
@@ -511,8 +548,14 @@ fn parse_worker_type(value: &str) -> PyResult<RsWorkerType> {
     }
 }
 
-fn ms_to_duration(ms: f64) -> Duration {
-    Duration::from_secs_f64((ms.max(0.0)) / 1000.0)
+fn ms_to_duration(ms: f64) -> PyResult<Duration> {
+    if !ms.is_finite() {
+        return Err(PyValueError::new_err(format!(
+            "SLA duration must be finite, got {ms}"
+        )));
+    }
+    Duration::try_from_secs_f64(ms.max(0.0) / 1000.0)
+        .map_err(|err| PyValueError::new_err(format!("invalid SLA duration {ms} ms: {err}")))
 }
 
 fn duration_to_ms(duration: Duration) -> f64 {

@@ -550,21 +550,33 @@ impl EnginePerfModel {
         &self,
         request: &EngineCapacityRequest,
     ) -> Result<Option<EngineCapacity>> {
-        let Some(ttft) = self.prefill_time_for_tokens(request.isl)? else {
-            return Ok(None);
-        };
-        if ttft.is_zero() {
+        let max_batch = self.prefill_max_batch(request.isl);
+        if max_batch == 0 {
             return Ok(None);
         }
-        let rps = 1.0 / ttft.as_secs_f64();
-        let eligible = sla_ok(Some(ttft), request.ttft_sla);
-        Ok(Some(EngineCapacity {
-            rps,
-            ttft: Some(ttft),
-            itl: None,
-            e2e_latency: None,
-            eligible,
-        }))
+
+        let mut best = None;
+        for batch_size in 1..=max_batch {
+            let tokens = request.isl.saturating_mul(batch_size);
+            let Some(ttft) = self.prefill_time_for_tokens(tokens)? else {
+                return Ok(None);
+            };
+            if ttft.is_zero() {
+                continue;
+            }
+            let rps = f64::from(batch_size) / ttft.as_secs_f64();
+            let capacity = EngineCapacity {
+                rps,
+                ttft: Some(ttft),
+                itl: None,
+                e2e_latency: Some(ttft),
+                eligible: sla_ok(Some(ttft), request.ttft_sla)
+                    && sla_ok(None, request.itl_sla)
+                    && sla_ok(Some(ttft), request.e2e_latency_sla),
+            };
+            best = select_capacity(best, capacity, request.optimization_target);
+        }
+        Ok(best)
     }
 
     fn find_decode_capacity(
@@ -576,6 +588,9 @@ impl EnginePerfModel {
         }
         let context_length = decode_context_length(request);
         let max_batch = self.decode_max_batch(context_length);
+        if max_batch == 0 {
+            return Ok(None);
+        }
         let mut best = None;
         for batch_size in 1..=max_batch {
             let Some(itl) = self.decode_time_for_batch(batch_size, context_length)? else {
@@ -590,7 +605,9 @@ impl EnginePerfModel {
                 ttft: None,
                 itl: Some(itl),
                 e2e_latency: None,
-                eligible: sla_ok(Some(itl), request.itl_sla),
+                eligible: sla_ok(None, request.ttft_sla)
+                    && sla_ok(Some(itl), request.itl_sla)
+                    && sla_ok(None, request.e2e_latency_sla),
             };
             best = select_capacity(best, capacity, request.optimization_target);
         }
@@ -608,6 +625,9 @@ impl EnginePerfModel {
             kv_cap,
             self.limits.max_num_batched_tokens.saturating_sub(1).max(1),
         );
+        if hard_cap == 0 {
+            return Ok(None);
+        }
 
         let mut best = None;
         for batch_size in 1..=hard_cap {
@@ -723,13 +743,27 @@ impl EnginePerfModel {
         Ok(Some(total))
     }
 
+    fn prefill_max_batch(&self, isl: u32) -> u32 {
+        if self.limits.max_num_seqs == 0 || self.limits.max_num_batched_tokens == 0 {
+            return 0;
+        }
+        if isl > self.limits.max_num_batched_tokens {
+            return 1;
+        }
+        cmp::min(
+            self.limits.max_num_seqs,
+            self.limits.max_num_batched_tokens / isl.max(1),
+        )
+    }
+
     fn decode_max_batch(&self, context_length: u32) -> u32 {
-        let kv_cap = if context_length > 0 {
-            cmp::max(1, self.limits.max_kv_tokens / context_length)
-        } else {
-            1
-        };
-        cmp::max(1, cmp::min(self.limits.max_num_seqs.max(1), kv_cap))
+        if context_length == 0 {
+            return 0;
+        }
+        cmp::min(
+            self.limits.max_num_seqs,
+            self.limits.max_kv_tokens / context_length,
+        )
     }
 
     fn validate_metrics_by_rank(&self, metrics_by_rank: &[ForwardPassSnapshot]) -> Result<()> {
@@ -768,7 +802,15 @@ impl EnginePerfModel {
             .model
             .estimate_forward_pass_time_ms(metrics)
             .context("failed to estimate AIC forward-pass time")?;
-        Ok(ms.map(|value| Duration::from_secs_f64((value.max(0.0)) / 1000.0)))
+        ms.map(|value| {
+            ensure!(
+                value.is_finite(),
+                "AIC forward-pass estimate must be finite, got {value}"
+            );
+            Duration::try_from_secs_f64(value.max(0.0) / 1000.0)
+                .with_context(|| format!("invalid AIC forward-pass estimate {value} ms"))
+        })
+        .transpose()
     }
 }
 
@@ -1052,7 +1094,7 @@ fn sla_ok(value: Option<Duration>, sla: Option<Duration>) -> bool {
     match (value, sla) {
         (_, None) => true,
         (Some(value), Some(sla)) => value <= sla,
-        (None, Some(_)) => true,
+        (None, Some(_)) => false,
     }
 }
 
@@ -1523,6 +1565,125 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(capacity.ttft.unwrap().as_secs_f64() > 0.08);
+    }
+
+    #[test]
+    fn prefill_capacity_batches_requests_within_limits() {
+        let small_limits = EnginePerfLimits {
+            max_num_batched_tokens: 400,
+            max_num_seqs: 4,
+            max_kv_tokens: 1_000_000,
+        };
+        let mut model = EnginePerfModel::from_regression(
+            WorkerType::Prefill,
+            small_limits,
+            Some(fast_options()),
+        )
+        .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![prefill_observation(100, 0.020)],
+                vec![prefill_observation(400, 0.050)],
+            ])
+            .unwrap();
+
+        let capacity = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+
+        assert!(capacity.rps > 70.0);
+        assert!(capacity.ttft.is_some());
+        assert_eq!(capacity.e2e_latency, capacity.ttft);
+        assert!(capacity.itl.is_none());
+    }
+
+    #[test]
+    fn decode_capacity_returns_none_when_kv_cannot_fit_one_sequence() {
+        let small_limits = EnginePerfLimits {
+            max_num_batched_tokens: 8192,
+            max_num_seqs: 4,
+            max_kv_tokens: 50,
+        };
+        let mut model = EnginePerfModel::from_regression(
+            WorkerType::Decode,
+            small_limits,
+            Some(fast_options()),
+        )
+        .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![decode_observation(1, 100, 0.010)],
+                vec![decode_observation(2, 200, 0.020)],
+            ])
+            .unwrap();
+
+        let capacity = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap();
+
+        assert!(capacity.is_none());
+    }
+
+    #[test]
+    fn capacity_marks_unsupported_sla_metrics_ineligible() {
+        let mut prefill =
+            EnginePerfModel::from_regression(WorkerType::Prefill, limits(), Some(fast_options()))
+                .unwrap();
+        prefill
+            .tune_with_fpms(&vec![
+                vec![prefill_observation(100, 0.010)],
+                vec![prefill_observation(200, 0.020)],
+            ])
+            .unwrap();
+        let prefill_capacity = prefill
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: Some(Duration::from_secs(1)),
+                e2e_latency_sla: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+        assert!(!prefill_capacity.eligible);
+
+        let mut decode =
+            EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
+                .unwrap();
+        decode
+            .tune_with_fpms(&vec![
+                vec![decode_observation(1, 100, 0.010)],
+                vec![decode_observation(2, 200, 0.020)],
+            ])
+            .unwrap();
+        let decode_capacity = decode
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 10,
+                ttft_sla: Some(Duration::from_secs(1)),
+                itl_sla: None,
+                e2e_latency_sla: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+        assert!(!decode_capacity.eligible);
     }
 
     #[test]
