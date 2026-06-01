@@ -26,134 +26,83 @@ def make_frames(n=3, h=8, w=8) -> np.ndarray:
 
 
 class TestEncodeToVideoBytes:
-    """Tests for encode_to_video_bytes()."""
+    """Tests for encode_to_video_bytes().
 
-    def _mock_iio_v3(self):
-        """Return a mock that looks like imageio.v3 (has imwrite)."""
-        iio = MagicMock()
-        iio.imwrite = MagicMock()
-        return iio
+    encode_to_video_bytes pre-converts RGB->YUV420p in numpy and shells out to
+    ffmpeg (feeding planar YUV on stdin) to sidestep the in-tree LGPL ffmpeg's
+    broken libswscale RGB->YUV path. These tests mock subprocess.run + the temp
+    file so no real ffmpeg is invoked.
+    """
 
-    def _mock_iio_v2(self):
-        """Return a mock that looks like imageio v2 (no imwrite, has get_writer)."""
-        iio = MagicMock(spec=[])  # no attributes by default
-        writer = MagicMock()
-        iio.get_writer = MagicMock(return_value=writer)
-        return iio, writer
+    def _patch_ffmpeg(self, read_bytes=b"video-bytes"):
+        """Patch subprocess.run (success) and the output tempfile.
 
-    def test_mp4_selects_h264_nvenc_codec(self):
+        Returns (run_patch, tempfile_patch); the run_patch's mock is what tests
+        assert against.
+        """
+        run_patch = patch("subprocess.run", MagicMock())
+        tmp = MagicMock()
+        tmp.read.return_value = read_bytes
+        ntf_cm = MagicMock()
+        ntf_cm.__enter__.return_value = tmp
+        tempfile_patch = patch(
+            "tempfile.NamedTemporaryFile", MagicMock(return_value=ntf_cm)
+        )
+        return run_patch, tempfile_patch
+
+    def test_mp4_uses_h264_nvenc(self):
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
-        iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
-            "imageio.v3", iio, create=True
-        ), patch.dict("sys.modules", {"imageio.v3": iio}):
-            buf = MagicMock()
-            buf.getvalue.return_value = b"fake-mp4"
-            mock_io.BytesIO.return_value = buf
-
+        run_patch, tempfile_patch = self._patch_ffmpeg()
+        with run_patch as mock_run, tempfile_patch:
             encode_to_video_bytes(make_frames(), fps=8, output_format="mp4")
 
-            iio.imwrite.assert_called_once()
-            _, kwargs = iio.imwrite.call_args
-            assert kwargs.get("codec") == "h264_nvenc"
-            assert kwargs.get("fps") == 8
+            cmd = mock_run.call_args[0][0]
+            assert "h264_nvenc" in cmd
+            assert mock_run.call_args[1]["check"] is True
 
-    def test_webm_selects_libvpx_vp9_codec(self):
+    def test_webm_uses_libvpx_vp9(self):
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
-        iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
-            "imageio.v3", iio, create=True
-        ), patch.dict("sys.modules", {"imageio.v3": iio}):
-            buf = MagicMock()
-            buf.getvalue.return_value = b"fake-webm"
-            mock_io.BytesIO.return_value = buf
-
+        run_patch, tempfile_patch = self._patch_ffmpeg()
+        with run_patch as mock_run, tempfile_patch:
             encode_to_video_bytes(make_frames(), fps=16, output_format="webm")
 
-            iio.imwrite.assert_called_once()
-            _, kwargs = iio.imwrite.call_args
-            assert kwargs.get("codec") == "libvpx-vp9"
-
-    def test_mp4_passes_extension_to_imwrite(self):
-        from dynamo.common.utils.video_utils import encode_to_video_bytes
-
-        iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
-            "imageio.v3", iio, create=True
-        ), patch.dict("sys.modules", {"imageio.v3": iio}):
-            buf = MagicMock()
-            buf.getvalue.return_value = b"bytes"
-            mock_io.BytesIO.return_value = buf
-
-            encode_to_video_bytes(make_frames(), output_format="mp4")
-
-            _, kwargs = iio.imwrite.call_args
-            assert kwargs.get("extension") == ".mp4"
-
-    def test_webm_passes_extension_to_imwrite(self):
-        from dynamo.common.utils.video_utils import encode_to_video_bytes
-
-        iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
-            "imageio.v3", iio, create=True
-        ), patch.dict("sys.modules", {"imageio.v3": iio}):
-            buf = MagicMock()
-            buf.getvalue.return_value = b"bytes"
-            mock_io.BytesIO.return_value = buf
-
-            encode_to_video_bytes(make_frames(), output_format="webm")
-
-            _, kwargs = iio.imwrite.call_args
-            assert kwargs.get("extension") == ".webm"
+            assert "libvpx-vp9" in mock_run.call_args[0][0]
 
     def test_unsupported_format_raises_value_error(self):
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
-        iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
-            "imageio.v3", iio, create=True
-        ), patch.dict("sys.modules", {"imageio.v3": iio}):
-            mock_io.BytesIO.return_value = MagicMock()
+        with pytest.raises(ValueError, match="No codec"):
+            encode_to_video_bytes(make_frames(), output_format="avi")
 
-            # ValueError is wrapped into RuntimeError by the except block
-            with pytest.raises(RuntimeError, match="Video encoding to bytes failed"):
-                encode_to_video_bytes(make_frames(), output_format="avi")
-
-    def test_returns_bytes_from_buffer(self):
+    def test_bad_shape_raises_value_error(self):
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
-        expected = b"\x00\x01\x02"
-        iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
-            "imageio.v3", iio, create=True
-        ), patch.dict("sys.modules", {"imageio.v3": iio}):
-            buf = MagicMock()
-            buf.getvalue.return_value = expected
-            mock_io.BytesIO.return_value = buf
+        with pytest.raises(ValueError, match="Expected frames of shape"):
+            encode_to_video_bytes(
+                np.zeros((3, 8, 8), dtype=np.uint8), output_format="mp4"
+            )
 
+    def test_subprocess_failure_raises_runtime_error(self):
+        import subprocess
+
+        from dynamo.common.utils.video_utils import encode_to_video_bytes
+
+        err = subprocess.CalledProcessError(1, "ffmpeg", stderr=b"boom")
+        _, tempfile_patch = self._patch_ffmpeg()
+        with patch("subprocess.run", MagicMock(side_effect=err)), tempfile_patch:
+            with pytest.raises(RuntimeError, match="Video encoding to bytes failed"):
+                encode_to_video_bytes(make_frames(), output_format="mp4")
+
+    def test_returns_file_bytes(self):
+        from dynamo.common.utils.video_utils import encode_to_video_bytes
+
+        run_patch, tempfile_patch = self._patch_ffmpeg(read_bytes=b"\x00\x01\x02")
+        with run_patch, tempfile_patch:
             result = encode_to_video_bytes(make_frames(), output_format="mp4")
 
-        assert result == expected
-
-    def test_v2_api_fallback_writes_all_frames(self):
-        """When imageio.v3.imwrite is absent, falls back to get_writer loop."""
-        from dynamo.common.utils.video_utils import encode_to_video_bytes
-
-        iio_v2, writer = self._mock_iio_v2()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
-            "imageio.v3", iio_v2, create=True
-        ), patch.dict("sys.modules", {"imageio.v3": iio_v2}):
-            buf = MagicMock()
-            buf.getvalue.return_value = b"v2-bytes"
-            mock_io.BytesIO.return_value = buf
-
-            frames = make_frames(n=4)
-            encode_to_video_bytes(frames, output_format="mp4")
-
-            assert writer.append_data.call_count == 4
-            writer.close.assert_called_once()
+        assert result == b"\x00\x01\x02"
 
 
 # ---------------------------------------------------------------------------
