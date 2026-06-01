@@ -446,9 +446,8 @@ snapshotctl restore --manifest ./worker-pod.yaml --namespace ${NAMESPACE} --chec
 
 ## Planned Features
 
-- Stabilize multi-GPU support
+- Stable multi-GPU and multinode support
 - TensorRT-LLM support
-- Alternative storage backends
 
 ## Related Documentation
 

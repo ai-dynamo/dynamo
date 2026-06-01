@@ -18,7 +18,7 @@ This document tracks backend support across three composable projects in this wo
 
 - **[GPU Memory Service (GMS)](#gpu-memory-service-gms)**: out-of-process GPU memory manager for zero-copy sharing of weights and KV across worker processes.
 - **[Dynamo Bulwark](#dynamo-bulwark-shadow-engine-failover)**: pre-initialized "shadow" engines sharing weights and KV cache can be quickly failed over to on software and hardware failures.
-- **[Dynamo Snapshot (ChReK)](#dynamo-snapshot-chrek)**: CRIU-based checkpoint/restore of initialized workers, cutting cold starts from minutes to seconds.
+- **[Dynamo Snapshot](./snapshot.md)**: CRIU-based checkpoint/restore of initialized workers, cutting cold starts from minutes to seconds.
 
 **Legend:**
 
@@ -29,7 +29,7 @@ Blank cells indicate "not started" or "not supported".
 
 ## Support Matrix
 
-| Backend | [GPU Memory Service](#gpu-memory-service-gms) | [Dynamo Bulwark](#dynamo-bulwark-shadow-engine-failover) | [Dynamo Snapshot](#dynamo-snapshot-chrek) |
+| Backend | [GPU Memory Service](#gpu-memory-service-gms) | [Dynamo Bulwark](#dynamo-bulwark-shadow-engine-failover) | [Dynamo Snapshot](./snapshot.md) |
 | :--- | :---: | :---: | :---: |
 | **vLLM** | ✅ | ✅ | ✅ |
 | **SGLang** | ✅ | 🚧 | ✅ |
@@ -46,19 +46,14 @@ See the per-feature sections below for detailed per-backend status.
 
 #### Status
 
-| Backend | Managed memory | Multi-node | Upstream integration¹ |
+| Backend | Managed memory | Multi-node | Upstream integration |
 | :--- | :--- | :---: | :--- |
-| **vLLM** | weights, KV | ✅ | 🚧 minimal patches² |
-| **SGLang** | weights, KV | ✅ | 🚧 patches needed³ |
-| **TensorRT-LLM** | weights⁴ | 🚧 | 🚧 patches needed⁵ |
+| **vLLM** | weights, KV | ✅ | 🚧 |
+| **SGLang** | weights, KV | ✅ | 🚧 |
+| **TensorRT-LLM** | weights | 🚧 | 🚧 |
 
 **Notes:**
-
-1. **Upstream integration**: whether the backend's integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream.
-2. vLLM carries a small set of out-of-tree patches pending upstreaming.
-3. SGLang currently requires monkey-patching for GMS; upstreaming is in progress.
-4. TensorRT-LLM manages weights through GMS today; KV cache management through GMS is pending.
-5. TensorRT-LLM integration requires out-of-tree patches, targeted for upstream once the shadow-engine flow is validated end-to-end.
+- vLLM, SGLang, and TensorRT-LLM require upstream changes to inference that are currently being upstreamed.
 
 ### Dynamo Bulwark (Shadow Engine Failover)
 
@@ -67,17 +62,15 @@ See the per-feature sections below for detailed per-backend status.
 
 #### Status
 
-| Backend | Single Node | Multi-node | Upstream Integration¹ | KV-Cache Reuse² | Hardware Fault Tolerance³ |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **vLLM** | ✅ | ✅ | ✅ | | |
-| **SGLang** | 🚧 | 🚧 | 🚧 | | |
-| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 | | |
+| Backend | Single Node | Multi-node | KV-Cache Reuse | Hardware Fault Tolerance |
+| :--- | :---: | :---: | :---: | :---: |
+| **vLLM** | ✅ | ✅ | 🚧 | 🚧|
+| **SGLang** | 🚧 | 🚧 | 🚧 | 🚧 |
+| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 | 🚧 |
 
 **Notes:**
-
-1. **Upstream Integration**: whether the backend's integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream. Shared definition with the GMS table.
-2. **KV-Cache Reuse**: whether KV cache is remapped across engines on failover (preserving in-flight requests) rather than each shadow starting from a fresh allocation.
-3. **Hardware Fault Tolerance**: whether shadow engines are placed on disjoint hardware from the primary, so GPU/node failures are recoverable rather than taking out primary and shadow together.
+- **KV-Cache Reuse**: whether KV cache is remapped across engines on failover (preserving in-flight requests) rather than each shadow starting from a fresh allocation.
+- **Hardware Fault Tolerance**: whether shadow engines are placed on disjoint hardware from the primary, so GPU/node failures are recoverable rather than taking out primary and shadow together.
 
 ### Dynamo Snapshot
 
@@ -87,11 +80,10 @@ Dynamo Snapshot uses CRIU and NVIDIA's `cuda-checkpoint` utility to capture a wo
 
 | Backend | Single GPU | Multi-GPU, Single Node| Multinode | 
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **vLLM** | ✅ | ✅ | 🚧 |
+| **vLLM** | ✅ | ✅ (unstable) | 🚧 |
 | **SGLang** |  ✅ | 🚧 | 🚧 | 🚧 |
 | **TensorRT-LLM** | 🚧 | 🚧 | 🚧 |
 
 **Notes:**
-1. Dynamo Snapshot and GMS integration prevents double-buffering and allows weights to be restored from various sources in parallel with the main process tree restoration, reducing startup time even further for large models. It is not yet available due to CUDA driver limitations.
-
-See [Dynamo Snapshot](snapshot.md) for usage.
+- GMS integration is currently gated on a pending driver release.
+- CRIU performance is only optimal with the following patches folded into criu-dev: [AIO support](https://github.com/checkpoint-restore/criu/pull/3022) and [parallel memfd support](https://github.com/checkpoint-restore/criu/pull/3021)
