@@ -1204,7 +1204,7 @@ impl OpenAIPreprocessor {
                 && tpl.contains("{n}")
                 && let Some(prompt) = formatted_prompt
             {
-                match self.splice_numbered_placeholders_at_token_level(
+                match self.splice_phi3_numbered_placeholders_at_token_level(
                     prompt,
                     tpl,
                     find_token_id,
@@ -1250,12 +1250,20 @@ impl OpenAIPreprocessor {
         // per-spec value previously left Qwen2-VL / Qwen2.5-VL stuck at
         // `effective_cached_blocks=1` because their per-patch id never
         // appears in stored block hashes.
-        let bos_extra = self.routing_prepend_bos.is_some() as usize;
+        // BOS ownership: when the Phi-3 splice helper produced
+        // `normalized_token_ids` (Cow::Owned), it has already emitted the
+        // leading BOS as part of its complete sequence. Only the non-splice
+        // path (Cow::Borrowed = raw tokenized prompt) needs the caller to
+        // prepend BOS here. Avoids the prior split-brain where the leading
+        // push was here and the mid-segment pushes lived inside the helper.
+        let splice_owns_bos = matches!(normalized_token_ids, std::borrow::Cow::Owned(_));
+        let bos_extra =
+            (!splice_owns_bos && self.routing_prepend_bos.is_some()) as usize;
         let mut expanded: Vec<crate::protocols::TokenIdType> =
             Vec::with_capacity(normalized_token_ids.len() + n_total + bos_extra);
-        // Prepend BOS before any other tokens for `add_bos_token: true`
-        // models so per-block hashes align with the backend's view.
-        if let Some(bos) = self.routing_prepend_bos {
+        if !splice_owns_bos
+            && let Some(bos) = self.routing_prepend_bos
+        {
             expanded.push(bos);
         }
         let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
@@ -1310,29 +1318,49 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    /// Build routing-side tokens for numbered-placeholder templates
-    /// (Phi-3-vision `<|image_N|>`) so the router's per-block hashes match
-    /// the worker's BlockStored events byte-for-byte.
+    /// Build routing-side tokens for Phi-3-vision's `<|image_N|>` numbered
+    /// placeholder template so the router's per-block hashes match the
+    /// worker's BlockStored events byte-for-byte.
     ///
-    /// Phi-3's HF processor splits the prompt at `<|image_N|>` and tokenizes
-    /// each segment with `add_special_tokens=true`, prefixing every segment
-    /// after the first with a fresh BOS. It also decodes-then-re-encodes
-    /// across special-token boundaries, which inserts whitespace after each
-    /// special token and bumps the SentencePiece prefix token (e.g. 29871
-    /// `▁` -> 259 `▁▁` for `<|user|>\n`). Both effects are reproduced here.
+    /// **Family contract — Phi-3-only.** The encode-decode roundtrip +
+    /// per-segment BOS pattern here is specific to Phi-3's HF processor
+    /// (and any future `LlamaTokenizer`-family with `<|image_{n}|>`
+    /// placeholders): the processor splits the prompt at `<|image_N|>` and
+    /// tokenizes each segment with `add_special_tokens=true`, prefixing
+    /// every segment (including the first) with a fresh BOS, and decodes-
+    /// then-re-encodes across special-token boundaries, which inserts
+    /// whitespace after each special token and bumps the SentencePiece
+    /// prefix token (e.g. 29871 `▁` -> 259 `▁▁` for `<|user|>\n`). Both
+    /// effects are reproduced here.
+    ///
+    /// Caller is `gather_mm_exact_routing_info`, which gates on
+    /// `placeholder_tpl.contains("{n}")`. The `routing_prepend_bos`
+    /// requirement below acts as the family guard: a future model with a
+    /// `{n}`-style placeholder but no BOS prepend (i.e. not a
+    /// LlamaTokenizer-family) would not benefit from this roundtrip and
+    /// could silently produce wrong block hashes, so we bail and let the
+    /// caller fall back to text-prefix routing.
     ///
     /// Returns one `find_token_id` per image; the caller's expansion loop
-    /// multiplies them to the per-image patch count. Start-of-prompt BOS is
-    /// added by the caller's `routing_prepend_bos`. Returns `None` (caller
-    /// falls back to text-prefix routing) on any tokenize/decode failure.
+    /// multiplies them to the per-image patch count. Leading BOS is
+    /// emitted here as the first element of the returned vector — the
+    /// caller does NOT prepend its own BOS when this helper succeeds.
+    /// Returns `None` (caller falls back to text-prefix routing) when the
+    /// family guard trips or on any tokenize/decode failure.
     #[cfg(feature = "lightseek-mm")]
-    fn splice_numbered_placeholders_at_token_level(
+    fn splice_phi3_numbered_placeholders_at_token_level(
         &self,
         prompt: &str,
         placeholder_tpl: &str,
         find_token_id: crate::protocols::TokenIdType,
         expected_count: usize,
     ) -> Option<Vec<crate::protocols::TokenIdType>> {
+        // Family guard: the encode-decode roundtrip + per-segment BOS
+        // semantics are LlamaTokenizer-family-specific. `routing_prepend_bos`
+        // is set iff the model declares `add_bos_token: true` in
+        // tokenizer_config.json, which is the marker for that family.
+        let bos = self.routing_prepend_bos?;
+
         // Encode-decode roundtrip mirrors vLLM's text-substitute fallback,
         // which is what the Phi-3 worker actually hashes on.
         let prompt_owned: String = self
@@ -1354,26 +1382,23 @@ impl OpenAIPreprocessor {
             search_from = end;
         }
 
-        let mut result: Vec<crate::protocols::TokenIdType> = Vec::new();
+        // Leading BOS is emitted here so the caller's general-purpose
+        // BOS-prepend path can skip when this helper produced the
+        // normalized tokens (avoids the prior split-brain where leading
+        // BOS was pushed by the caller and mid/suffix BOS pushed here).
+        let mut result: Vec<crate::protocols::TokenIdType> = vec![bos];
         let mut prev_end = 0usize;
-        for (i, &(ph_start, ph_end)) in byte_ranges.iter().enumerate() {
+        for &(ph_start, ph_end) in byte_ranges.iter() {
             let seg = &prompt[prev_end..ph_start];
             let seg_enc = self.tokenizer.encode(seg).ok()?;
-            // Mid-prompt segments get a fresh BOS — Phi-3's HF processor
-            // tokenizes each segment with add_special_tokens=true.
-            if i > 0
-                && let Some(bos) = self.routing_prepend_bos
-            {
-                result.push(bos);
-            }
             result.extend_from_slice(seg_enc.token_ids());
             result.push(find_token_id);
+            // Mid-prompt segments get a fresh BOS — Phi-3's HF processor
+            // tokenizes each segment with add_special_tokens=true.
+            result.push(bos);
             prev_end = ph_end;
         }
         let suffix_enc = self.tokenizer.encode(&prompt[prev_end..]).ok()?;
-        if let Some(bos) = self.routing_prepend_bos {
-            result.push(bos);
-        }
         result.extend_from_slice(suffix_enc.token_ids());
         Some(result)
     }
