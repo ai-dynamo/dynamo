@@ -429,7 +429,7 @@ class CachedTokensChatPayload(ChatPayload):
         # router/worker hash divergence (overlap=0) that cached_tokens alone
         # can miss via load-balance luck on vLLM's per-worker prefix cache.
         self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
-        self._metrics_baseline: Optional[Dict[str, tuple[float, float]]] = None
+        self._metrics_baseline: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -476,11 +476,12 @@ class CachedTokensChatPayload(ChatPayload):
             and self._request_count == 1
             and self.min_avg_kv_hit_rate > 0
         ):
-            self._metrics_baseline = self._scrape_router_histograms()
+            self._metrics_baseline = self._scrape_router_kv_hit_rate()
 
-    def _scrape_router_histograms(self) -> Dict[str, tuple[float, float]]:
-        """Return ``{"router_kv_hit_rate": (sum, count)}`` from the frontend
-        /metrics endpoint. The component MetricsHierarchy auto-prepends
+    def _scrape_router_kv_hit_rate(self) -> Optional[tuple[float, float]]:
+        """Return ``(sum, count)`` for ``router_kv_hit_rate`` from the
+        frontend /metrics endpoint, or ``None`` if the endpoint is
+        unreachable. The component MetricsHierarchy auto-prepends
         ``dynamo_component_`` to the exported name.
         """
         url = f"http://localhost:{self.port}/metrics"
@@ -488,7 +489,7 @@ class CachedTokensChatPayload(ChatPayload):
             text = requests.get(url, timeout=5).text
         except Exception as e:
             logger.warning("Failed to scrape %s: %s", url, e)
-            return {}
+            return None
         # Compose from canonical constants so a metric rename in
         # prometheus_names cascades here instead of silently breaking
         # the kv_hit_rate strong gate.
@@ -496,12 +497,10 @@ class CachedTokensChatPayload(ChatPayload):
             f"{prometheus_names.name_prefix.COMPONENT}_"
             f"{prometheus_names.router.KV_HIT_RATE}"
         )
-        return {
-            "router_kv_hit_rate": (
-                sum_metric_samples(text, f"{full}_sum"),
-                sum_metric_samples(text, f"{full}_count"),
-            )
-        }
+        return (
+            sum_metric_samples(text, f"{full}_sum"),
+            sum_metric_samples(text, f"{full}_count"),
+        )
 
     def final_validation(self) -> None:
         """Assert cached_tokens >= min_cached_tokens on at least one repeat,
@@ -525,9 +524,14 @@ class CachedTokensChatPayload(ChatPayload):
                 "min_avg_kv_hit_rate set but no metrics baseline captured "
                 "(R1 validate() didn't run or /metrics was unreachable)."
             )
-        after = self._scrape_router_histograms()
-        bsum, bcount = self._metrics_baseline.get("router_kv_hit_rate", (0.0, 0.0))
-        asum, acount = after.get("router_kv_hit_rate", (0.0, 0.0))
+        after = self._scrape_router_kv_hit_rate()
+        if after is None:
+            raise AssertionError(
+                "router_kv_hit_rate scrape failed at final_validation; "
+                "/metrics endpoint unreachable from test."
+            )
+        bsum, bcount = self._metrics_baseline
+        asum, acount = after
         d_sum, d_count = asum - bsum, acount - bcount
         if d_count <= 0:
             raise AssertionError(
