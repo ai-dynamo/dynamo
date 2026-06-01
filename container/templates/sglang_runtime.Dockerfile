@@ -125,12 +125,13 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     fi
 
 {% if context.sglang.enable_modelexpress == "true" %}
-RUN --mount=type=bind,source=./container/deps/sglang/install_modelexpress.sh,target=/tmp/install_modelexpress.sh \
-    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+# Install from the pinned ModelExpress ref until the required client changes are
+# available in a PyPI release.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eux; \
     export PIP_CACHE_DIR=/root/.cache/pip; \
-    export MODELEXPRESS_REF="${MODELEXPRESS_REF}"; \
-    bash /tmp/install_modelexpress.sh
+    pip install --break-system-packages --no-deps \
+        "https://github.com/ai-dynamo/modelexpress/archive/${MODELEXPRESS_REF}.tar.gz#subdirectory=modelexpress_client/python"
 {% endif %}
 {% endif %}
 {% endif %}

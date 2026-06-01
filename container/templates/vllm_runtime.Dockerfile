@@ -195,12 +195,13 @@ RUN uv pip uninstall triton && \
 {% endif %}
 
 {% if context.vllm.enable_modelexpress == "true" %}
-RUN --mount=type=bind,source=./container/deps/vllm/install_modelexpress.sh,target=/tmp/install_modelexpress.sh \
-    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+# Install from the pinned ModelExpress ref until the required client changes are
+# available in a PyPI release.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
-    export MODELEXPRESS_REF="${MODELEXPRESS_REF}"; \
-    bash /tmp/install_modelexpress.sh
+    uv pip install --system --no-deps \
+        "https://github.com/ai-dynamo/modelexpress/archive/${MODELEXPRESS_REF}.tar.gz#subdirectory=modelexpress_client/python"
 
 # vLLM discovers out-of-tree load formats through VLLM_PLUGINS. Set the image
 # default so --load-format=modelexpress works out of the box. A deployment that
