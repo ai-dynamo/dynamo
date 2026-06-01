@@ -109,12 +109,116 @@ fn merge_special_tokens_from_config(tokenizer: &mut HfTokenizer, model_dir: &Pat
     // tokenizer.json already had them. Return value = net-new count.
     let added = tokenizer.add_special_tokens(&to_add);
     if added > 0 {
-        tracing::debug!(
+        // Warn (not debug) when the merge actually promotes anything —
+        // intentionally loud so accidental promotion of a previously-
+        // non-special token shows up immediately in worker logs. Lists
+        // the literal token strings so debugging doesn't require a
+        // second pass through `added_tokens_decoder`.
+        let promoted: Vec<&str> = to_add.iter().map(|t| t.content.as_str()).collect();
+        tracing::warn!(
             target: "tokenizer",
             path = %cfg_path.display(),
             added,
             candidates = to_add.len(),
+            promoted = ?promoted,
             "merged additional special tokens from tokenizer_config.json"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The existing tool-calling / reasoning parser tests inject already-
+    //! decoded text and never run `tokenizer.decode`, so they cannot
+    //! catch the class of bug where a non-special marker gets accidentally
+    //! promoted to "special" and silently disappears under
+    //! `skip_special_tokens=True`. One unit test pins both halves of the
+    //! gate (promote special:true / skip special:false) end-to-end through
+    //! the actual encode -> decode round trip — the layer above which the
+    //! parser tests cannot reach.
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn merge_gate_round_trips_through_decode() {
+        // Minimal WordLevel `tokenizer.json`. `<|special_kept|>` and
+        // `<|special_dropped|>` are deliberately NOT pre-declared as
+        // special in `added_tokens` here — that's exactly the shape
+        // `merge_special_tokens_from_config` is supposed to fix from
+        // tokenizer_config.json.
+        const TOKENIZER_JSON: &str = r#"{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [
+                {"id": 0, "content": "<unk>", "special": true, "single_word": false, "lstrip": false, "rstrip": false, "normalized": false}
+            ],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "WordLevel",
+                "vocab": {"<unk>": 0, "hello": 1, "world": 2, "<|special_kept|>": 3, "<|special_dropped|>": 4},
+                "unk_token": "<unk>"
+            }
+        }"#;
+
+        // `<|special_kept|>` is `special: true` → must be promoted, and
+        // therefore stripped under skip_special_tokens=true.
+        // `<|special_dropped|>` is `special: false` → must be skipped,
+        // and therefore survive skip_special_tokens=true. The latter is
+        // the Ryan/Keiven concern: tool-call / reasoning markers are
+        // universally declared `special: false` precisely so the parser
+        // still sees them; a regression here would silently break
+        // parsing without any of the parser unit tests turning red.
+        const TOKENIZER_CONFIG_JSON: &str = r#"{
+            "added_tokens_decoder": {
+                "3": {"content": "<|special_kept|>",    "special": true,  "single_word": false, "lstrip": false, "rstrip": false, "normalized": false},
+                "4": {"content": "<|special_dropped|>", "special": false, "single_word": false, "lstrip": false, "rstrip": false, "normalized": false}
+            }
+        }"#;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("tokenizer.json"), TOKENIZER_JSON).unwrap();
+        fs::write(dir.path().join("tokenizer_config.json"), TOKENIZER_CONFIG_JSON).unwrap();
+
+        let mut tokenizer = HfTokenizer::from_file(dir.path().join("tokenizer.json")).unwrap();
+        merge_special_tokens_from_config(&mut tokenizer, dir.path());
+
+        // Registry assertion: only the special:true entry was promoted.
+        let specials: Vec<String> = {
+            let mut v: Vec<String> = tokenizer
+                .get_added_tokens_decoder()
+                .values()
+                .filter(|t| t.special)
+                .map(|t| t.content.clone())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            specials,
+            vec!["<unk>".to_string(), "<|special_kept|>".to_string()],
+            "<|special_kept|> promoted; <|special_dropped|> stayed non-special"
+        );
+
+        // Decode round-trip assertion (the layer parser tests cannot
+        // reach): the registry mutation actually changes downstream
+        // decode behavior in the expected direction.
+        let enc_kept = tokenizer.encode("<|special_kept|>", false).unwrap();
+        let decoded_strip = tokenizer.decode(enc_kept.get_ids(), true).unwrap();
+        assert!(
+            !decoded_strip.contains("<|special_kept|>"),
+            "promoted special:true token must be stripped under skip_special_tokens=true; got {decoded_strip:?}"
+        );
+
+        let enc_drop = tokenizer.encode("<|special_dropped|>", false).unwrap();
+        let decoded_keep = tokenizer.decode(enc_drop.get_ids(), true).unwrap();
+        assert!(
+            decoded_keep.contains("<|special_dropped|>"),
+            "non-promoted special:false token must survive skip_special_tokens=true; got {decoded_keep:?}"
         );
     }
 }
