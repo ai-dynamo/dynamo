@@ -49,6 +49,7 @@ def test_get_local_dp_rank_range_respects_multinode_dp_attention():
 
     assert list(get_local_dp_rank_range(server_args)) == [4, 5, 6, 7]
 
+
 def test_set_forward_pass_metrics_worker_id_uses_deterministic_identity():
     server_args = SimpleNamespace(enable_forward_pass_metrics=True)
     endpoint = SimpleNamespace(connection_id=lambda: "endpoint-9")

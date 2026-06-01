@@ -81,5 +81,3 @@ def test_make_fpm_worker_id_ignores_transient_config_fields(monkeypatch):
     )
 
     assert first == second
-
-
