@@ -153,7 +153,7 @@ Edit `agg_lmcache.yaml`: replace `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` 
 both `Frontend` and `VllmDecodeWorker`) with your Dynamo vllm-runtime image.
 
 ```bash
-kubectl apply -n dynamo-lmcache -f agg_lmcache.yaml
+kubectl apply -n dynamo-lmcache -f examples/backends/vllm/deploy/agg_lmcache.yaml
 ```
 
 > Validated `my-tag` against `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3`
@@ -211,7 +211,7 @@ Which port actually serves `/metrics` depends on the image:
 ## Cleanup
 
 ```bash
-kubectl delete -n dynamo-lmcache -f agg_lmcache.yaml
+kubectl delete -n dynamo-lmcache -f examples/backends/vllm/deploy/agg_lmcache.yaml
 kubectl -n dynamo-lmcache delete lmcacheengine lmcache-mp
 kubectl delete namespace dynamo-lmcache
 kubectl delete -f https://github.com/LMCache/LMCache/releases/download/operator-latest/install.yaml
