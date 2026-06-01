@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: harmony
+mode: batch
+cases:
+  TOOLCALLING.batch.6.a:
+    description: Canonical empty {} message body
+    ref: "OpenAI Harmony tool calls terminate with '<|call|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
+    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}<|call|>
+    tools:
+    - &id001
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      dynamo: &d_6_a
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_a
+      sglang:
+        calls: []
+        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}<|call|>
+        reason: "Less spec-correct parsing: SGLang leaks raw Harmony markup instead of extracting a valid '<|call|>'-terminated commentary tool call."
+  TOOLCALLING.batch.6.b:
+    description: Whitespace inside empty {}
+    ref: "OpenAI Harmony tool calls terminate with '<|call|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
+    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }<|call|>
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_6_b
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_b
+      sglang:
+        calls: []
+        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }<|call|>
+        reason: "Less spec-correct parsing: SGLang leaks raw Harmony markup instead of extracting a valid '<|call|>'-terminated commentary tool call."
+  TOOLCALLING.batch.6.c:
+    description: No <|message|> body
+    ref: "OpenAI Harmony tool-call message header/body format: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
+    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_6_c
+        calls: []
+        normal_text: ''
+      vllm: *d_6_c
+      sglang:
+        calls: []
+        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json
+        reason: "Dynamo/vLLM are more spec-correct: a commentary header without '<|message|>' is malformed protocol, not user-visible text; SGLang preserves raw markup"

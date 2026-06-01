@@ -77,6 +77,7 @@ vllm_omni_configs = {
         script_name="agg_omni.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -108,6 +109,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -141,6 +143,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
         ],
@@ -172,6 +175,7 @@ vllm_omni_configs = {
         script_name="agg_omni_audio.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -209,6 +213,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.profiled_vram_gib(16.8),  # actual profiled peak with kv-bytes

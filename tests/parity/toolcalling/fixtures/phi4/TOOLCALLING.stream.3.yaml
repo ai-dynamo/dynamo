@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: phi4
+model_label: Phi-4
+mode: stream
+cases:
+  TOOLCALLING.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: fu
+    - delta_text: nct
+    - delta_text: ools[
+    - delta_text: '{"name": "g'
+    - delta_text: et_weather", "argum
+    - delta_text: en
+    - delta_text: ts"
+    - delta_text: ': {"l'
+    - delta_text: 'ocation": "'
+    - delta_text: NYC"}}]
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+      vllm:
+        calls: []
+        normal_text: ''

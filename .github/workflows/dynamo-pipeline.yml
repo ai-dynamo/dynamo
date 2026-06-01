@@ -15,10 +15,10 @@ on:
         required: true
         type: string
       cuda_version:
-        description: 'CUDA version for the runtime image (e.g. 12.9)'
+        description: 'CUDA version for the runtime image (e.g. 13.0). cuda13 is the default.'
         required: false
         type: string
-        default: '12.9'
+        default: '13.0'
       fresh_builder:
         description: 'Always create a fresh K8s BuildKit builder (for nightly)'
         required: false
@@ -98,7 +98,7 @@ jobs:
     needs: image
     runs-on: prod-tester-amd-gpu-v2
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.cuda_version != '' && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || startsWith(inputs.cuda_version, '13.') && '13' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -114,6 +114,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          # `cargo test` reads LFS-managed fixtures under lib/llm/tests/data/media via
+          # include_bytes!; without lfs:true the checkout has 132-byte pointer files and
+          # the image-decoder tests panic with "image format could not be determined".
+          lfs: true
       - name: Select cargo target dir (prefer NVMe scratch)
         shell: bash
         run: |
@@ -127,7 +131,11 @@ jobs:
           echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" >> "$GITHUB_ENV"
 
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
-        working-directory: /workspace/lib/llm
+        # Run from the checked-out source (owned by the runner uid) rather than
+        # /workspace (baked as dynamo:0 mode 0775). The ARC pod runs as uid 1001
+        # with non-zero gid, so it falls into "other" perms on the baked tree and
+        # cargo cannot rewrite Cargo.lock when resolve mutates it.
+        working-directory: lib/llm
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -147,7 +155,7 @@ jobs:
     needs: image
     runs-on: prod-tester-amd-v2
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.cuda_version != '' && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || startsWith(inputs.cuda_version, '13.') && '13' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and

@@ -73,6 +73,20 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 	}
 }
 
+func sawEventReason(clientset *fake.Clientset, reason string) bool {
+	for _, action := range clientset.Actions() {
+		create, ok := action.(clientgotesting.CreateAction)
+		if !ok || create.GetResource().Resource != "events" {
+			continue
+		}
+		event, ok := create.GetObject().(*corev1.Event)
+		if ok && event.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
 func makeLease(namespace, name, holder string, renewTime time.Time) *coordinationv1.Lease {
 	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
 	renewMicroTime := metav1.NewMicroTime(renewTime)
@@ -437,16 +451,10 @@ func TestReconcileCheckpointPod(t *testing.T) {
 
 			w.reconcileCheckpointPod(ctx, pod)
 
-			// tryAcquire adds to inFlight synchronously before launching the goroutine.
-			// For filtered pods, inFlight stays at its original size.
-			triggered := len(w.inFlight) > 0 && !tc.preSeed
-			if tc.preSeed {
-				// Duplicate: inFlight was 1 before and should remain exactly 1
-				triggered = false
-			}
+			triggered := sawEventReason(w.clientset.(*fake.Clientset), "CheckpointRequested")
 
 			if triggered != tc.want {
-				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v)", triggered, tc.want, len(w.inFlight), tc.preSeed)
+				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v, actions=%#v)", triggered, tc.want, len(w.inFlight), tc.preSeed, w.clientset.(*fake.Clientset).Actions())
 			}
 
 			// Let the background goroutine (if any) finish before the test ends
@@ -563,9 +571,36 @@ func TestReconcileRestorePod(t *testing.T) {
 			want:      false,
 		},
 		{
-			name:      "not running",
+			name:      "pending pod with status container id still restores",
 			nodeName:  testNodeName,
 			phase:     corev1.PodPending,
+			ready:     false,
+			hash:      "abc123",
+			createDir: true,
+			want:      true,
+		},
+		{
+			name:      "succeeded pod does not restore",
+			nodeName:  testNodeName,
+			phase:     corev1.PodSucceeded,
+			ready:     false,
+			hash:      "abc123",
+			createDir: true,
+			want:      false,
+		},
+		{
+			name:      "failed pod does not restore",
+			nodeName:  testNodeName,
+			phase:     corev1.PodFailed,
+			ready:     false,
+			hash:      "abc123",
+			createDir: true,
+			want:      false,
+		},
+		{
+			name:      "unknown pod does not restore",
+			nodeName:  testNodeName,
+			phase:     corev1.PodUnknown,
 			ready:     false,
 			hash:      "abc123",
 			createDir: true,
@@ -727,13 +762,10 @@ func TestReconcileRestorePod(t *testing.T) {
 
 			w.reconcileRestorePod(ctx, pod)
 
-			triggered := len(w.inFlight) > 0 && !tc.preSeed
-			if tc.preSeed {
-				triggered = false
-			}
+			triggered := sawEventReason(w.clientset.(*fake.Clientset), "RestoreRequested")
 
 			if triggered != tc.want {
-				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v)", triggered, tc.want, len(w.inFlight), tc.preSeed)
+				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v, actions=%#v)", triggered, tc.want, len(w.inFlight), tc.preSeed, w.clientset.(*fake.Clientset).Actions())
 			}
 
 			// Let the background goroutine (if any) finish before the test ends
@@ -778,12 +810,12 @@ func TestReconcileRestorePodResolvesContainerBeforePodStatus(t *testing.T) {
 	labels := map[string]string{
 		snapshotprotocol.CheckpointIDLabel: "abc123",
 	}
-	w := makeTestController(t)
-	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
-	clientset := w.clientset.(*fake.Clientset)
 
 	pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, false, labels, nil)
 	pod.Status.ContainerStatuses = nil
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
+	clientset := w.clientset.(*fake.Clientset)
 	dir := filepath.Join(w.config.Storage.BasePath, "abc123", "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("failed to create checkpoint dir: %v", err)
@@ -808,6 +840,77 @@ func TestReconcileRestorePodResolvesContainerBeforePodStatus(t *testing.T) {
 	t.Fatalf("expected RestoreRequested event after node-runtime container resolution; actions=%#v", clientset.Actions())
 }
 
+func TestReconcileRestorePodPollsRuntimeBeforePodRunning(t *testing.T) {
+	labels := map[string]string{
+		snapshotprotocol.CheckpointIDLabel: "abc123",
+	}
+
+	pod := makePod("test-pod", "default", testNodeName, corev1.PodPending, false, labels, nil)
+	pod.Status.ContainerStatuses = nil
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
+	clientset := w.clientset.(*fake.Clientset)
+	dir := filepath.Join(w.config.Storage.BasePath, "abc123", "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+
+	w.reconcileRestorePod(context.Background(), pod)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, action := range clientset.Actions() {
+			create, ok := action.(clientgotesting.CreateAction)
+			if !ok || create.GetResource().Resource != "events" {
+				continue
+			}
+			event, ok := create.GetObject().(*corev1.Event)
+			if ok && event.Reason == "RestoreRequested" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected RestoreRequested event from runtime polling before PodRunning; actions=%#v", clientset.Actions())
+}
+
+func TestPollForContainerIDSkipsTerminalLivePod(t *testing.T) {
+	checkpointID := "abc123"
+	labels := map[string]string{
+		snapshotprotocol.CheckpointIDLabel: checkpointID,
+	}
+	stalePod := makePod("test-pod", "default", testNodeName, corev1.PodPending, false, labels, nil)
+	stalePod.Status.ContainerStatuses = nil
+	livePod := stalePod.DeepCopy()
+	livePod.Status.Phase = corev1.PodSucceeded
+
+	w := makeTestController(t, livePod)
+	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
+	clientset := w.clientset.(*fake.Clientset)
+	dir := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+
+	resolveKey := "default/test-pod/main/resolve"
+	w.inFlight[resolveKey] = struct{}{}
+	w.pollForContainerID(context.Background(), stalePod, "main", checkpointID, "default/test-pod", resolveKey)
+
+	if _, held := w.inFlight[resolveKey]; held {
+		t.Fatal("expected resolver key to be released")
+	}
+	for _, action := range clientset.Actions() {
+		create, ok := action.(clientgotesting.CreateAction)
+		if !ok || create.GetResource().Resource != "events" {
+			continue
+		}
+		event, ok := create.GetObject().(*corev1.Event)
+		if ok && event.Reason == "RestoreRequested" {
+			t.Fatalf("stale resolver should not start restore for terminal live pod; actions=%#v", clientset.Actions())
+		}
+	}
+}
+
 func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
 	checkpointID := "abc123"
 	labels := map[string]string{
@@ -816,7 +919,7 @@ func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
 	stalePod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, false, labels, nil)
 	stalePod.Status.ContainerStatuses = nil
 
-	w := makeTestController(t)
+	w := makeTestController(t, stalePod)
 	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
 	clientset := w.clientset.(*fake.Clientset)
 	dir := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)

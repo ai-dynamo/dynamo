@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::{RouterBackpressureReason, SharedCacheHits};
+use dynamo_kv_router::protocols::{LocalBlockHash, RouterBackpressureReason, SharedCacheHits};
+pub use dynamo_kv_router::scheduling::overlap_refresh::{
+    NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
+};
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
@@ -29,20 +32,30 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub struct KvScheduler<Sel = DefaultWorkerSelector>
+pub struct KvScheduler<Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
     Sel: WorkerSelectorTrait<ModelRuntimeConfig>,
+    RF: OverlapScoresRefresh,
 {
     inner: Arc<
-        LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig, RouterSchedulingPolicy, Sel>,
+        LocalScheduler<
+            RuntimeSequencePublisher,
+            ModelRuntimeConfig,
+            RouterSchedulingPolicy,
+            Sel,
+            RF,
+        >,
     >,
 }
 
-impl<Sel> KvScheduler<Sel>
+impl<Sel, RF> KvScheduler<Sel, RF>
 where
     Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
+    RF: OverlapScoresRefresh + Send + Sync + 'static,
 {
-    #[allow(clippy::too_many_arguments)]
+    /// Start the scheduler, optionally wiring an [`OverlapScoresRefresh`] into the queue so
+    /// long-waiting requests can be re-scored at dequeue time.
+    #[expect(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
@@ -50,6 +63,7 @@ where
         selector: Sel,
         kv_router_config: &KvRouterConfig,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
@@ -79,7 +93,7 @@ where
             kv_router_config.router_queue_policy
         );
 
-        let inner = Arc::new(LocalScheduler::new_with_overload_provider(
+        let inner = Arc::new(LocalScheduler::new_with_overlap_refresh(
             slots,
             workers_with_configs.clone(),
             kv_router_config.router_queue_threshold,
@@ -90,6 +104,7 @@ where
             selector,
             policy,
             prefill_load_estimator,
+            overlap_scores_refresh,
             overloaded_worker_provider,
             kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
@@ -154,12 +169,57 @@ where
         routing_constraints: RoutingConstraints,
         shared_cache_hits: Option<SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.schedule_with_block_hashes(
+            maybe_request_id,
+            isl_tokens,
+            token_seq,
+            None,
+            tier_overlap_blocks,
+            effective_overlap_blocks,
+            effective_cached_tokens,
+            router_config_override,
+            update_states,
+            lora_name,
+            priority_jump,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            shared_cache_hits,
+        )
+        .await
+    }
+
+    /// Like [`schedule`](Self::schedule) but forwards the block hashes used to compute the
+    /// initial overlap scores. Required to enable dequeue-time overlap refresh; ignored if
+    /// the scheduler was not constructed with an [`OverlapScoresRefresh`].
+    #[expect(clippy::too_many_arguments)]
+    pub async fn schedule_with_block_hashes(
+        &self,
+        maybe_request_id: Option<String>,
+        isl_tokens: usize,
+        token_seq: Option<Vec<SequenceHash>>,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+        tier_overlap_blocks: TierOverlapBlocks,
+        effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
+        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        shared_cache_hits: Option<SharedCacheHits>,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
         let response = self
             .inner
-            .schedule(
+            .schedule_with_block_hashes(
                 maybe_request_id,
                 isl_tokens,
                 token_seq,
+                block_hashes,
                 tier_overlap_blocks,
                 effective_overlap_blocks,
                 effective_cached_tokens,
@@ -242,6 +302,10 @@ where
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.inner.get_active_lora_counts()
+    }
+
+    pub fn supports_overlap_refresh(&self) -> bool {
+        self.inner.supports_overlap_refresh()
     }
 }
 
