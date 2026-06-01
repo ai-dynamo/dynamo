@@ -76,10 +76,12 @@ GPU_WORKER2="${_GPU_IDS[1]:-1}"
 KV_EVENT_PORT1="${DYN_VLLM_KV_EVENT_PORT1:-20080}"
 KV_EVENT_PORT2="${DYN_VLLM_KV_EVENT_PORT2:-20081}"
 
-# NIXL side channel port
-NIXL_PORT="${VLLM_NIXL_SIDE_CHANNEL_PORT:-20097}"
+# NIXL side channel ports (per-worker, avoids collisions in parallel test runs)
+NIXL_PORT1="${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1:-20097}"
+NIXL_PORT2="${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2:-20098}"
 
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT1 \
 ZE_AFFINITY_MASK=$GPU_WORKER1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
@@ -89,7 +91,7 @@ ZE_AFFINITY_MASK=$GPU_WORKER1 python3 -m dynamo.vllm \
     --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENT_PORT1}\",\"enable_kv_cache_events\":true}" &
 
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT2} \
-VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT2 \
 ZE_AFFINITY_MASK=$GPU_WORKER2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
