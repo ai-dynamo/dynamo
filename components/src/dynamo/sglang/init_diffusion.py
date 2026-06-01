@@ -146,12 +146,19 @@ async def init_image_diffusion(
 
     dist_timeout = getattr(server_args, "dist_timeout", None)
 
+    # Forward master_port when explicitly set on server_args so multiple
+    # diffusion replicas can coexist on one node. sglang's default of
+    # 30005 collides when more than one worker is launched per host.
+    master_port = getattr(server_args, "master_port", None)
+    extra_kwargs = {"master_port": master_port} if master_port is not None else {}
+
     generator = DiffGenerator.from_pretrained(
         model_path=server_args.model_path,
         num_gpus=num_gpus,
         tp_size=tp_size,
         dp_size=dp_size,
         dist_timeout=dist_timeout,
+        **extra_kwargs,
     )
 
     fs_url = dynamo_args.media_output_fs_url
@@ -232,12 +239,19 @@ async def init_video_diffusion(
 
     dist_timeout = getattr(server_args, "dist_timeout", None)
 
+    # Forward master_port when explicitly set on server_args so multiple
+    # diffusion replicas can coexist on one node. sglang's default of
+    # 30005 collides when more than one worker is launched per host.
+    master_port = getattr(server_args, "master_port", None)
+    extra_kwargs = {"master_port": master_port} if master_port is not None else {}
+
     generator = DiffGenerator.from_pretrained(
         model_path=server_args.model_path,
         num_gpus=num_gpus,
         tp_size=tp_size,
         dp_size=dp_size,
         dist_timeout=dist_timeout,
+        **extra_kwargs,
     )
 
     fs_url = dynamo_args.media_output_fs_url
