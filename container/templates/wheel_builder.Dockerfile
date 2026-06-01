@@ -255,9 +255,16 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Always build FFmpeg so libs are available for Rust checks in CI
-# Do not delete the source tarball for legal reasons
+# Always build FFmpeg so libs are available for Rust checks in CI.
+# We also build the ffmpeg CLI with h264_nvenc + libvpx_vp9 encoders so Python
+# code can encode video without the GPL-licensed binary shipped by imageio-ffmpeg.
+# Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
+# NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
+# GPU images) and VP9 from libvpx (BSD).
+# Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
+ARG NV_CODEC_HEADERS_REF
+ARG LIBVPX_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
@@ -266,11 +273,26 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     if [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
-    apt-get update -y && apt-get install -y build-essential pkg-config xz-utils; \
+    apt-get update -y && apt-get install -y build-essential pkg-config xz-utils git yasm; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
     elif [ "$DEVICE" = "cuda" ]; then \
-    dnf install -y --setopt=tsflags=nocontexts pkg-config xz; \
+    dnf install -y --setopt=tsflags=nocontexts pkg-config xz git yasm; \
     fi && \
+    # nv-codec-headers: provides the NVENC/NVDEC API headers ffmpeg compiles against.
+    # Header-only, no runtime dep here; libcuda/libnvidia-encode are loaded at runtime
+    # in the consuming container.
+    cd /tmp && \
+    git clone --depth 1 --branch ${NV_CODEC_HEADERS_REF} https://github.com/FFmpeg/nv-codec-headers.git && \
+    make -C nv-codec-headers PREFIX=/usr/local install && \
+    # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
+    # source so we don't need to track distro package names (libvpx-dev on Debian
+    # vs libvpx-devel via EPEL on RHEL/manylinux).
+    git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && \
+    cd libvpx && \
+    ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples --disable-unit-tests --disable-tools --disable-docs && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
     cd /tmp && \
     curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
@@ -279,17 +301,21 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --prefix=/usr/local \
         --disable-gpl \
         --disable-nonfree \
-        --disable-programs \
         --disable-doc \
         --disable-static \
         --disable-x86asm \
         --disable-network \
-        --disable-encoders \
-        --disable-muxers \
         --disable-bsfs \
         --disable-devices \
         --disable-libdrm \
-        --enable-shared && \
+        --enable-shared \
+        --enable-nvenc \
+        --enable-libvpx \
+        --disable-encoders \
+        --enable-encoder=h264_nvenc,libvpx_vp9 \
+        --disable-muxers \
+        --enable-muxer=mov,mp4,matroska,webm \
+        --enable-protocol=file,pipe && \
     make -j$(nproc) && \
     make install && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
@@ -401,7 +427,7 @@ ENV PKG_CONFIG_PATH="/usr/local/libfabric/lib/pkgconfig:${PKG_CONFIG_PATH}"
 
 {% if framework == "vllm" and device == "cuda" %}
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
-ARG AWS_SDK_CPP_VERSION=1.11.760
+ARG AWS_SDK_CPP_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \

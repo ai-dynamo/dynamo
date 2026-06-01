@@ -1549,11 +1549,14 @@ def _test_router_indexers_sync(
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
         )
+        event_plane = "nats" if durable_kv_events else None
 
         # If standalone indexer mode, launch workers one-by-one and register.
         # We need to create a temporary endpoint just to discover worker IDs.
         if standalone_indexer_url:
-            tmp_runtime = get_runtime(store_backend, request_plane)
+            tmp_runtime = get_runtime(
+                store_backend, request_plane, event_plane=event_plane
+            )
             tmp_endpoint = tmp_runtime.endpoint(
                 f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
             )
@@ -1649,7 +1652,7 @@ def _test_router_indexers_sync(
 
         # Create first runtime and endpoint for router 1
         logger.info("Creating first KV router with its own runtime")
-        runtime1 = get_runtime(store_backend, request_plane)
+        runtime1 = get_runtime(store_backend, request_plane, event_plane=event_plane)
         endpoint1 = runtime1.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -1758,7 +1761,7 @@ def _test_router_indexers_sync(
 
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
-        runtime2 = get_runtime(store_backend, request_plane)
+        runtime2 = get_runtime(store_backend, request_plane, event_plane=event_plane)
         endpoint2 = runtime2.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -2372,6 +2375,71 @@ def _test_disagg_background_prefill_sticky_routing(
             )
 
         asyncio.run(test_sync())
+
+
+def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    prefill_zone_a_id: int,
+    prefill_zone_b_id: int,
+    shared_namespace: str,
+    request_plane: str = "tcp",
+):
+    """Validate required topology constraints derived from pinned prefill workers."""
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        namespace=decode_workers.namespace,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        min_initial_workers=decode_workers.num_workers,
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        async def run_requests() -> None:
+            runtime = get_runtime(request_plane=request_plane)
+            decode_endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
+            prefill_endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
+
+            await poll_for_worker_instances(decode_endpoint, decode_workers.num_workers)
+            await poll_for_worker_instances(
+                prefill_endpoint, decode_workers.num_workers
+            )
+
+            zone_a_payload = {
+                **test_payload,
+                "nvext": {
+                    "prefill_worker_id": prefill_zone_a_id,
+                },
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(chat_url, json=zone_a_payload) as response:
+                    response_body = await response.text()
+                    assert response.status == 200, (
+                        "Expected required KV-transfer topology match to succeed, "
+                        f"got status={response.status} body={response_body}"
+                    )
+
+            zone_b_payload = {
+                **test_payload,
+                "nvext": {
+                    "prefill_worker_id": prefill_zone_b_id,
+                },
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(chat_url, json=zone_b_payload) as response:
+                    response_body = await response.text()
+                    assert response.status == 500, (
+                        "Expected required KV-transfer topology mismatch to fail, "
+                        f"got status={response.status} body={response_body}"
+                    )
+
+        asyncio.run(run_requests())
 
 
 def _test_router_decisions_disagg_round_robin_prefill_dp_rank(

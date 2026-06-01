@@ -170,8 +170,9 @@ async fn parse_response_stream(
         if let Some(tool_parser) = tool_parser_str {
             Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
                 Some(tool_parser),
-                None, // No tool_choice in this test
-                None, // No tool_definitions in this test
+                None,  // No tool_choice in this test
+                None,  // No tool_definitions in this test
+                false, // No structural_tag in this test
                 stream,
             ))
         } else {
@@ -1345,7 +1346,7 @@ mod tests {
         run_deepseek_v4_tool_call_fixture(&file_path).await;
     }
 
-    /// `PARSER.stream.4.a` — stream ends after a complete invoke but before
+    /// `TOOLCALLING.stream.4.a` — stream ends after a complete invoke but before
     /// `</｜DSML｜tool_calls>`. Finalization should recover the complete invoke
     /// without enabling early stream exit on unterminated DSML wrappers.
     #[tokio::test]

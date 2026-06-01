@@ -31,6 +31,7 @@ media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 lightseek-mm = ["dep:llm-multimodal", "dep:llm-tokenizer"]
+agent-trace-bench = []
 
 [[bench]]
 name = "tokenizer_simple"
@@ -49,6 +50,11 @@ required-features = ["block-manager", "testing-cuda"]
 name = "kv_router_bench"
 harness = false
 required-features = ["kv-router-stress"]
+
+[[bench]]
+name = "agent_trace_finish_metadata"
+harness = false
+required-features = ["agent-trace-bench"]
 
 [dependencies]
 # repo

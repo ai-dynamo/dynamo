@@ -522,6 +522,11 @@ async def init_llm_worker(
         runtime_config.exclude_tools_when_tool_choice_none = (
             config.exclude_tools_when_tool_choice_none
         )
+        runtime_config.set_structural_tag_mode(
+            "on" if config.dyn_enable_structural_tag else "off"
+        )
+        runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
+        runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer
