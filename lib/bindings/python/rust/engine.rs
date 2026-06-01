@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -17,7 +16,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
-use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
+use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
@@ -44,9 +43,7 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 //       implementation per struct
 
 /// Detect whether the Python `generate` callable accepts a `context`
-/// keyword argument. Both engines pass the per-request [`Context`] as a
-/// `context=` kwarg when the callable opts in, and otherwise fall back to
-/// the legacy positional-only call.
+/// keyword argument for backwards compatibility with the legacy positional-only call.
 fn detect_has_context(generator: &PyObject) -> bool {
     Python::with_gil(|py| {
         let callable = generator.bind(py);
@@ -61,46 +58,37 @@ type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 /// Invoke the Python `generate` callable and convert the async generator it
 /// returns into a Rust [`Stream`] of `PyObject` items.
 ///
-/// Shared by the unary and bidirectional engines. Both build a per-request
-/// [`Context`], call the user callable with a single positional argument
-/// plus an optional `context=` kwarg, and wrap the result with
-/// [`pyo3_async_runtimes::tokio::into_stream_with_locals_v1`].
-///
-/// `to_python_input` is the per-engine closure that converts this engine's
-/// `generate` input into the Python object passed as the generator's
-/// positional argument — a pythonized request for the unary engine, a
-/// [`PyAsyncRequestStream`] handle for the bidirectional engine. It runs
-/// inside the GIL because constructing that object needs `py`.
+/// `to_python_input` converts this engine's `generate` input into the Python
+/// object passed as the generator's positional argument. `to_python_context`,
+/// when `Some`, builds the `context=` keyword argument; `None` selects the
+/// legacy positional-only call. Both run inside the GIL because constructing
+/// their Python objects needs `py`.
 ///
 /// The GIL is acquired on a blocking task rather than inline: under contention
 /// it can block for an unbounded time, which would park the tokio reactor.
-async fn invoke_generator<F>(
+async fn invoke_generator<F, G>(
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
-    has_context: bool,
-    ctx: Arc<dyn AsyncEngineContext>,
-    trace_context: Option<DistributedTraceContext>,
-    metadata: BTreeMap<String, String>,
     to_python_input: F,
+    to_python_context: Option<G>,
 ) -> Result<PyItemStream>
 where
     F: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
+    G: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
 {
     let stream = tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| {
             let python_input = to_python_input(py)?;
 
-            // Build the per-request context handle, carrying the captured
-            // trace context and metadata.
-            let py_ctx = Py::new(py, Context::new(ctx.clone(), trace_context, None, metadata))?;
-
-            let gen_result = if has_context {
-                let kwarg = PyDict::new(py);
-                kwarg.set_item("context", &py_ctx)?;
-                generator.call(py, (python_input,), Some(&kwarg))
-            } else {
+            let gen_result = match to_python_context {
+                Some(to_python_context) => {
+                    let py_ctx = to_python_context(py)?;
+                    let kwarg = PyDict::new(py);
+                    kwarg.set_item("context", py_ctx)?;
+                    generator.call(py, (python_input,), Some(&kwarg))
+                }
                 // Legacy: no `context` arg.
-                generator.call1(py, (python_input,))
+                None => generator.call1(py, (python_input,)),
             }?;
 
             let locals = TaskLocals::new(event_loop.bind(py).clone());
@@ -240,11 +228,14 @@ where
         let stream = invoke_generator(
             self.generator.clone(),
             self.event_loop.clone(),
-            self.has_context,
-            ctx.clone(),
-            current_trace_context,
-            metadata,
             move |py| Ok(pythonize(py, &request)?.unbind()),
+            self.has_context.then_some({
+                let ctx = ctx.clone();
+                move |py: Python<'_>| {
+                    Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
+                        .map(|c| c.into_any())
+                }
+            }),
         )
         .await?;
 
@@ -543,11 +534,14 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
         let stream = invoke_generator(
             self.generator.clone(),
             self.event_loop.clone(),
-            self.has_context,
-            ctx.clone(),
-            current_trace_context,
-            metadata,
             move |py| Ok(Py::new(py, py_request_stream)?.into_any()),
+            self.has_context.then_some({
+                let ctx = ctx.clone();
+                move |py: Python<'_>| {
+                    Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
+                        .map(|c| c.into_any())
+                }
+            }),
         )
         .await?;
 
