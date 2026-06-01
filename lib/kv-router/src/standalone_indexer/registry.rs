@@ -538,11 +538,16 @@ impl WorkerRegistry {
         self.watermarks.remove(&(instance_id, dp_rank));
 
         if remove_worker {
-            self.workers.remove(&instance_id);
-            if let Some(ie) = self.indexers.get(&key) {
-                ie.indexer.remove_worker(instance_id).await;
+            let actually_removed = self
+                .workers
+                .remove_if(&instance_id, |_, entry| entry.listeners.is_empty())
+                .is_some();
+            if actually_removed {
+                if let Some(ie) = self.indexers.get(&key) {
+                    ie.indexer.remove_worker(instance_id).await;
+                }
+                self.maybe_remove_indexer(&key);
             }
-            self.maybe_remove_indexer(&key);
         } else if let Some(ie) = self.indexers.get(&key) {
             ie.indexer.remove_worker_dp_rank(instance_id, dp_rank).await;
         }
