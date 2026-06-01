@@ -84,7 +84,9 @@ def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
     raise AssertionError(f"component {name!r} not found in DGD spec")
 
 
-def _new_mocker_checkpoint_spec(name: str, namespace: str, image: str) -> DeploymentSpec:
+def _new_mocker_checkpoint_spec(
+    name: str, namespace: str, image: str
+) -> DeploymentSpec:
     spec_path = (
         Path(_get_workspace_dir())
         / "examples"
@@ -184,11 +186,7 @@ async def _wait_for_checkpoint_ready(
 ) -> tuple[str, str]:
     async def fetch_status() -> dict[str, Any]:
         dgd = await _get_dgd(deployment)
-        status = (
-            dgd.get("status", {})
-            .get("checkpoints", {})
-            .get(DECODE_COMPONENT, {})
-        )
+        status = dgd.get("status", {}).get("checkpoints", {}).get(DECODE_COMPONENT, {})
         checkpoint_name = status.get("checkpointName")
         checkpoint = None
         if checkpoint_name:
@@ -216,16 +214,12 @@ def _runtime_decode_pods(deployment: ManagedDeployment) -> list[Any]:
     return [
         pod
         for pod in pods
-        if pod.raw.get("metadata", {})
-        .get("labels", {})
-        .get(CHECKPOINT_SOURCE_LABEL)
+        if pod.raw.get("metadata", {}).get("labels", {}).get(CHECKPOINT_SOURCE_LABEL)
         != "true"
     ]
 
 
-async def _scale_decode_component(
-    deployment: ManagedDeployment, replicas: int
-) -> None:
+async def _scale_decode_component(deployment: ManagedDeployment, replicas: int) -> None:
     assert deployment._custom_api is not None, "Kubernetes API not initialized"
     dgd = await _get_dgd(deployment)
     components = dgd["spec"]["components"]
@@ -391,9 +385,7 @@ async def test_dgd_checkpoint_restore_deploy(
         old_pod_names = {pod.name for pod in old_decode_pods}
         logger.info("Scaling decode down from pods: %s", sorted(old_pod_names))
         await _scale_decode_component(deployment, replicas=0)
-        await _wait_for_decode_runtime_pod_count(
-            deployment, expected=0, timeout_s=300
-        )
+        await _wait_for_decode_runtime_pod_count(deployment, expected=0, timeout_s=300)
 
         logger.info("Scaling decode back up to trigger restore")
         await _scale_decode_component(deployment, replicas=1)
