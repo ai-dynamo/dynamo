@@ -87,6 +87,41 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     bash /tmp/install_vllm_omni.sh
 
+RUN set -eux; \
+    adapter="$(find /usr/local/lib /usr/lib /opt -type f -path '*/lmcache/integration/vllm/vllm_v1_adapter.py' -print -quit 2>/dev/null)"; \
+    test -n "${adapter}"; \
+    printf '%s\n' \
+        '/^        if request.status == RequestStatus.FINISHED_ABORTED:$/,/^        params = ($/c\' \
+        '        if request.status == RequestStatus.FINISHED_ABORTED:\' \
+        '            if self.lmcache_engine is None:\' \
+        '                logger.warning(\' \
+        '                    "Skipping abort-time backend cleanup for request %s: "\' \
+        '                    "lmcache_engine is not initialized.",\' \
+        '                    request.request_id,\' \
+        '                )\' \
+        '            else:\' \
+        '                sm = self.lmcache_engine.storage_manager\' \
+        '                if sm is not None:\' \
+        '                    sm.cancel_request(request.request_id)\' \
+        '\' \
+        '            if self.async_loading:\' \
+        '                lookup_id = request.request_id\' \
+        '                if self.lookup_client is None:\' \
+        '                    logger.warning(\' \
+        '                        "Skipping abort-time async lookup cancel for request %s: "\' \
+        '                        "lookup_client is not initialized while async_loading is enabled.",\' \
+        '                        request.request_id,\' \
+        '                    )\' \
+        '                else:\' \
+        '                    self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]\' \
+        '\' \
+        '        params = (' \
+        > /tmp/lmcache-request-finished.sed; \
+    sed -i -f /tmp/lmcache-request-finished.sed "${adapter}"; \
+    rm /tmp/lmcache-request-finished.sed; \
+    grep -q 'Skipping abort-time backend cleanup' "${adapter}"; \
+    grep -q 'Skipping abort-time async lookup cancel' "${adapter}"
+
 {% endif %}
 {% endif %}
 
