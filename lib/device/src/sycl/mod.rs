@@ -640,10 +640,50 @@ impl DeviceEventOps for SyclDeviceEvent {
 // SyclDeviceSlice<T> — owned USM device buffer
 // =====================================================================
 
-/// Owned SYCL USM-device allocation. Drops free the buffer through the
-/// `SyclContext::free_raw` path after a synchronize on the source queue
-/// — no stream-ordered free is exposed by the safe oneapi-rs surface
-/// today, so a brief queue sync at drop time is the safe baseline.
+/// Entry in the process-wide deferred-free list for `SyclDeviceSlice` drops.
+/// Instead of blocking the host with `queue.synchronize()`, we record a
+/// barrier event and push here; the buffer is freed once the event signals.
+struct DeferredSliceFree {
+    _queue: Arc<SyclQueue>,
+    context: Arc<SyclContext>,
+    ptr: *mut c_void,
+    event: SyclEvent,
+}
+
+// SAFETY: USM device pointers can be freed from any thread; the SyclContext
+// and SyclEvent are reference-counted and thread-safe.
+unsafe impl Send for DeferredSliceFree {}
+
+/// Process-wide deferred-free list for non-pool `SyclDeviceSlice` allocations.
+fn deferred_slice_frees() -> &'static Mutex<Vec<DeferredSliceFree>> {
+    static LIST: OnceLock<Mutex<Vec<DeferredSliceFree>>> = OnceLock::new();
+    LIST.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Drain deferred frees whose barrier events have completed.
+/// Called on the allocation path (`clone_htod`) so buffers are reclaimed
+/// before new allocations grow the USM heap.
+fn drain_deferred_slice_frees() {
+    let Ok(mut list) = deferred_slice_frees().lock() else { return };
+    let mut i = 0;
+    while i < list.len() {
+        match list[i].event.is_complete() {
+            Ok(true) => {
+                let entry = list.swap_remove(i);
+                if let Err(e) = entry.context.free_raw(entry.ptr) {
+                    tracing::warn!("deferred SyclDeviceSlice free_raw failed: {}", e);
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Owned SYCL USM-device allocation. Drops defer the free through a
+/// barrier-event mechanism so the host thread is never blocked.
+/// Fallback to synchronous free if the barrier cannot be recorded.
 pub struct SyclDeviceSlice<T: crate::DeviceDtype> {
     queue: Arc<SyclQueue>,
     context: Arc<SyclContext>,
@@ -670,6 +710,9 @@ impl<T: crate::DeviceDtype> SyclDeviceSlice<T> {
     where
         T: crate::DeviceDtype<SyclRepr = T>,
     {
+        // Reclaim completed deferred frees before allocating new memory.
+        drain_deferred_slice_frees();
+
         // Identity-shape fast path: host slice is already in the SYCL
         // representation, so the memcpy reads the caller's bytes
         // directly without an intermediate `Vec`. For non-identity
@@ -734,7 +777,28 @@ impl<T: crate::DeviceDtype> Drop for SyclDeviceSlice<T> {
         if self.ptr == 0 || self.bytes == 0 {
             return;
         }
-        // Drain any in-flight ops on the source queue before freeing.
+        // Record a barrier event capturing all prior work on this in-order
+        // queue, then defer the free until the event completes. This avoids
+        // blocking the host thread on queue synchronization.
+        match self.queue.submit_barrier() {
+            Ok(event) => {
+                if let Ok(mut list) = deferred_slice_frees().lock() {
+                    list.push(DeferredSliceFree {
+                        _queue: Arc::clone(&self.queue),
+                        context: Arc::clone(&self.context),
+                        ptr: self.ptr as *mut c_void,
+                        event,
+                    });
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "SyclDeviceSlice drop: barrier failed, falling back to sync: {}", e
+                );
+            }
+        }
+        // Fallback: synchronize + free (original blocking path).
         if let Err(e) = self.queue.synchronize() {
             tracing::warn!("SyclDeviceSlice drop: queue synchronize failed: {}", e);
         }
@@ -866,4 +930,47 @@ impl DeviceMemPoolOps for SyclDeviceMemPool {
 /// when its shared libraries are not present.
 pub fn is_available() -> bool {
     std::panic::catch_unwind(|| SyclDevice::count().map(|n| n > 0).unwrap_or(false)).unwrap_or(false)
+}
+
+// =====================================================================
+// Tests
+// =====================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke-test the deferred-free lifecycle: allocate several
+    /// `SyclDeviceSlice`s, drop them (exercises the barrier + deferred
+    /// path), then verify the deferred list drains cleanly.
+    #[test]
+    fn test_deferred_free_lifecycle() {
+        if !is_available() {
+            return;
+        }
+        let ctx = SyclDeviceContext::new(0).unwrap();
+        let stream = ctx.create_stream().unwrap();
+        let sycl_stream = stream
+            .as_any()
+            .downcast_ref::<SyclDeviceStream>()
+            .expect("stream must be SyclDeviceStream");
+
+        // Allocate + drop a few slices — exercises the deferred path.
+        for _ in 0..8 {
+            let slice =
+                SyclDeviceSlice::<usize>::clone_htod(sycl_stream, &[1, 2, 3]).unwrap();
+            drop(slice); // should NOT block
+        }
+
+        // Synchronize to ensure all barrier events are complete, then drain.
+        stream.synchronize().unwrap();
+        drain_deferred_slice_frees();
+
+        let list = deferred_slice_frees().lock().unwrap();
+        assert!(
+            list.is_empty(),
+            "deferred list should be empty after sync+drain, but has {} entries",
+            list.len()
+        );
+    }
 }
