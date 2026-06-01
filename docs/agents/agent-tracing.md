@@ -297,7 +297,7 @@ Agentic Mooncake rows preserve:
 
 Rows with no `wait_for` use their `timestamp` as the replay start time. Rows with dependencies wait
 for all listed requests to complete, then wait `delay + tool_wait_ms` before dispatch. For more
-flags and engine settings, see [Mocker trace replay](../benchmarks/mocker-trace-replay.md).
+flags and engine settings, see [DynoSim Runs](../dynosim/runs.md).
 
 <details>
 <summary>ATIF alignment</summary>
