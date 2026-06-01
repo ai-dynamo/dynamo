@@ -75,8 +75,8 @@ const X_REQUEST_ID_HEADER: &str = "x-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
-const ADMISSION_CONTROL_REJECTION_HINT: &str =
-    "If this rejection is not intended, consider passing --admission-control none to the frontend.";
+
+use super::error::SanitizedError;
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
@@ -245,6 +245,31 @@ impl ErrorMessage {
         )
     }
 
+    /// Build a sanitized error response from a [`SanitizedError`] variant.
+    /// The status, public message, and protocol error_type all come from
+    /// the variant — call sites do not pass any of them as literals.
+    /// Server-side `details` are logged alongside the canonical category;
+    /// the client only ever sees the variant's public message.
+    pub fn sanitized_with_details(
+        err: SanitizedError,
+        details: impl std::fmt::Display,
+    ) -> ErrorResponse {
+        let status = err.status();
+        if err.log_as_error() {
+            tracing::error!(status = %status, "{err}: {details}");
+        } else {
+            tracing::debug!(status = %status, "{err}: {details}");
+        }
+        (
+            status,
+            Json(ErrorMessage {
+                message: err.to_string(),
+                error_type: map_error_code_to_error_type(status),
+                code: status.as_u16(),
+            }),
+        )
+    }
+
     /// Not Implemented Error
     /// Return this error when the client requests a feature that is not yet implemented.
     /// This should be used for features that are planned but not available.
@@ -282,18 +307,9 @@ impl ErrorMessage {
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
         // Check for ResourceExhausted anywhere in the error chain → HTTP 503
         if super::metrics::request_was_rejected(err.as_ref()) {
-            // Log the full chain server-side; client only sees a sanitized hint
-            // so we don't leak internal paths or implementation details.
-            tracing::warn!("Request rejected by admission control: {err:#}");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorMessage {
-                    message: format!(
-                        "Service temporarily overloaded. {ADMISSION_CONTROL_REJECTION_HINT}"
-                    ),
-                    error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
-                    code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-                }),
+            return ErrorMessage::sanitized_with_details(
+                SanitizedError::Overloaded,
+                format!("{err:#}"),
             );
         }
 
@@ -318,26 +334,15 @@ impl ErrorMessage {
 
         // Check for Cancelled anywhere in the error chain → HTTP 499 (Client Closed Request)
         if super::metrics::request_was_cancelled(err.as_ref()) {
-            let code = StatusCode::from_u16(499).unwrap();
-            // Log the detail server-side; the client gets only a static message so a
-            // 499 surfaced before the connection actually drops can't leak context
-            // IDs or backend cancellation internals.
-            tracing::debug!("Request cancelled before response: {err:#}");
-            return (
-                code,
-                Json(ErrorMessage {
-                    message: "Request cancelled".to_string(),
-                    error_type: map_error_code_to_error_type(code),
-                    code: code.as_u16(),
-                }),
+            return ErrorMessage::sanitized_with_details(
+                SanitizedError::Cancelled,
+                format!("{err:#}"),
             );
         }
 
         // Then check for HttpError
         match err.downcast::<HttpError>() {
             Ok(http_error) => ErrorMessage::from_http_error(http_error),
-            // Log the full anyhow chain server-side but only return `alt_msg`
-            // to the client so we don't leak internal paths.
             Err(err) => {
                 ErrorMessage::internal_server_error_with_details(alt_msg, format!("{err:#}"))
             }
@@ -346,14 +351,16 @@ impl ErrorMessage {
 
     /// Implementers should only be able to throw 400-499 errors.
     pub fn from_http_error(err: HttpError) -> ErrorResponse {
+        // 499 is part of the 4xx range but its body can carry cancellation
+        // context (queue paths, context IDs) — sanitize separately.
+        if err.code == 499 {
+            return ErrorMessage::sanitized_with_details(SanitizedError::Cancelled, err.message);
+        }
         // Backend-supplied messages are only forwarded for the documented 4xx
         // range; for 5xx or codes outside the HTTP space the message may
         // contain internal paths/details and is kept server-side only.
         if err.code < 400 || err.code >= 500 {
-            return ErrorMessage::internal_server_error_with_details(
-                "Internal server error",
-                err.message,
-            );
+            return ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message);
         }
         match StatusCode::from_u16(err.code) {
             Ok(code) => (
@@ -364,10 +371,7 @@ impl ErrorMessage {
                     code: code.as_u16(),
                 }),
             ),
-            Err(_) => ErrorMessage::internal_server_error_with_details(
-                "Internal server error",
-                err.message,
-            ),
+            Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
         }
     }
 }
@@ -551,8 +555,6 @@ async fn handler_completions(
     let response = tokio::spawn(completions(state, request, stream_handle).in_current_span())
         .await
         .map_err(|e| {
-            // JoinError debug output can include panic messages with stack
-            // info — keep that server-side only.
             ErrorMessage::internal_server_error_with_details(
                 "Failed to await chat completions task",
                 format!("{e:?}"),
@@ -1071,8 +1073,6 @@ async fn handler_chat_completions(
         tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
             .await
             .map_err(|e| {
-                // JoinError debug output can include panic messages with stack
-                // info — keep that server-side only.
                 ErrorMessage::internal_server_error_with_details(
                     "Failed to await chat completions task",
                     format!("{e:?}"),
@@ -1177,8 +1177,25 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     None
 }
 
-/// Checks if the first event in the stream is a backend error.
-/// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise.
+/// Returns true for events that only carry an annotation tag (e.g. the
+/// `request_id` frame prepended to every stream): no data, no error, and
+/// an `event` field that is *not* the `"error"` marker. Annotations may
+/// still carry a serialized value in `comment` (that is how
+/// `Annotated::from_annotation` builds them), so the comment field is
+/// not part of the check. These frames are stepped over by
+/// `check_for_backend_error` so an immediate backend error in the *next*
+/// slot is still caught instead of slipping through to the fold/parse
+/// path.
+fn is_annotation_frame<T>(e: &Annotated<T>) -> bool {
+    e.data.is_none()
+        && e.error.is_none()
+        && matches!(e.event.as_deref(), Some(tag) if tag != "error")
+}
+
+/// Inspect the first non-annotation event in the stream for a backend error.
+/// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise — the
+/// returned stream replays any buffered annotation frames in their original
+/// order before yielding the remaining items.
 pub(super) async fn check_for_backend_error(
     mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
     + Send
@@ -1190,15 +1207,22 @@ pub(super) async fn check_for_backend_error(
 > {
     use futures::stream::StreamExt;
 
-    // Peek at the first event
-    if let Some(first_event) = stream.next().await {
-        // Check if it's an error event
-        if let Some((error_msg, status_code)) = extract_backend_error_if_present(&first_event) {
-            // Mirror from_http_error: only the documented 4xx range is part
-            // of the protocol contract and forwarded unchanged. Anything
-            // else (5xx, or a 1xx/2xx/3xx asserted by the backend payload)
-            // may carry panic text, file paths, or raw internal error JSON
-            // and is kept server-side only.
+    let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+    while let Some(event) = stream.next().await {
+        if is_annotation_frame(&event) {
+            buffered.push(event);
+            continue;
+        }
+        if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
+            // 499 is part of is_client_error() but its text can carry
+            // context IDs / cancellation internals — sanitize separately.
+            if status_code.as_u16() == 499 {
+                return Err(ErrorMessage::sanitized_with_details(
+                    SanitizedError::Cancelled,
+                    error_msg,
+                ));
+            }
+            // 4xx is the protocol contract — forward backend message as-is.
             if status_code.is_client_error() {
                 return Err((
                     status_code,
@@ -1209,19 +1233,27 @@ pub(super) async fn check_for_backend_error(
                     }),
                 ));
             }
-            return Err(ErrorMessage::internal_server_error_with_details(
-                "Internal server error",
+            // 5xx — preserve the status (clients distinguish 503 retry from 500)
+            // but replace the body with a sanitized message.
+            if status_code.is_server_error() {
+                return Err(ErrorMessage::sanitized_with_details(
+                    SanitizedError::PreserveServerError(status_code),
+                    error_msg,
+                ));
+            }
+            // 1xx/2xx/3xx asserted by the backend payload — coerce to 500.
+            return Err(ErrorMessage::sanitized_with_details(
+                SanitizedError::Internal,
                 error_msg,
             ));
         }
 
-        // Not an error - reconstruct stream with first event
-        let reconstructed_stream = futures::stream::iter(vec![first_event]).chain(stream);
-        Ok(reconstructed_stream)
-    } else {
-        // Empty stream - this shouldn't happen but handle gracefully
-        Ok(futures::stream::iter(vec![]).chain(stream))
+        // First non-annotation, non-error event — push it back and stop;
+        // downstream consumers see the original ordering.
+        buffered.push(event);
+        break;
     }
+    Ok(futures::stream::iter(buffered).chain(stream))
 }
 
 /// Serialize `payload` and wrap it as an SSE event with the given name.
@@ -1758,8 +1790,6 @@ async fn handler_responses(
         tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
             .await
             .map_err(|e| {
-                // JoinError debug output can include panic messages with stack
-                // info — keep that server-side only.
                 ErrorMessage::internal_server_error_with_details(
                     "Failed to await responses task",
                     format!("{e:?}"),
@@ -2861,6 +2891,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
+    use crate::http::service::error::ADMISSION_CONTROL_REJECTION_HINT;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -2918,6 +2949,22 @@ mod tests {
                 "client response must not include the backend-supplied HttpError message"
             );
         }
+    }
+
+    #[test]
+    fn test_from_http_error_sanitizes_499_message() {
+        // Backend may construct HttpError { code: 499, message: "..." }; that
+        // message can carry context IDs / queue paths and must not leak.
+        let err = HttpError {
+            code: 499,
+            message: "session abc-123 cancelled at /srv/queue.py:42".to_string(),
+        };
+        let response = ErrorMessage::from_http_error(err);
+        assert_eq!(response.0.as_u16(), 499);
+        assert_eq!(response.1.code, 499);
+        assert_eq!(response.1.message, "Request cancelled");
+        assert!(!response.1.message.contains("abc-123"));
+        assert!(!response.1.message.contains("/srv/queue.py"));
     }
 
     #[test]
@@ -3723,6 +3770,148 @@ mod tests {
             assert!(!error_response.1.message.contains("/srv/model.py"));
             assert!(!error_response.1.message.contains("panic"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_503_preserves_status() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        // Backend 5xx status codes must round-trip so clients can distinguish
+        // retryable overload (503) from generic 500; only the body is sanitized.
+        let error_json = r#"{"message":"engine pool exhausted at /srv/engine.py:88","code":503}"#;
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![error_json.to_string()]),
+            error: None,
+        };
+
+        let test_stream = stream::iter(vec![error_event]);
+        let result = check_for_backend_error(test_stream).await;
+
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(error_response.1.code, 503);
+            assert_eq!(error_response.1.message, "Internal server error");
+            assert!(!error_response.1.message.contains("engine pool"));
+            assert!(!error_response.1.message.contains("/srv/engine.py"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_499_sanitizes_cancellation() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        // 499 falls inside is_client_error(); ensure cancellation text from
+        // the backend (e.g. context IDs) cannot reach the client.
+        let error_json =
+            r#"{"message":"Context id abc-123 cancelled at /srv/queue.py:42","code":499}"#;
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![error_json.to_string()]),
+            error: None,
+        };
+
+        let test_stream = stream::iter(vec![error_event]);
+        let result = check_for_backend_error(test_stream).await;
+
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0.as_u16(), 499);
+            assert_eq!(error_response.1.code, 499);
+            assert_eq!(error_response.1.message, "Request cancelled");
+            assert!(!error_response.1.message.contains("abc-123"));
+            assert!(!error_response.1.message.contains("/srv/queue.py"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_skips_leading_annotation_frames() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        // Streams prepend a request_id annotation before forwarding engine
+        // events. An immediate backend error in the next slot must still be
+        // caught so a 4xx surfaces as a 4xx instead of falling through to
+        // the generic fold/parse 500.
+        let annotation = Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation(
+            ANNOTATION_REQUEST_ID,
+            &"req-123".to_string(),
+        )
+        .expect("annotation construction should succeed");
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![
+                r#"{"message":"bad input from client","code":400}"#.to_string(),
+            ]),
+            error: None,
+        };
+
+        let test_stream = stream::iter(vec![annotation, error_event]);
+        let result = check_for_backend_error(test_stream).await;
+
+        assert!(
+            result.is_err(),
+            "annotation followed by an error event must still be detected as an error"
+        );
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error_response.1.code, 400);
+            assert_eq!(error_response.1.message, "bad input from client");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_replays_leading_annotation_frames() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_protocols::types::CreateChatCompletionStreamResponse;
+        use futures::stream::{self, StreamExt};
+
+        // A leading annotation followed by a normal data event must yield
+        // a stream that replays both, in their original order.
+        let annotation = Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation(
+            ANNOTATION_REQUEST_ID,
+            &"req-123".to_string(),
+        )
+        .expect("annotation construction should succeed");
+        let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![],
+                    created: 0,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    service_tier: None,
+                    usage: None,
+                },
+                nvext: None,
+            }),
+            id: Some("msg-1".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        };
+
+        let test_stream = stream::iter(vec![annotation, normal_event]);
+        let result = check_for_backend_error(test_stream).await;
+
+        assert!(result.is_ok());
+        let mut returned: Vec<_> = result.unwrap().collect().await;
+        assert_eq!(returned.len(), 2, "annotation + data event must replay");
+        let first = returned.remove(0);
+        assert_eq!(first.event.as_deref(), Some(ANNOTATION_REQUEST_ID));
+        let second = returned.remove(0);
+        assert_eq!(second.id, Some("msg-1".to_string()));
     }
 
     #[tokio::test]

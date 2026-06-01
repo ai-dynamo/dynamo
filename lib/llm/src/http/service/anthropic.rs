@@ -50,6 +50,7 @@ use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
+use super::error::SanitizedError;
 use super::metadata::extract_metadata_from_http;
 use super::openai::{get_body_limit, get_or_create_request_id};
 
@@ -178,11 +179,9 @@ async fn handler_anthropic_messages(
         tokio::spawn(anthropic_messages(state, template, request, stream_handle).in_current_span())
             .await
             .map_err(|e| {
-                tracing::error!("Failed to await Anthropic messages task: {e:?}");
-                anthropic_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "api_error",
-                    "Internal server error",
+                anthropic_sanitized_error_with_details(
+                    SanitizedError::Internal,
+                    format!("Failed to await Anthropic messages task: {e:?}"),
                 )
             })?;
 
@@ -334,19 +333,15 @@ async fn anthropic_messages(
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
             inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
-            tracing::debug!("Anthropic request cancelled before response: {e:#}");
-            return anthropic_error(
-                StatusCode::from_u16(499).unwrap(),
-                "request_cancelled",
-                "Request cancelled",
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Cancelled,
+                format!("{e:#}"),
             );
         }
         inflight_guard.mark_error(super::metrics::ErrorType::Internal);
-        tracing::error!("Failed to generate Anthropic completions: {e}");
-        anthropic_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "api_error",
-            "Internal server error",
+        anthropic_sanitized_error_with_details(
+            SanitizedError::Internal,
+            format!("Failed to generate Anthropic completions: {e}"),
         )
     })?;
 
@@ -449,12 +444,20 @@ async fn anthropic_messages(
         // Check first event for backend errors using the openai helper
         let stream_with_check = super::openai::check_for_backend_error(engine_stream)
             .await
-            .map_err(|(status, json_err)| {
-                tracing::error!(request_id, %status, ?json_err, "Backend error detected");
-                anthropic_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "api_error",
-                    "Backend error during generation",
+            .map_err(|(status, _json_err)| {
+                // check_for_backend_error has already sanitized the body and
+                // logged the backend detail; we just preserve its status when
+                // re-wrapping in Anthropic format.
+                let err = if status.as_u16() == 499 {
+                    SanitizedError::Cancelled
+                } else if status.is_server_error() {
+                    SanitizedError::PreserveServerError(status)
+                } else {
+                    SanitizedError::Internal
+                };
+                anthropic_sanitized_error_with_details(
+                    err,
+                    format!("backend error event (status {})", status.as_u16()),
                 )
             })?;
 
@@ -471,11 +474,9 @@ async fn anthropic_messages(
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
                 .map_err(|e| {
-                    tracing::error!(request_id, "Failed to fold messages stream: {:?}", e);
-                    anthropic_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "api_error",
-                        "Internal server error",
+                    anthropic_sanitized_error_with_details(
+                        SanitizedError::Internal,
+                        format!("Failed to fold messages stream: {e:?}"),
                     )
                 })?;
 
@@ -735,6 +736,33 @@ fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
         tools: req.tools.clone(),
     };
     count_req.estimate_tokens()
+}
+
+/// Build an Anthropic-formatted error response from a canonical
+/// [`SanitizedError`] variant. The status, public message, and Anthropic
+/// `error_type` all come from the variant; `details` are logged
+/// server-side but never reach the client.
+fn anthropic_sanitized_error_with_details(
+    err: SanitizedError,
+    details: impl std::fmt::Display,
+) -> Response {
+    let status = err.status();
+    if err.log_as_error() {
+        tracing::error!(status = %status, "Anthropic {err}: {details}");
+    } else {
+        tracing::debug!(status = %status, "Anthropic {err}: {details}");
+    }
+    (
+        status,
+        Json(AnthropicErrorResponse {
+            object_type: "error".to_string(),
+            error: AnthropicErrorBody {
+                error_type: err.anthropic_type().to_string(),
+                message: err.to_string(),
+            },
+        }),
+    )
+        .into_response()
 }
 
 /// Build an Anthropic-formatted error response.

@@ -34,6 +34,7 @@ use futures::{Stream, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::http::service::error::SanitizedError;
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -226,19 +227,17 @@ pub fn monitor_for_disconnects(
                             // doesn't later record this as ClosedUnexpectedly (which
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
-                            // Log the underlying error server-side; the client only
-                            // receives a sanitized message so streaming responses don't
-                            // leak internal paths, panic text, or backend exception
-                            // details.
                             tracing::error!("Streaming error: {err}");
                             // Emit a structured OpenAI-style error frame + `data: [DONE]`
                             // so naive `data:`-line parsers see both the error and a
-                            // stream terminator.
+                            // stream terminator. Body derived from SanitizedError so
+                            // the sanitized message + status live in one place.
+                            let sanitized = SanitizedError::Internal;
                             let err_json = serde_json::json!({
                                 "error": {
-                                    "message": "Internal server error",
-                                    "type": "internal_server_error",
-                                    "code": 500,
+                                    "message": sanitized.to_string(),
+                                    "type": sanitized.openai_type_slug(),
+                                    "code": sanitized.status().as_u16(),
                                 }
                             });
                             yield Event::default().data(err_json.to_string());
@@ -590,19 +589,21 @@ mod tests {
             .get("error")
             .and_then(|v| v.as_object())
             .unwrap_or_else(|| panic!("[{case}] `error` field is not an object. Body:\n{text}"));
+        let expected = SanitizedError::Internal;
+        let expected_message = expected.to_string();
         assert_eq!(
             error.get("message").and_then(|v| v.as_str()),
-            Some("Internal server error"),
+            Some(expected_message.as_str()),
             "[{case}] structured error `message` must be the sanitized static string. Body:\n{text}"
         );
         assert_eq!(
             error.get("type").and_then(|v| v.as_str()),
-            Some("internal_server_error"),
+            Some(expected.openai_type_slug()),
             "[{case}] structured error `type` mismatch. Body:\n{text}"
         );
         assert_eq!(
             error.get("code").and_then(|v| v.as_i64()),
-            Some(500),
+            Some(i64::from(expected.status().as_u16())),
             "[{case}] structured error `code` mismatch. Body:\n{text}"
         );
         assert!(
