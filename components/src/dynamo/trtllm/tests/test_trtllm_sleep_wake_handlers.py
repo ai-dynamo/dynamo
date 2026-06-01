@@ -218,6 +218,20 @@ async def test_release_unregisters_endpoint_and_restores_on_error():
 
 
 @pytest.mark.asyncio
+async def test_release_rejected_while_resume_recovery_pending():
+    handler = _make_handler()
+    # A prior release left the controller half-quiesced; quiesce() would no-op.
+    handler._quiesce_controller.needs_resume_recovery = True
+
+    result = await handler.release_memory_occupation({})
+
+    assert result["status"] == "error"
+    assert "resume_memory_occupation required" in result["message"]
+    handler._quiesce_controller.quiesce.assert_not_called()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_release_recovers_partial_quiesce_before_restoring_endpoint():
     handler = _make_handler()
 

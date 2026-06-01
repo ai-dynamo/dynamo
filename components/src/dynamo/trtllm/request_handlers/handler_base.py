@@ -339,6 +339,13 @@ class HandlerBase(BaseGenerativeHandler):
         async with self._quiesce_lock:
             if self._quiesce_controller.is_quiesced:
                 return {"status": "ok", "message": "Memory already released"}
+            if self._controller_needs_resume_recovery(self._quiesce_controller):
+                # A prior release rolled back into a half-quiesced state; quiesce()
+                # would no-op and falsely report success. Force a resume first.
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
 
             try:
                 await self._set_reject_new_requests(True)
