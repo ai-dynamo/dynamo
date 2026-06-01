@@ -64,3 +64,19 @@ So a stale or torn read can lead to a suboptimal routing choice, but it should n
 - The system accepts this lag because the read side is advisory.
 
 This is the core design: a strict local write DAG with an eventually consistent read projection.
+
+## Modeled remaining prefill time
+
+The slot tracker also exposes an internal derived read for modeled remaining prefill time per worker.
+This value is computed from admission-time prefill duration hints already stored in `ActiveSequences`,
+then projected through `PromptRegistry` with the same advisory read semantics as token load.
+
+This read is not a routing input, protocol payload, metric, or authoritative engine timing signal.
+It returns signed milliseconds because negative values are meaningful: if the oldest active prefill
+has exceeded its singleton modeled duration, the negative spillover reduces later modeled backlog.
+That behavior is intentional because engines may batch or overlap multiple prefills faster than the
+per-request model represents.
+
+When any active prefill for a worker lacks an expected duration, the modeled-time read returns
+`Err(MissingExpectedDuration)`. That is the normal default/no-AIC or prediction-failed state, and the
+tracker fast-returns from the derived snapshot without summing active prefills in that case.

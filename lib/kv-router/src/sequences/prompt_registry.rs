@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::time::Instant;
 
 use super::PrefillTokenDeltas;
-use super::prefill_tracker::PrefillLoadSnapshot;
+use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
 use super::prompt_membership_trie::{PromptMembershipTrie, WorkerLookup};
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
@@ -26,6 +26,13 @@ pub(super) struct WorkerLoadSnapshot {
 impl WorkerLoadSnapshot {
     pub(super) fn active_tokens(&self, decay_now: Instant) -> usize {
         self.prefill.active_tokens_at(decay_now)
+    }
+
+    pub(super) fn modeled_remaining_prefill_time_ms(
+        &self,
+        now: Instant,
+    ) -> Result<i64, PrefillTimeLoadError> {
+        self.prefill.modeled_remaining_prefill_time_ms_at(now)
     }
 }
 
@@ -160,6 +167,21 @@ impl PromptRegistry {
             .collect()
     }
 
+    pub(super) fn modeled_remaining_prefill_times_ms(
+        &self,
+        now: Instant,
+    ) -> HashMap<WorkerWithDpRank, Result<i64, PrefillTimeLoadError>> {
+        self.loads
+            .iter()
+            .map(|entry| {
+                (
+                    *entry.key(),
+                    entry.value().modeled_remaining_prefill_time_ms(now),
+                )
+            })
+            .collect()
+    }
+
     pub(super) fn any_worker_matches_active_tokens(
         &self,
         decay_now: Instant,
@@ -251,6 +273,7 @@ mod tests {
                     expected_prefill_duration,
                     anchored_since,
                 }),
+                modeled_non_anchored_prefill_time_ms: expected_prefill_duration.map(|_| 0),
             },
         }
     }
