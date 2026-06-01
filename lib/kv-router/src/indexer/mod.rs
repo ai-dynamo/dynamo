@@ -34,6 +34,20 @@
 mod branch_sharded;
 mod shard_handle;
 
+use std::any::Any;
+
+pub(crate) fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = panic_payload.downcast_ref::<&str>() {
+        return s.to_string();
+    }
+
+    if let Some(s) = panic_payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+
+    "Unknown panic payload".to_string()
+}
+
 fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
     if kv_block_size == 1 {
         tracing::warn!(

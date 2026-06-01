@@ -15,7 +15,6 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
@@ -33,6 +32,7 @@ from vllm.sampling_params import (
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
+from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -265,14 +265,6 @@ class VllmEngineQuiesceController:
         self._is_quiesced = False
 
 
-@dataclass(frozen=True)
-class LoRAInfo:
-    """Metadata for a loaded LoRA adapter."""
-
-    id: int
-    path: str
-
-
 def _compute_mm_uuids(
     multi_modal_data: Dict[str, Any] | None,
 ) -> Dict[str, list[str]] | None:
@@ -298,33 +290,6 @@ def _compute_mm_uuids(
         return None
     uuids = compute_mm_uuids_from_images(images)
     return {"image": uuids}
-
-
-# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
-# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
-_lora_manager = None
-
-
-def get_lora_manager():
-    """Get the LoRAManager singleton, initializing it on first call if enabled."""
-    global _lora_manager
-
-    if _lora_manager is not None:
-        return _lora_manager
-
-    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
-        try:
-            from dynamo.common.lora import LoRAManager
-
-            _lora_manager = LoRAManager()
-            logger.info("LoRAManager initialized successfully")
-            return _lora_manager
-        except Exception as e:
-            logger.warning(
-                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
-            )
-
-    return None
 
 
 def build_sampling_params(
@@ -2980,10 +2945,7 @@ class EmbeddingWorkerHandler:
         # unique enough to scope a vLLM ``request_id``.
         base_request_id = context.id()
 
-        embedding_objects: list[Dict[str, Any]] = []
-        prompt_tokens = 0
-
-        for idx, prompt in enumerate(prompts):
+        async def _encode_one(idx: int, prompt: Any):
             request_id = f"{base_request_id}-{idx}"
             encode_arg: Any = (
                 prompt
@@ -2998,12 +2960,35 @@ class EmbeddingWorkerHandler:
                     request_id=request_id,
                 ):
                     final_output = out
-
             if final_output is None:
                 raise RuntimeError(
                     f"vLLM engine.encode produced no output for input index {idx}"
                 )
+            return final_output
 
+        # Submit every prompt to the engine in the same event-loop tick so
+        # vLLM's continuous-batching scheduler can coalesce them into a
+        # single forward pass instead of N sequential ones. ``asyncio.gather``
+        # returns results in input order, so ``outputs[k]`` matches ``prompts[k]``
+        # regardless of engine completion order.
+        #
+        # Use explicit tasks + a ``finally`` cancellation pass so that if one
+        # ``_encode_one`` raises, we cancel siblings still in flight instead
+        # of leaving them running -- otherwise vLLM keeps consuming engine
+        # capacity for output that this handler will discard.
+        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
+        try:
+            outputs = await asyncio.gather(*tasks)
+        finally:
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        embedding_objects: list[Dict[str, Any]] = []
+        prompt_tokens = 0
+        for idx, final_output in enumerate(outputs):
             embedding = _pooling_output_to_list(final_output.outputs.data)
             if dimensions is not None:
                 if dimensions > len(embedding):
@@ -3013,16 +2998,17 @@ class EmbeddingWorkerHandler:
                     )
                 embedding = embedding[:dimensions]
 
-            embedding_payload: Any
-            if encoding_format == "base64":
-                embedding_payload = _encode_floats_to_base64(embedding)
-            else:
-                embedding_payload = embedding
-
+            # Always emit base64 over the worker->frontend wire format. The
+            # Rust frontend decodes back to float when the client's
+            # ``encoding_format`` is float (or unset). 15x1024-float responses
+            # serialized as JSON arrays cost ~110 ms in Python json.dumps +
+            # Rust serde parse; base64 bytes are ~3x smaller and ~10x faster
+            # to (de)serialize. Client-visible wire format is preserved
+            # because Rust converts at the HTTP boundary.
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": embedding_payload,
+                    "embedding": _encode_floats_to_base64(embedding),
                     "index": idx,
                 }
             )

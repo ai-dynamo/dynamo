@@ -342,3 +342,34 @@ impl NetworkManager {
         Ok(Arc::new(NatsRequestClient::new(nats_client.clone())))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager_for(mode: RequestPlaneMode) -> NetworkManager {
+        NetworkManager::new(
+            CancellationToken::new(),
+            None,
+            crate::component::Registry::new(),
+            mode,
+        )
+    }
+
+    #[test]
+    fn tcp_mode_creates_tcp_client_without_nats_client() {
+        let tcp = manager_for(RequestPlaneMode::Tcp).create_client().unwrap();
+        assert_eq!(tcp.transport_name(), "tcp");
+    }
+
+    #[test]
+    fn nats_mode_requires_nats_client() {
+        match manager_for(RequestPlaneMode::Nats).create_client() {
+            Ok(client) => panic!(
+                "expected NATS mode without NATS client to fail, got {} client",
+                client.transport_name()
+            ),
+            Err(err) => assert!(err.to_string().contains("NATS client required")),
+        }
+    }
+}

@@ -8,7 +8,8 @@ import os
 import random
 import string
 import sys
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import aiohttp
 import nats
@@ -161,7 +162,10 @@ def verify_response_timing(timing_info: dict[str, Any], disagg: bool = False) ->
 
 
 async def wait_for_frontend_ready(
-    frontend_url: str, expected_num_workers: int = 2, timeout: int = 120
+    frontend_url: str,
+    expected_num_workers: int = 2,
+    timeout: int = 120,
+    test_payload: dict[str, Any] | None = None,
 ):
     """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API).
 
@@ -176,6 +180,8 @@ async def wait_for_frontend_ready(
         frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
         expected_num_workers: Number of workers to wait for (currently logs but doesn't enforce)
         timeout: Maximum time to wait in seconds for both phases combined
+        test_payload: Optional chat completions payload for the phase 2 readiness probe.
+            Use this when readiness must satisfy the same routing constraints as the test.
 
     Raises:
         TimeoutError: If workers don't register or pipeline doesn't become ready within timeout
@@ -224,12 +230,16 @@ async def wait_for_frontend_ready(
 
     # Phase 2: Wait for chat completions pipeline to be ready
     logger.info("Waiting for chat completions pipeline to be built...")
-    test_payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": "test"}],
-        "max_tokens": 1,
-        "stream": False,
-    }
+    if test_payload is None:
+        test_payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+    else:
+        test_payload = {**test_payload}
+        test_payload.setdefault("model", model_name)
 
     while True:
         elapsed = asyncio.get_event_loop().time() - start_time
@@ -699,3 +709,24 @@ async def send_request_via_python_kv_router(
         }
 
     return True
+
+
+def topology_env(
+    tmp_path: Path,
+    name: str,
+    topology_domains: Dict[str, str],
+    *,
+    transfer_domain: str = "zone",
+    enforcement: str = "required",
+) -> Dict[str, str]:
+    topology_dir = tmp_path / name
+    topology_dir.mkdir()
+    for domain, value in topology_domains.items():
+        (topology_dir / domain).write_text(value)
+
+    return {
+        "DYN_TOPOLOGY_ENABLED": "true",
+        "DYN_TOPOLOGY_MOUNT_PATH": str(topology_dir),
+        "DYN_KV_TRANSFER_DOMAIN": transfer_domain,
+        "DYN_KV_TRANSFER_ENFORCEMENT": enforcement,
+    }

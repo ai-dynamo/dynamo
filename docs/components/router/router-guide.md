@@ -49,7 +49,7 @@ Backend workers register themselves using the `register_model` API. For accurate
 
 For all available options: `python -m dynamo.frontend --help`
 
-For detailed configuration options and tuning parameters, see [Configuration and Tuning](router-configuration.md). For how the router models prefill and decode load in the cost function, see [Routing Concepts](router-concepts.md#active-load-modeling).
+For detailed configuration options and tuning parameters, see [Configuration and Tuning](router-configuration.md). For candidate eligibility rules, see [Router Filtering](router-filtering.md). For how the router models prefill and decode load in the cost function, see [Routing Concepts](router-concepts.md#active-load-modeling).
 
 ### Kubernetes Deployment
 
@@ -174,6 +174,7 @@ Disaggregated mode is activated automatically when prefill workers register alon
 - **[Routing Concepts](router-concepts.md)**: Cost model, worker selection, and routing primitives
 - **[Configuration and Tuning](router-configuration.md)**: Router flags, transport modes, load tracking, and metrics
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
+- **[Topology-Aware KV Transfer](topology-aware-kv-transfer.md)**: Runtime metadata and decode routing constraints for topology-aware prefill/decode handoff
 - **[Router Operations](router-operations.md)**: Replicas, remote indexers, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Router Testing](router-testing.md)**: Recommended test layers for non-trivial router changes
