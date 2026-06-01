@@ -19,6 +19,7 @@ package validation
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -48,6 +49,7 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 		calculatedNamespace string
 		wantErr             bool
 		errMsg              string
+		errContains         string
 	}{
 		{
 			name: "valid spec with all fields",
@@ -288,6 +290,133 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			wantErr:             false,
 		},
 		{
+			name: "gpuMemoryService.extraClientContainers with enabled=true is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled:               true,
+					Mode:                  nvidiacomv1alpha1.GMSModeIntraPod,
+					ExtraClientContainers: []string{"gms-loader"},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "checkpoint targetContainerName must be a Kubernetes container name",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled:             true,
+					TargetContainerName: "Bad_Name",
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errContains:         "checkpoint.targetContainerName",
+		},
+		{
+			name: "gpuMemoryService.extraClientContainers entries must be Kubernetes container names",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled:               true,
+					Mode:                  nvidiacomv1alpha1.GMSModeIntraPod,
+					ExtraClientContainers: []string{"Bad_Name"},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errContains:         "gpuMemoryService.extraClientContainers[0]",
+		},
+		{
+			name: "checkpoint job with checkpointRef is rejected",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled:       true,
+					CheckpointRef: ptr("existing-checkpoint"),
+					Job:           &nvidiacomv1alpha1.ServiceCheckpointJobConfig{},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.services[worker].checkpoint.job cannot be set when checkpointRef is specified",
+		},
+		{
+			name: "checkpoint job with Manual mode is rejected",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.CheckpointModeManual,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.services[worker].checkpoint.job can only be set in Auto mode",
+		},
+		{
+			name: "checkpoint job GMS clients require gpuMemoryService",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
+						GMSClientContainers: []string{"gms-saver"},
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.services[worker].checkpoint.job.gmsClientContainers requires gpuMemoryService to be enabled",
+		},
+		{
+			name: "checkpoint job GMS client names must be Kubernetes container names",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
+						GMSClientContainers: []string{"Bad_Name"},
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errContains:         "checkpoint.job.gmsClientContainers[0]",
+		},
+		{
 			name: "frontendSidecar with no extraPodSpec containers is valid",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{
@@ -347,8 +476,11 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 				return
 			}
 
-			if tt.wantErr && err.Error() != tt.errMsg {
+			if tt.wantErr && tt.errMsg != "" && err.Error() != tt.errMsg {
 				t.Errorf("SharedSpecValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			}
+			if tt.wantErr && tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+				t.Errorf("SharedSpecValidator.Validate() error message = %v, want substring %v", err.Error(), tt.errContains)
 			}
 		})
 	}

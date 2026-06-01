@@ -13,12 +13,21 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 
+/// Client-facing message for oversized request payloads.
+///
+/// Intentionally generic: it must not leak the NATS subject, byte counts, the
+/// `max_payload` limit, or deployment-configuration instructions. Internal
+/// diagnostics (subject, payload_bytes, max_payload_bytes) live in logs and
+/// the `nats_errors_total` metric instead.
+const MAX_PAYLOAD_USER_MESSAGE: &str = "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.";
+
 /// NATS implementation of RequestPlaneClient
 ///
 /// This client wraps the async_nats::Client and adapts it to the
 /// unified RequestPlaneClient interface.
 pub struct NatsRequestClient {
     client: async_nats::Client,
+    max_payload: usize,
 }
 
 impl NatsRequestClient {
@@ -28,7 +37,22 @@ impl NatsRequestClient {
     ///
     /// * `client` - The underlying NATS client
     pub fn new(client: async_nats::Client) -> Self {
-        Self { client }
+        // Snapshot the server-advertised max_payload at construction time. This is
+        // not re-read on reconnect, so if the client later reconnects to a server
+        // advertising a smaller limit, oversized payloads fall through to the
+        // server's own enforcement rather than being caught by the early check below.
+        let max_payload = client.server_info().max_payload;
+        Self {
+            client,
+            max_payload,
+        }
+    }
+
+    fn max_payload_error() -> DynamoError {
+        DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message(MAX_PAYLOAD_USER_MESSAGE)
+            .build()
     }
 }
 
@@ -40,6 +64,26 @@ impl RequestPlaneClient for NatsRequestClient {
         payload: Bytes,
         headers: Headers,
     ) -> Result<Bytes> {
+        // Best-effort early rejection. This compares the payload body only, not the
+        // header/subject framing that also counts toward the server's max_payload for
+        // header messages (HPUB). It is therefore a lower bound: it reliably catches
+        // oversized payloads without ever false-rejecting a valid request, while
+        // borderline messages inflated by large headers are still caught server-side.
+        let payload_len = payload.len();
+        let max_payload = self.max_payload;
+        if max_payload > 0 && payload_len > max_payload {
+            NATS_ERRORS_TOTAL
+                .with_label_values(&["max_payload_exceeded"])
+                .inc();
+            tracing::error!(
+                address = %address,
+                payload_bytes = payload_len,
+                max_payload_bytes = max_payload,
+                "NATS request payload exceeds server max_payload; rejecting before send"
+            );
+            return Err(anyhow::anyhow!(Self::max_payload_error()));
+        }
+
         // Convert generic headers to NATS headers
         let mut nats_headers = async_nats::HeaderMap::new();
         for (key, value) in headers {
@@ -96,5 +140,22 @@ impl RequestPlaneClient for NatsRequestClient {
         // NATS client doesn't have an explicit close method
         // Connection is managed by the client lifecycle
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_payload_error_is_user_safe() {
+        let err = NatsRequestClient::max_payload_error();
+
+        assert_eq!(err.error_type(), ErrorType::InvalidArgument);
+        assert!(err.message().contains("Request payload is too large"));
+        assert!(!err.message().contains("NATS"));
+        assert!(!err.message().contains("max_payload"));
+        assert!(!err.message().contains("payload_bytes"));
+        assert!(!err.message().contains("nats-server"));
     }
 }

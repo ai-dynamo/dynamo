@@ -548,6 +548,7 @@ impl RouterHandles {
                 None,
                 config_override.as_ref(),
                 false,
+                false,
                 None,
                 priority_jump,
                 None,

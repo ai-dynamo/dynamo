@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3_2
+model_label: DeepSeek V3.2
+mode: stream
+cases:
+  TOOLCALLING.stream.2:
+    description: Multiple tool calls split across multiple content chunks
+    ref: derived from TOOLCALLING.batch.2.a
+    chunks:
+    - delta_text: <｜DSML｜fu
+    - delta_text: nction_
+    - delta_text: |-
+        calls>
+        <｜DSML
+    - delta_text: ｜invo
+    - delta_text: ke name="get_weat
+    - delta_text: her
+    - delta_text: |-
+        ">
+        <｜DSML
+    - delta_text: ｜parame
+    - delta_text: ter name="loc
+    - delta_text: ation
+    - delta_text: '" string="true">N'
+    - delta_text: YC<
+    - delta_text: /｜DSML｜pa
+    - delta_text: rameter
+    - delta_text: |-
+        >
+        </｜DSML｜inv
+    - delta_text: |
+        oke>
+    - delta_text: <｜DSML｜invoke nam
+    - delta_text: e="
+    - delta_text: get_time"
+    - delta_text: |-
+        >
+        <｜DSM
+    - delta_text: L｜parameter n
+    - delta_text: ame="
+    - delta_text: timezone" string=
+    - delta_text: '"tr'
+    - delta_text: ue">EST</
+    - delta_text: ｜DSML｜p
+    - delta_text: |-
+        arameter>
+        </｜
+    - delta_text: DSML｜
+    - delta_text: |-
+        invoke>
+        </｜DSML｜f
+    - delta_text: unc
+    - delta_text: tion_call
+    - delta_text: s>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      sglang: *id001
+      vllm: *id001

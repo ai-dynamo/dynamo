@@ -92,8 +92,21 @@ def test_worker_serves_metadata_via_http(
         )
         assert miss.status_code == 404, miss.text
 
+        # extra_files harvest: a non-typed sibling that exists in the
+        # Qwen3 HF snapshot (`vocab.json`) must also be served. Doubles
+        # as a symlink-follow check — HF snapshot entries are symlinks
+        # into `blobs/`, so a non-following stat would miss this file.
+        extra_url = (
+            f"http://localhost:{system_port}/v1/metadata/{slug}/{suffix}/vocab.json"
+        )
+        extra_response = requests.get(extra_url, timeout=10)
+        assert (
+            extra_response.status_code == 200
+        ), f"GET {extra_url} returned {extra_response.status_code}: harvest did not advertise vocab.json"
+        assert extra_response.content, "vocab.json served but body was empty"
+
         logger.info(
-            "self-host metadata verified: %s/%s/config.json served from worker on port %d",
+            "self-host metadata verified: %s/%s/{config,vocab}.json served from worker on port %d",
             slug,
             suffix,
             system_port,
