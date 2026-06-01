@@ -15,10 +15,10 @@ on:
         required: true
         type: string
       cuda_version:
-        description: 'CUDA version for the runtime image (e.g. 12.9)'
+        description: 'CUDA version for the runtime image (e.g. 13.0)'
         required: false
         type: string
-        default: '12.9'
+        default: '13.0'
       fresh_builder:
         description: 'Always create a fresh K8s BuildKit builder (for nightly)'
         required: false

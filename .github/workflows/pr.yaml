@@ -188,7 +188,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -202,7 +202,7 @@ jobs:
     with:
       framework: vllm
       target: dev
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
@@ -217,7 +217,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -231,7 +231,7 @@ jobs:
     with:
       framework: sglang
       target: dev
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
@@ -309,7 +309,7 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0
@@ -331,7 +331,7 @@ jobs:
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
@@ -348,7 +348,7 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
@@ -370,7 +370,7 @@ jobs:
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
@@ -472,7 +472,7 @@ jobs:
       framework: vllm
       target: runtime
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]'
     secrets: inherit
 
@@ -485,7 +485,7 @@ jobs:
       framework: sglang
       target: runtime
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]'
     secrets: inherit
 

@@ -282,18 +282,10 @@ jobs:
             fi
           }
 
-          # ---- CUDA 12 runtime images (vllm and sglang) ----
-          echo ""
-          echo "=== CUDA 12 Runtime Images (vllm, sglang) ==="
-          CUDA12_FRAMEWORKS=("vllm" "sglang")
-          for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
-            NGC_NAME="${FRAMEWORK}-runtime"
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12${NIGHTLY_TAG_SUFFIX}"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
-            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
-          done
-
           # ---- CUDA 13 runtime images (vllm, sglang, trtllm) ----
+          # CUDA 13 is the default. CUDA 12 runtime builds are deprecated, so
+          # vllm/sglang publish both the unsuffixed default tag and an explicit
+          # -cuda13 tag (same image); trtllm publishes -cuda13 only.
           echo ""
           echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) ==="
           CUDA13_FRAMEWORKS=("vllm" "sglang" "trtllm")
@@ -307,10 +299,16 @@ jobs:
             SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13${NIGHTLY_TAG_SUFFIX}"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
             copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+
+            # vllm/sglang also publish the unsuffixed default tag (now CUDA 13).
+            if [ "${FRAMEWORK}" != "trtllm" ]; then
+              DEFAULT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
+              copy_image "${SOURCE}" "${DEFAULT_TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
+            fi
           done
 
           # Nightly builds only the runtime images above (vllm/sglang/trtllm
-          # cuda12+cuda13). EFA/frontend/operator/planner/snapshot are built
+          # cuda13). EFA/frontend/operator/planner/snapshot are built
           # by post-merge and other workflows on release branches; for nightly
           # we skip them entirely so we don't try to copy ECR tags that don't
           # exist for the resolved SHA.
@@ -457,11 +455,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 12 - default):" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (default - CUDA 13):" >> $GITHUB_STEP_SUMMARY
           echo "- \`vllm-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 13):" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 13 - explicit tag):" >> $GITHUB_STEP_SUMMARY
           echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
@@ -530,13 +528,13 @@ jobs:
 
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          # Nightly pushes to <sha>-dynamo-runtime-cuda12-nightly so a failed
+          # Nightly pushes to <sha>-dynamo-runtime-cuda13-nightly so a failed
           # nightly build cannot fall through to the stable post-merge image.
           NIGHTLY_TAG_SUFFIX=""
           if [ "${NIGHTLY}" = "true" ]; then
             NIGHTLY_TAG_SUFFIX="-nightly"
           fi
-          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime-cuda12${NIGHTLY_TAG_SUFFIX}"
+          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime-cuda13${NIGHTLY_TAG_SUFFIX}"
 
           STAGE="${RUNNER_TEMP}/wheels"
           mkdir -p "${STAGE}/amd64" "${STAGE}/arm64"
