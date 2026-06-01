@@ -28,6 +28,8 @@ DECODE_COMPONENT = "VllmDecodeWorker"
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
 VLLM_MODEL = "Qwen/Qwen3-0.6B"
+VLLM_MAX_MODEL_LEN = "2048"
+VLLM_GPU_MEMORY_UTILIZATION = "0.30"
 DEFAULT_VLLM_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 
 CHECKPOINT_ID_LABEL = "nvidia.com/snapshot-checkpoint-id"
@@ -77,6 +79,18 @@ def _new_vllm_checkpoint_spec(name: str, namespace: str, image: str) -> Deployme
     pod_spec = decode.setdefault("podTemplate", {}).setdefault("spec", {})
     pod_spec["nodeSelector"] = dict(GPU_NODE_SELECTOR)
     pod_spec["tolerations"] = list(GPU_TOLERATIONS)
+    containers = pod_spec.setdefault("containers", [])
+    if not containers:
+        raise AssertionError(f"component {DECODE_COMPONENT!r} has no containers")
+    containers[0]["args"] = [
+        "--model",
+        VLLM_MODEL,
+        "--max-model-len",
+        VLLM_MAX_MODEL_LEN,
+        "--gpu-memory-utilization",
+        VLLM_GPU_MEMORY_UTILIZATION,
+        "--enforce-eager",
+    ]
 
     decode.setdefault("experimental", {})["checkpoint"] = {
         "mode": "Auto",
@@ -86,7 +100,12 @@ def _new_vllm_checkpoint_spec(name: str, namespace: str, image: str) -> Deployme
             "backendFramework": "vllm",
             "tensorParallelSize": 1,
             "pipelineParallelSize": 1,
-            "extraParameters": {"ciTest": name},
+            "extraParameters": {
+                "ciTest": name,
+                "enforceEager": "true",
+                "gpuMemoryUtilization": VLLM_GPU_MEMORY_UTILIZATION,
+                "maxModelLen": VLLM_MAX_MODEL_LEN,
+            },
         },
     }
     return deployment_spec
