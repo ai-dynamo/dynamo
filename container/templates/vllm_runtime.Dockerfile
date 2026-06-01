@@ -202,11 +202,19 @@ RUN uv pip uninstall triton && \
 # against libx264/libx265/libmp3lame. Purge that entire apt codec stack and
 # replace it with the LGPL-only in-tree ffmpeg built in wheel_builder
 # (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via libvpx). PyAV,
-# torchaudio, torchvision and soundfile all bundle their own libraries and do
-# not link the system ffmpeg, so removing it is safe. dpkg-query keeps the
-# purge robust across base-image/arch version suffixes (e.g. libavcodec58 vs 60),
-# and autoremove sweeps the now-orphaned media deps (libsdl2, libpulse, ...).
+# torchaudio, torchvision, soundfile and Pillow all bundle their own libraries
+# and do not link the system ffmpeg/codecs, so removing them is safe. dpkg-query
+# keeps the purge robust across base-image/arch version suffixes (e.g.
+# libavcodec58 vs 60), and autoremove then sweeps the now-orphaned media deps.
+#
+# CRITICAL: the base image marks the CUDA math libs (libcublas/libcusolver/
+# libcusparse) auto-installed, and the torch wheels here ship NO bundled cublas
+# — torch loads the system copies. A bare autoremove would delete them and break
+# GPU inference, so pin every CUDA/NVIDIA lib as manually-installed first.
 RUN set -eux; \
+    keep=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
+        | grep -E '^(libcu|libnv|libnccl|cuda)' || true); \
+    if [ -n "$keep" ]; then apt-mark manual $keep >/dev/null; fi; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
         | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr)' \
         || true); \
