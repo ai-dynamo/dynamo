@@ -18,7 +18,7 @@ spec:
           value: kubernetes
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.2.0-post.1
+          image: nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.2.0
           imagePullPolicy: IfNotPresent
           workingDir: /opt/app
           command:
@@ -55,7 +55,7 @@ spec:
           mountPoint: /root/.cache/huggingface
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.2.0-post.1
+          image: nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.2.0
           imagePullPolicy: IfNotPresent
           workingDir: /opt/app
           command:

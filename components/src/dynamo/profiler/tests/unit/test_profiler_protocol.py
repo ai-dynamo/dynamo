@@ -73,7 +73,7 @@ def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() ->
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="Qwen/Qwen3-30B-A3B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0",
         prefill_cli_args=[
             "--tensor-parallel-size",
             "2",
@@ -115,7 +115,7 @@ def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="Qwen/Qwen3-30B-A3B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0",
         prefill_cli_args=[
             "--max-running-requests",
             "1",
