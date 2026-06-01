@@ -92,12 +92,13 @@ cases:
             type: string
     expected:
       dynamo: &id001
-        calls: []
-        normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_end|><|tool_call_end|>
-      vllm: *id001
-      sglang:
         calls:
         - arguments:
             location: NYC
           name: get_weather
         normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_end|><|tool_call_end|>
+        reason: vLLM preserves the raw Kimi call body as content when the opening <|tool_calls_section_begin|> marker is missing; Dynamo recovers the complete bare call body and drops close-marker spam.
+      sglang: *id001

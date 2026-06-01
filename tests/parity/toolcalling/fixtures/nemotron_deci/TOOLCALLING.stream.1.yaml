@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: nemotron_deci
-model_label: Nemotron (DeciLM)
+model_label: Nemotron (DeciLM) v1/v2
 mode: stream
 cases:
   TOOLCALLING.stream.1.a:

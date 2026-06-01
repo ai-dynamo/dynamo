@@ -42,9 +42,10 @@ fn truncate_for_log(s: &str) -> String {
 /// Format: <tool_call>function_name<arg_key>...</arg_key><arg_value>...</arg_value></tool_call>
 pub fn detect_tool_call_start_glm47(chunk: &str, config: &Glm47ParserConfig) -> bool {
     let start_token = &config.tool_call_start;
+    let arg_key_start = &config.arg_key_start;
 
     // Check if we have the complete start token
-    if chunk.contains(start_token.as_str()) {
+    if chunk.contains(start_token.as_str()) || chunk.contains(arg_key_start.as_str()) {
         return true;
     }
 
@@ -69,6 +70,10 @@ pub fn find_tool_call_end_position_glm47(chunk: &str, config: &Glm47ParserConfig
     let start_token = &config.tool_call_start;
     let end_token = &config.tool_call_end;
 
+    if !chunk.contains(start_token.as_str()) && chunk.contains(config.arg_key_start.as_str()) {
+        return find_bare_glm47_tool_call_end_position(chunk, config).unwrap_or(chunk.len());
+    }
+
     let Some(first_end) = chunk.find(end_token.as_str()) else {
         return chunk.len();
     };
@@ -91,6 +96,48 @@ pub fn find_tool_call_end_position_glm47(chunk: &str, config: &Glm47ParserConfig
     }
 
     cursor
+}
+
+fn find_bare_glm47_tool_call_end_position(text: &str, config: &Glm47ParserConfig) -> Option<usize> {
+    let marker_idx = first_orphan_glm47_marker_index(text, config)?;
+    let before_marker = text[..marker_idx].trim_end();
+    let function_name_start = before_marker
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+
+    let candidate_name = before_marker[function_name_start..].trim();
+    if candidate_name.is_empty()
+        || !candidate_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return None;
+    }
+
+    let mut cursor = function_name_start;
+    let mut last_complete_end = None;
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        let trim_offset = rest.len() - rest.trim_start().len();
+        let call_start = cursor + trim_offset;
+        let tail = &text[call_start..];
+        let Some(end_pos) = tail.find(config.tool_call_end.as_str()) else {
+            break;
+        };
+
+        let call_end = call_start + end_pos + config.tool_call_end.len();
+        cursor = consume_glm47_close_markers(text, call_end, config);
+        last_complete_end = Some(cursor);
+
+        if first_orphan_glm47_marker_index(&text[cursor..], config).is_none() {
+            break;
+        }
+    }
+
+    last_complete_end
 }
 
 /// Try to parse GLM-4.7 formatted tool calls from a message.
@@ -125,18 +172,55 @@ fn extract_tool_calls(
     let start_token = &config.tool_call_start;
     let end_token = &config.tool_call_end;
 
+    if !text.contains(start_token.as_str())
+        && let Some(marker_idx) = first_orphan_glm47_marker_index(text, config)
+    {
+        if let Some((prefix, mut parsed_calls)) =
+            recover_bare_glm47_calls(text, marker_idx, config, tools)?
+        {
+            let recovered_calls = parsed_calls.len();
+            warn!(
+                why = "bare_body_recovery",
+                recovered_calls,
+                recovered_bytes = text.len() - prefix.len(),
+                kept_prefix_bytes = prefix.len(),
+                "GLM-4.7 parser recovered complete bare call body/bodies without <tool_call> start"
+            );
+            calls.append(&mut parsed_calls);
+            return Ok((prefix, calls));
+        }
+        warn!(
+            why = "GLM-4.7 tool-call marker found without <tool_call> start; dropping orphan marker tail so wire tags do not leak into normal_text",
+            dropped_block = %truncate_for_log(&text[marker_idx..]),
+            "GLM-4.7 parser dropping orphan tool-call marker tail"
+        );
+        return Ok((orphan_glm47_prefix(text, marker_idx), calls));
+    }
+
     while cursor < text.len() {
         // Find next tool call start
         if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
             let abs_start = cursor + start_pos;
+            let gap = &text[cursor..abs_start];
+            if let Some((prefix, mut parsed_calls)) =
+                recover_bare_glm47_calls_in_span(gap, config, tools)?
+            {
+                if calls.is_empty() {
+                    normal_parts.push(prefix);
+                }
+                calls.append(&mut parsed_calls);
+            } else if calls.is_empty() {
+                if let Some(marker_idx) = first_orphan_glm47_marker_index(gap, config) {
+                    normal_parts.push(orphan_glm47_prefix(gap, marker_idx));
+                } else {
+                    normal_parts.push(gap.to_string());
+                }
+            }
 
             // Only surface normal text that precedes the first parsed call.
             // Text after any </tool_call> is not response content; matches the
             // convention ported into the generic XML parser by PR #9350 and
             // vLLM's glm47_moe_tool_parser.
-            if calls.is_empty() {
-                normal_parts.push(&text[cursor..abs_start]);
-            }
 
             // Find the corresponding end token
             if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
@@ -216,8 +300,20 @@ fn extract_tool_calls(
             }
         } else {
             // No more tool calls
-            if calls.is_empty() {
-                normal_parts.push(&text[cursor..]);
+            let gap = &text[cursor..];
+            if let Some((prefix, mut parsed_calls)) =
+                recover_bare_glm47_calls_in_span(gap, config, tools)?
+            {
+                if calls.is_empty() {
+                    normal_parts.push(prefix);
+                }
+                calls.append(&mut parsed_calls);
+            } else if calls.is_empty() {
+                if let Some(marker_idx) = first_orphan_glm47_marker_index(gap, config) {
+                    normal_parts.push(orphan_glm47_prefix(gap, marker_idx));
+                } else {
+                    normal_parts.push(gap.to_string());
+                }
             }
             break;
         }
@@ -230,6 +326,149 @@ fn extract_tool_calls(
         normal_text
     };
     Ok((normal_text, calls))
+}
+
+fn recover_bare_glm47_calls_in_span(
+    span: &str,
+    config: &Glm47ParserConfig,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    let Some(marker_idx) = first_orphan_glm47_marker_index(span, config) else {
+        return Ok(None);
+    };
+    let recovered = recover_bare_glm47_calls(span, marker_idx, config, tools)?;
+    if let Some((prefix, parsed_calls)) = recovered {
+        let recovered_calls = parsed_calls.len();
+        warn!(
+            why = "bare_body_gap_recovery",
+            recovered_calls,
+            recovered_bytes = span.len() - prefix.len(),
+            kept_prefix_bytes = prefix.len(),
+            "GLM-4.7 parser recovered complete bare call body/bodies before a later <tool_call>"
+        );
+        return Ok(Some((prefix, parsed_calls)));
+    }
+    Ok(None)
+}
+
+fn first_orphan_glm47_marker_index(text: &str, config: &Glm47ParserConfig) -> Option<usize> {
+    [
+        config.tool_call_end.as_str(),
+        config.arg_key_start.as_str(),
+        config.arg_key_end.as_str(),
+        config.arg_value_start.as_str(),
+        config.arg_value_end.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|marker| text.find(marker))
+    .min()
+}
+
+fn orphan_glm47_prefix(text: &str, marker_idx: usize) -> String {
+    let prefix = text[..marker_idx].trim_end();
+    let token_start = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+    let tail = &prefix[token_start..];
+    if !tail.is_empty()
+        && tail
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        prefix[..token_start].trim().to_string()
+    } else {
+        prefix.trim().to_string()
+    }
+}
+
+fn recover_bare_glm47_calls(
+    text: &str,
+    marker_idx: usize,
+    config: &Glm47ParserConfig,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    if !text[marker_idx..].contains(config.tool_call_end.as_str()) {
+        return Ok(None);
+    }
+
+    let before_marker = text[..marker_idx].trim_end();
+    let function_name_start = before_marker
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+
+    let candidate_name = before_marker[function_name_start..].trim();
+    if candidate_name.is_empty()
+        || !candidate_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return Ok(None);
+    }
+
+    let prefix = text[..function_name_start].to_string();
+    let mut cursor = function_name_start;
+    let mut calls = Vec::new();
+
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        let trim_offset = rest.len() - rest.trim_start().len();
+        cursor += trim_offset;
+
+        let tail = &text[cursor..];
+        let Some(end_pos) = tail.find(config.tool_call_end.as_str()) else {
+            break;
+        };
+        let call_end = cursor + end_pos + config.tool_call_end.len();
+        let wrapped = format!("{}{}", config.tool_call_start, &text[cursor..call_end]);
+        calls.push(parse_tool_call_block(&wrapped, config, tools)?);
+        cursor = call_end;
+
+        if is_glm47_close_marker_spam(&text[cursor..], config) {
+            warn!(
+                why = "orphan_close_marker_spam",
+                dropped_block = %truncate_for_log(&text[cursor..]),
+                "GLM-4.7 parser dropping orphan close-marker spam after recovered bare call"
+            );
+            break;
+        }
+
+        if first_orphan_glm47_marker_index(&text[cursor..], config).is_none() {
+            break;
+        }
+    }
+
+    if calls.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((prefix, calls)))
+}
+
+fn is_glm47_close_marker_spam(text: &str, config: &Glm47ParserConfig) -> bool {
+    let mut rest = text.trim_start();
+    let mut saw_close = false;
+    while let Some(after_close) = rest.strip_prefix(config.tool_call_end.as_str()) {
+        saw_close = true;
+        rest = after_close.trim_start();
+    }
+    saw_close && rest.is_empty()
+}
+
+fn consume_glm47_close_markers(text: &str, mut cursor: usize, config: &Glm47ParserConfig) -> usize {
+    loop {
+        let rest = &text[cursor..];
+        let trim_offset = rest.len() - rest.trim_start().len();
+        let close_start = cursor + trim_offset;
+        if !text[close_start..].starts_with(config.tool_call_end.as_str()) {
+            return cursor;
+        }
+        cursor = close_start + config.tool_call_end.len();
+    }
 }
 
 /// Decode XML character entities in a string.
@@ -602,6 +841,25 @@ mod tests {
             text,
             "I'll check the weather for both cities at the same time!"
         );
+    }
+
+    #[test]
+    fn test_parse_two_bare_calls_without_start_markers_recovers_independently() {
+        let config = get_test_config();
+        let message = "I will check both. get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>get_time<arg_key>timezone</arg_key><arg_value>EST</arg_value></tool_call>";
+
+        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_time");
+        let args0: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: HashMap<String, Value> =
+            serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(args0["location"], "NYC");
+        assert_eq!(args1["timezone"], "EST");
+        assert_eq!(normal_text.unwrap(), "I will check both. ");
     }
 
     // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.b in tests/parity/toolcalling/fixtures/glm47/TOOLCALLING.batch.7.yaml.

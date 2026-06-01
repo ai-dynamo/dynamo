@@ -92,10 +92,7 @@ jobs:
           fi
 
           if [[ "${NIGHTLY}" == "true" ]]; then
-            # TODO: REVERT — testing only. Allows this dev branch through the
-            # branch=main guard so push-triggered nightlies can run end-to-end.
-            # MUST be removed before merging to main.
-            if [[ "${BRANCH_NAME}" != "main" && "${BRANCH_NAME}" != "pvijayakrish/nightly-notifications" ]]; then
+            if [[ "${BRANCH_NAME}" != "main" ]]; then
               echo "Error: nightly=true requires branch=main (got: ${BRANCH_NAME})"
               exit 1
             fi
@@ -149,7 +146,10 @@ jobs:
           if [[ "${NIGHTLY}" == "true" ]]; then
             DATE_UTC=$(date -u +%Y%m%d)
             SHORT_SHA="${COMMIT_SHA:0:7}"
-            NGC_VERSION_TAG="nightly-${DATE_UTC}-${SHORT_SHA}"
+            # No `nightly-` prefix on the tag: the NGC repo name itself carries
+            # the `-nightly` suffix (e.g. vllm-runtime-nightly), so the tag stays
+            # the bare date+sha (e.g. 20260520-abc1234).
+            NGC_VERSION_TAG="${DATE_UTC}-${SHORT_SHA}"
             WHEEL_VERSION="${BASE_VERSION}.dev${DATE_UTC}"
             echo "rc_number=" >> $GITHUB_OUTPUT
             echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
@@ -294,31 +294,68 @@ jobs:
             fi
           }
 
-          # ---- CUDA 12 runtime images (vllm and sglang) ----
-          echo ""
-          echo "=== CUDA 12 Runtime Images (vllm, sglang) ==="
-          CUDA12_FRAMEWORKS=("vllm" "sglang")
-          for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
-            NGC_NAME="${FRAMEWORK}-runtime"
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12${NIGHTLY_TAG_SUFFIX}"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
-            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
-          done
+          # On nightly, segregate published images into their own NGC repos by
+          # appending `-nightly` to the repo name (e.g. vllm-runtime-nightly).
+          # This keeps consumers from accidentally pulling a nightly image from
+          # the stable repo.
+          NGC_NAME_SUFFIX=""
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            NGC_NAME_SUFFIX="-nightly"
+          fi
 
-          # ---- CUDA 13 runtime images (vllm, sglang, trtllm) ----
+          # ---- CUDA 13 runtime images (vllm, sglang, trtllm) — DEFAULT ----
           echo ""
-          echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) ==="
+          echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) — default ==="
           CUDA13_FRAMEWORKS=("vllm" "sglang" "trtllm")
           for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
             if [ "${FRAMEWORK}" = "trtllm" ]; then
-              NGC_NAME="tensorrtllm-runtime"
+              NGC_NAME="tensorrtllm-runtime${NGC_NAME_SUFFIX}"
+              STABLE_NAME="tensorrtllm-runtime"
             else
-              NGC_NAME="${FRAMEWORK}-runtime"
+              NGC_NAME="${FRAMEWORK}-runtime${NGC_NAME_SUFFIX}"
+              STABLE_NAME="${FRAMEWORK}-runtime"
             fi
 
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13${NIGHTLY_TAG_SUFFIX}"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
-            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime${NIGHTLY_TAG_SUFFIX}"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
+            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
+
+            # Explicit `-cuda13` alias on the same digest so consumers can
+            # pin to cuda13 specifically. The bare tag above stays as the
+            # implicit default and will move to cuda14+ when that flips.
+            EXPLICIT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+            copy_image "${SOURCE}" "${EXPLICIT_TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+
+            # Mutable `:nightly` floating tag on the stable repo (e.g.
+            # vllm-runtime:nightly). cuda13 is the default so no cuda suffix.
+            if [[ "${NIGHTLY}" == "true" ]]; then
+              MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${STABLE_NAME}:nightly"
+              copy_image "${SOURCE}" "${MUTABLE_TARGET}" "${STABLE_NAME}:nightly"
+
+              # Explicit `:nightly-cuda13` floating alias.
+              EXPLICIT_MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${STABLE_NAME}:nightly-cuda13"
+              copy_image "${SOURCE}" "${EXPLICIT_MUTABLE_TARGET}" "${STABLE_NAME}:nightly-cuda13"
+            fi
+          done
+
+          # ---- CUDA 12 runtime images (vllm and sglang) — explicit ----
+          # cuda12 is no longer the default: both the ECR source and the NGC
+          # target carry an explicit -cuda12 suffix.
+          echo ""
+          echo "=== CUDA 12 Runtime Images (vllm, sglang) — explicit ==="
+          CUDA12_FRAMEWORKS=("vllm" "sglang")
+          for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
+            NGC_NAME="${FRAMEWORK}-runtime${NGC_NAME_SUFFIX}"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12${NIGHTLY_TAG_SUFFIX}"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda12"
+            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda12"
+
+            # Mutable `:nightly-cuda12` floating tag on the stable repo
+            # (e.g. vllm-runtime:nightly-cuda12).
+            if [[ "${NIGHTLY}" == "true" ]]; then
+              MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:nightly-cuda12"
+              copy_image "${SOURCE}" "${MUTABLE_TARGET}" "${FRAMEWORK}-runtime:nightly-cuda12"
+            fi
           done
 
           # Nightly builds only the runtime images above (vllm/sglang/trtllm
@@ -333,18 +370,18 @@ jobs:
             echo ""
             echo "=== EFA Runtime Images ==="
 
-            # vllm EFA (CUDA 12)
+            # vllm EFA (CUDA 12 — explicit suffix since cuda13 is default)
             SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
-            copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa-cuda12"
+            copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa-cuda12"
 
-            # sglang EFA (CUDA 12)
+            # sglang EFA (CUDA 12 — explicit suffix since cuda13 is default)
             SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa-cuda12"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
-            copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa-cuda12"
+            copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa-cuda12"
 
-            # trtllm EFA (CUDA 13)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
+            # trtllm EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
             copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
@@ -467,21 +504,34 @@ jobs:
           echo "- **Successful copies**: ${SUCCESSFUL_COUNT}" >> $GITHUB_STEP_SUMMARY
           echo "- **Failed copies**: ${FAILED_COUNT}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          # Mirror the NGC_NAME_SUFFIX logic used in the copy step so the summary
+          # advertises the actual repos that were pushed to.
+          NGC_NAME_SUFFIX=""
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            NGC_NAME_SUFFIX="-nightly"
+          fi
           echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 12 - default):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 13 - default, bare tag + explicit -cuda13 alias):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 13):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 12 - explicit):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda12\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda12\`" >> $GITHUB_STEP_SUMMARY
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Mutable floating tags (repushed every nightly):" >> $GITHUB_STEP_SUMMARY
+            echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\` / \`vllm-runtime:nightly-cuda12\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda13\` / \`sglang-runtime:nightly-cuda12\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`tensorrtllm-runtime:nightly\` / \`tensorrtllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          fi
           if [[ "${NIGHTLY}" != "true" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "EFA runtime images (multi-arch):" >> $GITHUB_STEP_SUMMARY
-            echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa-cuda12\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa-cuda12\`" >> $GITHUB_STEP_SUMMARY
             echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Operator image:" >> $GITHUB_STEP_SUMMARY
@@ -542,13 +592,13 @@ jobs:
 
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          # Nightly pushes to <sha>-dynamo-runtime-cuda12-nightly so a failed
-          # nightly build cannot fall through to the stable post-merge image.
+          # Nightly suffix ensures a failed nightly cannot fall through to
+          # the stable image.
           NIGHTLY_TAG_SUFFIX=""
           if [ "${NIGHTLY}" = "true" ]; then
             NIGHTLY_TAG_SUFFIX="-nightly"
           fi
-          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime-cuda12${NIGHTLY_TAG_SUFFIX}"
+          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime${NIGHTLY_TAG_SUFFIX}"
 
           STAGE="${RUNNER_TEMP}/wheels"
           mkdir -p "${STAGE}/amd64" "${STAGE}/arm64"

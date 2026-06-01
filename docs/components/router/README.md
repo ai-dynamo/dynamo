@@ -57,6 +57,7 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 
 - **[Router Guide](router-guide.md)**: Deployment modes, quick start, and page map
 - **[Routing Concepts](router-concepts.md)**: Cost model and worker-selection behavior
+- **[Router Filtering](router-filtering.md)**: Candidate eligibility, DP-rank filtering, and busy-threshold overload handling
 - **[Configuration and Tuning](router-configuration.md)**: Router flags, transport modes, and metrics
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
 - **[Router Operations](router-operations.md)**: Replicas, persistence, and recovery

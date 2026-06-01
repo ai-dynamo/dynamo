@@ -24,6 +24,7 @@ pytestmark = [
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 _DIFFUSION_FIELDS = {f.name for f in dataclasses.fields(OmniDiffusionKwargs)}
