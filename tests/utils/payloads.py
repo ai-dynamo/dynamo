@@ -487,7 +487,13 @@ class CachedTokensChatPayload(ChatPayload):
         url = f"http://localhost:{self.port}/metrics"
         try:
             text = requests.get(url, timeout=5).text
-        except Exception as e:
+        except requests.RequestException as e:
+            # Narrow to HTTP/network errors per .ai/python-guidelines.md:
+            # we expect transient endpoint flakes here (timeout, connection
+            # refused while the frontend is still binding /metrics) and
+            # the strong gate has its own `is None` guard. Programming
+            # errors propagate so they surface at test-time instead of
+            # being swallowed.
             logger.warning("Failed to scrape %s: %s", url, e)
             return None
         # Compose from canonical constants so a metric rename in
