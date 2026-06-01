@@ -277,7 +277,6 @@ class StreamingPostProcessor:
         return (
             not self.stream_response
             and self.tool_parser is not None
-            and self.reasoning_parser is None
             and self.request_for_sampling.tool_choice != "none"
         )
 
@@ -443,7 +442,20 @@ class StreamingPostProcessor:
         if not output.finish_reason:
             return None
 
-        delta_message = self._extract_tool_calls_from_text(current_text)
+        saved_reasoning = None
+        content = current_text
+        if self.reasoning_parser:
+            saved_reasoning, content = self.reasoning_parser.extract_reasoning(
+                current_text,
+                request=self.request_for_sampling,
+            )
+            if not self.request_for_sampling.include_reasoning:
+                saved_reasoning = None
+
+        delta_message = self._extract_tool_calls_from_text(
+            content or "",
+            saved_reasoning=saved_reasoning,
+        )
         if delta_message is None:
             if self.in_progress_tool_calls:
                 return self._emit_tool_calls_choice(output)
@@ -452,6 +464,8 @@ class StreamingPostProcessor:
         delta: dict[str, Any] = {"role": "assistant"}
         if delta_message.content:
             delta["content"] = delta_message.content
+        if delta_message.reasoning:
+            delta["reasoning_content"] = delta_message.reasoning
         if self.in_progress_tool_calls:
             delta["tool_calls"] = self._dump_in_progress_tool_calls()
             self.in_progress_tool_calls.clear()
