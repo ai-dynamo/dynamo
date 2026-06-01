@@ -68,13 +68,13 @@ def make_image_payload_cached_tokens(
     *,
     repeat_count: int = 3,
     min_cached_tokens: int = 1,
-    require_lightseek_init: bool = False,
+    require_rust_processor_init: bool = False,
     require_vllm_mm_processor_init: bool = False,
     min_avg_kv_hit_rate: float = 0.0,
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
 
-    ``require_lightseek_init`` / ``require_vllm_mm_processor_init`` assert
+    ``require_rust_processor_init`` / ``require_vllm_mm_processor_init`` assert
     the MM-routing init log fired. ``min_avg_kv_hit_rate`` asserts the
     post-R1 mean of router_kv_hit_rate >= threshold (fails closed when
     router-side hashes diverge from the worker).
@@ -100,7 +100,7 @@ def make_image_payload_cached_tokens(
         repeat_count=repeat_count,
         expected_response=expected_response,
         min_cached_tokens=min_cached_tokens,
-        require_lightseek_init=require_lightseek_init,
+        require_rust_processor_init=require_rust_processor_init,
         require_vllm_mm_processor_init=require_vllm_mm_processor_init,
         min_avg_kv_hit_rate=min_avg_kv_hit_rate,
     )

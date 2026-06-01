@@ -405,12 +405,12 @@ class CachedTokensChatPayload(ChatPayload):
         timeout: int = 60,
         min_cached_tokens: int = 1,
         router_nvext_expectation: RouterNvextExpectation | None = None,
-        require_lightseek_init: bool = False,
+        require_rust_processor_init: bool = False,
         require_vllm_mm_processor_init: bool = False,
         min_avg_kv_hit_rate: float = 0.0,
     ):
         log_patterns: List[str] = list(expected_log or [])
-        if require_lightseek_init:
+        if require_rust_processor_init:
             log_patterns.append(r"MM-aware KV routing enabled \(lightseek\)")
         if require_vllm_mm_processor_init:
             log_patterns.append(r"\[mm-routing\] Transfer mode:")
