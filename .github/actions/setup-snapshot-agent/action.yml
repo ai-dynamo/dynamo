@@ -17,9 +17,25 @@ inputs:
     description: 'Full snapshot-agent image reference'
     required: true
   storage_size:
-    description: 'Checkpoint PVC size for CI'
+    description: 'Checkpoint PVC size for agentMount mode'
     required: false
     default: 1Gi
+  storage_access_mode:
+    description: 'How the snapshot-agent accesses checkpoint storage'
+    required: false
+    default: podMount
+  storage_pvc_name:
+    description: 'Checkpoint PVC name used by snapshot metadata'
+    required: false
+    default: snapshot-pvc
+  storage_pvc_access_mode:
+    description: 'Checkpoint PVC Kubernetes access mode'
+    required: false
+    default: ReadWriteOnce
+  storage_base_path:
+    description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
+    required: false
+    default: /checkpoints
 
 runs:
   using: "composite"
@@ -41,6 +57,10 @@ runs:
         RELEASE_NAME: ${{ inputs.release_name }}
         SNAPSHOT_AGENT_IMAGE: ${{ inputs.snapshot_agent_image }}
         STORAGE_SIZE: ${{ inputs.storage_size }}
+        STORAGE_ACCESS_MODE: ${{ inputs.storage_access_mode }}
+        STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
+        STORAGE_PVC_ACCESS_MODE: ${{ inputs.storage_pvc_access_mode }}
+        STORAGE_BASE_PATH: ${{ inputs.storage_base_path }}
       run: |
         echo "::group::Install snapshot-agent"
         set -euo pipefail
@@ -61,7 +81,11 @@ runs:
           --set daemonset.image.tag="${SNAPSHOT_IMAGE_TAG}" \
           --set daemonset.image.pullPolicy=Always \
           --set-json=daemonset.imagePullSecrets=[] \
-          --set storage.pvc.create=true \
+          --set storage.accessMode="${STORAGE_ACCESS_MODE}" \
+          --set storage.pvc.name="${STORAGE_PVC_NAME}" \
+          --set storage.pvc.accessMode="${STORAGE_PVC_ACCESS_MODE}" \
+          --set storage.pvc.basePath="${STORAGE_BASE_PATH}" \
+          --set storage.pvc.create=false \
           --set storage.pvc.size="${STORAGE_SIZE}" \
           --debug
 
