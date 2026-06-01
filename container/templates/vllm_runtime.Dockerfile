@@ -201,6 +201,18 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
 
+# Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships
+# a GPL-encumbered prebuilt ffmpeg binary) with a source install that leaves
+# no binary on disk. vLLM-Omni uses diffusers.export_to_video and doesn't
+# invoke imageio-ffmpeg, so no IMAGEIO_FFMPEG_EXE is needed — this is
+# purely to clear the GPL binary. The --no-binary directive lives in the
+# requirements file itself.
+RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
+        --requirement /tmp/requirements.vllm.txt
+
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
 # tool scripts referencing files not present in Dynamo's build context.

@@ -35,7 +35,11 @@ from .handlers import (
     PrefillWorkerHandler,
     get_dp_range_for_worker,
 )
-from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .health_check import (
+    VllmEmbeddingHealthCheckPayload,
+    VllmHealthCheckPayload,
+    VllmPrefillHealthCheckPayload,
+)
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
 
@@ -282,12 +286,17 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
         )
 
+        embedding_health_check_payload = VllmEmbeddingHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=[("model", config.model)],
+                    health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
                     ModelInput.Text,

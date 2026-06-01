@@ -124,6 +124,7 @@ mod tests {
                 queue_depth: None,
                 worker: None,
                 replay: None,
+                finish_reason_metadata: None,
             },
         );
 

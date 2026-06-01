@@ -6,6 +6,9 @@ title: Quickstart
 
 Get a model running on Kubernetes in minutes.
 
+> [!NOTE]
+> **Deployment modes.** Dynamo supports two deployment modes on Kubernetes. This quickstart uses **standalone mode**, where the Dynamo Frontend serves requests and the integrated Dynamo Router does KV-aware routing. Dynamo can also run in **gateway mode** behind a [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway, where KV-aware routing happens in the Dynamo Endpoint Picker Plugin (EPP) at the gateway layer and the Frontend runs as a sidecar in `--router-mode direct`. See the [Inference Gateway (GAIE) guide](inference-gateway.md) to set up gateway mode.
+
 ## Prerequisites
 
 - Kubernetes cluster (v1.24+) with GPU nodes
