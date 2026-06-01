@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::PrefillLoadEstimator;
+use dynamo_kv_router::{PrefillLoadEstimator, protocols::RoutingConstraints};
 use dynamo_runtime::{
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, RouterMode, ServerStreamingEngine,
@@ -129,8 +129,9 @@ impl
             ));
         }
 
-        let prefill_result = match self
-            .resolve_prefill_worker(&prefill_req, preselected_worker)
+        let endpoint_id = self.endpoint_id.get();
+        let (prefill_result, topology_constraints) = match self
+            .resolve_prefill_worker(&request_id, &prefill_req, preselected_worker)
             .await
         {
             PrefillResolveDecision::Resolved {
@@ -138,18 +139,16 @@ impl
                 dp_rank,
                 bootstrap_info,
             } => {
-                // Bootstrap optimization path: spawn prefill in background
-                // We successfully used the peeked worker, so we must now advance the router state
-                // to ensure the next request gets a different worker.
-                if !self.router_mode.is_kv_routing()
-                    && let Some(router) = self.prefill_router.get()
-                {
-                    router.select_next_worker();
-                }
+                let topology_constraints =
+                    self.preflight_kv_transfer_constraints(endpoint_id, Some(worker_id))?;
 
-                let routing = prefill_req.routing_mut();
-                routing.prefill_worker_id = Some(worker_id);
-                routing.dp_rank = dp_rank;
+                // Bootstrap optimization path: spawn prefill in background
+                self.commit_selected_prefill_worker(
+                    &mut prefill_req,
+                    worker_id,
+                    dp_rank,
+                    preselected_worker,
+                );
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 // NVBugs 5969206: Do NOT link prefill as child of engine context.
@@ -171,7 +170,13 @@ impl
                 // completes so worker recording finishes before phase changes to Decode.
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
 
-                Ok(PrefillOutcome::Bootstrap(bootstrap_info))
+                (
+                    Ok(PrefillOutcome::Bootstrap {
+                        bootstrap_info,
+                        worker_id,
+                    }),
+                    topology_constraints,
+                )
             }
             PrefillResolveDecision::Backpressure {
                 reason,
@@ -183,7 +188,7 @@ impl
                 // back to the synchronous prefill path (which would re-enter
                 // the saturated queue).
                 //
-                // TODO(DEP-8189 / ai-dynamo#8189): once the shared rejection
+                // TODO(ai-dynamo#8189): once the shared rejection
                 // layer lands, classify queue-depth saturation distinctly
                 // from generic resource exhaustion (operator-facing 429 vs
                 // 503) instead of stringifying through ResourceExhausted.
@@ -196,11 +201,54 @@ impl
                     .build()
                     .into());
             }
-            PrefillResolveDecision::Unavailable
-            | PrefillResolveDecision::NotActivated
-            | PrefillResolveDecision::NoBootstrapEndpoint => {
-                // Original prefill path: wait for prefill to complete
-                tracing::debug!("Using original prefill path");
+            PrefillResolveDecision::NoBootstrapEndpoint {
+                worker_id: resolved_wid,
+                dp_rank: resolved_dp_rank,
+            } => {
+                let topology_constraints =
+                    self.preflight_kv_transfer_constraints(endpoint_id, Some(resolved_wid))?;
+
+                // Bootstrap unavailable after resolve_prefill_worker selected a worker.
+                // Commit the same selection in the synchronous path
+                tracing::debug!(
+                    worker_id = resolved_wid,
+                    "Using original prefill path (no bootstrap endpoint), routing to resolved worker"
+                );
+                self.commit_selected_prefill_worker(
+                    &mut prefill_req,
+                    resolved_wid,
+                    resolved_dp_rank,
+                    preselected_worker,
+                );
+
+                drop(prefill_phase_barrier);
+                let prefill_context = Context::with_id_and_metadata(
+                    prefill_req,
+                    request_id.clone(),
+                    metadata.clone(),
+                );
+                let completion = Self::execute_prefill(
+                    self.prefill_router.get().cloned(),
+                    prefill_context,
+                    Some(resolved_wid),
+                    None,
+                )
+                .await?;
+                (
+                    Ok(PrefillOutcome::Completed {
+                        result: completion.result,
+                        worker_id: Some(resolved_wid),
+                        worker_link: completion.worker_link,
+                    }),
+                    topology_constraints,
+                )
+            }
+            PrefillResolveDecision::Unavailable | PrefillResolveDecision::NotActivated => {
+                let topology_constraints =
+                    self.preflight_kv_transfer_constraints(endpoint_id, None)?;
+
+                // No worker resolved; fall back to router-selected prefill.
+                tracing::debug!("Using original prefill path (no resolved worker)");
 
                 // Drop the phase barrier because we wait for prefill completion in this task,
                 // so there is no race with set_phase(Decode) below.
@@ -222,11 +270,18 @@ impl
                     None,
                 )
                 .await?;
-
-                Ok(PrefillOutcome::Completed {
-                    result: completion.result,
-                    worker_link: completion.worker_link,
-                })
+                let prefill_worker_id = completion
+                    .worker_info
+                    .map(|(wid, _)| wid)
+                    .or(preselected_worker);
+                (
+                    Ok(PrefillOutcome::Completed {
+                        result: completion.result,
+                        worker_id: prefill_worker_id,
+                        worker_link: completion.worker_link,
+                    }),
+                    topology_constraints,
+                )
             }
         };
 
@@ -259,16 +314,28 @@ impl
                 let mut decode_req = req;
 
                 match outcome {
-                    PrefillOutcome::Bootstrap(info) => {
-                        decode_req.bootstrap_info = Some(info);
+                    PrefillOutcome::Bootstrap {
+                        bootstrap_info,
+                        worker_id,
+                    } => {
+                        decode_req.bootstrap_info = Some(bootstrap_info);
+                        decode_req.routing_mut().prefill_worker_id = Some(worker_id);
                     }
                     PrefillOutcome::Completed {
                         result,
+                        worker_id,
                         worker_link,
                     } => {
                         decode_req.prefill_result = Some(result);
                         decode_req.migration_link = worker_link;
+                        if let Some(wid) = worker_id {
+                            decode_req.routing_mut().prefill_worker_id = Some(wid);
+                        }
                     }
+                };
+
+                if let Some(topology_constraints) = topology_constraints {
+                    merge_decode_topology_constraints(&mut decode_req, topology_constraints);
                 }
 
                 // Restore original max_tokens for decode
@@ -299,10 +366,88 @@ impl
     }
 }
 
+impl PrefillRouter {
+    fn preflight_kv_transfer_constraints(
+        &self,
+        endpoint_id: Option<&EndpointId>,
+        worker_id: Option<u64>,
+    ) -> anyhow::Result<Option<RoutingConstraints>> {
+        let Some(endpoint_id) = endpoint_id else {
+            return Ok(None);
+        };
+
+        if let Some(worker_id) = worker_id {
+            return self
+                .model_manager
+                .get_kv_transfer_routing_constraints(endpoint_id, worker_id);
+        }
+
+        // TODO: Make synchronous prefill completion always report the exact
+        // prefill worker id. Required KV-transfer policy needs that id to derive
+        // decode constraints, so fail closed until attribution is authoritative.
+        if self
+            .model_manager
+            .has_kv_transfer_required_routing_policy(endpoint_id)
+        {
+            anyhow::bail!(
+                "prefill worker id unavailable before prefill; cannot derive KV transfer topology constraints for endpoint {endpoint_id}"
+            );
+        }
+
+        Ok(None)
+    }
+
+    fn commit_selected_prefill_worker(
+        &self,
+        prefill_req: &mut PreprocessedRequest,
+        worker_id: u64,
+        dp_rank: Option<u32>,
+        preselected_worker: Option<u64>,
+    ) {
+        // SimpleRouter workers selected by resolve_prefill_worker are peeked first,
+        // so advance once when committing that router-selected worker. Externally
+        // preselected workers did not come from the router cursor and must not
+        // advance round-robin state.
+        if preselected_worker.is_none()
+            && !self.router_mode.is_kv_routing()
+            && let Some(router) = self.prefill_router.get()
+        {
+            router.select_next_worker();
+        }
+
+        let routing = prefill_req.routing_mut();
+        routing.prefill_worker_id = Some(worker_id);
+        routing.dp_rank = dp_rank;
+    }
+}
+
+fn merge_decode_topology_constraints(
+    request: &mut PreprocessedRequest,
+    topology_constraints: RoutingConstraints,
+) {
+    if topology_constraints.is_empty() {
+        return;
+    }
+
+    let routing_constraints = request
+        .routing_mut()
+        .routing_constraints
+        .get_or_insert_with(RoutingConstraints::default);
+    routing_constraints
+        .required_taints
+        .extend(topology_constraints.required_taints);
+    routing_constraints
+        .preferred_taints
+        .extend(topology_constraints.preferred_taints);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use dynamo_kv_router::config::RouterConfigOverride;
+    use std::collections::{HashMap, HashSet};
+
+    use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
 
     #[test]
     fn decode_router_override_disables_overlap_and_prefill_tracking() {
@@ -315,6 +460,68 @@ mod tests {
         assert_eq!(override_config.assume_kv_reuse, Some(false));
         assert_eq!(override_config.track_prefill_tokens, Some(false));
         assert_eq!(override_config.router_temperature, Some(0.7));
+    }
+
+    fn request_with_constraints(
+        routing_constraints: Option<RoutingConstraints>,
+    ) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .routing(Some(RoutingHints {
+                routing_constraints,
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn merge_decode_topology_constraints_creates_and_preserves_constraints() {
+        for (mut request, expect_user_constraints) in [
+            (request_with_constraints(None), false),
+            (
+                request_with_constraints(Some(RoutingConstraints {
+                    required_taints: HashSet::from(["user.required".to_string()]),
+                    preferred_taints: HashMap::from([("user.preferred".to_string(), 0.25)]),
+                })),
+                true,
+            ),
+        ] {
+            merge_decode_topology_constraints(
+                &mut request,
+                RoutingConstraints {
+                    required_taints: HashSet::from(["dynamo.topology/zone=us-east-1a".to_string()]),
+                    preferred_taints: HashMap::from([(
+                        "dynamo.topology/rack=rack-7".to_string(),
+                        0.85,
+                    )]),
+                },
+            );
+
+            let constraints = request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.routing_constraints.as_ref())
+                .unwrap();
+            assert!(
+                constraints
+                    .required_taints
+                    .contains("dynamo.topology/zone=us-east-1a")
+            );
+            assert_eq!(
+                constraints.preferred_taints["dynamo.topology/rack=rack-7"],
+                0.85
+            );
+
+            if expect_user_constraints {
+                assert!(constraints.required_taints.contains("user.required"));
+                assert_eq!(constraints.preferred_taints["user.preferred"], 0.25);
+            }
+        }
     }
 
     // -- Prefill death handling tests --

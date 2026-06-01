@@ -7,7 +7,6 @@ import importlib
 import inspect
 import json
 import logging
-import os
 import random
 import threading
 from abc import ABC, abstractmethod
@@ -28,8 +27,10 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -45,32 +46,6 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
 logger = logging.getLogger(__name__)
-
-# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
-# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
-_lora_manager = None
-
-
-def get_lora_manager():
-    """Get the LoRAManager singleton, initializing it on first call if enabled."""
-    global _lora_manager
-
-    if _lora_manager is not None:
-        return _lora_manager
-
-    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
-        try:
-            from dynamo.common.lora import LoRAManager
-
-            _lora_manager = LoRAManager()
-            logger.info("LoRAManager initialized successfully")
-            return _lora_manager
-        except Exception as e:
-            logger.warning(
-                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
-            )
-
-    return None
 
 
 class SGLangEngineQuiesceController:
@@ -1081,9 +1056,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 return {"json_schema": json.dumps(json_schema)}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
-                if hasattr(structural_tag, "model_dump"):
-                    structural_tag = structural_tag.model_dump()
-                return {"structural_tag": json.dumps(structural_tag)}
+                return {"structural_tag": serialize_structural_tag(structural_tag)}
         return {}
 
     @staticmethod
@@ -1137,6 +1110,8 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         Raises:
             EngineShutdown: If shutdown event was triggered.
         """
+        cancellation_future: asyncio.Future[Any] | None = None
+        shutdown_task: asyncio.Task[Any] | None = None
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
 
@@ -1152,7 +1127,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
 
             # Build list of futures/tasks to wait for
             wait_for: list[asyncio.Future[Any]] = [cancellation_future]
-            shutdown_task = None
 
             if self.shutdown_event:
                 # Create task for shutdown monitoring and add to wait list
@@ -1210,6 +1184,15 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 f"Cancellation monitor task cancelled for SGLang Request ID {request_id}, Context: {context.id()}"
             )
             raise
+        finally:
+            for awaitable in (cancellation_future, shutdown_task):
+                if awaitable is None or awaitable.done():
+                    continue
+                awaitable.cancel()
+                try:
+                    await awaitable
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     @asynccontextmanager
     async def _cancellation_monitor(

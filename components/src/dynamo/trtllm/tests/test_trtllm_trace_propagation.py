@@ -54,6 +54,7 @@ def _make_engine(generate_async) -> TrtllmLLMEngine:
     # Couples to TrtllmLLMEngine.__init__ attribute names — keep in sync.
     engine = TrtllmLLMEngine.__new__(TrtllmLLMEngine)
     engine._engine = SimpleNamespace(llm=SimpleNamespace(generate_async=generate_async))
+    engine._logits_processor_spec = None
     engine._default_sampling_params = SimpleNamespace()
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
     engine.max_seq_len = 1024

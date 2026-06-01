@@ -25,9 +25,9 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, CommonArgs, ComponentSnapshot, DisaggregationMode,
-    DynamoError, EngineConfig, ErrorType, GenerateContext, KvEventSource, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx, PreprocessedRequest,
-    SnapshotPublisher, WorkerConfig, chunk, usage,
+    DynamoError, EngineConfig, ErrorType, GenerateContext, HEALTH_CHECK_KEY, KvEventSource,
+    LLMEngine, LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx,
+    PreprocessedRequest, SnapshotPublisher, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
@@ -522,6 +522,21 @@ impl LLMEngine for MockerBackend {
                 Ok(())
             })),
         })
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        let mut payload = serde_json::json!({
+            "token_ids": [1],
+            "stop_conditions": {"max_tokens": 1, "ignore_eos": true},
+            "sampling_options": {"temperature": 0.0},
+        });
+        // Decode mode's generate() rejects requests without prefill_result;
+        // synthesize an empty handoff so the canary clears the precondition.
+        if self.disaggregation_mode.is_decode() {
+            payload["prefill_result"] = serde_json::json!({"disaggregated_params": {}});
+        }
+        payload[HEALTH_CHECK_KEY] = serde_json::Value::Bool(true);
+        Ok(Some(payload))
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

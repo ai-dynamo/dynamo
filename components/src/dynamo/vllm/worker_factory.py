@@ -21,11 +21,12 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
 from .cache_info import configure_kv_event_block_size
+from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
@@ -34,14 +35,21 @@ from .handlers import (
     PrefillWorkerHandler,
     get_dp_range_for_worker,
 )
-from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .health_check import (
+    VllmEmbeddingHealthCheckPayload,
+    VllmHealthCheckPayload,
+    VllmPrefillHealthCheckPayload,
+)
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
 
 logger = logging.getLogger(__name__)
 
 # (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
-EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
+# component_gauges is None on the embedding-worker path: pooling engines
+# have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
+# LLMBackendMetrics registration there.
+EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
@@ -254,7 +262,15 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint]
 
         fpm_worker_id = str(generate_endpoint.connection_id())
-        factory = StatLoggerFactory(endpoint=generate_endpoint)
+        # Embedding workers run on pooling engines: no KV cache, no
+        # scheduler stats, no decode loop. The factory still has to exist
+        # because vLLM unconditionally invokes it during AsyncLLM init,
+        # but it returns a no-op stat logger and setup_vllm_engine() skips
+        # the chat-shaped LLMBackendMetrics registration.
+        factory = StatLoggerFactory(
+            endpoint=generate_endpoint,
+            embedding_worker=True,
+        )
         (
             engine_client,
             vllm_config,
@@ -270,12 +286,17 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
         )
 
+        embedding_health_check_payload = VllmEmbeddingHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=[("model", config.model)],
+                    health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
                     ModelInput.Text,
@@ -284,6 +305,11 @@ class WorkerFactory:
                     config,
                     engine_client,
                     vllm_config,
+                    # Embedding workers have no prefill/decode split — they
+                    # always serve a single pooling pass, so they advertise
+                    # as Aggregated with no peer dependencies.
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
                 ),
             )
         except Exception as e:
@@ -399,7 +425,12 @@ class WorkerFactory:
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
-        factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
         factory.init_publish()
 
         # Currently routing to worker is still controlled by the worker
@@ -494,6 +525,16 @@ class WorkerFactory:
                 bench_cfg, vllm_config
             )
 
+        # What the worker is advertising itself as, and what other worker it needs to serve traffic.
+        if config.disaggregation_mode == DisaggregationMode.DECODE:
+            worker_type = WorkerType.Decode
+            needs_set: list[WorkerType] = [WorkerType.Prefill]
+        else:
+            # AGGREGATED
+            worker_type = WorkerType.Aggregated
+            needs_set = []
+        needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
         await self.register_vllm_model(
             model_input,
             model_type,
@@ -501,6 +542,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=worker_type,
+            needs=needs,
         )
 
         health_check_payload = VllmHealthCheckPayload(
@@ -706,6 +749,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=WorkerType.Prefill,
+            needs=[[WorkerType.Decode]],
         )
 
         health_check_payload = VllmPrefillHealthCheckPayload(

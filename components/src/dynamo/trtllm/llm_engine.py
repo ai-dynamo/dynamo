@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -36,19 +37,30 @@ from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
+    TEST_LOGITS_PROCESSOR_ENV,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LogitsProcessorSpec,
+    is_generation_stage,
+    logits_processors_for_request,
+    resolve_test_logits_processor_spec,
+)
+from dynamo.common.backend.health_check import (
+    bos_token_id_or,
+    build_health_check_payload,
 )
 from dynamo.common.backend.metrics import register_global_registry
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, PushSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
+from dynamo.trtllm.logits_processing.adapter import attach_logits_processors
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -144,6 +156,8 @@ class TrtllmLLMEngine(LLMEngine):
         self._log_request_metrics: Optional[Callable[[dict], None]] = None
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
+        # Resolved once in `start()`; None when the smoke hook is off.
+        self._logits_processor_spec: LogitsProcessorSpec | None = None
         # Per-request GenerationResult handles for `abort()` lookup. TRT-LLM's
         # abort API is `GenerationResult.abort()` (not by request-id), so we
         # need the handle. Other engines (vllm, sglang) abort by id and
@@ -252,6 +266,15 @@ class TrtllmLLMEngine(LLMEngine):
                 kv_cfg["event_buffer_max_size"] = _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
             engine_args["kv_cache_config"] = kv_cfg
 
+        # Force tokenizer init for the smoke hook, after all overrides so an
+        # explicit user `skip_tokenizer_init=True` can't starve the processor.
+        # Gated to generation roles for the same reason as the spec resolution
+        # below. The flag is TRT-LLM-shaped; each backend sets its own.
+        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
+            _TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode]
+        ):
+            engine_args["skip_tokenizer_init"] = False
+
         # Use post-override engine_args so EngineConfig matches what the
         # actual TRT-LLM engine got.
         engine = cls(
@@ -288,6 +311,10 @@ class TrtllmLLMEngine(LLMEngine):
 
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
+
+        # Resolve the engine-declared spec now the engine (and its tokenizer)
+        # is initialized; see `logits_processor_spec()`.
+        self._logits_processor_spec = await self.logits_processor_spec()
 
         from tensorrt_llm.metrics import MetricsCollector
 
@@ -353,6 +380,18 @@ class TrtllmLLMEngine(LLMEngine):
             )
             for rank in range(self._attention_dp_size)
         ]
+
+    async def logits_processor_spec(self) -> LogitsProcessorSpec | None:
+        # Only generation roles ever attach (PREFILL/ENCODE gate out per
+        # request), so skip spec resolution — and the tokenizer it needs —
+        # entirely for the other roles.
+        if not is_generation_stage(_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode]):
+            return None
+        # Bind the env-gated smoke hook to TRT-LLM's tokenizer; the lambda is
+        # dereferenced lazily, only when the hook is on (see the resolver).
+        assert self._engine is not None
+        engine = self._engine  # narrow for the closure
+        return resolve_test_logits_processor_spec(lambda: engine.llm.tokenizer)
 
     def component_metrics_dp_ranks(self) -> list[int]:
         return list(range(self._attention_dp_size))
@@ -605,7 +644,13 @@ class TrtllmLLMEngine(LLMEngine):
             else None
         )
 
-        # Prefill returns one non-streaming chunk carrying the handoff —
+        entries = logits_processors_for_request(
+            self._logits_processor_spec,
+            disaggregation_mode=_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode],
+        )
+        attach_logits_processors(sampling_params, entries)
+
+        # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
         generation_result = self._engine.llm.generate_async(
@@ -774,6 +819,23 @@ class TrtllmLLMEngine(LLMEngine):
         # vendor metrics independent of KV-event publishing.
         register_global_registry(metrics, engine_prefix="trtllm_")
 
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            logger.warning(
+                "DECODE worker: health-check canary disabled — synthesizing a "
+                "prefill_result that survives DisaggregatedParamsCodec.decode "
+                "is non-trivial. Endpoint readiness will rely on real request traffic."
+            )
+            return None
+        tokenizer = None
+        if self._engine is not None and self._engine._llm is not None:
+            tokenizer = self._engine.llm.tokenizer
+        # priority=1.0 is TRT-LLM's max — keeps the canary off the starvation path.
+        return build_health_check_payload(
+            bos_token_id=bos_token_id_or(tokenizer),
+            extras={"priority": 1.0},
+        )
+
     async def drain(self) -> None:
         """Prefill-only: poll until in-flight requests finish so a
         decode peer's NIXL pull doesn't see freed GPU memory (#7319).
@@ -858,7 +920,9 @@ class TrtllmLLMEngine(LLMEngine):
                 regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
-                structural_tag=guided_decoding.get("structural_tag"),
+                structural_tag=serialize_structural_tag(
+                    guided_decoding.get("structural_tag")
+                ),
             )
 
         n = overrides.get("n")

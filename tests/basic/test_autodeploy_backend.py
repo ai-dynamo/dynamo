@@ -167,6 +167,7 @@ def send_completion_request(
 
 
 @pytest.mark.trtllm
+@pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.gpu_1

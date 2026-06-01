@@ -26,6 +26,8 @@ use dynamo_runtime::{
     protocols::{EndpointId, annotated::Annotated},
 };
 
+use dynamo_renderer::PromptFormatter;
+
 use crate::{
     backend::Backend,
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
@@ -34,7 +36,9 @@ use crate::{
     kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
-    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
+    preprocessor::{
+        OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::prompt_formatter_from_mdc,
+    },
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
         openai::{
@@ -784,6 +788,9 @@ impl ModelWatcher {
                         // Create prefill-specific config with track_active_blocks disabled
                         let mut prefill_config = router_config.kv_router_config.clone();
                         prefill_config.router_track_active_blocks = false;
+                        // Prefill KV events are emitted by prefill workers; do not inherit
+                        // decode-only speculative hash mode.
+                        let prefill_enable_eagle = false;
 
                         PrefillRouter::new(
                             rx,
@@ -795,7 +802,7 @@ impl ModelWatcher {
                             router_config.enforce_disagg,
                             model_name.clone(),
                             namespace.clone(),
-                            card.runtime_config.enable_eagle,
+                            prefill_enable_eagle,
                         )
                     })
             } else {
@@ -876,7 +883,7 @@ impl ModelWatcher {
                         )
                     })?;
                     let PromptFormatter::OAI(formatter) =
-                        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
+                        prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
                     let preprocessor =
                         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
                             .context("OpenAIPreprocessor.new_with_parts")?;
