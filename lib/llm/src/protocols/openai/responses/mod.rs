@@ -720,14 +720,15 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
 
-        // Map reasoning.effort to reasoning_effort
+        // Map reasoning.effort to reasoning_effort. The upstream responses
+        // `effort` is the same `async_openai` enum the Chat field is built on,
+        // so the local `From` impl converts it directly and exhaustively.
         let reasoning_effort = resp
             .inner
             .reasoning
             .as_ref()
             .and_then(|r| r.effort.clone())
-            .and_then(|effort| serde_json::to_value(effort).ok())
-            .and_then(|value| serde_json::from_value::<ChatReasoningEffort>(value).ok());
+            .map(ChatReasoningEffort::from);
 
         // Map text.format to response_format
         let response_format = resp.inner.text.as_ref().and_then(convert_text_format);

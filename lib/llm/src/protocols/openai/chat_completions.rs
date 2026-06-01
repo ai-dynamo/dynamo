@@ -152,6 +152,11 @@ impl NvCreateChatCompletionRequest {
         if let Some(effort) = reasoning_effort {
             args.entry("reasoning_effort".to_string()).or_insert(effort);
         }
+
+        // The raw `thinking` payload has been folded into `chat_template_args`;
+        // drop it so it isn't double-shipped downstream (and so it can't be
+        // re-interpreted with different precedence by the worker preprocessor).
+        self.thinking = None;
         Ok(())
     }
 }
