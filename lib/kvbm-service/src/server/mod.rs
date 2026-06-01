@@ -116,7 +116,7 @@ impl KvbmService {
         info!(
             capacity_slots = capacity,
             container = container.name(),
-            "discovered CUDA-visible GPUs (slot capacity)"
+            "discovered visible GPUs (slot capacity)"
         );
 
         let metrics = ServiceMetrics::new();
@@ -296,7 +296,7 @@ fn capacity_from_resources(resources: &Resources) -> u32 {
     let count = resources
         .gpus
         .iter()
-        .filter(|g| g.cuda_ordinal.is_some())
+        .filter(|g| g.device_ordinal.is_some())
         .count();
     u32::try_from(count).unwrap_or(u32::MAX)
 }
