@@ -9,10 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from dynamo.vllm.constants import DisaggregationMode
-from dynamo.vllm.worker_factory import (
-    EngineSetupResult,
-    WorkerFactory,
-)
+from dynamo.vllm.worker_factory import EngineSetupResult, WorkerFactory
 
 pytestmark = [
     pytest.mark.unit,

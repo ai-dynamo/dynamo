@@ -17,8 +17,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 WORKER_ID_PLACEMENT_ENV_KEYS = (
-    "VLLM_NIXL_SIDE_CHANNEL_HOST",
-    "VLLM_NIXL_SIDE_CHANNEL_PORT",
     "CUDA_VISIBLE_DEVICES",
     "ZE_AFFINITY_MASK",
     "HABANA_VISIBLE_DEVICES",
