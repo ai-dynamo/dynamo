@@ -23,6 +23,7 @@ use validator::Validate;
 use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs, WorkerType};
 
 const DEFAULT_AIC_SYSTEM: &str = "h200_sxm";
+const MAX_CAPACITY_SEARCH_CANDIDATES: u32 = 128;
 
 /// Engine limits needed by planner/router-level queries.
 ///
@@ -557,10 +558,11 @@ impl EnginePerfModel {
         if request.isl == 0 {
             return Ok(None);
         }
-        // TODO: Replace worker-specific linear batch-size sweeps with a faster
-        // non-monotonic-safe search. We tried binary search, but the perf model
-        // does not guarantee strictly increasing estimates, which led to bad
-        // capacity choices.
+        // Capacity search is intentionally bounded: full linear sweeps can be
+        // caller-controlled through engine limits. TODO: replace coarse sampling
+        // with a faster non-monotonic-safe search. We tried binary search, but
+        // the perf model does not guarantee strictly increasing estimates,
+        // which led to bad capacity choices.
         match self.worker_type {
             WorkerType::Prefill => self.find_prefill_capacity(&request),
             WorkerType::Decode => self.find_decode_capacity(&request),
@@ -578,7 +580,7 @@ impl EnginePerfModel {
         }
 
         let mut best = None;
-        for batch_size in 1..=max_batch {
+        for batch_size in capacity_batch_sizes(max_batch) {
             let tokens = request.isl.saturating_mul(batch_size);
             let Some(ttft) = self.prefill_time_for_tokens(tokens)? else {
                 return Ok(None);
@@ -614,7 +616,7 @@ impl EnginePerfModel {
             return Ok(None);
         }
         let mut best = None;
-        for batch_size in 1..=max_batch {
+        for batch_size in capacity_batch_sizes(max_batch) {
             let Some(itl) = self.decode_time_for_batch(batch_size, context_length)? else {
                 return Ok(None);
             };
@@ -652,7 +654,7 @@ impl EnginePerfModel {
         }
 
         let mut best = None;
-        for batch_size in 1..=hard_cap {
+        for batch_size in capacity_batch_sizes(hard_cap) {
             if !prefill_decode_balanced(
                 request.isl,
                 request.osl,
@@ -1114,6 +1116,21 @@ fn prefill_decode_balanced(
     prefill_budget > 0 && isl <= osl.saturating_mul(prefill_budget)
 }
 
+fn capacity_batch_sizes(max_batch: u32) -> Vec<u32> {
+    if max_batch == 0 {
+        return Vec::new();
+    }
+    if max_batch <= MAX_CAPACITY_SEARCH_CANDIDATES {
+        return (1..=max_batch).collect();
+    }
+
+    let span = u64::from(max_batch - 1);
+    let denominator = u64::from(MAX_CAPACITY_SEARCH_CANDIDATES - 1);
+    (0..MAX_CAPACITY_SEARCH_CANDIDATES)
+        .map(|index| 1 + ((u64::from(index) * span) / denominator) as u32)
+        .collect()
+}
+
 fn ceil_div_u32(numerator: u32, denominator: u32) -> u32 {
     if denominator == 0 {
         return 0;
@@ -1362,6 +1379,26 @@ mod tests {
                 EnginePerfModel::from_regression(WorkerType::Decode, limits, None).unwrap_err();
             assert!(err.to_string().contains("invalid engine perf limits"));
         }
+    }
+
+    #[test]
+    fn capacity_batch_sizes_are_bounded_and_include_endpoints() {
+        assert_eq!(capacity_batch_sizes(0), Vec::<u32>::new());
+        assert_eq!(capacity_batch_sizes(3), vec![1, 2, 3]);
+
+        let exact = capacity_batch_sizes(MAX_CAPACITY_SEARCH_CANDIDATES);
+        assert_eq!(exact.len(), MAX_CAPACITY_SEARCH_CANDIDATES as usize);
+        assert_eq!(exact[0], 1);
+        assert_eq!(exact[exact.len() - 1], MAX_CAPACITY_SEARCH_CANDIDATES);
+
+        let sampled = capacity_batch_sizes(MAX_CAPACITY_SEARCH_CANDIDATES + 1);
+        assert_eq!(sampled.len(), MAX_CAPACITY_SEARCH_CANDIDATES as usize);
+        assert_eq!(sampled[0], 1);
+        assert_eq!(
+            sampled[sampled.len() - 1],
+            MAX_CAPACITY_SEARCH_CANDIDATES + 1
+        );
+        assert!(sampled.windows(2).all(|window| window[0] < window[1]));
     }
 
     #[test]

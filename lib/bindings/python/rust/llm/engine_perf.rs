@@ -421,11 +421,13 @@ impl RustEnginePerfModel {
     /// Search sustainable per-engine RPS; inspect eligible to see whether eligible SLA metrics passed.
     fn find_engine_capacity_rps(
         &self,
+        py: Python<'_>,
         request: PyRef<'_, EngineCapacityRequest>,
     ) -> PyResult<Option<EngineCapacity>> {
-        Ok(self
-            .inner
-            .find_engine_capacity_rps(request.inner.clone())
+        let model = self.inner.clone();
+        let request = request.inner.clone();
+        Ok(py
+            .allow_threads(move || model.find_engine_capacity_rps(request))
             .map_err(to_pyerr)?
             .map(|inner| EngineCapacity { inner }))
     }
