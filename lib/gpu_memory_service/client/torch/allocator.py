@@ -1,7 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU Memory Service allocator registry for PyTorch integration."""
+"""GPU Memory Service allocator registry for PyTorch integration.
+
+Two manager flavors share the same tagged-mempool dispatch:
+- GMSClientMemoryManager: server-backed (used for weights, anything that
+  needs cross-engine import).
+- ClientLocalMemoryManager: pure client-local CUDA VMM (used for kv_cache,
+  whether shadow-failover scratch or plain enable_sleep_mode buffers).
+
+Both implement the same minimal interface — create_mapping, destroy_mapping,
+unmap_all_vas, remap_all_vas, is_unmapped, mappings, abort — so the
+allocator's malloc/free dispatch is content-blind.
+"""
 
 from __future__ import annotations
 
@@ -9,25 +20,28 @@ import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Optional, Union
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
 if TYPE_CHECKING:
     import torch
+    from gpu_memory_service.client.client_local_memory_manager import (
+        ClientLocalMemoryManager,
+    )
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
     from torch.cuda.memory import MemPool
+
+    AnyManager = Union[GMSClientMemoryManager, ClientLocalMemoryManager]
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class _TagState:
-    manager: "GMSClientMemoryManager"
+    manager: "AnyManager"
     mem_pool: "MemPool | None"
-    socket_path: str
     device: int
-    is_scratch: bool = False
 
 
 _tag_states: dict[str, _TagState] = {}
@@ -40,21 +54,15 @@ _pluggable_alloc: Any | None = None
 
 
 def _gms_malloc(size: int, device: int, stream: int) -> int:
-    # Tag-context dispatch: the active tag (set by gms_use_mem_pool) selects
-    # the registry; state.is_scratch decides scratch vs server-backed routing.
+    # Active tag (set by gms_use_mem_pool) selects the manager; the manager's
+    # create_mapping is virtual — server-backed or client-local depending on
+    # which class was registered for this tag.
     tag = _active_tag.get()
     if tag is None:
         raise RuntimeError("No active GMS allocation tag")
-
     state = _tag_states.get(tag)
     if state is None:
         raise RuntimeError(f"Unknown GMS allocation tag: {tag}")
-
-    if state.is_scratch:
-        va = state.manager.create_scratch_mapping(size=int(size), tag=tag)
-        logger.debug("[GMS] scratch malloc(tag=%s): va=0x%x size=%d", tag, va, size)
-        return va
-
     va = state.manager.create_mapping(size=int(size), tag=tag)
     logger.debug("[GMS] malloc(tag=%s): va=0x%x size=%d", tag, va, size)
     return va
@@ -62,18 +70,12 @@ def _gms_malloc(size: int, device: int, stream: int) -> int:
 
 def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
     # Content-driven dispatch: torch only gives us a VA, no tag context.
-    # Try the scratch registry first across all managers, then standard.
+    # Each manager's destroy_mapping returns True iff it owned the VA.
     va = int(ptr)
     for tag, state in _tag_states.items():
-        if state.manager.destroy_scratch_mapping(va):
-            logger.debug("[GMS] scratch free(tag=%s): va=0x%x size=%d", tag, va, size)
+        if state.manager.destroy_mapping(va):
+            logger.debug("[GMS] free(tag=%s): va=0x%x size=%d", tag, va, size)
             return
-    for tag, state in _tag_states.items():
-        if va not in state.manager.mappings:
-            continue
-        logger.debug("[GMS] free(tag=%s): va=0x%x size=%d", tag, va, size)
-        state.manager.destroy_mapping(va)
-        return
     logger.warning("[GMS] free: no manager owns va=0x%x, ignoring", va)
 
 
@@ -106,18 +108,23 @@ def get_or_create_gms_client_memory_manager(
     tag: str = "weights",
     timeout_ms: Optional[int] = None,
 ) -> "GMSClientMemoryManager":
+    """Construct + register a server-backed manager."""
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
     state = _tag_states.get(tag)
     if state is not None:
-        if state.socket_path != socket_path or state.device != device:
+        manager = state.manager
+        if not isinstance(manager, GMSClientMemoryManager):
+            raise RuntimeError(
+                f"GMS allocator tag={tag} is registered as non-server-backed; "
+                "cannot reuse via get_or_create_gms_client_memory_manager"
+            )
+        if manager.socket_path != socket_path or state.device != device:
             raise RuntimeError(
                 f"GMS allocator tag={tag} was initialized for "
-                f"{state.socket_path} on device {state.device}, not {socket_path} "
-                f"on device {device}"
+                f"{manager.socket_path} on device {state.device}, not "
+                f"{socket_path} on device {device}"
             )
-
-        manager = state.manager
         if not manager.is_connected:
             if manager.mappings or manager.is_unmapped or manager.granted_lock_type:
                 raise RuntimeError(
@@ -155,7 +162,6 @@ def get_or_create_gms_client_memory_manager(
     _tag_states[tag] = _TagState(
         manager=manager,
         mem_pool=mem_pool,
-        socket_path=socket_path,
         device=device,
     )
     logger.info(
@@ -167,106 +173,72 @@ def get_or_create_gms_client_memory_manager(
     return manager
 
 
-def get_or_create_scratch_manager(
-    socket_path: str,
+def get_or_create_client_local_manager(
     device: int,
     *,
     tag: str = "kv_cache",
-) -> "GMSClientMemoryManager":
-    """Register an unconnected manager for client-local scratch allocation.
+    aliased: bool = False,
+) -> "ClientLocalMemoryManager":
+    """Construct + register a client-local manager (no GMS server).
 
-    The manager is constructed but .connect() is NOT called. _gms_malloc routes
-    via create_scratch_mapping while is_scratch is True. Caller must invoke
-    .connect(...) before any server-backed operation, then call
-    ensure_scratch_disabled(manager) to flip routing to the standard
-    create_mapping path.
+    aliased=True  installs scratch-aliased physical at create_mapping (one
+                  granularity-sized handle aliased N times across the VA).
+                  remap_all_vas always allocates real per-tensor backing,
+                  collapsing aliased state on first wake.
+    aliased=False installs full-size real physical at create_mapping.
     """
-    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+    from gpu_memory_service.client.client_local_memory_manager import (
+        ClientLocalMemoryManager,
+    )
 
     state = _tag_states.get(tag)
     if state is not None:
-        if state.socket_path != socket_path or state.device != device:
+        manager = state.manager
+        if not isinstance(manager, ClientLocalMemoryManager):
+            raise RuntimeError(
+                f"GMS allocator tag={tag} is already registered as server-backed; "
+                "cannot reuse via get_or_create_client_local_manager"
+            )
+        if state.device != device or manager.aliased != aliased:
             raise RuntimeError(
                 f"GMS allocator tag={tag} was initialized for "
-                f"{state.socket_path} on device {state.device}, not {socket_path} "
-                f"on device {device}"
+                f"device={state.device} aliased={manager.aliased}; "
+                f"got device={device} aliased={aliased}"
             )
-        if not state.is_scratch:
-            raise RuntimeError(
-                f"GMS allocator tag={tag} already registered as non-scratch; "
-                "use get_or_create_gms_client_memory_manager instead"
-            )
-        return state.manager
+        return manager
 
-    manager = GMSClientMemoryManager(socket_path, device=device, tag=tag)
+    manager = ClientLocalMemoryManager(device=device, aliased=aliased, tag=tag)
     _ensure_callbacks_initialized()
     mem_pool = _create_mem_pool()
 
     _tag_states[tag] = _TagState(
         manager=manager,
         mem_pool=mem_pool,
-        socket_path=socket_path,
         device=device,
-        is_scratch=True,
     )
     logger.info(
-        "[GMS] Registered scratch allocator for tag=%s (device=%d)", tag, device
+        "[GMS] Registered client-local allocator for tag=%s (device=%d, aliased=%s)",
+        tag,
+        device,
+        aliased,
     )
     return manager
 
 
-def is_scratch(manager: "GMSClientMemoryManager") -> bool:
-    """True if the manager's tag is currently in scratch routing.
-
-    Routes through manager.tag → _tag_states. Raises if the manager is not
-    registered.
-    """
-    if manager.tag is None:
-        raise RuntimeError("manager has no tag; not registered in allocator")
-    state = _tag_states.get(manager.tag)
-    if state is None:
-        raise RuntimeError(f"tag {manager.tag!r} not in _tag_states")
-    return state.is_scratch
-
-
-def ensure_scratch_disabled(manager: "GMSClientMemoryManager") -> None:
-    """Flip the manager's tag out of scratch routing.
-
-    After this, _gms_malloc routes via create_mapping (server-backed) on the
-    tag's mempool. Idempotent. Raises if the manager is not registered or
-    not currently RW-connected — server-backed allocations require RW.
-
-    Call after migrating scratch entries into _mappings via
-    prepare_scratch_for_reallocation, before reallocate_all_handles.
-    """
-    if manager.tag is None:
-        raise RuntimeError("manager has no tag; not registered in allocator")
-    state = _tag_states.get(manager.tag)
-    if state is None:
-        raise RuntimeError(f"tag {manager.tag!r} not in _tag_states")
-    if manager.granted_lock_type != GrantedLockType.RW:
-        raise RuntimeError(
-            f"ensure_scratch_disabled requires RW grant on tag={manager.tag!r}; "
-            f"got granted_lock_type={manager.granted_lock_type}. "
-            "Did you forget to .connect(RequestedLockType.RW) first?"
-        )
-    state.is_scratch = False
-
-
 def get_gms_client_memory_manager(
     tag: str = "weights",
-) -> "GMSClientMemoryManager | None":
+) -> "AnyManager | None":
     state = _tag_states.get(tag)
     if state is None:
         return None
     return state.manager
 
 
-def get_gms_client_memory_managers() -> tuple["GMSClientMemoryManager", ...]:
+def get_gms_client_memory_managers() -> tuple["AnyManager", ...]:
     return tuple(state.manager for state in _tag_states.values())
 
 
-def evict_gms_client_memory_manager(manager: "GMSClientMemoryManager") -> None:
+def evict_gms_client_memory_manager(manager: "AnyManager") -> None:
     for tag, state in list(_tag_states.items()):
         if state.manager is manager:
             _tag_states.pop(tag, None)
