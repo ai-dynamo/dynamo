@@ -318,33 +318,37 @@ pub fn get_numa_node_for_pci_address(pci_address: &str) -> Option<NumaNode> {
 /// `testing-cuda` tests in this crate consume it as the canonical
 /// CUDA-BDF helper.
 pub fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
-    use cudarc::driver::{result::device as cuda_device, sys as cuda_sys};
-    unsafe {
-        let mut dev = std::mem::MaybeUninit::uninit();
-        if cuda_sys::cuDeviceGet(dev.as_mut_ptr(), device_id as i32)
-            .result()
-            .is_err()
-        {
-            return None;
+    // cudarc panics (rather than returning Err) when libcuda.so is absent.
+    std::panic::catch_unwind(|| {
+        use cudarc::driver::{result::device as cuda_device, sys as cuda_sys};
+        unsafe {
+            let mut dev = std::mem::MaybeUninit::uninit();
+            if cuda_sys::cuDeviceGet(dev.as_mut_ptr(), device_id as i32)
+                .result()
+                .is_err()
+            {
+                return None;
+            }
+            let dev = dev.assume_init();
+            let domain = cuda_device::get_attribute(
+                dev,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
+            )
+            .ok()?;
+            let bus = cuda_device::get_attribute(
+                dev,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
+            )
+            .ok()?;
+            let device = cuda_device::get_attribute(
+                dev,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
+            )
+            .ok()?;
+            Some(format!("{:04x}:{:02x}:{:02x}.0", domain, bus, device))
         }
-        let dev = dev.assume_init();
-        let domain = cuda_device::get_attribute(
-            dev,
-            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
-        )
-        .ok()?;
-        let bus = cuda_device::get_attribute(
-            dev,
-            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
-        )
-        .ok()?;
-        let device = cuda_device::get_attribute(
-            dev,
-            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
-        )
-        .ok()?;
-        Some(format!("{:04x}:{:02x}:{:02x}.0", domain, bus, device))
-    }
+    })
+    .unwrap_or(None)
 }
 
 /// Get NUMA node for a CUDA device by ordinal — CUDA-only legacy helper.
@@ -551,22 +555,26 @@ pub struct GpuInfo {
 /// `CUDA_VISIBLE_DEVICES`). Used as a last-ditch fallback when neither
 /// sysfs nor NVML succeed.
 fn enumerate_cuda_gpus() -> Vec<GpuInfo> {
-    use cudarc::driver::result::device as cuda_device;
-    let count = match cuda_device::get_count() {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+    // cudarc panics (rather than returning Err) when libcuda.so is absent.
+    std::panic::catch_unwind(|| {
+        use cudarc::driver::result::device as cuda_device;
+        let count = match cuda_device::get_count() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
 
-    (0..count as u32)
-        .filter_map(|i| {
-            let pci = get_pci_bus_address_from_cuda(i)?;
-            let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
-            Some(GpuInfo {
-                pci_address: pci,
-                numa_node: numa,
+        (0..count as u32)
+            .filter_map(|i| {
+                let pci = get_pci_bus_address_from_cuda(i)?;
+                let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
+                Some(GpuInfo {
+                    pci_address: pci,
+                    numa_node: numa,
+                })
             })
-        })
-        .collect()
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Enumerate all NVIDIA GPUs on the host by walking sysfs.

@@ -283,18 +283,22 @@ impl Resources {
         let all_gpus = numa::enumerate_all_gpus();
 
         // Best-effort CUDA init so a fresh process (e.g. the inspection
-        // binary) can still see ordinals. Errors are ignored: a CUDA-less
-        // host should still produce a useful sysfs-derived snapshot.
-        let _ = cudarc::driver::result::init();
-
-        let mut cuda_ordinals_by_pci: HashMap<String, u32> = HashMap::new();
-        if let Ok(count) = cudarc::driver::result::device::get_count() {
-            for i in 0..count as u32 {
-                if let Some(pci) = get_pci_bus_address_from_cuda(i) {
-                    cuda_ordinals_by_pci.insert(pci, i);
+        // binary) can still see ordinals. Wrapped in catch_unwind because
+        // cudarc panics (rather than returning Err) when libcuda.so is
+        // absent. A CUDA-less host still produces a useful sysfs snapshot.
+        let cuda_ordinals_by_pci: HashMap<String, u32> = std::panic::catch_unwind(|| {
+            let _ = cudarc::driver::result::init();
+            let mut map = HashMap::new();
+            if let Ok(count) = cudarc::driver::result::device::get_count() {
+                for i in 0..count as u32 {
+                    if let Some(pci) = get_pci_bus_address_from_cuda(i) {
+                        map.insert(pci, i);
+                    }
                 }
             }
-        }
+            map
+        })
+        .unwrap_or_default();
 
         let process_allowed_cpus = read_process_allowed_cpus();
         let host_cpus_fallback = available_parallelism_range();

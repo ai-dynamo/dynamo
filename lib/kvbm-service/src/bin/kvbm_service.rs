@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
+use dynamo_device::DeviceBackend;
+use dynamo_memory::HostRegistrar;
 use kvbm_service::config::ServiceFlags;
 use kvbm_service::{KvbmService, NoopContainer, ServiceConfig};
 use tracing_subscriber::EnvFilter;
@@ -45,7 +47,35 @@ async fn main() -> anyhow::Result<()> {
     // Always build the host-memory pool — the binary is the production
     // entry point and the `/v1/pool` snapshot is part of the contract.
     // Tests that don't want a pool call `KvbmService::start` directly.
-    let service = KvbmService::start_with_pool(cfg, Arc::new(NoopContainer)).await?;
+    let registrar: Arc<dyn HostRegistrar> = match cfg.pool.device_backend {
+        DeviceBackend::Cuda => {
+            #[cfg(feature = "cuda")]
+            {
+                Arc::new(dynamo_device::cuda::CudaHostRegistrar::new(
+                    cfg.pool.ctx_device_id,
+                )?) as Arc<dyn HostRegistrar>
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                anyhow::bail!("device_backend = Cuda but kvbm-service was compiled without cuda feature");
+            }
+        }
+        DeviceBackend::Sycl => {
+            #[cfg(feature = "xpu-sycl")]
+            {
+                Arc::new(dynamo_device::sycl::SyclHostRegistrar::new(
+                    cfg.pool.ctx_device_id,
+                )?) as Arc<dyn HostRegistrar>
+            }
+            #[cfg(not(feature = "xpu-sycl"))]
+            {
+                anyhow::bail!(
+                    "device_backend = Sycl but kvbm-service was compiled without xpu-sycl feature"
+                );
+            }
+        }
+    };
+    let service = KvbmService::start_with_pool(cfg, Arc::new(NoopContainer), registrar).await?;
     tracing::info!(
         http_addr = %service.http_addr,
         uds_path = %service.uds_path.display(),

@@ -10,7 +10,8 @@ use anyhow::{Result, Context as _};
 use cudarc::driver::result as cuda_result;
 use cudarc::driver::sys::CUresult;
 use cudarc::driver::DriverError;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use dynamo_memory::CudaMemPool;
 
 /// Whether to use write-combined pinned allocations.
@@ -278,6 +279,69 @@ impl dynamo_memory::PinnedAllocator for CudaPinnedAllocator {
             cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void)
                 .map_err(|e| format!("CUDA free_host: {:?}", e))
         }
+    }
+}
+
+
+/// CUDA implementation of [`dynamo_memory::HostRegistrar`].
+///
+/// Calls `cuMemHostRegister_v2` / `cuMemHostUnregister` for DMA registration.
+/// Constructed from a device ordinal via [`CudaHostRegistrar::new`].
+#[derive(Debug)]
+pub struct CudaHostRegistrar {
+    context: Arc<cudarc::driver::CudaContext>,
+}
+
+/// Get or create a CUDA context for the given device ordinal.
+///
+/// Uses a process-wide cache so repeated calls with the same `device_id`
+/// return the same `Arc<CudaContext>`. Mirrors the pattern originally in
+/// `dynamo-memory` but lives here so `dynamo-memory` stays device-agnostic.
+pub fn cuda_context(device_id: u32) -> Result<Arc<cudarc::driver::CudaContext>> {
+    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<cudarc::driver::CudaContext>>>> = OnceLock::new();
+    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
+
+    if let Some(existing) = map.get(&device_id) {
+        return Ok(existing.clone());
+    }
+
+    let ctx = cudarc::driver::CudaContext::new(device_id as usize)
+        .with_context(|| format!("cuda_context: failed to get CUDA context for device {}", device_id))?;
+    map.insert(device_id, ctx.clone());
+    Ok(ctx)
+}
+
+impl CudaHostRegistrar {
+    /// Create a registrar for the given CUDA device ordinal.
+    pub fn new(device_id: u32) -> Result<Self> {
+        let context = cuda_context(device_id)?;
+        Ok(Self { context })
+    }
+}
+
+impl dynamo_memory::HostRegistrar for CudaHostRegistrar {
+    unsafe fn register(&self, ptr: *mut std::ffi::c_void, len: usize) -> dynamo_memory::Result<()> {
+        self.context.bind_to_thread().map_err(dynamo_memory::StorageError::Cuda)?;
+        unsafe {
+            cudarc::driver::sys::cuMemHostRegister_v2(
+                ptr,
+                len,
+                cudarc::driver::sys::CU_MEMHOSTREGISTER_DEVICEMAP,
+            )
+            .result()
+            .map_err(dynamo_memory::StorageError::Cuda)?
+        };
+        Ok(())
+    }
+
+    unsafe fn unregister(&self, ptr: *mut std::ffi::c_void) -> dynamo_memory::Result<()> {
+        self.context.bind_to_thread().map_err(dynamo_memory::StorageError::Cuda)?;
+        unsafe {
+            cudarc::driver::sys::cuMemHostUnregister(ptr)
+                .result()
+                .map_err(dynamo_memory::StorageError::Cuda)?
+        };
+        Ok(())
     }
 }
 

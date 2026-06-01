@@ -6,31 +6,11 @@
 //! [`DeviceStorage`] allocates device memory via an [`super::DeviceAllocator`]
 //! implementation, supporting any hardware backend (CUDA, SYCL/XPU, HPU, …).
 
-use super::{DeviceAllocator, MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
-use cudarc::driver::CudaContext;
+use super::{
+    nixl::NixlDescriptor, DeviceAllocator, MemoryDescriptor, Result, StorageError, StorageKind,
+};
 use std::any::Any;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-
-/// Get or create a CUDA context for the given device.
-///
-/// Used by `mmap_pinned` to register hugepage-backed host memory with
-/// the CUDA driver via `cudaHostRegister`. The XPU/allocator path
-/// (`DeviceStorage::new(len, Arc<dyn DeviceAllocator>)`) does not use
-/// this — it lives here because `mmap_pinned` is CUDA-only and predates
-/// the allocator abstraction.
-pub(crate) fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
-    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
-    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
-
-    if let Some(existing) = map.get(&device_id) {
-        return Ok(existing.clone());
-    }
-
-    let ctx = CudaContext::new(device_id as usize).map_err(StorageError::Cuda)?;
-    map.insert(device_id, ctx.clone());
-    Ok(ctx)
-}
+use std::sync::Arc;
 
 /// Device memory allocated via a [`DeviceAllocator`].
 #[derive(Debug)]

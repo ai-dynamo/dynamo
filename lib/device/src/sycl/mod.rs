@@ -367,6 +367,50 @@ impl dynamo_memory::PinnedAllocator for SyclPinnedAllocator {
     }
 }
 
+
+/// SYCL implementation of [`dynamo_memory::HostRegistrar`].
+///
+/// Calls `zexDriverImportExternalPointer` / `zexDriverReleaseImportedPointer`
+/// via the oneapi-rs safe wrapper.
+#[derive(Debug)]
+pub struct SyclHostRegistrar {
+    context: Arc<SyclContext>,
+}
+
+impl SyclHostRegistrar {
+    /// Create a registrar for the given device ordinal.
+    ///
+    /// Uses the process-wide shared SYCL context (initialised on first
+    /// call, cached thereafter). The shared context spans all discrete
+    /// GPUs — any device ordinal works.
+    pub fn new(_device_id: u32) -> anyhow::Result<Self> {
+        let context = shared_sycl_context()?;
+        Ok(Self { context })
+    }
+}
+
+impl dynamo_memory::HostRegistrar for SyclHostRegistrar {
+    unsafe fn register(&self, ptr: *mut c_void, len: usize) -> dynamo_memory::Result<()> {
+        unsafe {
+            self.context
+                .host_import_pointer(ptr, len)
+                .map_err(|e| dynamo_memory::StorageError::AllocationFailed(
+                    format!("host_import_pointer: {}", e)
+                ))
+        }
+    }
+
+    unsafe fn unregister(&self, ptr: *mut c_void) -> dynamo_memory::Result<()> {
+        unsafe {
+            self.context
+                .host_release_imported_pointer(ptr)
+                .map_err(|e| dynamo_memory::StorageError::AllocationFailed(
+                    format!("host_release_imported_pointer: {}", e)
+                ))
+        }
+    }
+}
+
 // =====================================================================
 // SyclDeviceStream — implements DeviceStreamOps
 // =====================================================================

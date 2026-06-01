@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use dynamo_device::DeviceBackend;
 use dynamo_memory::HugepageMode;
 use serde::{Deserialize, Serialize};
 
@@ -66,8 +67,13 @@ pub struct PoolConfig {
     /// the system default (`/proc/meminfo Hugepagesize:`, typically 2 MiB).
     #[serde(default)]
     pub hugepage_size_bytes: Option<usize>,
-    /// CUDA device ordinal whose context is used for `cuMemHostRegister`.
-    /// Any visible GPU works; defaults to `0`.
+    /// Which device backend to use for host-register DMA pinning.
+    /// The caller reads this to construct the appropriate `HostRegistrar`.
+    /// Auto-detected via `DeviceBackend::detect_backend()` when omitted.
+    #[serde(default = "default_device_backend")]
+    pub device_backend: DeviceBackend,
+    /// Device ordinal used by the caller to construct a `HostRegistrar`
+    /// (CUDA or SYCL). Any visible device works; defaults to `0`.
     #[serde(default)]
     pub ctx_device_id: u32,
     /// Sample-check page placement via `move_pages(2)` after allocation
@@ -104,6 +110,10 @@ fn default_nixl_backends() -> Vec<String> {
     vec!["UCX".to_string()]
 }
 
+fn default_device_backend() -> DeviceBackend {
+    DeviceBackend::detect_backend().unwrap_or(DeviceBackend::Cuda)
+}
+
 impl Default for PoolConfig {
     fn default() -> Self {
         // The service's default differs from the primitive type's default
@@ -114,6 +124,7 @@ impl Default for PoolConfig {
             sizing: PoolSizing::default(),
             hugepage_mode: default_hugepage_mode(),
             hugepage_size_bytes: None,
+            device_backend: default_device_backend(),
             ctx_device_id: 0,
             validate_placement: false,
             allow_no_nixl_backends: false,

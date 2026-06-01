@@ -4925,6 +4925,7 @@ dependencies = [
  "axum 0.8.4",
  "blake3",
  "clap 4.6.1",
+ "dynamo-device",
  "dynamo-memory",
  "figment",
  "futures",
