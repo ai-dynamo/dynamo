@@ -185,53 +185,6 @@ fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
     cf.path()?.parent().map(std::path::PathBuf::from)
 }
 
-/// Read `image_token_id` from `config.json`. Used for Qwen2-VL / Qwen2.5-VL
-/// where the chat-template-emitted placeholder differs from the per-patch
-/// expansion token. Returns `None` if missing — caller falls back to
-/// lightseek's `image_token_id`.
-///
-/// TODO(mm-routing): duplicates a field lightseek-mm already parses; delete
-/// once `ModelProcessorSpec` exposes `chat_template_placeholder_id()`.
-#[cfg(feature = "lightseek-mm")]
-fn read_image_token_id_from_config(
-    model_dir: &std::path::Path,
-) -> Option<crate::protocols::TokenIdType> {
-    let config_path = model_dir.join("config.json");
-    let raw = std::fs::read_to_string(&config_path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    v.get("image_token_id")
-        .and_then(|x| x.as_u64())
-        .and_then(|id| u32::try_from(id).ok())
-}
-
-/// Return the BOS token string from `tokenizer_config.json` when
-/// `add_bos_token: true` — the routing-side sequence must prepend it to
-/// match the backend's HF-processor output (Phi-3-vision and other
-/// `LlamaTokenizer`-family models). `None` otherwise.
-#[cfg(feature = "lightseek-mm")]
-fn read_bos_token_from_config(model_dir: &std::path::Path) -> Option<String> {
-    let config_path = model_dir.join("tokenizer_config.json");
-    let raw = std::fs::read_to_string(&config_path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    if !v
-        .get("add_bos_token")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    // `bos_token` is usually a plain string ("<s>") but the HF schema also
-    // allows it to be an `AddedToken` dict — handle both.
-    v.get("bos_token").and_then(|x| match x {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Object(o) => o
-            .get("content")
-            .and_then(|c| c.as_str())
-            .map(|s| s.to_owned()),
-        _ => None,
-    })
-}
-
 /// Shared SSRF-aware `MediaFetcher` + `reqwest::Client` for the dim-fetch
 /// path used by MM-aware routing. Inherits the same policy contract as the
 /// frontend-decode path (`MediaLoader`): blocklist DNS resolver, redirect
@@ -469,7 +422,7 @@ impl OpenAIPreprocessor {
         let context_length = mdc.context_length;
 
         #[cfg(feature = "lightseek-mm")]
-        let (image_token_counter, image_token_id, chat_placeholder_token_id) =
+        let (image_token_counter, image_token_id, chat_placeholder_token_id, bos_token_string) =
             match image_token_inputs {
                 Some((model_id, model_type, model_dir)) => {
                     // Resolve counter + image-token id independently so the
@@ -485,10 +438,15 @@ impl OpenAIPreprocessor {
                         Ok(c) => (Some(c), None),
                         Err(e) => (None, Some(e.to_string())),
                     };
-                    let img_tok = lightseek_mm::resolve_image_token_id(&model_id, &model_dir);
-
-                    let chat_placeholder_tok =
-                        read_image_token_id_from_config(&model_dir).or(img_tok);
+                    // One-shot config/tokenizer_config read for all
+                    // routing-side token info (image id, chat-template
+                    // placeholder, BOS string). Parsing lives in
+                    // `lightseek_mm`, next to the spec resolution.
+                    let routing_tokens =
+                        lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
+                    let img_tok = routing_tokens.image_token_id;
+                    let chat_placeholder_tok = routing_tokens.chat_placeholder_token_id;
+                    let bos_tok_string = routing_tokens.bos_token_string;
 
                     match (counter.is_some(), img_tok.is_some()) {
                         (true, true) => tracing::info!(
@@ -526,14 +484,14 @@ impl OpenAIPreprocessor {
                             );
                         }
                     }
-                    (counter, img_tok, chat_placeholder_tok)
+                    (counter, img_tok, chat_placeholder_tok, bos_tok_string)
                 }
                 None => {
                     tracing::debug!(
                         target: "mm_routing",
                         "model directory not derivable from MDC; MM-aware routing disabled"
                     );
-                    (None, None, None)
+                    (None, None, None, None)
                 }
             };
 
@@ -554,14 +512,11 @@ impl OpenAIPreprocessor {
 
         // Resolve the routing-side BOS prepend for models with
         // `add_bos_token: true` (see `routing_prepend_bos` doc). Only kept
-        // when the configured `bos_token` round-trips to a single id.
-        // `model_dir_for_routing` is captured above the partial moves of
-        // `mdc.media_decoder` / `mdc.media_fetcher`.
+        // when the configured `bos_token` round-trips to a single id. The
+        // BOS string was harvested above by `resolve_routing_tokens` from
+        // the same `tokenizer_config.json` pass.
         #[cfg(feature = "lightseek-mm")]
-        let routing_prepend_bos = match model_dir_for_routing
-            .as_deref()
-            .and_then(read_bos_token_from_config)
-        {
+        let routing_prepend_bos = match bos_token_string {
             Some(bos_text) => match tokenizer.encode(&bos_text) {
                 Ok(enc) if enc.token_ids().len() == 1 => {
                     let id = enc.token_ids()[0];
