@@ -24,17 +24,11 @@ logger = logging.getLogger(__name__)
 DGD_PLURAL = "dynamographdeployments"
 CHECKPOINT_PLURAL = "dynamocheckpoints"
 
-DECODE_COMPONENT = "decode"
+DECODE_COMPONENT = "VllmDecodeWorker"
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
-# Mocker/profile fixtures in this repo are keyed to the 8B recipe; this path
-# validates checkpoint plumbing and does not load model weights.
-MOCKER_MODEL = "nvidia/Llama-3.1-8B-Instruct-FP8"
-DEFAULT_MOCKER_IMAGE = "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
-MOCKER_PROFILE_DATA = (
-    "/workspace/components/src/dynamo/planner/tests/data/profiling_results/"
-    "H200_TP1P_TP1D"
-)
+VLLM_MODEL = "Qwen/Qwen3-0.6B"
+DEFAULT_VLLM_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 
 CHECKPOINT_ID_LABEL = "nvidia.com/snapshot-checkpoint-id"
 CHECKPOINT_SOURCE_LABEL = "nvidia.com/snapshot-is-checkpoint-source"
@@ -54,31 +48,6 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = 120
 
 
-def _checkpoint_job_command() -> str:
-    return f"""set -eu
-control_dir="${{DYN_SNAPSHOT_CONTROL_DIR:-/snapshot-control}}"
-python3 -m dynamo.mocker \\
-  --model-path {MOCKER_MODEL} \\
-  --model-name {MOCKER_MODEL} \\
-  --speedup-ratio 1.0 \\
-  --planner-profile-data {MOCKER_PROFILE_DATA} &
-child="$!"
-sleep 30
-if ! kill -0 "${{child}}" 2>/dev/null; then
-  wait "${{child}}"
-fi
-touch "${{control_dir}}/ready-for-checkpoint"
-while [ ! -f "${{control_dir}}/snapshot-complete" ]; do
-  if ! kill -0 "${{child}}" 2>/dev/null; then
-    wait "${{child}}"
-  fi
-  sleep 1
-done
-kill -TERM "${{child}}" 2>/dev/null || true
-wait "${{child}}" 2>/dev/null || true
-"""
-
-
 def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
     for component in spec["spec"].get("components", []):
         if component.get("name") == name:
@@ -86,14 +55,12 @@ def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
     raise AssertionError(f"component {name!r} not found in DGD spec")
 
 
-def _new_mocker_checkpoint_spec(
-    name: str, namespace: str, image: str
-) -> DeploymentSpec:
+def _new_vllm_checkpoint_spec(name: str, namespace: str, image: str) -> DeploymentSpec:
     spec_path = (
         Path(_get_workspace_dir())
         / "examples"
         / "backends"
-        / "mocker"
+        / "vllm"
         / "deploy"
         / "v1beta1"
         / "agg.yaml"
@@ -103,6 +70,7 @@ def _new_mocker_checkpoint_spec(
     deployment_spec.namespace = namespace
     deployment_spec.set_image(image, FRONTEND_COMPONENT)
     deployment_spec.set_image(image, DECODE_COMPONENT)
+    deployment_spec.set_model(VLLM_MODEL, DECODE_COMPONENT)
 
     raw_spec = deployment_spec.spec()
     decode = _component(raw_spec, DECODE_COMPONENT)
@@ -114,26 +82,11 @@ def _new_mocker_checkpoint_spec(
         "mode": "Auto",
         "targetContainerName": TARGET_CONTAINER,
         "identity": {
-            "model": MOCKER_MODEL,
+            "model": VLLM_MODEL,
             "backendFramework": "vllm",
             "tensorParallelSize": 1,
             "pipelineParallelSize": 1,
             "extraParameters": {"ciTest": name},
-        },
-        "job": {
-            "podTemplate": {
-                "spec": {
-                    "nodeSelector": dict(GPU_NODE_SELECTOR),
-                    "tolerations": list(GPU_TOLERATIONS),
-                    "containers": [
-                        {
-                            "name": TARGET_CONTAINER,
-                            "command": ["/bin/sh", "-c"],
-                            "args": [_checkpoint_job_command()],
-                        }
-                    ],
-                }
-            }
         },
     }
     return deployment_spec
@@ -377,11 +330,11 @@ async def test_dgd_checkpoint_restore_deploy(
 ) -> None:
     """Verify a DGD worker can be checkpointed, restored, and still serve."""
     suffix = str(int(time.time() * 1000))
-    deployment_name = f"mocker-checkpoint-{suffix}"
-    deployment_spec = _new_mocker_checkpoint_spec(
+    deployment_name = f"vllm-checkpoint-{suffix}"
+    deployment_spec = _new_vllm_checkpoint_spec(
         name=deployment_name,
         namespace=namespace,
-        image=image or DEFAULT_MOCKER_IMAGE,
+        image=image or DEFAULT_VLLM_IMAGE,
     )
 
     async with ManagedDeployment(
@@ -401,7 +354,7 @@ async def test_dgd_checkpoint_restore_deploy(
         base_url = f"http://localhost:{port_forward.local_port}"
 
         logger.info("Validating inference before restore")
-        _assert_inference(base_url, deployment_spec.endpoint, MOCKER_MODEL)
+        _assert_inference(base_url, deployment_spec.endpoint, VLLM_MODEL)
 
         _, checkpoint_hash = await _wait_for_checkpoint_ready(deployment)
 
@@ -423,4 +376,4 @@ async def test_dgd_checkpoint_restore_deploy(
         )
 
         logger.info("Validating inference after restore")
-        _assert_inference(base_url, deployment_spec.endpoint, MOCKER_MODEL)
+        _assert_inference(base_url, deployment_spec.endpoint, VLLM_MODEL)

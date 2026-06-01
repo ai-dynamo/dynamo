@@ -754,8 +754,11 @@ jobs:
 
   deploy-test-checkpoint:
     name: DynamoCheckpoint Deploy Test
-    needs: [deploy-operator, deploy-snapshot-agent]
-    if: needs.deploy-snapshot-agent.result == 'success'
+    needs: [deploy-operator, deploy-snapshot-agent, vllm-copy-to-acr]
+    if: |
+      always() && !cancelled() &&
+      needs.deploy-snapshot-agent.result == 'success' &&
+      (needs.vllm-copy-to-acr.result == 'success' || needs.vllm-copy-to-acr.result == 'skipped')
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
     permissions:
@@ -805,7 +808,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1
+          image: ${{ needs.vllm-copy-to-acr.result == 'success' && format('{0}/ai-dynamo/dynamo:{1}-vllm-runtime', secrets.AZURE_ACR_HOSTNAME, github.sha) || 'nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1' }}
           test_name: checkpoint_dgd_restore
           test_file: tests/deploy/test_dynamocheckpoint.py
           extra_pytest_args: -m dynamocheckpoint
@@ -888,7 +891,7 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, deploy-test-checkpoint, deploy-test-gaie]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, deploy-test-checkpoint, deploy-test-gaie, deploy-cleanup]
     if: always()
     steps:
       - name: "Check all deploy test jobs"

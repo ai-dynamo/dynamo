@@ -94,6 +94,7 @@ runs:
           BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
           echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
+          echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
         fi
 
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
@@ -113,16 +114,24 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        NAMESPACE_SUFFIX: ${{ steps.resolve-names.outputs.namespace_suffix }}
       run: |
         echo "::group::Create host namespace $NAMESPACE"
+        set -euo pipefail
         set -x
-        kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-        kubectl label namespaces ${NAMESPACE} \
+        kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+        LABELS=(
           nscleanup/enabled=true \
           nscleanup/ttl=7200 \
+          dynamo.github/run-id="${{ github.run_id }}" \
           ngc-api=enabled \
-          nvcr-imagepull=enabled \
-          --overwrite
+          nvcr-imagepull=enabled
+        )
+        if [[ -n "${NAMESPACE_SUFFIX}" ]]; then
+          LABELS+=(dynamo.github/cleanup-key="${NAMESPACE_SUFFIX}")
+        fi
+        kubectl label namespaces "${NAMESPACE}" "${LABELS[@]}" --overwrite
         echo "::endgroup::"
 
     - name: Create vCluster
@@ -176,6 +185,38 @@ runs:
           -l app=vcluster,release=${VCLUSTER_NAME} \
           -n ${NAMESPACE} \
           --timeout=900s
+        echo "::endgroup::"
+
+    - name: Install vCluster HostPath Mapper
+      if: inputs.checkpoint_enabled == 'true'
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Install vCluster HostPath Mapper"
+        set -euo pipefail
+
+        HPM_VALUES="$(mktemp)"
+        cat > "${HPM_VALUES}" <<'EOF'
+        nodeSelector:
+          nvidia.com/gpu.present: "true"
+        tolerations:
+          - operator: Exists
+        EOF
+
+        helm upgrade --install vcluster-hpm vcluster-hpm \
+          --repo https://charts.loft.sh \
+          --namespace "${NAMESPACE}" \
+          --wait \
+          --timeout 10m \
+          --set VclusterReleaseName="${VCLUSTER_NAME}" \
+          --values "${HPM_VALUES}" \
+          --debug
+
+        kubectl rollout status daemonset/vcluster-hpm-hostpath-mapper \
+          -n "${NAMESPACE}" \
+          --timeout=600s
         echo "::endgroup::"
 
     - name: Connect to vCluster

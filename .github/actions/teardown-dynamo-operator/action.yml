@@ -33,7 +33,30 @@ runs:
         NAMESPACE: ${{ inputs.vcluster_namespace }}
       run: |
         echo "::group::Delete vCluster ${VCLUSTER_NAME}"
-        vcluster delete ${VCLUSTER_NAME} --namespace ${NAMESPACE} || true
+        set -euo pipefail
+
+        if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "Namespace ${NAMESPACE} does not exist; nothing to delete"
+          echo "::endgroup::"
+          exit 0
+        fi
+
+        # vCluster HostPath Mapper is installed on the host for checkpoint
+        # tests. Remove it explicitly before deleting the namespace so GPU-node
+        # DaemonSet pods do not linger until namespace garbage collection.
+        helm uninstall vcluster-hpm \
+          --namespace "${NAMESPACE}" \
+          --wait \
+          --timeout 5m || true
+
+        kubectl delete daemonset \
+          -n "${NAMESPACE}" \
+          -l app=vcluster-hostpath-mapper,release=vcluster-hpm \
+          --ignore-not-found \
+          --wait=true \
+          --timeout=300s || true
+
+        vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" || true
         echo "::endgroup::"
 
     - name: Delete host namespace
@@ -42,5 +65,27 @@ runs:
         NAMESPACE: ${{ inputs.vcluster_namespace }}
       run: |
         echo "::group::Delete namespace $NAMESPACE"
-        kubectl delete namespace ${NAMESPACE} --timeout=120s || true
+        set -euo pipefail
+
+        if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "Namespace ${NAMESPACE} is already deleted"
+          echo "::endgroup::"
+          exit 0
+        fi
+
+        if ! kubectl delete namespace "${NAMESPACE}" --wait=true --timeout=300s; then
+          echo "::error::Namespace ${NAMESPACE} did not delete cleanly"
+          kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
+          kubectl get all -n "${NAMESPACE}" -o wide || true
+          kubectl describe namespace "${NAMESPACE}" || true
+          exit 1
+        fi
+
+        if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::Namespace ${NAMESPACE} still exists after delete completed"
+          kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
+          exit 1
+        fi
+
+        echo "Namespace ${NAMESPACE} deleted"
         echo "::endgroup::"

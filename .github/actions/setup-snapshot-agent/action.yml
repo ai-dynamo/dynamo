@@ -81,6 +81,7 @@ runs:
           --set daemonset.image.tag="${SNAPSHOT_IMAGE_TAG}" \
           --set daemonset.image.pullPolicy=Always \
           --set-json=daemonset.imagePullSecrets=[] \
+          --set rbac.namespaceRestricted=true \
           --set storage.accessMode="${STORAGE_ACCESS_MODE}" \
           --set storage.pvc.name="${STORAGE_PVC_NAME}" \
           --set storage.pvc.accessMode="${STORAGE_PVC_ACCESS_MODE}" \
@@ -95,6 +96,15 @@ runs:
           -o jsonpath='{.items[0].metadata.name}')"
         if [[ -z "${DAEMONSET_NAME}" ]]; then
           echo "::error::snapshot-agent DaemonSet was not created"
+          exit 1
+        fi
+
+        RESTRICTED_NAMESPACE_FIELD="$(kubectl get daemonset "${DAEMONSET_NAME}" \
+          -n "${NAMESPACE}" \
+          -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].env[?(@.name=="RESTRICTED_NAMESPACE")].valueFrom.fieldRef.fieldPath}')"
+        if [[ "${RESTRICTED_NAMESPACE_FIELD}" != "metadata.namespace" ]]; then
+          echo "::error::snapshot-agent is not configured for namespace-restricted pod watching"
+          kubectl get daemonset "${DAEMONSET_NAME}" -n "${NAMESPACE}" -o yaml
           exit 1
         fi
 
