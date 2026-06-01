@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import logging
 import os
-import signal
 import traceback
 
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -54,24 +54,20 @@ class VllmEngineMonitor:
         self._monitor_task.cancel()
         self._stats_task.cancel()
 
-    def _shutdown_engine(self):
+    async def _shutdown_engine(self):
         """
         Shutdown the vLLM engine on crash scenarios to free resources.
         """
-
-        # Has timeout protection via SIGALRM
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Engine shutdown timed out")
-
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(ENGINE_SHUTDOWN_TIMEOUT)
-
         try:
-            self.engine_client.shutdown()
+            result = self.engine_client.shutdown()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=ENGINE_SHUTDOWN_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "vLLM engine shutdown timed out after %ds", ENGINE_SHUTDOWN_TIMEOUT
+            )
         except Exception as e:
-            logger.warning(f"vLLM engine shutdown failed: {e}")
-        finally:
-            signal.alarm(0)
+            logger.warning("vLLM engine shutdown failed: %s", e)
 
     async def _check_engine_health(self):
         """
@@ -113,7 +109,7 @@ class VllmEngineMonitor:
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 logger.error(f"vLLM AsyncLLM health check failed: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
-                self._shutdown_engine()
+                await self._shutdown_engine()
                 self.runtime.shutdown()
                 os._exit(1)
             except asyncio.CancelledError:
