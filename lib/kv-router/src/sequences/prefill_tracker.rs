@@ -20,6 +20,10 @@ pub(super) struct PrefillLoadState {
 pub(super) struct AnchoredPrefillSnapshot {
     pub(super) initial_effective_prefill_tokens: usize,
     pub(super) expected_prefill_duration: Option<Duration>,
+    /// When the oldest active prefill became the decay anchor.
+    ///
+    /// Only this front request decays with elapsed time; later active prefills
+    /// remain at full modeled load until they are promoted to the front.
     pub(super) anchored_since: Instant,
 }
 
@@ -168,6 +172,10 @@ pub(super) struct PrefillLoadTracker {
     pub(super) prefill_order: VecDeque<RequestId>,
     pub(super) prefill_full_tokens_sum: usize,
     pub(super) unmodeled_prefill_count: usize,
+    /// The front of `prefill_order` plus the local time it became front.
+    ///
+    /// This anchors both token decay and modeled-time decay. When the anchor is
+    /// removed, the next queued prefill is re-anchored at that removal time.
     pub(super) anchored_prefill: Option<(RequestId, Instant)>,
 }
 
@@ -240,6 +248,9 @@ impl PrefillLoadTracker {
         let modeled_non_anchored_prefill_time_ms = if self.unmodeled_prefill_count > 0 {
             None
         } else {
+            // TODO: This all-modeled path walks active prefills on snapshot refresh even if the
+            // modeled-time diagnostic read is never consumed. Consider moving this to an on-demand
+            // worker-slot read if snapshot-time O(active_prefills) work becomes undesirable.
             let sum = self
                 .prefill_order
                 .iter()
