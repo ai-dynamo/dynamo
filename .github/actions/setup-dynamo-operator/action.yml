@@ -130,17 +130,29 @@ runs:
       env:
         VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
       run: |
         echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         set -x
         # The K8s version must be supported by the kr8s Python library used in deploy tests.
         # This is independent of the host cluster version.
+        VCLUSTER_HELM_ARGS=()
+        if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
+          VCLUSTER_HELM_ARGS+=(
+            --set sync.fromHost.nodes.enabled=true
+            --set sync.fromHost.nodes.clearImageStatus=true
+            --set-string "sync.fromHost.nodes.selector.labels.nvidia\.com/gpu\.present=true"
+            --set sync.fromHost.runtimeClasses.enabled=true
+          )
+        fi
+
         vcluster create ${VCLUSTER_NAME} \
           --namespace ${NAMESPACE} \
           --connect=false \
           --upgrade \
           --set controlPlane.distro.k8s.enabled=true \
-          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }}
+          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }} \
+          "${VCLUSTER_HELM_ARGS[@]}"
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready

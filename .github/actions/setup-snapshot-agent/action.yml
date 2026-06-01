@@ -98,6 +98,16 @@ runs:
           exit 1
         fi
 
+        DESIRED_SCHEDULED="$(kubectl get daemonset "${DAEMONSET_NAME}" \
+          -n "${NAMESPACE}" \
+          -o jsonpath='{.status.desiredNumberScheduled}')"
+        if [[ -z "${DESIRED_SCHEDULED}" || "${DESIRED_SCHEDULED}" == "0" ]]; then
+          echo "::error::snapshot-agent DaemonSet matches 0 nodes in namespace ${NAMESPACE}"
+          kubectl get daemonset "${DAEMONSET_NAME}" -n "${NAMESPACE}" -o wide
+          kubectl get nodes -o wide --show-labels
+          exit 1
+        fi
+
         kubectl rollout status "daemonset/${DAEMONSET_NAME}" \
           -n "${NAMESPACE}" \
           --timeout=900s

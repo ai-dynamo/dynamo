@@ -27,6 +27,8 @@ CHECKPOINT_PLURAL = "dynamocheckpoints"
 DECODE_COMPONENT = "decode"
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
+# Mocker/profile fixtures in this repo are keyed to the 8B recipe; this path
+# validates checkpoint plumbing and does not load model weights.
 MOCKER_MODEL = "nvidia/Llama-3.1-8B-Instruct-FP8"
 DEFAULT_MOCKER_IMAGE = "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 MOCKER_PROFILE_DATA = (
@@ -158,7 +160,8 @@ async def _wait_for(
 
 
 async def _get_dgd(deployment: ManagedDeployment) -> dict[str, Any]:
-    assert deployment._custom_api is not None, "Kubernetes API not initialized"
+    if deployment._custom_api is None:
+        raise RuntimeError("Kubernetes API not initialized")
     return await deployment._custom_api.get_namespaced_custom_object(
         group="nvidia.com",
         version=deployment.deployment_spec.api_version,
@@ -171,7 +174,8 @@ async def _get_dgd(deployment: ManagedDeployment) -> dict[str, Any]:
 async def _get_checkpoint(
     deployment: ManagedDeployment, checkpoint_name: str
 ) -> dict[str, Any]:
-    assert deployment._custom_api is not None, "Kubernetes API not initialized"
+    if deployment._custom_api is None:
+        raise RuntimeError("Kubernetes API not initialized")
     return await deployment._custom_api.get_namespaced_custom_object(
         group="nvidia.com",
         version="v1alpha1",
@@ -220,7 +224,8 @@ def _runtime_decode_pods(deployment: ManagedDeployment) -> list[Any]:
 
 
 async def _scale_decode_component(deployment: ManagedDeployment, replicas: int) -> None:
-    assert deployment._custom_api is not None, "Kubernetes API not initialized"
+    if deployment._custom_api is None:
+        raise RuntimeError("Kubernetes API not initialized")
     dgd = await _get_dgd(deployment)
     components = dgd["spec"]["components"]
     for component in components:
@@ -299,17 +304,35 @@ async def _wait_for_restored_decode_pod(
 
 
 def _assert_chat_response(response: requests.Response, expected_model: str) -> None:
-    assert response.status_code == 200, (
-        f"Expected status 200, got {response.status_code}. "
-        f"Response: {response.text[:500]}"
-    )
+    if response.status_code != 200:
+        pytest.fail(
+            f"Expected status 200, got {response.status_code}. "
+            f"Response: {response.text[:500]}",
+            pytrace=False,
+        )
     data = response.json()
-    assert data.get("model") == expected_model, data
+    if data.get("model") != expected_model:
+        pytest.fail(
+            f"Expected model {expected_model!r}, got response: {data}",
+            pytrace=False,
+        )
     choices = data.get("choices", [])
-    assert choices, data
+    if not choices:
+        pytest.fail(
+            f"Expected at least one chat choice, got response: {data}",
+            pytrace=False,
+        )
     message = choices[0].get("message", {})
-    assert message.get("role") == "assistant", data
-    assert message.get("content"), data
+    if message.get("role") != "assistant":
+        pytest.fail(
+            f"Expected assistant message, got response: {data}",
+            pytrace=False,
+        )
+    if not message.get("content"):
+        pytest.fail(
+            f"Expected non-empty assistant content, got response: {data}",
+            pytrace=False,
+        )
 
 
 def _assert_inference(base_url: str, endpoint: str, model: str) -> None:
@@ -320,7 +343,8 @@ def _assert_inference(base_url: str, endpoint: str, model: str) -> None:
         logger=logger,
         max_attempts=30,
     )
-    assert model_ready, f"model {model!r} did not become available"
+    if not model_ready:
+        pytest.fail(f"model {model!r} did not become available", pytrace=False)
 
     payload = {
         "model": model,
@@ -343,7 +367,7 @@ def _assert_inference(base_url: str, endpoint: str, model: str) -> None:
 @pytest.mark.deploy
 @pytest.mark.post_merge
 @pytest.mark.e2e
-@pytest.mark.none
+@pytest.mark.gpu_1
 @pytest.mark.timeout(1800)
 async def test_dgd_checkpoint_restore_deploy(
     namespace: str,
@@ -369,9 +393,11 @@ async def test_dgd_checkpoint_restore_deploy(
         frontend_pods = deployment.get_pods([FRONTEND_COMPONENT]).get(
             FRONTEND_COMPONENT, []
         )
-        assert frontend_pods, f"No frontend pods found for {deployment_name}"
+        if not frontend_pods:
+            pytest.fail(f"No frontend pods found for {deployment_name}", pytrace=False)
         port_forward = deployment.port_forward(frontend_pods[0], deployment_spec.port)
-        assert port_forward is not None, "failed to establish frontend port-forward"
+        if port_forward is None:
+            pytest.fail("failed to establish frontend port-forward", pytrace=False)
         base_url = f"http://localhost:{port_forward.local_port}"
 
         logger.info("Validating inference before restore")
