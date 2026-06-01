@@ -31,7 +31,7 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
 # =============================================================================
-FROM ${DOCKER_PROXY}golang:${GO_VERSION} AS go-base
+FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
