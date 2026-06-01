@@ -28,6 +28,7 @@ from gpu_memory_service.integrations.sglang.memory_saver import (
 )
 from gpu_memory_service.integrations.sglang.patches import (
     patch_model_runner,
+    patch_scheduler,
     patch_static_state_for_gms,
     patch_torch_memory_saver,
 )
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 patch_empty_cache()
 patch_torch_memory_saver()
 patch_model_runner()
+patch_scheduler()
 patch_static_state_for_gms()
 logger.info("[GMS] Applied patches")
 
@@ -79,14 +81,36 @@ class GMSModelLoader:
             )
 
         mode = impl.allocators["weights"].granted_lock_type
-        logger.info("[GMS] Loading model in %s mode", mode.name)
+        namespace = _resolve_model_namespace(model_config, self.load_config)
+        logger.info(
+            "[GMS] Loading model in %s mode (namespace=%s)",
+            mode.name,
+            namespace,
+        )
 
         if mode == GrantedLockType.RO:
-            return self._load_import_only(model_config, device_config, impl)
-        return self._load_write_mode(model_config, device_config, impl)
+            return self._load_import_only(
+                model_config,
+                device_config,
+                impl,
+                namespace=namespace,
+            )
+        return self._load_write_mode(
+            model_config,
+            device_config,
+            impl,
+            namespace=namespace,
+        )
 
-    def _load_write_mode(self, model_config, device_config, impl) -> torch.nn.Module:
-        """Load model from disk and register with GMS (WRITE mode)."""
+    def _load_write_mode(
+        self,
+        model_config,
+        device_config,
+        impl,
+        *,
+        namespace: str,
+    ) -> torch.nn.Module:
+        """Load model from disk and stage it for GMS publication."""
         default_loader = self._get_default_loader()
 
         model = default_loader.load_model(
@@ -94,22 +118,35 @@ class GMSModelLoader:
             device_config=device_config,
         )
 
-        impl.finalize_write_mode(model)
+        impl.stage_write_model(model, namespace=namespace)
         return model
 
-    def _load_import_only(self, model_config, device_config, impl) -> torch.nn.Module:
+    def _load_import_only(
+        self,
+        model_config,
+        device_config,
+        impl,
+        *,
+        namespace: str,
+    ) -> torch.nn.Module:
         """Import model weights from GMS metadata (READ mode)."""
         allocator = impl.allocators["weights"]
 
         device_index = torch.cuda.current_device()
         model = self._create_meta_model(model_config, device_config)
 
-        materialize_module_from_gms(allocator, model, device_index=device_index)
+        materialize_module_from_gms(
+            allocator,
+            model,
+            device_index=device_index,
+            namespace=namespace,
+        )
         impl.imported_weights_bytes = allocator.total_bytes
 
         logger.info(
-            "[GMS] READ mode: imported %.2f GiB from metadata",
+            "[GMS] READ mode: imported %.2f GiB from metadata (namespace=%s)",
             allocator.total_bytes / (1 << 30),
+            namespace,
         )
         return model.eval()
 
@@ -144,3 +181,13 @@ class GMSModelLoader:
             logger.debug("[GMS] Post-processing on meta tensors: %s", e)
 
         return model
+
+
+def _resolve_model_namespace(model_config, load_config) -> str:
+    """Return the GMS metadata namespace for an SGLang model load."""
+    if getattr(model_config, "is_draft_model", False):
+        draft_model_idx = getattr(load_config, "draft_model_idx", None)
+        if draft_model_idx is not None:
+            return f"draft_{draft_model_idx}"
+        return "draft"
+    return "target"

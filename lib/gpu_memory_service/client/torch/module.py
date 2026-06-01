@@ -12,7 +12,7 @@ This module provides module-level tensor operations:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Iterator, Tuple
+from typing import TYPE_CHECKING, Collection, Iterator, Tuple
 
 import torch
 from gpu_memory_service.client.torch.tensor import GMSTensorSpec, TensorMetadata
@@ -120,15 +120,27 @@ def _resolve_module_attr(
 def register_module_tensors(
     gms_client_memory_manager: "GMSClientMemoryManager",
     model: torch.nn.Module,
+    *,
+    namespace: str | None = None,
+    tensor_names: Collection[str] | None = None,
 ) -> None:
     """Register all model tensors into the GMS metadata store.
 
     Args:
         gms_client_memory_manager: GMS client memory manager in write mode.
         model: PyTorch model to register.
+        namespace: Optional model namespace. When set, metadata keys are
+            written under ``"{namespace}/"`` so multiple models can share the
+            same GMS layout without key collisions.
+        tensor_names: Optional set of module tensor names to register. This is
+            useful for staged publication where the engine may add auxiliary
+            non-GMS parameters after the loader returns.
     """
     for name, tensor, tensor_type in _iter_module_tensors(model):
+        if tensor_names is not None and name not in tensor_names:
+            continue
         ptr = int(tensor.data_ptr())
+        metadata_key = f"{namespace}/{name}" if namespace is not None else name
 
         # Find allocation containing this tensor
         for va, mapping in gms_client_memory_manager.mappings.items():
@@ -136,7 +148,7 @@ def register_module_tensors(
                 offset = ptr - va
                 meta = TensorMetadata.from_tensor(tensor, tensor_type)
                 gms_client_memory_manager.metadata_put(
-                    key=name,
+                    key=metadata_key,
                     allocation_id=mapping.allocation_id,
                     offset_bytes=offset,
                     value=meta.to_bytes(),
@@ -153,11 +165,17 @@ def register_module_tensors(
             )
 
 
+def collect_module_tensor_names(model: torch.nn.Module) -> frozenset[str]:
+    """Collect current CUDA tensor names from a module tree."""
+    return frozenset(name for name, _, _ in _iter_module_tensors(model))
+
+
 def materialize_module_from_gms(
     gms_client_memory_manager: "GMSClientMemoryManager",
     model: torch.nn.Module,
     *,
     device_index: int,
+    namespace: str | None = None,
 ) -> None:
     """Materialize model tensors from GMS.
 
@@ -165,12 +183,14 @@ def materialize_module_from_gms(
         gms_client_memory_manager: GMS client memory manager in read mode.
         model: Model to populate with tensors.
         device_index: CUDA device index.
+        namespace: Optional model namespace to import. When set, only metadata
+            keys under ``"{namespace}/"`` are loaded.
     """
-    specs = GMSTensorSpec.load_all(gms_client_memory_manager)
+    specs = GMSTensorSpec.load_all(gms_client_memory_manager, namespace=namespace)
 
     for name, spec in specs.items():
         tensor = spec.materialize(gms_client_memory_manager, device_index)
-        mod, attr = _resolve_module_attr(model, name)
+        mod, attr = _resolve_module_attr(model, spec.name)
         tensor_type = spec.meta.tensor_type
 
         # Tensor attrs and buffers: clone since they may be mutated
@@ -191,7 +211,7 @@ def materialize_module_from_gms(
             if param is not None:
                 if param.shape != tensor.shape or param.dtype != tensor.dtype:
                     raise RuntimeError(
-                        f"Shape/dtype mismatch for {name}: "
+                        f"Shape/dtype mismatch for {spec.name}: "
                         f"param={tuple(param.shape)}/{param.dtype}, "
                         f"gms={tuple(tensor.shape)}/{tensor.dtype}"
                     )

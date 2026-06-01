@@ -34,6 +34,7 @@ from gpu_memory_service.common.utils import get_socket_path, is_scratch_kv_enabl
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
     GMS_TAGS,
+    finalize_staged_gms_write,
     get_gms_lock_mode,
     get_gms_ro_connect_timeout_ms,
 )
@@ -235,6 +236,16 @@ class GMSWorker(Worker):
         by vLLM's memory tracking).
         """
         super().load_model(*args, **kwargs)
+
+        weights_manager = get_gms_client_memory_manager("weights")
+        if weights_manager is not None:
+            from gpu_memory_service.integrations.vllm.model_loader import (
+                set_imported_weights_bytes,
+            )
+
+            finalized_bytes = finalize_staged_gms_write(weights_manager)
+            if finalized_bytes > 0:
+                set_imported_weights_bytes(finalized_bytes)
 
         # Correct memory accounting for GMS-imported weights
         try:

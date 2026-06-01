@@ -23,9 +23,9 @@ from gpu_memory_service.client.torch.module import materialize_module_from_gms
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import (
-    finalize_gms_write,
     get_gms_lock_mode,
     setup_meta_tensor_workaround,
+    stage_gms_write_model,
     strip_gms_model_loader_config,
 )
 
@@ -55,6 +55,12 @@ _last_imported_weights_bytes: int = 0
 def get_imported_weights_bytes() -> int:
     """Return bytes of weights imported in the last load_model call."""
     return _last_imported_weights_bytes
+
+
+def set_imported_weights_bytes(value: int) -> None:
+    """Set bytes imported/published by the complete engine model load."""
+    global _last_imported_weights_bytes
+    _last_imported_weights_bytes = int(value)
 
 
 # =============================================================================
@@ -131,6 +137,7 @@ def register_gms_loader(load_format: str = "gms") -> None:
             device = torch.cuda.current_device()
             extra = getattr(self.load_config, "model_loader_extra_config", {}) or {}
             mode = get_gms_lock_mode(extra)
+            namespace = _resolve_model_namespace(vllm_config, model_config, prefix)
             gms_client = get_or_create_gms_client_memory_manager(
                 get_socket_path(device, "weights"),
                 device,
@@ -139,7 +146,14 @@ def register_gms_loader(load_format: str = "gms") -> None:
             )
 
             if gms_client.granted_lock_type == GrantedLockType.RO:
-                return _load_read_mode(gms_client, vllm_config, model_config, device)
+                return _load_read_mode(
+                    gms_client,
+                    vllm_config,
+                    model_config,
+                    device,
+                    namespace=namespace,
+                    prefix=prefix,
+                )
             else:
                 return _load_write_mode(
                     gms_client,
@@ -147,6 +161,8 @@ def register_gms_loader(load_format: str = "gms") -> None:
                     model_config,
                     self.default_loader,
                     torch.device("cuda", device),
+                    namespace=namespace,
+                    prefix=prefix,
                 )
 
 
@@ -160,6 +176,9 @@ def _load_read_mode(
     vllm_config,
     model_config,
     device_index: int,
+    *,
+    namespace: str,
+    prefix: str,
 ) -> torch.nn.Module:
     """Load model by importing weights from GMS (RO mode).
 
@@ -169,8 +188,13 @@ def _load_read_mode(
     global _last_imported_weights_bytes
 
     try:
-        model = _create_meta_model(vllm_config, model_config)
-        materialize_module_from_gms(gms_client, model, device_index=device_index)
+        model = _create_meta_model(vllm_config, model_config, prefix=prefix)
+        materialize_module_from_gms(
+            gms_client,
+            model,
+            device_index=device_index,
+            namespace=namespace,
+        )
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
@@ -180,8 +204,9 @@ def _load_read_mode(
 
         _last_imported_weights_bytes = gms_client.total_bytes
         logger.info(
-            "[GMS] Read mode: imported %.2f GiB",
+            "[GMS] Read mode: imported %.2f GiB (namespace=%s)",
             _last_imported_weights_bytes / (1 << 30),
+            namespace,
         )
         return model.eval()
     except Exception:
@@ -195,6 +220,9 @@ def _load_write_mode(
     model_config,
     default_loader,
     target_device: torch.device,
+    *,
+    namespace: str,
+    prefix: str,
 ) -> torch.nn.Module:
     """Load model from disk and publish weights to GMS (RW mode).
 
@@ -220,7 +248,9 @@ def _load_write_mode(
         with gms_use_mem_pool("weights", target_device):
             with target_device:
                 model = initialize_model(
-                    vllm_config=vllm_config, model_config=model_config
+                    vllm_config=vllm_config,
+                    model_config=model_config,
+                    prefix=prefix,
                 )
 
             if mx_ctx is not None:
@@ -232,16 +262,18 @@ def _load_write_mode(
 
             torch.cuda.empty_cache()
 
-    _last_imported_weights_bytes = finalize_gms_write(gms_client, model)
+    stage_gms_write_model(gms_client, model, namespace=namespace)
+    _last_imported_weights_bytes = int(gms_client.total_bytes)
 
     logger.info(
-        "[GMS] Write mode: published %.2f GiB",
+        "[GMS] Write mode: staged %.2f GiB (namespace=%s)",
         _last_imported_weights_bytes / (1 << 30),
+        namespace,
     )
     return model.eval()
 
 
-def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
+def _create_meta_model(vllm_config, model_config, *, prefix: str) -> torch.nn.Module:
     """Create model on meta device for RO mode materialization."""
     from vllm.model_executor.model_loader.utils import (
         initialize_model,
@@ -254,7 +286,11 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
 
     with set_default_torch_dtype(model_config.dtype):
         with meta_device:
-            model = initialize_model(vllm_config=vllm_config, model_config=model_config)
+            model = initialize_model(
+                vllm_config=vllm_config,
+                model_config=model_config,
+                prefix=prefix,
+            )
 
     try:
         process_weights_after_loading(model, model_config, meta_device)
@@ -262,3 +298,27 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
         logger.debug("[GMS] Post-processing on meta tensors: %s", e)
 
     return model
+
+
+def _resolve_model_namespace(vllm_config, model_config, prefix: str) -> str:
+    """Return the GMS metadata namespace for a vLLM model load."""
+    if prefix.startswith("draft"):
+        return prefix
+
+    if model_config is getattr(vllm_config, "model_config", None):
+        return "target"
+
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is not None:
+        draft_model_config = getattr(speculative_config, "draft_model_config", None)
+        if model_config is draft_model_config:
+            return "draft"
+
+        draft_model = getattr(draft_model_config, "model", None)
+        if (
+            draft_model is not None
+            and getattr(model_config, "model", None) == draft_model
+        ):
+            return "draft"
+
+    return "target"

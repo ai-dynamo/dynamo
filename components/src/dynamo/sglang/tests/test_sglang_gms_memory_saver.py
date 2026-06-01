@@ -17,6 +17,7 @@ from gpu_memory_service.common.locks import (  # noqa: E402
 )
 from gpu_memory_service.integrations.sglang.memory_saver import (  # noqa: E402
     GMSMemorySaverImpl,
+    disable_gms_weight_region,
 )
 
 pytestmark = [
@@ -37,6 +38,7 @@ class _FakeManager:
         self.is_unmapped = is_unmapped
         self.granted_lock_type = granted_lock_type
         self.calls: list[object] = []
+        self.total_bytes = 4096
 
     def unmap_all_vas(self) -> None:
         self.calls.append("unmap_all_vas")
@@ -161,3 +163,50 @@ def test_region_requires_rw_allocator(build_impl, tag):
     with pytest.raises(RuntimeError, match=rf"requires '{tag}' to be RW"):
         with impl.region(tag, enable_cpu_backup=False):
             pass
+
+
+def test_disable_gms_weight_region_bypasses_weight_pool(build_impl):
+    impl, _, _, pool_calls = build_impl(weights_lock=GrantedLockType.RW)
+
+    with disable_gms_weight_region():
+        with impl.region("weights", enable_cpu_backup=False):
+            pass
+
+    assert pool_calls == []
+
+
+def test_stage_write_model_stages_without_commit(build_impl, monkeypatch):
+    impl, weights, _, _ = build_impl(weights_lock=GrantedLockType.RW)
+    model = object()
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        gms_memory_saver,
+        "stage_gms_write_model",
+        lambda allocator, target_model, *, namespace: calls.append(
+            ("stage_gms_write_model", allocator, target_model, namespace)
+        ),
+    )
+
+    impl.stage_write_model(model, namespace="draft")
+
+    assert calls == [("stage_gms_write_model", weights, model, "draft")]
+    assert impl.imported_weights_bytes == weights.total_bytes
+
+
+def test_finalize_write_mode_commits_staged_models(build_impl, monkeypatch):
+    impl, weights, _, _ = build_impl(weights_lock=GrantedLockType.RW)
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        gms_memory_saver,
+        "finalize_staged_gms_write",
+        lambda allocator: calls.append(("finalize_staged_gms_write", allocator))
+        or allocator.total_bytes,
+    )
+
+    finalized_bytes = impl.finalize_write_mode()
+
+    assert finalized_bytes == weights.total_bytes
+    assert calls == [("finalize_staged_gms_write", weights)]
+    assert impl.imported_weights_bytes == weights.total_bytes
