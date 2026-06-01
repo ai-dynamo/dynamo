@@ -413,8 +413,18 @@ class CachedTokensChatPayload(ChatPayload):
         if require_lightseek_init:
             log_patterns.append(r"MM-aware KV routing enabled \(lightseek\)")
         if min_routing_total_blocks > 0:
-            # Threshold assumed to be a power of 10 (10, 100, ...).
-            min_digits = len(str(min_routing_total_blocks))
+            # The regex below gates by digit-count, so the threshold must
+            # be a power of 10 (1, 10, 100, ...). Reject any non-conforming
+            # value at construction time — otherwise the assertion would
+            # under-enforce (e.g. min_routing_total_blocks=25 would still
+            # only require 2-digit counts ≥10, not ≥25).
+            n_str = str(min_routing_total_blocks)
+            if n_str[0] != "1" or any(c != "0" for c in n_str[1:]):
+                raise ValueError(
+                    f"min_routing_total_blocks must be a power of 10 "
+                    f"(1, 10, 100, ...); got {min_routing_total_blocks}"
+                )
+            min_digits = len(n_str)
             log_patterns.append(
                 rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
             )
