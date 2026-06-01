@@ -2131,11 +2131,29 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	// Override RestartPolicy for job (must be Never or OnFailure)
 	podSpec.RestartPolicy = corev1.RestartPolicyNever
 
+	// Seed the checkpoint job pod-template metadata from the component's own
+	// PodTemplate.ObjectMeta so workload-level labels/annotations (e.g. Istio
+	// sidecar opt-out or policy annotations) are not silently dropped on the
+	// auto-created checkpoint job. GeneratePodSpecForComponent only returns the
+	// PodSpec, so the template metadata must be carried over explicitly here.
+	// Precedence: component pod-template metadata < controller-managed labels <
+	// explicit checkpoint.job.podTemplate overrides (applied below).
+	podLabels := map[string]string{}
+	podAnnotations := map[string]string{}
+	if component.PodTemplate != nil {
+		for k, v := range component.PodTemplate.Labels {
+			podLabels[k] = v
+		}
+		for k, v := range component.PodTemplate.Annotations {
+			podAnnotations[k] = v
+		}
+	}
+	podLabels[consts.KubeLabelDynamoComponent] = componentName
+
 	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels: map[string]string{
-				consts.KubeLabelDynamoComponent: componentName,
-			},
+			Labels:      podLabels,
+			Annotations: podAnnotations,
 		},
 		Spec: *podSpec,
 	}

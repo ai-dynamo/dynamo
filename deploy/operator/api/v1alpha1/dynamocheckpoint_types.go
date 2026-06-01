@@ -62,29 +62,39 @@ type DynamoCheckpointIdentity struct {
 	// +optional
 	DynamoVersion string `json:"dynamoVersion,omitempty"`
 
-	// TensorParallelSize is the tensor parallel configuration
+	// TensorParallelSize is the tensor parallel configuration.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
 
-	// PipelineParallelSize is the pipeline parallel configuration
+	// PipelineParallelSize is the pipeline parallel configuration.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
 
-	// Dtype is the data type (fp16, bf16, fp8, etc.)
+	// Dtype is the data type (fp16, bf16, fp8, etc.).
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	Dtype string `json:"dtype,omitempty"`
 
-	// MaxModelLen is the maximum sequence length
+	// MaxModelLen is the maximum sequence length.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaxModelLen int32 `json:"maxModelLen,omitempty"`
 
-	// ExtraParameters are additional parameters that affect the checkpoint hash
-	// Use for any framework-specific or custom parameters not covered above
+	// ExtraParameters are additional parameters that affect the checkpoint hash.
+	// Use for any framework-specific or custom parameters not covered above.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
 }

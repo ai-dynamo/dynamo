@@ -158,7 +158,10 @@ spec:
                         - trtllm
                       type: string
                     dtype:
-                      description: Dtype is the data type (fp16, bf16, fp8, etc.)
+                      description: |-
+                        Dtype is the data type (fp16, bf16, fp8, etc.).
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       type: string
                     dynamoVersion:
                       description: |-
@@ -170,11 +173,16 @@ spec:
                       additionalProperties:
                         type: string
                       description: |-
-                        ExtraParameters are additional parameters that affect the checkpoint hash
-                        Use for any framework-specific or custom parameters not covered above
+                        ExtraParameters are additional parameters that affect the checkpoint hash.
+                        Use for any framework-specific or custom parameters not covered above.
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       type: object
                     maxModelLen:
-                      description: MaxModelLen is the maximum sequence length
+                      description: |-
+                        MaxModelLen is the maximum sequence length.
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       format: int32
                       minimum: 1
                       type: integer
@@ -183,13 +191,19 @@ spec:
                       type: string
                     pipelineParallelSize:
                       default: 1
-                      description: PipelineParallelSize is the pipeline parallel configuration
+                      description: |-
+                        PipelineParallelSize is the pipeline parallel configuration.
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       format: int32
                       minimum: 1
                       type: integer
                     tensorParallelSize:
                       default: 1
-                      description: TensorParallelSize is the tensor parallel configuration
+                      description: |-
+                        TensorParallelSize is the tensor parallel configuration.
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       format: int32
                       minimum: 1
                       type: integer

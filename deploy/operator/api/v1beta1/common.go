@@ -364,27 +364,37 @@ type DynamoCheckpointIdentity struct {
 	DynamoVersion string `json:"dynamoVersion,omitempty"`
 
 	// tensorParallelSize is the tensor parallel configuration.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
 
 	// pipelineParallelSize is the pipeline parallel configuration.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
 
 	// dtype is the data type (`fp16`, `bf16`, `fp8`, etc.).
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	Dtype string `json:"dtype,omitempty"`
 
 	// maxModelLen is the maximum sequence length.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaxModelLen int32 `json:"maxModelLen,omitempty"`
 
 	// extraParameters are additional parameters that affect the checkpoint hash.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
 }

@@ -242,11 +242,11 @@ _Appears in:_
 | `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B") |  | Required: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework is the runtime framework (vllm, sglang, trtllm) |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
 | `dynamoVersion` _string_ | DynamoVersion is the Dynamo platform version (optional).<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. |  | Optional: \{\} <br /> |
-| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.) |  | Optional: \{\} <br /> |
-| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters are additional parameters that affect the checkpoint hash<br />Use for any framework-specific or custom parameters not covered above |  | Optional: \{\} <br /> |
+| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration.<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration.<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.).<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. |  | Optional: \{\} <br /> |
+| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length.<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters are additional parameters that affect the checkpoint hash.<br />Use for any framework-specific or custom parameters not covered above.<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. |  | Optional: \{\} <br /> |
 
 
 #### DynamoCheckpointJobConfig
@@ -1309,7 +1309,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false | Optional: \{\} <br /> |
 | `mode` _[CheckpointMode](#checkpointmode)_ | Mode defines how checkpoint creation is handled<br />- Auto: DGD controller creates Checkpoint CR automatically<br />- Manual: User must create Checkpoint CR | Auto | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
 | `checkpointRef` _string_ | CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.<br />If specified, this service's Identity is ignored and the referenced checkpoint is used directly. |  | Optional: \{\} <br /> |
-| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: Identity is ignored by DGD-managed automatic checkpoints.<br />Automatic checkpoints are scoped to the owning DGD/service generation and<br />are never reused across DGDs. |  | Optional: \{\} <br /> |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: Identity is ignored by DGD-managed automatic checkpoints.<br />Automatic checkpoints are scoped to the owning DGD/component generation and<br />are never reused across DGDs. |  | Optional: \{\} <br /> |
 | `targetContainerName` _string_ | TargetContainerName is the workload container to snapshot and restore. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `job` _[ServiceCheckpointJobConfig](#servicecheckpointjobconfig)_ | Job customizes the checkpoint Job that is created in Auto mode. |  | Optional: \{\} <br /> |
 
@@ -1745,11 +1745,11 @@ _Appears in:_
 | `model` _string_ | model is the model identifier (e.g. "meta-llama/Llama-3-70B"). |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `backendFramework` _string_ | backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`). |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
 | `dynamoVersion` _string_ | dynamoVersion is the Dynamo platform version. Deprecated for DGD-managed<br />automatic checkpoints; it only participates in the legacy identity hash<br />fallback for standalone objects. |  | Optional: \{\} <br /> |
-| `tensorParallelSize` _integer_ | tensorParallelSize is the tensor parallel configuration. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `pipelineParallelSize` _integer_ | pipelineParallelSize is the pipeline parallel configuration. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `dtype` _string_ | dtype is the data type (`fp16`, `bf16`, `fp8`, etc.). |  | Optional: \{\} <br /> |
-| `maxModelLen` _integer_ | maxModelLen is the maximum sequence length. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `extraParameters` _object (keys:string, values:string)_ | extraParameters are additional parameters that affect the checkpoint hash. |  | Optional: \{\} <br /> |
+| `tensorParallelSize` _integer_ | tensorParallelSize is the tensor parallel configuration.<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `pipelineParallelSize` _integer_ | pipelineParallelSize is the pipeline parallel configuration.<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `dtype` _string_ | dtype is the data type (`fp16`, `bf16`, `fp8`, etc.).<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. |  | Optional: \{\} <br /> |
+| `maxModelLen` _integer_ | maxModelLen is the maximum sequence length.<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `extraParameters` _object (keys:string, values:string)_ | extraParameters are additional parameters that affect the checkpoint hash.<br />Deprecated for DGD-managed automatic checkpoints; it only participates in<br />the legacy identity hash fallback for standalone objects. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeployment

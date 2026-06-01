@@ -1261,6 +1261,65 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoUsesTargetConta
 	assert.Equal(t, checkpointStatuses["worker"].CheckpointID, ckpt.Spec.Identity.ExtraParameters["checkpointID"])
 }
 
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoPreservesPodTemplateMetadata(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"workload-label": "keep-me",
+						},
+						Annotations: map[string]string{
+							commonconsts.KubeAnnotationIstioSidecarInject: "false",
+							"policy.example.com/keep":                     "yes",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: commonconsts.MainContainerName, Image: "main:latest"},
+						},
+					},
+				},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Mode: v1beta1.CheckpointModeAuto,
+					},
+				},
+			}},
+		},
+	}
+
+	checkpointStatuses, _, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	require.NoError(t, err)
+	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointName)
+
+	ckpt := &v1alpha1.DynamoCheckpoint{}
+	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: checkpointStatuses["worker"].CheckpointName, Namespace: "default"}, ckpt))
+
+	jobMeta := ckpt.Spec.Job.PodTemplateSpec.ObjectMeta
+	// Workload pod-template labels/annotations must survive onto the checkpoint job.
+	assert.Equal(t, "keep-me", jobMeta.Labels["workload-label"])
+	assert.Equal(t, "false", jobMeta.Annotations[commonconsts.KubeAnnotationIstioSidecarInject])
+	assert.Equal(t, "yes", jobMeta.Annotations["policy.example.com/keep"])
+	// Controller-managed component label is still applied.
+	assert.Equal(t, "worker", jobMeta.Labels[commonconsts.KubeLabelDynamoComponent])
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
