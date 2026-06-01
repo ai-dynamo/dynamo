@@ -292,6 +292,21 @@ const (
 	CheckpointStartupPolicyWaitForCheckpoint CheckpointStartupPolicy = "WaitForCheckpoint"
 )
 
+// CheckpointDeletionPolicy defines what happens to DGD-managed automatic
+// checkpoint resources when the owning DGD is deleted.
+// +kubebuilder:validation:Enum=Delete;Retain
+type CheckpointDeletionPolicy string
+
+const (
+	// CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint
+	// CRs and artifacts when the owning DGD is deleted.
+	CheckpointDeletionPolicyDelete CheckpointDeletionPolicy = "Delete"
+	// CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs
+	// and artifacts after the owning DGD is deleted. Users can reference the
+	// retained checkpoint with checkpointRef if they accept compatibility risk.
+	CheckpointDeletionPolicyRetain CheckpointDeletionPolicy = "Retain"
+)
+
 // ServiceCheckpointConfig configures checkpointing for a DGD service
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.mode) || self.mode == 'Auto'",message="checkpoint.job can only be set in Auto mode"
@@ -317,6 +332,13 @@ type ServiceCheckpointConfig struct {
 	// +optional
 	// +kubebuilder:default=Immediate
 	StartupPolicy CheckpointStartupPolicy `json:"startupPolicy,omitempty"`
+
+	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
+	// artifact are deleted or retained when the owning DGD is deleted.
+	// Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+	// +optional
+	// +kubebuilder:default=Delete
+	DeletionPolicy CheckpointDeletionPolicy `json:"deletionPolicy,omitempty"`
 
 	// CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
 	// If specified, this service's Identity is ignored and the referenced checkpoint is used directly.

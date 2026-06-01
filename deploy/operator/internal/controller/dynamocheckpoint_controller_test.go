@@ -32,6 +32,9 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -248,8 +251,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(300), *job.Spec.TTLSecondsAfterFinished)
 
-	// Multi-GPU: wrapping decision uses identity.TensorParallelSize, not container GPU limits.
-	ckpt.Spec.Identity.TensorParallelSize = 2
+	// Multi-GPU: wrapping decision uses the target container's captured GPU request.
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
@@ -446,6 +448,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhasePending, updated.Status.Phase)
+		assert.Equal(t, testHash, updated.Status.CheckpointID)
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 		assert.Empty(t, updated.Status.Message)
 		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
@@ -497,6 +500,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: friendlyCheckpointName, Namespace: testNamespace}, updated))
 		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
+		assert.Equal(t, testHash, updated.Status.CheckpointID)
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 	})
 
@@ -554,6 +558,47 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
 		assert.Contains(t, updated.Status.Message, primary.Name)
 	})
+}
+
+func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDelete(t *testing.T) {
+	ctx := context.Background()
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+	ckpt.Labels = map[string]string{
+		snapshotprotocol.CheckpointIDLabel: testHash,
+	}
+	ckpt.Annotations = map[string]string{
+		consts.CheckpointAutoAnnotation:           consts.KubeLabelValueTrue,
+		consts.CheckpointDeletionPolicyAnnotation: string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
+	}
+
+	cfg := checkpointTestConfig()
+	cfg.Checkpoint.Storage = configv1alpha1.CheckpointStorageConfiguration{
+		Type: snapshotprotocol.StorageTypePVC,
+		PVC: configv1alpha1.CheckpointPVCConfig{
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		},
+	}
+	job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
+		Type:     snapshotprotocol.StorageTypePVC,
+		PVCName:  "snapshot-pvc",
+		BasePath: "/checkpoints",
+	})
+	require.NoError(t, err)
+	job.Status.Conditions = []batchv1.JobCondition{{
+		Type:   batchv1.JobComplete,
+		Status: corev1.ConditionTrue,
+	}}
+
+	r := makeCheckpointReconciler(s, ckpt, job)
+	r.Config = cfg
+
+	require.NoError(t, r.FinalizeResource(ctx, ckpt))
+
+	current := &batchv1.Job{}
+	err = r.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, current)
+	require.True(t, apierrors.IsNotFound(err), "expected cleanup job to be removed after completion, got %v", err)
 }
 
 func TestCheckpointReconciler_HandleCreating(t *testing.T) {

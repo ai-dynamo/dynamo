@@ -173,6 +173,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
+| dynamo-operator.checkpoint.cleanupImage | string | `"busybox:1.36"` | Image used by best-effort artifact cleanup Jobs for automatically-created checkpoints. The image must provide /bin/sh and rm. |
 | dynamo-operator.checkpoint.storage | object | `{}` | Optional PVC storage used when the snapshot-agent is installed outside workload namespaces with snapshot.storage.accessMode=podMount. Set create=true for operator-managed namespace PVCs, or omit/create=false to require an already-present PVC with the configured name. ReadWriteOnce can be used with podMount for sequential checkpoint/restore on suitable storage backends; use ReadWriteMany for concurrent multi-node access. |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |

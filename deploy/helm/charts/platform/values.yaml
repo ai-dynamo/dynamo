@@ -261,6 +261,8 @@ dynamo-operator:
   checkpoint:
     # -- Whether to enable checkpoint/restore functionality
     enabled: false
+    # -- Image used by best-effort artifact cleanup Jobs for automatically-created checkpoints. The image must provide /bin/sh and rm.
+    cleanupImage: busybox:1.36
     # -- Optional PVC storage used when the snapshot-agent is installed outside
     # workload namespaces with snapshot.storage.accessMode=podMount. Set
     # create=true for operator-managed namespace PVCs, or omit/create=false to

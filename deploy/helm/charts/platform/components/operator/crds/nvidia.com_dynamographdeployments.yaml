@@ -976,6 +976,16 @@ spec:
                               CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
                               If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
                             type: string
+                          deletionPolicy:
+                            default: Delete
+                            description: |-
+                              DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
+                              artifact are deleted or retained when the owning DGD is deleted.
+                              Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+                            enum:
+                              - Delete
+                              - Retain
+                            type: string
                           enabled:
                             default: false
                             description: Enabled indicates whether checkpointing is enabled for this service
@@ -12269,6 +12279,16 @@ spec:
                                   checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.
                                   When set, this component's `identity` is ignored and the referenced
                                   checkpoint is used directly.
+                                type: string
+                              deletionPolicy:
+                                default: Delete
+                                description: |-
+                                  deletionPolicy defines whether a DGD-managed automatic checkpoint CR and
+                                  artifact are deleted or retained when the owning DGD is deleted.
+                                  Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+                                enum:
+                                  - Delete
+                                  - Retain
                                 type: string
                               identity:
                                 description: |-

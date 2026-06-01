@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -61,6 +62,8 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -75,6 +78,19 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	logger.Info("Reconciling DynamoCheckpoint", "name", ckpt.Name, "phase", ckpt.Status.Phase)
+
+	if commonController.ContainsFinalizer(ckpt) ||
+		ckpt.Annotations != nil &&
+			ckpt.Annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue {
+		deleted, err := commonController.HandleFinalizer(ctx, ckpt, r.Client, r)
+		if err != nil {
+			logger.Error(err, "Failed to handle finalizer")
+			return ctrl.Result{}, err
+		}
+		if deleted {
+			return ctrl.Result{}, nil
+		}
+	}
 
 	checkpointID, err := checkpoint.CheckpointID(ckpt)
 	if err != nil {
@@ -360,6 +376,100 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, nil
 	default:
 		return ctrl.Result{}, nil
+	}
+}
+
+func (r *CheckpointReconciler) FinalizeResource(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
+	logger := log.FromContext(ctx)
+	if ckpt == nil || ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+		return nil
+	}
+	if r.Config == nil {
+		logger.Info("Automatic checkpoint artifact cleanup skipped because operator configuration is not available")
+		return nil
+	}
+
+	checkpointID, err := checkpoint.CheckpointID(ckpt)
+	if err != nil {
+		return err
+	}
+
+	storage, ok, err := checkpoint.StorageFromConfig(r.Config.Checkpoint.Storage)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		daemonSets := &appsv1.DaemonSetList{}
+		if err := r.List(
+			ctx,
+			daemonSets,
+			client.InNamespace(ckpt.Namespace),
+			client.MatchingLabels{snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue},
+		); err != nil {
+			return fmt.Errorf("list snapshot-agent daemonsets in %s: %w", ckpt.Namespace, err)
+		}
+		storage, err = snapshotprotocol.DiscoverStorageFromDaemonSets(ckpt.Namespace, daemonSets.Items)
+		if err != nil {
+			return fmt.Errorf("discover snapshot-agent storage for automatic checkpoint cleanup: %w", err)
+		}
+	}
+
+	job, err := buildCheckpointCleanupJob(r.Config, ckpt, checkpointID, storage)
+	if err != nil {
+		return err
+	}
+	current := &batchv1.Job{}
+	jobKey := client.ObjectKey{Namespace: job.Namespace, Name: job.Name}
+	if err := r.Get(ctx, jobKey, current); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get checkpoint cleanup job %s/%s: %w", job.Namespace, job.Name, err)
+		}
+		if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create checkpoint cleanup job %s/%s: %w", job.Namespace, job.Name, err)
+		}
+	} else if current.Labels[snapshotprotocol.CheckpointIDLabel] != checkpointID {
+		return fmt.Errorf("checkpoint cleanup job %s/%s already exists for checkpoint ID %q", job.Namespace, job.Name, current.Labels[snapshotprotocol.CheckpointIDLabel])
+	}
+
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		current := &batchv1.Job{}
+		if err := r.Get(ctx, jobKey, current); err != nil {
+			if apierrors.IsNotFound(err) {
+				if err := r.Create(ctx, job.DeepCopy()); err != nil && !apierrors.IsAlreadyExists(err) {
+					return fmt.Errorf("create checkpoint cleanup job %s/%s: %w", job.Namespace, job.Name, err)
+				}
+				if time.Now().After(deadline) {
+					return fmt.Errorf("timed out waiting for checkpoint cleanup job %s/%s to be observed", job.Namespace, job.Name)
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
+				continue
+			}
+			return fmt.Errorf("get checkpoint cleanup job %s/%s: %w", job.Namespace, job.Name, err)
+		}
+		for _, condition := range current.Status.Conditions {
+			switch {
+			case condition.Type == batchv1.JobComplete && condition.Status == corev1.ConditionTrue:
+				if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
+					return fmt.Errorf("delete completed checkpoint cleanup job %s/%s: %w", current.Namespace, current.Name, err)
+				}
+				return nil
+			case condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue:
+				return fmt.Errorf("checkpoint cleanup job %s/%s failed: %s", current.Namespace, current.Name, condition.Message)
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for checkpoint cleanup job %s/%s", job.Namespace, job.Name)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 

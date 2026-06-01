@@ -292,15 +292,21 @@ The `VllmDecodeWorker` pod should restore from the ready checkpoint instead of c
 `checkpointRef` is the most explicit path. If you set it, the DGD uses that
 existing `DynamoCheckpoint` and does not create a new automatic checkpoint for
 the component. This is the escape hatch for users who intentionally want to
-reuse a pre-existing checkpoint and accept the compatibility risk.
+reuse a retained or pre-warmed checkpoint and accept the compatibility risk.
 
 Without `checkpointRef`, `mode: Auto` is the DGD-managed path: for each
-checkpoint-enabled worker generation, the DGD controller creates a DGD-scoped
+checkpoint-enabled worker generation, the DGD controller creates a DGD-owned
 `DynamoCheckpoint` and the checkpoint controller starts a checkpoint Job.
 Automatic DGD checkpoints are not reused across DGDs, even when two manifests
 are identical.
 
 The automatic checkpoint ID is derived from the DGD namespace/name/UID, component name, and active worker hash. The DGD UID prevents cross-DGD reuse; the worker hash keeps a scale down/up on the same worker generation using the same DGD-scoped checkpoint while creating a new checkpoint for a new worker generation.
+
+By default, when the DGD is deleted, the operator deletes DGD-owned automatic
+`DynamoCheckpoint` CRs. The checkpoint finalizer then removes the corresponding
+checkpoint artifact from the checkpoint PVC. Set `deletionPolicy: Retain` to
+keep the automatic checkpoint CR and stored artifact after the DGD is deleted.
+Retained checkpoints can later be used explicitly with `checkpointRef`.
 
 By default, `startupPolicy: Immediate` starts workers cold while the checkpoint job runs in the background. Once the checkpoint becomes `Ready`, only newly-created Pods restore from it. Existing Pods are not mutated or restarted just because the checkpoint became ready.
 
@@ -311,6 +317,7 @@ checkpoint:
   enabled: true
   mode: Auto
   startupPolicy: Immediate # default; optional
+  deletionPolicy: Delete  # default; use Retain to keep CR/artifact after DGD deletion
 ```
 
 Inside a `DynamoGraphDeployment`, it looks like this:
@@ -336,6 +343,7 @@ spec:
         enabled: true
         mode: Auto
         startupPolicy: Immediate
+        deletionPolicy: Delete
       extraPodSpec:
         mainContainer:
           image: registry.example.com/dynamo/vllm-placeholder:1.0.0

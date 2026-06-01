@@ -624,6 +624,7 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
 							Mode:                v1beta1.CheckpointModeAuto,
 							StartupPolicy:       v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+							DeletionPolicy:      v1beta1.CheckpointDeletionPolicyRetain,
 							TargetContainerName: "worker",
 							Job: &v1beta1.ComponentCheckpointJobConfig{
 								GMSClientContainers: []string{"gms-saver"},
@@ -661,8 +662,9 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 						ExtraClientContainers: []string{"gms-loader"},
 					},
 					Checkpoint: &ServiceCheckpointConfig{
-						Enabled:       true,
-						StartupPolicy: CheckpointStartupPolicyWaitForCheckpoint,
+						Enabled:        true,
+						StartupPolicy:  CheckpointStartupPolicyWaitForCheckpoint,
+						DeletionPolicy: CheckpointDeletionPolicyRetain,
 						Identity: &DynamoCheckpointIdentity{
 							Model:            "model",
 							BackendFramework: "vllm",

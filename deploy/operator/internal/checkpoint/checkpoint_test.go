@@ -24,6 +24,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
@@ -412,7 +413,7 @@ func TestCreateOrGetAutoCheckpointDoesNotReuseDifferentCheckpointWithSameLegacyH
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", "", nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "checkpoint-"+testHash, ckpt.Name)
 
@@ -426,12 +427,18 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", "", nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 	assert.Equal(t, "true", ckpt.Annotations[consts.CheckpointAutoAnnotation])
+	assert.Equal(t, string(nvidiacomv1alpha1.CheckpointDeletionPolicyDelete), ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation])
 	assert.Equal(t, testHash, ckpt.Labels[snapshotprotocol.CheckpointIDLabel])
+	assert.True(t, commonController.ContainsFinalizer(ckpt))
+
+	stored := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: ckpt.Namespace}, stored))
+	assert.True(t, commonController.ContainsFinalizer(stored))
 }
 
 func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.T) {
@@ -448,10 +455,88 @@ func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.
 		testIdentity(),
 		corev1.PodTemplateSpec{},
 		"",
+		"",
 		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
+		nil,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GMS + Snapshot is temporarily disabled")
+}
+
+func TestCreateOrGetAutoCheckpointRetainStoresDeletionPolicy(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+	owner := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: testNamespace,
+			UID:       types.UID("dgd-uid"),
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(owner).Build()
+
+	ckpt, err := CreateOrGetAutoCheckpoint(
+		ctx,
+		c,
+		testNamespace,
+		testHash,
+		testIdentity(),
+		corev1.PodTemplateSpec{},
+		"",
+		nvidiacomv1alpha1.CheckpointDeletionPolicyRetain,
+		nil,
+		owner,
+	)
+	require.NoError(t, err)
+
+	assert.Empty(t, ckpt.OwnerReferences)
+	assert.Equal(t, string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain), ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation])
+}
+
+func TestCreateOrGetAutoCheckpointUpdatesExistingDeletionPolicyAndFinalizer(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+	owner := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: testNamespace,
+			UID:       types.UID("dgd-uid"),
+		},
+	}
+	existing := &nvidiacomv1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkpoint-" + testHash,
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				snapshotprotocol.CheckpointIDLabel: testHash,
+			},
+			Annotations: map[string]string{
+				consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
+			Identity: testIdentity(),
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(owner, existing).Build()
+
+	ckpt, err := CreateOrGetAutoCheckpoint(
+		ctx,
+		c,
+		testNamespace,
+		testHash,
+		testIdentity(),
+		corev1.PodTemplateSpec{},
+		"",
+		nvidiacomv1alpha1.CheckpointDeletionPolicyDelete,
+		nil,
+		owner,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, string(nvidiacomv1alpha1.CheckpointDeletionPolicyDelete), ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation])
+	assert.True(t, commonController.ContainsFinalizer(ckpt))
+	require.Len(t, ckpt.OwnerReferences, 1)
+	assert.Equal(t, owner.UID, ckpt.OwnerReferences[0].UID)
 }
 
 // --- InjectCheckpointIntoPodSpec tests ---

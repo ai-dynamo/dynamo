@@ -153,6 +153,9 @@ modelExpressURL: ""
 checkpoint:
   # -- Enable checkpoint/restore functionality
   enabled: false
+  # -- Image used by best-effort artifact cleanup Jobs for automatically-created
+  # checkpoints. The image must provide /bin/sh and rm.
+  cleanupImage: busybox:1.36
   # Localhost seccomp profile applied to checkpoint+restore pods to block
   # io_uring (which CRIU cannot dump). The default profile is applied unless
   # seccomp.disabled=true is set. Set seccomp.disabled=true on OpenShift
