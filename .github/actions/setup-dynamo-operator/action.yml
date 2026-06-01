@@ -138,12 +138,20 @@ runs:
         # This is independent of the host cluster version.
         VCLUSTER_HELM_ARGS=()
         if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
-          VCLUSTER_HELM_ARGS+=(
-            --set sync.fromHost.nodes.enabled=true
-            --set sync.fromHost.nodes.clearImageStatus=true
-            --set-string "sync.fromHost.nodes.selector.labels.nvidia\.com/gpu\.present=true"
-            --set sync.fromHost.runtimeClasses.enabled=true
-          )
+          VCLUSTER_CHECKPOINT_VALUES="$(mktemp)"
+          cat > "${VCLUSTER_CHECKPOINT_VALUES}" <<'EOF'
+        sync:
+          fromHost:
+            nodes:
+              enabled: true
+              clearImageStatus: true
+              selector:
+                labels:
+                  nvidia.com/gpu.present: "true"
+            runtimeClasses:
+              enabled: true
+        EOF
+          VCLUSTER_HELM_ARGS+=(--values "${VCLUSTER_CHECKPOINT_VALUES}")
         fi
 
         vcluster create ${VCLUSTER_NAME} \
