@@ -831,17 +831,36 @@ impl ModelManager {
             let feed_key = format!("{}/{}", endpoint.id().namespace, endpoint.id().component);
             // Start a feed if none runs for this component yet, or restart it if the previous
             // one exited (so a dead subscription does not permanently disable load tracking).
-            let needs_feed = self
-                .lora_load_feeds
-                .get(&feed_key)
-                .map(|h| h.is_finished())
-                .unwrap_or(true);
-            if needs_feed {
-                let handle = self
-                    .lora_load_estimator
-                    .clone()
-                    .start_event_subscription(endpoint.component().clone());
-                self.lora_load_feeds.insert(feed_key, handle);
+            //
+            // Use the DashMap entry API so the check-and-insert is atomic per key: two
+            // concurrent `kv_chooser_for` calls for the same component otherwise both observe
+            // "no feed" and each spawn a subscription, double-counting active sequences.
+            // Holding the entry lock across the spawn serializes them — the loser sees the
+            // winner's live handle and skips.
+            let started = match self.lora_load_feeds.entry(feed_key) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get().is_finished() {
+                        // Previous feed exited; replace it (aborting the dead handle is a no-op).
+                        let handle = self
+                            .lora_load_estimator
+                            .clone()
+                            .start_event_subscription(endpoint.component().clone());
+                        entry.insert(handle);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    let handle = self
+                        .lora_load_estimator
+                        .clone()
+                        .start_event_subscription(endpoint.component().clone());
+                    entry.insert(handle);
+                    true
+                }
+            };
+            if started {
                 tracing::info!(
                     namespace = %endpoint.id().namespace,
                     component = %endpoint.id().component,
