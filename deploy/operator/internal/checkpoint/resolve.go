@@ -41,7 +41,7 @@ type CheckpointInfo struct {
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
-	hash, err := checkpointIdentityHash(ckpt)
+	hash, err := CheckpointID(ckpt)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,9 @@ func ResolveCheckpointForService(
 		}
 		return info, nil
 	case config.Identity == nil:
-		return nil, fmt.Errorf("checkpoint enabled but no checkpointRef or identity provided")
+		return &CheckpointInfo{
+			Enabled: true,
+		}, nil
 	}
 
 	hash, err := ComputeIdentityHash(*config.Identity)

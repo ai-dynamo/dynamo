@@ -689,9 +689,9 @@ spec:
                       type: boolean
                     identity:
                       description: |-
-                        Identity defines the checkpoint identity for hash computation
-                        Used when Mode is Auto or when looking up existing checkpoints
-                        Required when checkpointRef is not specified
+                        Deprecated: Identity is ignored by DGD-managed automatic checkpoints.
+                        Automatic checkpoints are scoped to the owning DGD/service generation and
+                        are never reused across DGDs.
                       properties:
                         backendFramework:
                           description: BackendFramework is the runtime framework (vllm, sglang, trtllm)
@@ -705,9 +705,9 @@ spec:
                           type: string
                         dynamoVersion:
                           description: |-
-                            DynamoVersion is the Dynamo platform version (optional)
-                            If not specified, version is not included in identity hash
-                            This ensures checkpoint compatibility across Dynamo releases
+                            DynamoVersion is the Dynamo platform version (optional).
+                            Deprecated for DGD-managed automatic checkpoints; it only participates in
+                            the legacy identity hash fallback for standalone objects.
                           type: string
                         extraParameters:
                           additionalProperties:
@@ -781,8 +781,6 @@ spec:
                       type: string
                   type: object
                   x-kubernetes-validations:
-                    - message: When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified
-                      rule: '!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))'
                     - message: checkpoint.job cannot be set when checkpointRef is specified
                       rule: '!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0'
                     - message: checkpoint.job can only be set in Auto mode
@@ -11808,13 +11806,11 @@ spec:
                     checkpoint:
                       description: |-
                         checkpoint configures container-image snapshotting and restore for
-                        this component. When set, the DGD controller can produce a
-                        DynamoCheckpoint CR from a running pod and later restore pods from
-                        that checkpoint for faster cold start. The user-facing shape of this
-                        field -- especially its interaction with the standalone
-                        DynamoCheckpoint resource and the identity-hash computation -- is
-                        still settling, which is why it lives under `experimental` in v1beta1
-                        instead of at the top level.
+                        this component. When set, the DGD controller can produce a DGD-scoped
+                        DynamoCheckpoint CR and later restore pods in the same DGD generation
+                        from that checkpoint for faster cold start. The user-facing shape of
+                        this field is still settling, which is why it lives under `experimental`
+                        in v1beta1 instead of at the top level.
                       properties:
                         checkpointRef:
                           description: |-
@@ -11824,9 +11820,9 @@ spec:
                           type: string
                         identity:
                           description: |-
-                            identity defines the checkpoint identity for hash computation. Used
-                            when `mode` is `Auto` or when looking up existing checkpoints.
-                            Required when `checkpointRef` is not specified.
+                            Deprecated: identity is ignored by DGD-managed automatic checkpoints.
+                            Automatic checkpoints are scoped to the owning DGD/component generation and
+                            are never reused across DGDs.
                           properties:
                             backendFramework:
                               description: backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
@@ -11840,9 +11836,9 @@ spec:
                               type: string
                             dynamoVersion:
                               description: |-
-                                dynamoVersion is the Dynamo platform version. If empty, the version is
-                                not included in the identity hash, so checkpoints remain compatible
-                                across releases.
+                                dynamoVersion is the Dynamo platform version. Deprecated for DGD-managed
+                                automatic checkpoints; it only participates in the legacy identity hash
+                                fallback for standalone objects.
                               type: string
                             extraParameters:
                               additionalProperties:
@@ -11915,8 +11911,6 @@ spec:
                           type: string
                       type: object
                       x-kubernetes-validations:
-                        - message: When checkpoint is configured, either checkpointRef or identity must be specified
-                          rule: (has(self.checkpointRef) && size(self.checkpointRef) > 0) || has(self.identity)
                         - message: checkpoint.job cannot be set when checkpointRef is specified
                           rule: '!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0'
                         - message: checkpoint.job can only be set in Auto mode
