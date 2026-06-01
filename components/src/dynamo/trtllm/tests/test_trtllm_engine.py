@@ -39,7 +39,7 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.unified,
     pytest.mark.gpu_1,
-    pytest.mark.timeout(300),
+    pytest.mark.timeout(320),  # 3x ~104s (trtllm gpu_1 log)
     pytest.mark.skipif(
         importlib.util.find_spec("tensorrt_llm") is None,
         reason="tensorrt_llm not installed in this container",

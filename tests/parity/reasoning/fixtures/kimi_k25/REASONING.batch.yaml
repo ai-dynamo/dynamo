@@ -10,101 +10,102 @@ cases:
   REASONING.batch.1.b:
     description: Plain text stays in force-reasoning mode
     ref: *upstream_ref
+    force_reasoning: true
     model_text: plain answer
     expected:
-      dynamo:
+      dynamo: &sg_batch_1_b
         reasoning_text: plain answer
         normal_text: ''
       vllm:
         reasoning_text: plain answer
         normal_text: ''
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *sg_batch_1_b
   REASONING.batch.2.a:
     description: Force-reasoning parser with explicit think tags
     ref: *upstream_ref
+    force_reasoning: true
     model_text: <think>thinking</think>answer
     expected:
       dynamo: &d_1
         reasoning_text: thinking
         normal_text: answer
       vllm: *d_1
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *d_1
   REASONING.batch.3.b:
     description: Tool-call section marker force-exits an open reasoning block
     ref: *upstream_ref
+    force_reasoning: true
     model_text: thinking <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
     expected:
-      dynamo:
-        reasoning_text: thinking
+      dynamo: &sg_batch_3_b
+        reasoning_text: 'thinking '
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       vllm:
         reasoning_text: 'thinking '
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *sg_batch_3_b
   REASONING.batch.2.c:
     description: Force-reasoning parser treats plain output as reasoning
     ref: *upstream_ref
+    force_reasoning: true
     model_text: thinking without explicit tags
     expected:
-      dynamo:
+      dynamo: &sg_batch_2_c
         reasoning_text: thinking without explicit tags
         normal_text: ''
       vllm:
         reasoning_text: thinking without explicit tags
         normal_text: ''
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *sg_batch_2_c
   REASONING.batch.4:
     description: Dangling end marker exits force-reasoning mode
     ref: *upstream_ref
+    force_reasoning: true
     model_text: normal</think>answer
     expected:
-      dynamo:
+      dynamo: &sg_batch_4
         reasoning_text: normal
         normal_text: answer
       vllm:
         reasoning_text: normal
         normal_text: answer
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *sg_batch_4
   REASONING.batch.5:
     description: Missing end marker keeps the remaining text as reasoning
     ref: *upstream_ref
+    force_reasoning: true
     model_text: partial reasoning
     expected:
-      dynamo:
+      dynamo: &sg_batch_5
         reasoning_text: partial reasoning
         normal_text: ''
       vllm:
         reasoning_text: partial reasoning
         normal_text: ''
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *sg_batch_5
   REASONING.batch.2.e:
     description: Empty reasoning block
     ref: *upstream_ref
+    force_reasoning: true
     model_text: <think></think>answer
     expected:
-      dynamo:
+      dynamo: &id001
         reasoning_text: ''
         normal_text: answer
       vllm:
         reasoning_text: ''
         normal_text: answer
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *id001
   REASONING.batch.2.f:
     description: Complex reasoning content with Unicode and newlines
     ref: *upstream_ref
+    force_reasoning: true
     model_text: |-
       <think>Line 1
       Unicode: café
       JSON-ish: {"x": [1, true]}</think>Done.
     expected:
-      dynamo:
+      dynamo: &id002
         reasoning_text: |-
           Line 1
           Unicode: café
@@ -116,24 +117,24 @@ cases:
           Unicode: café
           JSON-ish: {"x": [1, true]}
         normal_text: Done.
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *id002
   REASONING.batch.1.a:
     description: Empty input
     ref: *upstream_ref
+    force_reasoning: true
     model_text: ''
     expected:
-      dynamo:
+      dynamo: &id003
         reasoning_text: ''
         normal_text: ''
       vllm:
         reasoning_text: ''
         normal_text: ''
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *id003
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated
     ref: *upstream_ref
+    force_reasoning: true
     model_text: <think>first</think> middle <think>second</think> done
     expected:
       dynamo:
@@ -144,20 +145,22 @@ cases:
         normal_text: ' middle <think>second</think> done'
         reason: Dynamo extracts each complete reasoning span; vLLM Kimi K2 parser leaves the later complete span in normal_text.
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+        reasoning_text: first
+        normal_text: ' middle <think>second</think> done'
+        reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span, with its literal markers, in normal_text.
   REASONING.batch.2.d:
     description: Normal text around reasoning is not applicable in force-reasoning mode
     reason: Force-reasoning parser families start inside reasoning; marker-free prefix text is not a normal-text prefix.
   REASONING.batch.3.a:
     description: Closed reasoning span followed by Kimi tool-call section marker
     ref: *upstream_ref
+    force_reasoning: true
     model_text: <think>choose tool</think><|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
     expected:
-      dynamo:
+      dynamo: &id004
         reasoning_text: choose tool
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       vllm:
         reasoning_text: choose tool
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+      sglang: *id004

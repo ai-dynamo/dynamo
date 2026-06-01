@@ -18,6 +18,8 @@ This page collects the main router flags for frontend-embedded and standalone de
 - `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 16.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. It also enables priority scheduling via `priority` hints in `nvext.agent_hints`. Must be greater than 0. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend.
 - `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`).
 
+For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](router-filtering.md).
+
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
 `lcfs` orders by adjusted reverse arrival time (`priority_jump + arrival_offset`) and mainly serves controlled comparison experiments.
 `wspt` orders by `(1 + priority_jump) / isl_tokens` and optimizes average TTFT.
@@ -94,12 +96,12 @@ For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`
 
 ### Session Control and Sticky Routing
 
-When a request carries `nvext.session_control`, the KV router activates two additional components:
+When a request carries `nvext.session_control`, the KV router can activate two session-related components:
 
-- **AgentController**: Sends session lifecycle RPCs (`open_session`, `close_session`) to the worker's `session_control` endpoint. The event-plane client is lazily initialized on the first session request.
-- **StickySessionRouter**: Maintains an in-memory `session_id -> worker_id` affinity map with sliding-window TTL. Subsequent requests with the same `session_id` are routed to the pinned worker, bypassing KV overlap scoring.
+- **StickySessionRouter**: Maintains an in-memory `session_id -> (worker_id, dp_rank)` affinity map with sliding-window TTL. `action: "bind"` creates router-only affinity without backend engine RPCs. Subsequent requests with the same `session_id` are routed to the pinned worker/rank, bypassing KV overlap scoring.
+- **AgentController**: Sends session lifecycle RPCs (`open_session`, `close_session`) to the worker's `session_control` endpoint when `action` is `"open"` or `"close"`. The event-plane client is lazily initialized on the first lifecycle request.
 
-These activate automatically with `--router-mode kv` -- no additional flags are needed. Requests without `session_control` are unaffected and follow the standard KV-aware routing path. Session control currently requires the SGLang backend with `--enable-streaming-session`. See [SGLang for Agentic Workloads -- Session Control](../../backends/sglang/agents.md#session-control-for-subagent-kv-isolation-experimental) for details.
+These activate automatically with `--router-mode kv` -- no additional flags are needed. Requests without `session_control` are unaffected and follow the standard KV-aware routing path. Router-only sticky routing only requires `action: "bind"`; engine-backed session lifecycle currently requires the SGLang backend with `--enable-streaming-session`. See [SGLang for Agentic Workloads -- Session Control](../../backends/sglang/agents.md#session-control-for-subagent-kv-isolation-experimental) for details.
 
 ## Tuning Guidelines
 
@@ -124,6 +126,10 @@ Use `--no-router-track-prefill-tokens` when a router is serving decode-only traf
 Use `--router-track-output-blocks` when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. If you also pass `nvext.agent_hints.osl` per request, the router applies fractional decay to output blocks so that requests nearing completion contribute less future load. See [Decode Load Modeling](router-concepts.md#decode-load-modeling) for the cost-model details.
 
 `--router-queue-threshold` controls when incoming requests are held in a priority queue. The router waits while all workers exceed the configured fraction of `max_num_batched_tokens`, then releases work as capacity frees up. Set it to `None` to disable queueing entirely.
+
+This threshold delays dispatch. It does not remove workers from the candidate set; for that distinction, see [Router Filtering](router-filtering.md).
+
+Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh.
 
 **Note for the SGLang backend.** Since [#8220](https://github.com/ai-dynamo/dynamo/pull/8220), the value the SGLang worker publishes for `max_num_batched_tokens` in its Model Deployment Card depends on the server args:
 

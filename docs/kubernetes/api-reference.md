@@ -2242,7 +2242,7 @@ _Underlying type:_ _string_
 GPUSKUType is the AIC hardware system identifier for a supported GPU.
 
 _Validation:_
-- Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
+- Enum: [gb200_sxm gb10 b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
 
 _Appears in:_
 - [HardwareSpec](#hardwarespec)
@@ -2250,6 +2250,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `gb200_sxm` | --- Blackwell ---<br /> |
+| `gb10` |  |
 | `b200_sxm` |  |
 | `h200_sxm` | --- Hopper ---<br /> |
 | `h100_sxm` |  |
@@ -2285,7 +2286,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected by selecting the GPU with the highest<br />node count, then highest VRAM. In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU. |  | Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected by selecting the GPU with the highest<br />node count, then highest VRAM. In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU. |  | Enum: [gb200_sxm gb10 b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB.<br />When omitted, auto-detected from cluster GPU nodes. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the GPU budget for profiling and deployment.<br />The profiler uses this to determine parallelism and replica count.<br />When omitted, computed by counting GPUs on discovered nodes<br />(filtered by gpuSku when set), temporarily capped at 32 to<br />limit profiler search space. This cap may be removed in a future<br />release. Set this field explicitly to override. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node.<br />When omitted, auto-detected from cluster GPU nodes. |  | Optional: \{\} <br /> |
@@ -3045,8 +3046,11 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `tlsMode` _string_ | TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").<br />Defaults to "SIMPLE". |  |  |
+| `tlsMode` _string_ | TLSMode is the Istio TLS mode for DestinationRules.<br />Supported values: "DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL".<br />Defaults to "SIMPLE". |  |  |
 | `insecureSkipVerify` _boolean_ | InsecureSkipVerify skips TLS certificate verification in DestinationRules.<br />Defaults to true (matching upstream GAIE behavior with self-signed certs). |  |  |
+| `clientCertificate` _string_ | ClientCertificate is the path (in the istio-proxy sidecar's filesystem)<br />to the file holding the client-side TLS certificate used for mTLS.<br />REQUIRED when TLSMode is "MUTUAL"; ignored for other modes. |  |  |
+| `privateKey` _string_ | PrivateKey is the path (in the istio-proxy sidecar's filesystem) to the<br />file holding the client-side TLS private key used for mTLS.<br />REQUIRED when TLSMode is "MUTUAL"; ignored for other modes. |  |  |
+| `caCertificates` _string_ | CaCertificates is the optional path (in the istio-proxy sidecar's<br />filesystem) to the file holding CA certificates used to verify the<br />server certificate. Used only when TLSMode is "MUTUAL"; for other modes<br />the field is ignored. |  |  |
 
 
 #### KaiSchedulerConfiguration

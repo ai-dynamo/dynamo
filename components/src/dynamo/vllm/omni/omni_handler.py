@@ -62,7 +62,7 @@ class EngineInputs:
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
-    Handles text-to-text, text-to-image, text-to-video, and text-to-audio generation.
+    Handles text-to-image, text-to-video, image-to-video, and text-to-audio generation.
     Audio/TTS logic is delegated to AudioGenerationHandler via composition.
     """
 
@@ -303,7 +303,8 @@ class OmniHandler(BaseOmniHandler):
         for i, default in enumerate(defaults):
             stage_type = "llm"
             if engine is not None and hasattr(engine, "get_stage_metadata"):
-                stage_type = engine.get_stage_metadata(i).get("stage_type", "llm")
+                metadata = engine.get_stage_metadata(i)
+                stage_type = getattr(metadata, "stage_type", "llm")
             elif isinstance(default, OmniDiffusionSamplingParams):
                 # AsyncOmni no longer exposes .engine in some versions. When
                 # metadata is unavailable, infer diffusion stages from defaults.

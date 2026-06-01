@@ -11,6 +11,7 @@
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
+#   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
@@ -33,6 +34,8 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
+  # Canonical agent skills directory (post-flip); .agents/skills is a symlink here.
+  - 'skills/**'
 
 examples:
   - 'recipes/**'
@@ -64,7 +67,6 @@ ignore:
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
-  - 'container/templates/aws.Dockerfile'
   - 'container/templates/local_dev.Dockerfile'
   - 'container/templates/dev.Dockerfile'
   # Removed by trtllm upstream-base migration; claim here so changed-files
@@ -208,3 +210,6 @@ benchmarks:
   - 'benchmarks/**'
   - '!**/*.md'
   - '!**/*.rst'
+
+efa:
+  - 'container/templates/aws.Dockerfile'

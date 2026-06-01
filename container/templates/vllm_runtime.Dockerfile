@@ -20,6 +20,9 @@ ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG NIXL_REF
+{% if device == "cuda" %}
+ARG CUDA_MAJOR
+{% endif %}
 
 WORKDIR /workspace
 
@@ -45,6 +48,22 @@ ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+{% else %}
+# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
+# stable prefix so non-Python consumers use the same NIXL copy that Python imports.
+# This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
+# processes that do not import the nixl Python package first.
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ENV NIXL_PREFIX=/opt/dynamo/nixl \
+    NIXL_LIB_DIR=/opt/dynamo/nixl \
+    NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
+COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
+RUN install_nixl_from_wheel \
+    --cuda-major "${CUDA_MAJOR}" \
+    --site-packages "${SITE_PACKAGES}" \
+    --prefix "${NIXL_PREFIX}" \
+    --skip-headers
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
 # Install NATS and ETCD
@@ -181,6 +200,18 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
+
+# Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships
+# a GPL-encumbered prebuilt ffmpeg binary) with a source install that leaves
+# no binary on disk. vLLM-Omni uses diffusers.export_to_video and doesn't
+# invoke imageio-ffmpeg, so no IMAGEIO_FFMPEG_EXE is needed — this is
+# purely to clear the GPL binary. The --no-binary directive lives in the
+# requirements file itself.
+RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
+        --requirement /tmp/requirements.vllm.txt
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale

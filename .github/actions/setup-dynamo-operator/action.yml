@@ -4,7 +4,8 @@ description: 'Create a vCluster, install the Dynamo platform operator inside it 
 inputs:
   kubeconfig_base64:
     description: 'Base64-encoded kubeconfig for host cluster access'
-    required: true
+    required: false
+    default: ''
   vcluster_name:
     description: 'Name for the vCluster instance (auto-generated from github.run_id if empty)'
     required: false
@@ -78,6 +79,7 @@ runs:
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
 
     - name: Setup host kubeconfig
+      if: inputs.kubeconfig_base64 != ''
       shell: bash
       run: |
         echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host

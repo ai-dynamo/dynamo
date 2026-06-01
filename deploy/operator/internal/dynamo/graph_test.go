@@ -39,6 +39,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	istioNetworking "istio.io/api/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -9830,4 +9831,31 @@ func hasVolumeMountNamed(mounts []corev1.VolumeMount, name string) bool {
 		}
 	}
 	return false
+}
+
+// TestGenerateEPPDestinationRule_MUTUALPropagatesCerts is the regression test
+// MUTUAL TLS mode must populate ClientCertificate, PrivateKey,
+// and CaCertificates on the generated DestinationRule, otherwise Istio's
+// validation webhook rejects the DR with "client certificate required for
+// mutual tls" / "private key required for mutual tls" and the DGD never
+// finishes reconciling.
+func TestGenerateEPPDestinationRule_MUTUALPropagatesCerts(t *testing.T) {
+	mesh := configv1alpha1.ServiceMeshConfiguration{
+		Provider: string(configv1alpha1.ServiceMeshProviderIstio),
+		Istio: &configv1alpha1.IstioMeshConfiguration{
+			TLSMode:           "MUTUAL",
+			ClientCertificate: "/etc/certs/client.pem",
+			PrivateKey:        "/etc/certs/client.key",
+			CaCertificates:    "/etc/certs/ca.pem",
+		},
+	}
+
+	dr := GenerateEPPDestinationRule("qwen-epp", "dynamo-cloud", mesh)
+
+	require.NotNil(t, dr.Spec.TrafficPolicy)
+	require.NotNil(t, dr.Spec.TrafficPolicy.Tls)
+	assert.Equal(t, istioNetworking.ClientTLSSettings_MUTUAL, dr.Spec.TrafficPolicy.Tls.Mode)
+	assert.Equal(t, "/etc/certs/client.pem", dr.Spec.TrafficPolicy.Tls.ClientCertificate)
+	assert.Equal(t, "/etc/certs/client.key", dr.Spec.TrafficPolicy.Tls.PrivateKey)
+	assert.Equal(t, "/etc/certs/ca.pem", dr.Spec.TrafficPolicy.Tls.CaCertificates)
 }

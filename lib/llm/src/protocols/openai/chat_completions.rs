@@ -14,7 +14,7 @@ use super::{
     common_ext::{CommonExt, CommonExtProvider},
     nvext::NvExt,
     nvext::NvExtProvider,
-    tools, validate,
+    validate,
 };
 
 pub mod aggregator;
@@ -23,6 +23,54 @@ pub mod jail;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
+
+use dynamo_parsers::tool_calling::{ToolCallResponse, ToolCallResponseChunk};
+use dynamo_protocols::types::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk, FunctionCall,
+    FunctionCallStream, FunctionType,
+};
+
+/// Map a parser-native [`ToolCallResponse`] onto the protocol/wire
+/// [`ChatCompletionMessageToolCall`].
+///
+/// `dynamo-parsers` is decoupled from `dynamo-protocols`, so this consumer —
+/// which already depends on both — owns the mapping between the parser-native
+/// types and the OpenAI wire types. The field shapes are identical, so this is
+/// a straight re-map that preserves the previous wire output.
+pub(crate) fn tool_call_response_to_protocol(
+    parsed: ToolCallResponse,
+) -> ChatCompletionMessageToolCall {
+    ChatCompletionMessageToolCall {
+        id: parsed.id,
+        r#type: FunctionType::Function,
+        function: FunctionCall {
+            name: parsed.function.name,
+            arguments: parsed.function.arguments,
+        },
+    }
+}
+
+/// Map a parser-native [`ToolCallResponseChunk`] onto the protocol/wire
+/// [`ChatCompletionMessageToolCallChunk`]. See
+/// [`tool_call_response_to_protocol`] for the rationale.
+///
+/// Exposed so consumers of the decoupled streaming parser entrypoint
+/// ([`dynamo_parsers::tool_calling::try_tool_call_parse_stream`]) can recover
+/// the wire type without `dynamo-parsers` depending on `dynamo-protocols`.
+#[allow(dead_code)]
+pub(crate) fn tool_call_response_chunk_to_protocol(
+    parsed: ToolCallResponseChunk,
+) -> ChatCompletionMessageToolCallChunk {
+    ChatCompletionMessageToolCallChunk {
+        index: parsed.index,
+        id: parsed.id,
+        r#type: parsed.tp.map(|_| FunctionType::Function),
+        function: parsed.function.map(|f| FunctionCallStream {
+            name: f.name,
+            arguments: f.arguments,
+        }),
+    }
+}
 
 /// A request structure for creating a chat completion, extending OpenAI's
 /// `CreateChatCompletionRequest` with [`NvExt`] extensions and common fields.
@@ -184,23 +232,6 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
             return Some(value);
         }
 
-        // 1) Tool-call guided decoding (highest precedence after explicit guided_json)
-        if let (Some(tool_choice), Some(tools)) =
-            (self.inner.tool_choice.as_ref(), self.inner.tools.as_deref())
-        {
-            match tools::get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
-                Ok(Some(schema)) => return Some(schema),
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "failed to derive guided_json from tool_choice"
-                    );
-                }
-            }
-        }
-
-        // 2) OpenAI `response_format` (applies to assistant content, not tool calls)
         if let Some(response_format) = self.inner.response_format.as_ref() {
             use dynamo_protocols::types::ResponseFormat;
             match response_format {
@@ -386,7 +417,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
         validate::validate_tools(&self.inner.tools.as_deref())?;
-        // none for tool_choice
+        validate::validate_tool_choice(&self.inner.tool_choice, self.inner.tools.as_deref())?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call
@@ -407,6 +438,7 @@ mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::common::{OutputOptionsProvider, StopConditionsProvider};
+    use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
 
     #[test]
@@ -590,6 +622,50 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_tool_choice_required_rejects_empty_tools() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": "required"
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("required needs tools");
+        assert!(
+            err.to_string()
+                .contains("tool_choice is \"required\" but tools is empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_tool_choice_named_rejects_missing_tool() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "search"}
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("named tool must exist");
+        assert!(
+            err.to_string()
+                .contains("tool named \"search\" in tool_choice is not present in tools")
+        );
+    }
+
+    #[test]
     fn test_truncate_prompt_tokens_rejected_until_supported() {
         let request_json = json!({
             "model": "test-model",
@@ -600,5 +676,194 @@ mod tests {
             serde_json::from_value(request_json).expect("Failed to deserialize request");
 
         assert!(ValidateRequest::validate(&request).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Parser -> protocol mapping (decoupling guard).
+    //
+    // `dynamo-parsers` no longer depends on `dynamo-protocols`; the mapping
+    // moved into this consumer. These tests pin the mapper output to the
+    // *exact* struct + serialized JSON the old protocol-typed parser path
+    // produced, proving the wire output is unchanged.
+    // -----------------------------------------------------------------------
+    use dynamo_parsers::tool_calling::{
+        CalledFunction, CalledFunctionStream, ToolCallResponse, ToolCallResponseChunk, ToolCallType,
+    };
+
+    fn native_call(id: &str, name: &str, args: &str) -> ToolCallResponse {
+        ToolCallResponse {
+            id: id.to_string(),
+            tp: ToolCallType::Function,
+            function: CalledFunction {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    fn native_chunk(index: u32, id: &str, name: &str, args: &str) -> ToolCallResponseChunk {
+        ToolCallResponseChunk {
+            index,
+            id: Some(id.to_string()),
+            tp: Some(ToolCallType::Function),
+            function: Some(CalledFunctionStream {
+                name: Some(name.to_string()),
+                arguments: Some(args.to_string()),
+            }),
+        }
+    }
+
+    /// Reference reconstruction of the pre-decoupling unary mapping that lived
+    /// inside `dynamo-parsers`. Kept inline so a divergence in the live mapper
+    /// fails the test.
+    fn legacy_unary(id: &str, name: &str, args: &str) -> ChatCompletionMessageToolCall {
+        ChatCompletionMessageToolCall {
+            id: id.to_string(),
+            r#type: FunctionType::Function,
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    /// Reference reconstruction of the pre-decoupling streaming mapping.
+    fn legacy_chunk(
+        index: u32,
+        id: &str,
+        name: &str,
+        args: &str,
+    ) -> ChatCompletionMessageToolCallChunk {
+        ChatCompletionMessageToolCallChunk {
+            index,
+            id: Some(id.to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some(name.to_string()),
+                arguments: Some(args.to_string()),
+            }),
+        }
+    }
+
+    #[test]
+    fn unary_mapping_matches_legacy_struct_and_json() {
+        for (id, name, args) in [
+            (
+                "call_1",
+                "get_weather",
+                r#"{"location":"SF","unit":"celsius"}"#,
+            ),
+            ("call_2", "ping", "{}"), // empty arguments
+        ] {
+            let mapped = tool_call_response_to_protocol(native_call(id, name, args));
+            let legacy = legacy_unary(id, name, args);
+            assert_eq!(mapped, legacy, "struct mismatch for {name}");
+            assert_eq!(
+                serde_json::to_string(&mapped).unwrap(),
+                serde_json::to_string(&legacy).unwrap(),
+                "serialized JSON mismatch for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unary_mapping_multi_call_matches_legacy() {
+        let inputs = [
+            ("a", "first", r#"{"k":"v1"}"#),
+            ("b", "second", r#"{"k":"v2"}"#),
+        ];
+        let mapped: Vec<_> = inputs
+            .iter()
+            .map(|(id, n, a)| tool_call_response_to_protocol(native_call(id, n, a)))
+            .collect();
+        let legacy: Vec<_> = inputs
+            .iter()
+            .map(|(id, n, a)| legacy_unary(id, n, a))
+            .collect();
+        assert_eq!(mapped, legacy);
+        assert_eq!(
+            serde_json::to_string(&mapped).unwrap(),
+            serde_json::to_string(&legacy).unwrap()
+        );
+    }
+
+    #[test]
+    fn stream_mapping_matches_legacy_struct_and_json() {
+        for (idx, id, name, args) in [
+            (0u32, "call_1", "get_weather", r#"{"location":"SF"}"#),
+            (1u32, "call_2", "ping", "{}"), // empty arguments
+        ] {
+            let mapped = tool_call_response_chunk_to_protocol(native_chunk(idx, id, name, args));
+            let legacy = legacy_chunk(idx, id, name, args);
+            assert_eq!(mapped, legacy, "struct mismatch for {name}");
+            assert_eq!(
+                serde_json::to_string(&mapped).unwrap(),
+                serde_json::to_string(&legacy).unwrap(),
+                "serialized JSON mismatch for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_mapping_multi_call_indexes_and_matches_legacy() {
+        let inputs = [
+            (0u32, "a", "first", r#"{"k":"v1"}"#),
+            (1u32, "b", "second", r#"{"k":"v2"}"#),
+        ];
+        let mapped: Vec<_> = inputs
+            .iter()
+            .map(|(i, id, n, a)| tool_call_response_chunk_to_protocol(native_chunk(*i, id, n, a)))
+            .collect();
+        let legacy: Vec<_> = inputs
+            .iter()
+            .map(|(i, id, n, a)| legacy_chunk(*i, id, n, a))
+            .collect();
+        assert_eq!(mapped, legacy);
+        assert_eq!(
+            serde_json::to_string(&mapped).unwrap(),
+            serde_json::to_string(&legacy).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_validate_tools_valid_names() {
+        fn make_tool(name: &str) -> ChatCompletionTool {
+            ChatCompletionTool {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionObject {
+                    name: name.to_string(),
+                    description: None,
+                    parameters: Some(json!({"type": "object", "properties": {}})),
+                    strict: None,
+                },
+            }
+        }
+
+        let tools = vec![
+            make_tool("func_name"),
+            make_tool("func-name_v2"),
+            make_tool("FuncName"),
+            make_tool("Func_Name-123"),
+        ];
+        assert!(validate::validate_tools(&Some(&tools)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tools_invalid_names() {
+        for name in ["<func_name>", "func name", "func@name", "func,name", ""] {
+            let tools = vec![ChatCompletionTool {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionObject {
+                    name: name.to_string(),
+                    description: None,
+                    parameters: Some(json!({"type": "object", "properties": {}})),
+                    strict: None,
+                },
+            }];
+            assert!(
+                validate::validate_tools(&Some(&tools)).is_err(),
+                "expected error for name: {name:?}"
+            );
+        }
     }
 }

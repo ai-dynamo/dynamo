@@ -28,11 +28,22 @@ use crate::lora::predictor::{EmaPredictor, LoadPredictor};
 
 // ─── BucketedRateCounter ────────────────────────────────────────────────────
 
+/// Sentinel epoch value indicating a bucket is mid-rotation. Acts as a
+/// transient lock: fast-path adders spin until the rotator publishes the new
+/// epoch, and readers skip the bucket until then.
+const BUCKET_ROTATING: u64 = u64::MAX;
+
+/// Upper bound on the per-LoRA sliding-window bucket count. Caps the bucket
+/// vector allocation (~16 bytes/bucket) so a pathological rate-window or
+/// bucket-rate config cannot OOM. 1M buckets ≈ 16 MiB.
+const MAX_BUCKETS: u64 = 1_000_000;
+
 /// Lock-free, epoch-based sliding-window rate counter.
 ///
 /// Divides time into fixed-duration buckets. Each bucket has an atomic counter
 /// and an epoch (the absolute bucket index it was last used for). Stale buckets
-/// are detected by epoch mismatch and lazily reset via CAS.
+/// are detected by epoch mismatch and lazily reset via a CAS-into-sentinel
+/// protocol that prevents concurrent fast-path additions from being lost.
 pub struct BucketedRateCounter {
     buckets: Vec<AtomicU64>,
     epochs: Vec<AtomicU64>,
@@ -76,41 +87,57 @@ impl BucketedRateCounter {
         self.record_count(1, now);
     }
 
-    /// Record `n` arrivals at time `now`. Lock-free.
+    /// Record `n` arrivals at time `now`. Lock-free (spins only during the
+    /// narrow rotation window when crossing a bucket boundary).
+    ///
+    /// Rotation protocol: when a stale epoch is observed, the writer CASes the
+    /// epoch to the `BUCKET_ROTATING` sentinel, resets the bucket to its own
+    /// contribution, and publishes the new epoch. Concurrent threads either
+    /// take the fast path against the new epoch (preserving their adds) or
+    /// observe the sentinel and spin until publish completes — so no fast-path
+    /// add can be silently overwritten by the rotation.
     pub fn record_count(&self, n: u64, now: Instant) {
         if n == 0 {
             return;
         }
         let elapsed = now.duration_since(self.epoch_start);
-        let global_bucket = elapsed.as_nanos() / self.bucket_duration.as_nanos();
-        let global_bucket = global_bucket as u64;
+        let global_bucket = (elapsed.as_nanos() / self.bucket_duration.as_nanos()) as u64;
         let index = (global_bucket as usize) % self.num_buckets;
 
-        let current_epoch = self.epochs[index].load(Ordering::Acquire);
-        if current_epoch == global_bucket {
-            self.buckets[index].fetch_add(n, Ordering::Relaxed);
-        } else if current_epoch < global_bucket {
-            match self.epochs[index].compare_exchange(
-                current_epoch,
-                global_bucket,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // Discard the stale previous epoch's value and add our
-                    // contribution. Using swap(0) + fetch_add instead of
-                    // store(n) avoids a lost-update race: a concurrent fast-path
-                    // fetch_add between these two ops would still be preserved.
-                    self.buckets[index].swap(0, Ordering::AcqRel);
-                    self.buckets[index].fetch_add(n, Ordering::Relaxed);
-                }
-                Err(actual) => {
-                    if actual == global_bucket {
-                        self.buckets[index].fetch_add(n, Ordering::Relaxed);
-                    }
-                    // else: another thread advanced to a newer epoch; drop this record
-                }
+        loop {
+            let current_epoch = self.epochs[index].load(Ordering::Acquire);
+            if current_epoch == global_bucket {
+                // Fast path: bucket already belongs to our epoch.
+                self.buckets[index].fetch_add(n, Ordering::Relaxed);
+                return;
             }
+            if current_epoch == BUCKET_ROTATING {
+                // Another thread is rotating this bucket; wait for publish.
+                std::hint::spin_loop();
+                continue;
+            }
+            if current_epoch > global_bucket {
+                // A newer epoch already owns this slot; drop the stale record.
+                return;
+            }
+            // current_epoch < global_bucket: try to claim the rotation.
+            if self.epochs[index]
+                .compare_exchange(
+                    current_epoch,
+                    BUCKET_ROTATING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                // We own the bucket. Reset to our contribution, then publish
+                // the new epoch. Concurrent readers/writers see ROTATING in
+                // between and either spin or skip, never a stale value.
+                self.buckets[index].store(n, Ordering::Release);
+                self.epochs[index].store(global_bucket, Ordering::Release);
+                return;
+            }
+            // Lost the CAS; another rotator won. Loop to observe new state.
         }
     }
 
@@ -123,6 +150,11 @@ impl BucketedRateCounter {
         let min_valid_epoch = global_bucket.saturating_sub(self.num_buckets as u64 - 1);
         for i in 0..self.num_buckets {
             let epoch = self.epochs[i].load(Ordering::Acquire);
+            // Skip buckets that are mid-rotation; their value will be visible
+            // on the next read once the rotator publishes the new epoch.
+            if epoch == BUCKET_ROTATING {
+                continue;
+            }
             if epoch >= min_valid_epoch && epoch <= global_bucket {
                 total += self.buckets[i].load(Ordering::Relaxed);
             }
@@ -184,22 +216,36 @@ impl LoadEstimatorConfig {
     pub fn from_controller_timestep(timestep_secs: u64, multiplier: u64) -> Self {
         let min_window = crate::lora::config::MIN_RATE_WINDOW_SECS;
         Self {
-            rate_window: Duration::from_secs((timestep_secs * multiplier).max(min_window)),
+            // saturating_mul: both operands are operator-supplied and could
+            // otherwise overflow u64.
+            rate_window: Duration::from_secs(
+                timestep_secs.saturating_mul(multiplier).max(min_window),
+            ),
             ..Default::default()
         }
     }
 
     fn num_buckets(&self) -> usize {
         let secs = self.rate_window.as_secs().max(1);
-        (secs * self.buckets_per_second).max(1) as usize
+        // saturating_mul guards against overflow; the clamp then bounds the
+        // bucket-vector allocation so a pathological (operator-supplied) window
+        // or bucket rate cannot OOM/panic when a counter is created. At 16 bytes
+        // per bucket (count + epoch atomics) the cap is ~16 MiB per LoRA.
+        secs.saturating_mul(self.buckets_per_second)
+            .clamp(1, MAX_BUCKETS) as usize
     }
 
     fn bucket_duration(&self) -> Duration {
-        if self.buckets_per_second == 0 {
-            Duration::from_secs(1)
-        } else {
-            Duration::from_nanos(1_000_000_000 / self.buckets_per_second)
-        }
+        // Spread exactly `num_buckets` buckets across the configured rate
+        // window. Deriving the duration from the (possibly clamped) bucket
+        // count keeps `num_buckets * bucket_duration == rate_window`, so
+        // clamping the count lengthens each bucket rather than silently
+        // shrinking the retained window. For unclamped configs this equals the
+        // requested 1s / buckets_per_second.
+        let buckets = self.num_buckets() as u128; // num_buckets() >= 1
+        let window_nanos = self.rate_window.as_nanos().max(1);
+        let per = (window_nanos / buckets).clamp(1, u64::MAX as u128) as u64;
+        Duration::from_nanos(per)
     }
 }
 
@@ -408,6 +454,15 @@ impl LoadEstimator {
         }
     }
 
+    /// Update active counts from a polled snapshot.
+    ///
+    /// **Polling-mode caveat**: arrivals are approximated as the per-poll
+    /// delta `max(0, current - prev)`, since worker snapshots do not expose
+    /// request-start events. This is a *lower bound* on real arrivals:
+    /// in-interval churn (e.g., 10 requests finishing while 10 new ones start
+    /// — net delta 0) is invisible, and sub-interval oscillation is lost.
+    /// Event-based mode (`handle_event` / `increment_load`) gives accurate
+    /// arrival rates; prefer it when arrival precision matters.
     fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
         let now = Instant::now();
         let cfg = self.config.read();
@@ -617,6 +672,113 @@ mod tests {
         let load = estimator.get_current_load();
         assert_eq!(load.get("lora-math"), Some(&5));
         assert_eq!(load.get("lora-code"), Some(&3));
+    }
+
+    #[test]
+    fn test_decrement_load_saturates_at_zero() {
+        let estimator = LoadEstimator::new();
+
+        // Decrementing a never-seen LoRA is a no-op (data entry doesn't exist).
+        estimator.decrement_load("never-seen");
+        assert!(!estimator.get_inflight_counts().contains_key("never-seen"));
+
+        // Over-decrement an existing entry: pre-fix, this wrapped to usize::MAX.
+        estimator.increment_load("lora-test");
+        estimator.decrement_load("lora-test");
+        estimator.decrement_load("lora-test"); // would wrap without saturating_sub
+        estimator.decrement_load("lora-test");
+
+        let inflight = estimator.get_inflight_counts();
+        // active_count == 0 is filtered out of get_inflight_counts.
+        assert!(
+            !inflight.contains_key("lora-test"),
+            "expected saturated zero (filtered out); got {:?}",
+            inflight.get("lora-test")
+        );
+    }
+
+    #[test]
+    fn test_update_from_counts_records_arrival_deltas() {
+        let estimator = LoadEstimator::new();
+
+        // First poll: 3 active → record 3 arrivals.
+        let mut counts = HashMap::new();
+        counts.insert("lora-a".to_string(), 3);
+        estimator.update_from_counts(counts);
+        assert_eq!(estimator.get_raw_arrival_counts().get("lora-a"), Some(&3));
+
+        // Second poll: still 3 active (sustained) → delta is 0, no new arrivals.
+        let mut counts = HashMap::new();
+        counts.insert("lora-a".to_string(), 3);
+        estimator.update_from_counts(counts);
+        assert_eq!(
+            estimator.get_raw_arrival_counts().get("lora-a"),
+            Some(&3),
+            "sustained traffic must not double-count arrivals"
+        );
+
+        // Third poll: 5 active (grew by 2) → record 2 new arrivals.
+        let mut counts = HashMap::new();
+        counts.insert("lora-a".to_string(), 5);
+        estimator.update_from_counts(counts);
+        assert_eq!(estimator.get_raw_arrival_counts().get("lora-a"), Some(&5));
+
+        // Fourth poll: 2 active (shrank by 3) → no arrivals recorded; window stays.
+        let mut counts = HashMap::new();
+        counts.insert("lora-a".to_string(), 2);
+        estimator.update_from_counts(counts);
+        assert_eq!(
+            estimator.get_raw_arrival_counts().get("lora-a"),
+            Some(&5),
+            "decreases must not record arrivals"
+        );
+
+        // In-flight reflects the latest snapshot, not the rolling window.
+        assert_eq!(estimator.get_inflight_counts().get("lora-a"), Some(&2));
+    }
+
+    #[test]
+    fn test_bucket_rotation_concurrent_no_lost_updates() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Geometry: 100us per bucket, large window so nothing expires during the
+        // test. Threads contend simultaneously across many bucket boundaries.
+        let start = Instant::now();
+        let bucket_duration = Duration::from_micros(100);
+        let num_buckets = 10_000usize;
+        let counter = Arc::new(BucketedRateCounter::new(
+            num_buckets,
+            bucket_duration,
+            start,
+        ));
+
+        let threads_n: usize = 8;
+        let per_thread: usize = 1_000;
+        let step_micros: u64 = 50; // two records per bucket, so every other i crosses a boundary
+
+        let mut handles = Vec::with_capacity(threads_n);
+        for _ in 0..threads_n {
+            let counter = Arc::clone(&counter);
+            handles.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    let offset = Duration::from_micros(i as u64 * step_micros);
+                    counter.record(start + offset);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_time = start + Duration::from_micros(per_thread as u64 * step_micros);
+        let total = counter.count(final_time);
+        let expected = (threads_n * per_thread) as u64;
+        assert_eq!(
+            total, expected,
+            "expected {expected} arrivals across concurrent bucket rotations, got {total} \
+             — rotation protocol lost updates"
+        );
     }
 
     #[test]

@@ -106,6 +106,8 @@ on:
         required: true
       HF_TOKEN:
         required: false
+      DD_API_KEY:
+        required: true
 
 jobs:
   test:
@@ -117,7 +119,7 @@ jobs:
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ matrix.cuda_version != '' && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || startsWith(matrix.cuda_version, '13.') && '13' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -144,6 +146,14 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+      # Experimental: trialing Datadog Test Visibility. Remove if not kept.
+      - name: Configure Datadog Test Visibility
+        continue-on-error: true
+        uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
+        with:
+          languages: python
+          api_key: ${{ secrets.DD_API_KEY }}
+          site: us3.datadoghq.com
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash

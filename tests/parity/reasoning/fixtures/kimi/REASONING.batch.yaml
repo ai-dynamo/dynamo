@@ -15,8 +15,7 @@ cases:
         normal_text: plain answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_0
   REASONING.batch.2.a:
     description: Single reasoning block with Kimi delimiters
     ref: dynamo
@@ -27,8 +26,7 @@ cases:
         normal_text: answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_1
   REASONING.batch.3.a:
     description: Reasoning followed by downstream tool-call text
     ref: dynamo
@@ -39,8 +37,7 @@ cases:
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_2
   REASONING.batch.2.c:
     description: Reasoning followed by normal answer text
     ref: dynamo
@@ -51,8 +48,7 @@ cases:
         normal_text: answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_3
   REASONING.batch.4:
     description: Dangling end marker without an opening think tag
     dynamo_leak: true
@@ -64,8 +60,7 @@ cases:
         normal_text: normal◁/think▷answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_4
   REASONING.batch.5:
     description: Missing end marker keeps the remaining text as reasoning
     ref: dynamo
@@ -76,8 +71,7 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_5
   REASONING.batch.2.e:
     description: Empty reasoning block
     ref: dynamo
@@ -88,8 +82,7 @@ cases:
         normal_text: answer
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_6
   REASONING.batch.2.f:
     description: Complex reasoning content with Unicode and newlines
     ref: dynamo
@@ -106,8 +99,7 @@ cases:
         normal_text: Done.
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_7
   REASONING.batch.1.a:
     description: Empty input
     ref: dynamo
@@ -118,32 +110,33 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
-      sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+      sglang: *d_8
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated
     ref: dynamo
     model_text: ◁think▷first◁/think▷ middle ◁think▷second◁/think▷ done
     expected:
-      dynamo: &d_9
+      dynamo:
         reasoning_text: firstsecond
         normal_text: middle  done
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
       sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+        reasoning_text: first
+        normal_text: ' middle ◁think▷second◁/think▷ done'
   REASONING.batch.2.d:
     description: Normal text before and after a Kimi reasoning span
     ref: dynamo
     model_text: before ◁think▷thinking◁/think▷ after
     expected:
-      dynamo: &d_10
+      dynamo:
         reasoning_text: thinking
         normal_text: before  after
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
       sglang:
-        unavailable: SGLang has no Kimi reasoning parser for this delimiter family.
+        reasoning_text: before thinking
+        normal_text: ' after'
   REASONING.batch.3.b:
     description: Open reasoning interrupted by downstream tool-call text is not configured for this Kimi delimiter family
     ref: dynamo

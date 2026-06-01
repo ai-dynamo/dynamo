@@ -125,7 +125,20 @@ data:
       istio:
         {{- $istio := .Values.dynamo.serviceMesh.istio | default dict }}
         tlsMode: {{ $istio.tlsMode | default "SIMPLE" | quote }}
-        insecureSkipVerify: {{ $istio.insecureSkipVerify | default true }}
+        {{- if hasKey $istio "insecureSkipVerify" }}
+        insecureSkipVerify: {{ $istio.insecureSkipVerify }}
+        {{- else }}
+        insecureSkipVerify: true
+        {{- end }}
+        {{- if $istio.clientCertificate }}
+        clientCertificate: {{ $istio.clientCertificate | quote }}
+        {{- end }}
+        {{- if $istio.privateKey }}
+        privateKey: {{ $istio.privateKey | quote }}
+        {{- end }}
+        {{- if $istio.caCertificates }}
+        caCertificates: {{ $istio.caCertificates | quote }}
+        {{- end }}
       {{- end }}
     {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}

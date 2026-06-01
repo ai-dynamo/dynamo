@@ -85,7 +85,7 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform
 
-Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
+Follow the [Dynamo Kubernetes Installation Guide](../kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
 
 > **Note:** Namespace-restricted mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode for new deployments.
 

@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import re
+import struct
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -908,6 +909,14 @@ class EmbeddingPayload(BasePayload):
     def extract_embeddings(response):
         """
         Process embeddings API responses.
+
+        Accepts both shapes from the OpenAI spec:
+        - ``encoding_format="float"`` (default) -- each ``data[].embedding``
+          is a JSON array of floats.
+        - ``encoding_format="base64"`` -- each ``data[].embedding`` is a
+          base64-encoded string of little-endian f32 bytes. The string
+          is decoded here so the dimension count in the summary string
+          stays comparable across both shapes.
         """
         response.raise_for_status()
         result = response.json()
@@ -926,17 +935,161 @@ class EmbeddingPayload(BasePayload):
                 item["object"] == "embedding"
             ), f"Expected object='embedding', got {item['object']}"
             assert "embedding" in item, "Missing 'embedding' vector in item"
-            assert isinstance(
-                item["embedding"], list
-            ), "Embedding should be a list of floats"
-            assert len(item["embedding"]) > 0, "Embedding vector should not be empty"
-            embeddings.append(item["embedding"])
+            raw = item["embedding"]
+            if isinstance(raw, str):
+                # base64: decode to a float list so downstream dimension
+                # checks are uniform.
+                decoded = base64.b64decode(raw)
+                assert (
+                    len(decoded) % 4 == 0
+                ), f"base64 payload not f32-aligned: {len(decoded)} bytes"
+                count = len(decoded) // 4
+                vec = list(struct.unpack(f"<{count}f", decoded))
+            elif isinstance(raw, list):
+                vec = raw
+            else:
+                raise AssertionError(
+                    f"Embedding should be a list of floats or a base64 "
+                    f"string, got {type(raw).__name__}"
+                )
+            assert len(vec) > 0, "Embedding vector should not be empty"
+            embeddings.append(vec)
 
         # Return a summary string for validation
         return f"Generated {len(embeddings)} embeddings with dimension {len(embeddings[0])}"
 
     def response_handler(self, response: Any) -> str:
         return EmbeddingPayload.extract_embeddings(response)
+
+
+@dataclass
+class EmbeddingMultiWorkerDispatchPayload(BasePayload):
+    """Send ``repeat_count`` embedding requests to the frontend, capturing a
+    per-worker ``/metrics`` snapshot on the FIRST iteration and on the LAST
+    iteration. Assert the delta — i.e. requests attributed during *this*
+    burst — matches an expected per-worker pattern.
+
+    Diff semantics are important because the same fixture may run multiple
+    bursts back-to-back (e.g. one per model in a multi-model dispatch
+    test): the prior burst leaves a worker's absolute counter > 0, so only
+    deltas can prove the second burst did not also reach that worker.
+
+    Two routing properties of the embedding worker pool are checked
+    through this payload:
+
+    1. **Same-model load balancing** — when multiple workers serve the
+       same embedding model, ``select_worker_set_with()`` does
+       weighted-random selection across them, so both workers should see
+       ``>0`` delta. Set ``expected_workers_with_delta={port1, port2}``.
+
+    2. **Multi-model dispatch** — when workers serve different models,
+       the name-keyed ``get_embeddings_engine(model)`` lookup must route
+       only to the worker registered for the requested model. Set
+       ``expected_workers_with_delta={port_of_requested_model}`` so the
+       check asserts the wrong-model worker observed exactly 0 delta
+       during this burst.
+
+    The per-worker counter sampled is
+    ``dynamo_component_requests_total`` — the same counter exercised by
+    ``MetricsPayload`` for single-worker tests. The dispatch assertion
+    fires once after the last repeat.
+    """
+
+    endpoint: str = "/v1/embeddings"
+
+    # Indices into ``self.system_ports`` (inherited from BasePayload, with
+    # DefaultPort.SYSTEM{1,2} entries remapped to per-test dynamic ports
+    # by the harness). Each indexed worker must have observed >0 delta
+    # during this burst; other workers must observe exactly 0 delta.
+    #
+    # Index-based on purpose: the actual port values are not known at
+    # config-construction time because the harness assigns dynamic ports.
+    expected_worker_indices_with_delta: set[int] = field(default_factory=set)
+
+    # Lower bound on the SUM of per-worker deltas across all workers. Use
+    # ``repeat_count`` for an exact-match expectation in clean fixtures.
+    # Defaults to 0 (predicate-only — workers_with_delta must match).
+    min_total_delta: int = 0
+
+    # Settle delay applied around each /metrics scrape so the worker has
+    # time to flush the most recent counter increment.
+    settle_seconds: float = 1.0
+
+    # Internal: iteration counter and baseline snapshot. Both are mutated
+    # in validate(); the dataclass machinery treats them as normal
+    # attributes once the instance is constructed.
+    _calls_seen: int = 0
+    _baseline: dict[int, float] = field(default_factory=dict)
+
+    def with_model(self, model):
+        # Embedding body is set externally; this is a no-op.
+        return self
+
+    def response_handler(self, response: Any) -> str:
+        # Validate the per-iteration response shape so an HTML/JSON error
+        # surfaces immediately. The *dispatch* assertion happens in
+        # validate() on the final repeat.
+        return EmbeddingPayload.extract_embeddings(response)
+
+    def _scrape(self) -> dict[int, float]:
+        prefix = prometheus_names.name_prefix.COMPONENT
+        counter_name = f"{prefix}_{prometheus_names.work_handler.REQUESTS_TOTAL}"
+
+        counts: dict[int, float] = {}
+        for port in self.system_ports:
+            r = requests.get(
+                f"http://{self.host}:{port}/metrics",
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+            counts[port] = sum_metric_samples(r.text, counter_name)
+        return counts
+
+    def validate(self, response: Any, content: str) -> None:
+        """First repeat: snapshot baseline counts. Last repeat: scrape
+        again, compute deltas, and assert the dispatch pattern.
+        """
+        self._calls_seen += 1
+
+        if self._calls_seen == 1:
+            # Snapshot AFTER the first request; this is fine because the
+            # baseline is subtracted out below — we only care that the
+            # delta from this point forward matches expectations.
+            time.sleep(self.settle_seconds)
+            self._baseline = self._scrape()
+            logger.info("Baseline per-worker counts: %s", self._baseline)
+            return
+
+        if self._calls_seen < self.repeat_count:
+            return
+
+        # Last repeat — compute delta.
+        time.sleep(self.settle_seconds)
+        final = self._scrape()
+        delta = {p: final[p] - self._baseline.get(p, 0.0) for p in final}
+        logger.info(
+            "Per-worker delta (final - baseline) over %d requests: %s",
+            self.repeat_count - 1,
+            delta,
+        )
+
+        workers_with_delta_idx = {
+            i for i, port in enumerate(self.system_ports) if delta.get(port, 0) > 0
+        }
+        assert workers_with_delta_idx == self.expected_worker_indices_with_delta, (
+            f"Expected worker indices with delta "
+            f"{self.expected_worker_indices_with_delta}, got "
+            f"{workers_with_delta_idx}. Per-worker delta: {delta} "
+            f"(baseline={self._baseline}, final={final}, "
+            f"system_ports={self.system_ports})"
+        )
+
+        if self.min_total_delta > 0:
+            total_delta = sum(delta.values())
+            assert total_delta >= self.min_total_delta, (
+                f"Expected at least {self.min_total_delta} total delta across "
+                f"workers, got {int(total_delta)}. Per-worker delta: {delta}"
+            )
 
 
 @dataclass

@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3_1
+mode: batch
+cases:
+  TOOLCALLING.batch.6.a:
+    description: Canonical empty {} after tool_sep
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  TOOLCALLING.batch.6.b:
+    description: Whitespace inside empty { }
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{ }<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id003
+      sglang: *id003
+  TOOLCALLING.batch.6.c:
+    description: No tool_sep / args section
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id002
+    expected:
+      dynamo: &d_6_c
+        calls: []
+        normal_text: ''
+      vllm: *d_6_c
+      sglang:
+        reason: SGLang preserves the minimal DeepSeek V3.1 no-args wrapper as normal_text; Dynamo and vLLM strip malformed tool-call markup from message content.
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>

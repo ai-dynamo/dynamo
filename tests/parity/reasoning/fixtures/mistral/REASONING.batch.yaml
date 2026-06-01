@@ -12,7 +12,7 @@ cases:
     ref: *upstream_ref
     model_text: plain answer
     expected:
-      dynamo: &d_0
+      dynamo:
         reasoning_text: plain answer
         normal_text: ''
       vllm:
@@ -20,7 +20,8 @@ cases:
         normal_text: plain answer
         reason: vLLM Mistral parser only enters reasoning after the explicit start token.
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+        reasoning_text: ''
+        normal_text: plain answer
   REASONING.batch.2.a:
     description: Mistral THINK block
     ref: *upstream_ref
@@ -30,8 +31,7 @@ cases:
         reasoning_text: thinking
         normal_text: answer
       vllm: *d_1
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+      sglang: *d_1
   REASONING.batch.3.a:
     description: Mistral reasoning followed by downstream tool-call text
     ref: *upstream_ref
@@ -41,8 +41,7 @@ cases:
         reasoning_text: choose tool
         normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
       vllm: *d_2
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+      sglang: *d_2
   REASONING.batch.3.b:
     description: Open reasoning interrupted by downstream tool-call text is not configured for Mistral
     ref: *upstream_ref
@@ -56,8 +55,7 @@ cases:
         reasoning_text: compute
         normal_text: answer
       vllm: *d_3
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+      sglang: *d_3
   REASONING.batch.2.d:
     description: Normal text around reasoning is not applicable in force-reasoning mode
     reason: Force-reasoning parser families start inside reasoning; marker-free prefix text is not a normal-text prefix.
@@ -74,13 +72,14 @@ cases:
         normal_text: normalanswer
         reason: vLLM Mistral parser treats a dangling end marker as normal text and strips the marker.
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+        reasoning_text: ''
+        normal_text: normal[/THINK]answer
   REASONING.batch.5:
     description: Force-reasoning parser treats unterminated text as reasoning
     ref: *upstream_ref
     model_text: thinking without an end marker
     expected:
-      dynamo: &d_5
+      dynamo:
         reasoning_text: thinking without an end marker
         normal_text: ''
       vllm:
@@ -88,7 +87,8 @@ cases:
         normal_text: thinking without an end marker
         reason: vLLM Mistral parser only enters reasoning after the explicit start token.
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+        reasoning_text: ''
+        normal_text: thinking without an end marker
   REASONING.batch.2.e:
     description: Empty Mistral reasoning block
     ref: *upstream_ref
@@ -98,8 +98,7 @@ cases:
         reasoning_text: ''
         normal_text: answer
       vllm: *d_6
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+      sglang: *d_6
   REASONING.batch.2.f:
     description: Complex Mistral reasoning content with Unicode and newlines
     ref: *upstream_ref
@@ -115,8 +114,7 @@ cases:
           JSON-ish: {"x": [1, true]}
         normal_text: Done.
       vllm: *d_7
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+      sglang: *d_7
   REASONING.batch.1.a:
     description: Empty input
     ref: *upstream_ref
@@ -126,8 +124,7 @@ cases:
         reasoning_text: ''
         normal_text: ''
       vllm: *d_8
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+      sglang: *d_8
   REASONING.batch.6.a:
     description: Multiple Mistral reasoning spans are concatenated by Dynamo
     ref: *upstream_ref
@@ -140,4 +137,5 @@ cases:
         reasoning_text: first
         normal_text: ' middle [THINK]second[/THINK] done'
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+        reasoning_text: first
+        normal_text: ' middle [THINK]second[/THINK] done'

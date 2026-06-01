@@ -86,7 +86,11 @@ impl LoraAllocationConfig {
 
     /// Compute the effective rate window (seconds) for the load estimator.
     pub fn effective_rate_window_secs(&self) -> u64 {
-        (self.timestep_secs * self.rate_window_multiplier).max(MIN_RATE_WINDOW_SECS)
+        // saturating_mul: large timestep_secs * rate_window_multiplier (both
+        // operator-supplied) would otherwise overflow u64.
+        self.timestep_secs
+            .saturating_mul(self.rate_window_multiplier)
+            .max(MIN_RATE_WINDOW_SECS)
     }
 
     /// Create config from environment variables, falling back to defaults.
@@ -106,7 +110,21 @@ impl LoraAllocationConfig {
 
         let algorithm = std::env::var(llm::DYN_LORA_ALLOCATION_ALGORITHM)
             .ok()
-            .and_then(|v| AllocationAlgorithmType::from_str(&v).ok())
+            .and_then(|v| match AllocationAlgorithmType::from_str(&v) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    // Do not silently fall back to the default: surface the
+                    // rejected value so an operator who set e.g. `mcf` (not yet
+                    // wired) knows their choice was ignored.
+                    tracing::warn!(
+                        value = %v,
+                        error = %e,
+                        default = ?defaults.algorithm,
+                        "Ignoring invalid DYN_LORA_ALLOCATION_ALGORITHM; using default"
+                    );
+                    None
+                }
+            })
             .unwrap_or(defaults.algorithm);
 
         let timestep_secs = std::env::var(llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS)

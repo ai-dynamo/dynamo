@@ -55,41 +55,73 @@ alongside this guide.
 
 ## Feature gaps
 
-The unified backend is in beta and does not yet cover the full feature
-set of Dynamo's existing (non-unified) backend paths. The summary
-below is the common contract — what every engine on the unified path
-gets. Per-engine gaps (vLLM, SGLang, TRT-LLM specifics like LoRA,
-diffusion, attention DP scheduling) live in the
+The unified backend is in beta. The summary below is the common
+contract — what every engine on the unified path gets — plus the
+gaps that apply to all three engines. Per-engine specifics (vLLM
+sleep/wake, SGLang diffusion, TRT-LLM custom logits processors,
+etc.) live in the
 [package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
 
 **Supported today**
 
+Lifecycle and runtime:
 - Aggregated token-in-token-out inference
-- Disaggregated serving (`agg` / `prefill` / `decode`) with bootstrap
-  (SGLang) or internal KV transport (vLLM, TRT-LLM)
+- Disaggregated serving (`agg` / `prefill` / `decode`) — KV transfer
+  uses NIXL across all three engines; SGLang exchanges a Dynamo-level
+  bootstrap address (host/port/room), vLLM and TRT-LLM use an
+  engine-internal handshake
 - Model registration with discovery and endpoint types
 - Request cancellation via `abort()` + `context.is_stopped()`
-- `DynamoException` error chain wrapping
 - Graceful shutdown with signal handling
+- `drain()` hook for pre-cleanup work (e.g. in-flight NIXL transfers)
+- `DynamoException` error chain wrapping
 - Finish reason normalization (handled by the Rust layer)
 
-**Not yet on the unified path**
+Observability:
+- Health-check canary via `health_check_payload()` (plus
+  `DYN_HEALTH_CHECK_PAYLOAD` / `--health-check-payload` overrides)
+- Vendor-prefixed Prometheus bridge (`vllm:` / `sglang:` /
+  `trtllm_` / `lmcache:`) via `register_prometheus()`
+- Framework-owned lifecycle gauges (`cleanup_time_seconds`,
+  `drain_time_seconds`, `model_load_time_seconds`) — always on
+- Per-rank `dynamo_component_*` gauges + router `kv_used_blocks`
+  signal via `component_metrics_dp_ranks()` +
+  `attach_snapshot_publisher()` + `ComponentSnapshot` push
+- KV event publishing via `kv_event_sources()` returning
+  `ZmqSource` or `PushSource`
+- KV-aware routing (DP-rank-aware) via `dp_rank.forced_dp_rank` /
+  `validate_global_dp_rank` + `EngineConfig.data_parallel_{size,
+  start_rank}`
+- OpenTelemetry tracing facade — `telemetry.current_span` /
+  `start_span` plus W3C trace header propagation through
+  `telemetry.engine_trace_kwargs(context)`
+
+Request handling:
+- Guided decoding — wired per-engine on the request side with
+  engine-specific coverage. vLLM (`StructuredOutputsParams`) and
+  TRT-LLM (`GuidedDecodingParams`) cover JSON schema / regex / grammar
+  / choice; SGLang (`_get_guided_decoding_params`) covers JSON schema
+  only — regex / grammar / choice are silently dropped today (see the
+  SGLang-specific gaps in the package README)
+- Structural tag generation via `WorkerConfig.structural_tag_{mode,
+  scope, schema}` and `serialize_structural_tag`
+- Custom Jinja chat templates via
+  `WorkerConfig.custom_jinja_template` (frontend applies; the
+  backend advertises through model registration)
+- Tool / reasoning parser configuration (`tool_call_parser`,
+  `reasoning_parser`, `exclude_tools_when_tool_choice_none`)
+
+**Not yet on the unified path (common to all engines)**
 
 | Feature | What's missing |
 |---------|----------------|
-| Metrics & Prometheus | Engine-level metrics, KV utilization gauges, multiprocess registry |
-| KV event publishing | Prefix cache events (BlockStored / Removed) to router via ZMQ or NATS |
-| Health check payloads | Per-engine custom health probes (BOS token probe, etc.) |
-| Logprobs | Selected + top-k logprob extraction and streaming |
-| Guided decoding | JSON schema, regex, grammar, choice constraints |
-| OpenTelemetry tracing | Trace headers, request perf metrics, OTEL propagation |
-| Engine routes | Profiling, memory release/resume, weight updates (disk/tensor/distributed/IPC) |
-| Data-parallel routing | DP rank extraction, DP-aware scheduling |
-| Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization |
-| Custom Jinja chat templates | `--custom-jinja-template` for model-specific prompt formatting |
-| Snapshot/checkpoint | CRIU-based engine state save/restore |
-| Multimodal | Images, video, embeddings, separate encode workers |
-| LoRA adapters | Dynamic load/unload, ModelDeploymentCard publishing, per-adapter serialization |
+| Logprob response wire | Legacy handlers extract logprobs onto response chunks (vLLM `_extract_logprobs`, SGLang `_extract_logprobs` in `decode_handler`, TRT-LLM `_extract_logprobs` in `handler_base`); the unified `generate()` loops do not populate `log_probs` / `top_logprobs` / `cum_log_probs` on `GenerateChunk`. vLLM's `build_sampling_params` still passes `output_options.logprobs` to the engine on the unified path, so the engine computes them, but the values are dropped before they reach the chunk. SGLang and TRT-LLM unified `generate()` do not read `output_options.logprobs` at all. |
+| Text-in-text-out mode | Unified hardcodes `ModelInput.Tokens`; no engine-side tokenization or chat templating path |
+| Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers, `ENCODE` disaggregation role |
+| Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
+| LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill |
+| Engine routes | Profile start/stop, sleep / wake / quiesce, weight updates (disk / tensor / distributed / IPC), KV block clearing, prefix cache reset |
+| Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
 
 If you need one of these features today, keep that workload on the
 existing per-engine entry point (`dynamo.<backend>.main`) until the

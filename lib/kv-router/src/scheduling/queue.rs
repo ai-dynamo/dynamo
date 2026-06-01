@@ -6,20 +6,26 @@ use std::collections::{BinaryHeap, HashMap};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::config::RouterQueueDepthTiers;
+use super::filter::RoutingEligibility;
+use super::overlap_refresh::{
+    NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, read_overlap_refresh_after,
+    refresh_overlap,
+};
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, RoutingEligibility, SchedulingContext,
-    SchedulingRequest, SchedulingResponse, pinned_worker_config,
+    KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
+    SchedulingResponse,
 };
 use crate::protocols::{
-    PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId,
 };
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
@@ -32,6 +38,8 @@ const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
 struct QueueEntry<K: Ord + Eq> {
     key: K,
     request: SchedulingRequest,
+    enqueue_at: Instant,
+    block_hashes: Option<Vec<LocalBlockHash>>,
 }
 
 impl<K: Ord + Eq> Eq for QueueEntry<K> {}
@@ -58,6 +66,7 @@ impl<K: Ord + Eq> PartialOrd for QueueEntry<K> {
 enum AdmissionCommand {
     Enqueue {
         request: SchedulingRequest,
+        block_hashes: Option<Vec<LocalBlockHash>>,
         ack_tx: oneshot::Sender<()>,
     },
     Update {
@@ -70,6 +79,7 @@ struct SchedulerQueueActor<
     C: WorkerConfigLike,
     S: SchedulingPolicy,
     Sel: WorkerSelector<C>,
+    RF: OverlapScoresRefresh,
 > {
     pending: BinaryHeap<QueueEntry<S::Key>>,
     pending_count: Arc<AtomicUsize>,
@@ -83,6 +93,8 @@ struct SchedulerQueueActor<
     selector: Sel,
     policy: S,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    overlap_scores_refresh: Option<Arc<RF>>,
+    overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
 }
 
@@ -95,6 +107,7 @@ pub struct SchedulerQueue<
     C: WorkerConfigLike,
     S: SchedulingPolicy = FcfsPolicy,
     Sel: WorkerSelector<C> = DefaultWorkerSelector,
+    RF: OverlapScoresRefresh = NoopOverlapScoresRefresh,
 > {
     admission_tx: mpsc::Sender<AdmissionCommand>,
     /// Number of requests currently parked in the pending queue.
@@ -107,7 +120,8 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
-    _marker: PhantomData<fn() -> (S, Sel)>,
+    supports_overlap_refresh: bool,
+    _marker: PhantomData<(S, Sel, RF)>,
 }
 
 impl<
@@ -115,10 +129,11 @@ impl<
     C: WorkerConfigLike + Send + Sync + 'static,
     S: SchedulingPolicy + 'static,
     Sel: WorkerSelector<C> + Send + 'static,
-> SchedulerQueue<P, C, S, Sel>
+    RF: OverlapScoresRefresh + Send + Sync + 'static,
+> SchedulerQueue<P, C, S, Sel, RF>
 {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_with_overlap_refresh(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
@@ -127,30 +142,7 @@ impl<
         selector: Sel,
         policy: S,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    ) -> Self {
-        Self::new_with_overload_provider(
-            slots,
-            workers_with_configs,
-            threshold_frac,
-            queue_depth_tiers,
-            block_size,
-            selector,
-            policy,
-            prefill_load_estimator,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_overload_provider(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        queue_depth_tiers: RouterQueueDepthTiers,
-        block_size: u32,
-        selector: Sel,
-        policy: S,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     ) -> Self {
         if let Some(frac) = threshold_frac {
@@ -159,6 +151,21 @@ impl<
         if !queue_depth_tiers.is_unbounded() {
             tracing::info!("Router queue tiered by cache-miss: pending ISL token caps configured");
         }
+        let overlap_refresh_after = if overlap_scores_refresh.is_some() {
+            let configured = read_overlap_refresh_after();
+            match configured {
+                Some(d) => tracing::info!(
+                    "Router queue overlap-score refresh enabled after {:.1}s wait",
+                    d.as_secs_f64()
+                ),
+                None => tracing::info!(
+                    "Router queue overlap-score refresh disabled via DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS"
+                ),
+            }
+            configured
+        } else {
+            None
+        };
         let pending_count = Arc::new(AtomicUsize::new(0));
         let pending_isl_tokens = Arc::new(AtomicUsize::new(0));
         let (admission_tx, admission_rx) = mpsc::channel(ADMISSION_CHANNEL_CAPACITY);
@@ -175,6 +182,8 @@ impl<
             selector,
             policy,
             prefill_load_estimator,
+            overlap_scores_refresh,
+            overlap_refresh_after,
             overloaded_worker_provider,
         };
         tokio::spawn(actor.run(admission_rx));
@@ -185,10 +194,79 @@ impl<
             slots,
             workers_with_configs,
             threshold_frac,
+            supports_overlap_refresh: overlap_refresh_after.is_some(),
             _marker: PhantomData,
         }
     }
+}
 
+impl<
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike + Send + Sync + 'static,
+    S: SchedulingPolicy + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
+> SchedulerQueue<P, C, S, Sel, NoopOverlapScoresRefresh>
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        queue_depth_tiers: RouterQueueDepthTiers,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    ) -> Self {
+        Self::new_with_overlap_refresh(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            queue_depth_tiers,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_overload_provider(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        queue_depth_tiers: RouterQueueDepthTiers,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    ) -> Self {
+        Self::new_with_overlap_refresh(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            queue_depth_tiers,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            None,
+            overloaded_worker_provider,
+        )
+    }
+}
+
+impl<
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike + Send + Sync + 'static,
+    S: SchedulingPolicy + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
+    RF: OverlapScoresRefresh + Send + Sync + 'static,
+> SchedulerQueue<P, C, S, Sel, RF>
+{
     /// Register externally-provided workers in the slot tracker.
     ///
     /// Looks up DP rank/size from the discovery watch channel; defaults to
@@ -219,7 +297,15 @@ impl<
     ///
     /// When `allowed_worker_ids` is set on the request without an exact pin
     /// (external routing), the capacity check is skipped.
-    pub async fn enqueue(&self, mut request: SchedulingRequest) {
+    pub async fn enqueue(&self, request: SchedulingRequest) {
+        self.enqueue_with_block_hashes(request, None).await;
+    }
+
+    pub async fn enqueue_with_block_hashes(
+        &self,
+        mut request: SchedulingRequest,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+    ) {
         let eligibility = request.eligibility();
 
         if let Err(error) = eligibility.validate_pinned_worker_allowed() {
@@ -228,7 +314,11 @@ impl<
         }
 
         let (ack_tx, ack_rx) = oneshot::channel();
-        let command = AdmissionCommand::Enqueue { request, ack_tx };
+        let command = AdmissionCommand::Enqueue {
+            request,
+            block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
+            ack_tx,
+        };
 
         if let Err(error) = self.admission_tx.send(command).await {
             let AdmissionCommand::Enqueue { mut request, .. } = error.0 else {
@@ -271,6 +361,20 @@ impl<
     pub fn pending_isl_tokens(&self) -> usize {
         self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
     }
+
+    pub fn supports_overlap_refresh(&self) -> bool {
+        self.supports_overlap_refresh
+    }
+
+    fn prepare_block_hashes_for_refresh(
+        &self,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+    ) -> Option<Vec<LocalBlockHash>> {
+        if !self.supports_overlap_refresh {
+            return None;
+        }
+        block_hashes.filter(|hashes| !hashes.is_empty())
+    }
 }
 
 impl<
@@ -278,17 +382,22 @@ impl<
     C: WorkerConfigLike + Send + Sync + 'static,
     S: SchedulingPolicy + 'static,
     Sel: WorkerSelector<C> + Send + 'static,
-> SchedulerQueueActor<P, C, S, Sel>
+    RF: OverlapScoresRefresh + Send + Sync + 'static,
+> SchedulerQueueActor<P, C, S, Sel, RF>
 {
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
         while let Some(command) = rx.recv().await {
             match command {
-                AdmissionCommand::Enqueue { request, ack_tx } => {
-                    self.handle_enqueue(request);
+                AdmissionCommand::Enqueue {
+                    request,
+                    block_hashes,
+                    ack_tx,
+                } => {
+                    self.handle_enqueue(request, block_hashes);
                     let _ = ack_tx.send(());
                 }
                 AdmissionCommand::Update { ack_tx } => {
-                    self.handle_update();
+                    self.handle_update().await;
                     let _ = ack_tx.send(());
                 }
             }
@@ -304,7 +413,11 @@ impl<
         }
     }
 
-    fn handle_enqueue(&mut self, mut request: SchedulingRequest) {
+    fn handle_enqueue(
+        &mut self,
+        mut request: SchedulingRequest,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+    ) {
         let eligibility = request.eligibility();
         let decay_now = Instant::now();
 
@@ -342,7 +455,12 @@ impl<
                     .enqueue_key(arrival_offset, SchedulingContext::new(&request, &workers))
             };
             let isl_tokens = request.isl_tokens;
-            self.pending.push(QueueEntry { key, request });
+            self.pending.push(QueueEntry {
+                key,
+                request,
+                enqueue_at: decay_now,
+                block_hashes,
+            });
             self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
             self.pending_isl_tokens
                 .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
@@ -352,7 +470,7 @@ impl<
         self.admit_one(request, decay_now);
     }
 
-    fn handle_update(&mut self) {
+    async fn handle_update(&mut self) {
         let Some(threshold) = self.threshold_frac else {
             return;
         };
@@ -370,6 +488,8 @@ impl<
                         SchedulingContext::new(&e.request, &workers),
                     ),
                     request: e.request,
+                    enqueue_at: e.enqueue_at,
+                    block_hashes: e.block_hashes,
                 })
                 .collect();
             self.pending = BinaryHeap::from(rekeyed);
@@ -403,8 +523,47 @@ impl<
             );
             self.pending_isl_tokens
                 .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
+            let mut request = entry.request;
+            let refreshed = refresh_overlap(
+                self.overlap_scores_refresh.as_deref(),
+                self.overlap_refresh_after,
+                entry.block_hashes.as_deref(),
+                entry.enqueue_at,
+                decay_now,
+            )
+            .await;
+            let wait_ms = entry.enqueue_at.elapsed().as_millis() as u64;
+            if let Some(RefreshedOverlap {
+                tier_overlap_blocks,
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            }) = refreshed
+            {
+                tracing::info!(
+                    request_id = request.maybe_request_id.as_deref().unwrap_or("unknown"),
+                    wait_ms,
+                    "refreshed overlap scores after long queue wait"
+                );
+                request.tier_overlap_blocks = tier_overlap_blocks;
+                request.effective_overlap_blocks = effective_overlap_blocks;
+                request.effective_cached_tokens = effective_cached_tokens;
+            }
+            let admit_now = Instant::now();
+            if self.all_workers_prefill_busy(threshold, request.eligibility(), admit_now) {
+                let isl_tokens = request.isl_tokens;
+                self.pending.push(QueueEntry {
+                    key: entry.key,
+                    request,
+                    enqueue_at: entry.enqueue_at,
+                    block_hashes: entry.block_hashes,
+                });
+                self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
+                self.pending_isl_tokens
+                    .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
+                break;
+            }
             tracing::debug!("scheduling request from pending queue");
-            self.admit_one(entry.request, decay_now);
+            self.admit_one(request, admit_now);
         }
     }
 
@@ -547,12 +706,9 @@ impl<
         let configs = self.workers_with_configs.borrow();
 
         if let Some(worker) = eligibility.pinned_worker() {
-            let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
+            let Ok(config) = eligibility.validate_worker_rank(&configs, worker) else {
                 return false;
             };
-            if !eligibility.allows_worker(worker.worker_id, config) {
-                return false;
-            }
 
             let max_batched = config
                 .max_num_batched_tokens()
@@ -562,35 +718,27 @@ impl<
         }
 
         let mut checked_any = false;
-        for (&worker_id, config) in configs.iter() {
-            if !eligibility.allows_worker(worker_id, config) {
-                continue;
-            }
-            let dp_size = config.data_parallel_size();
-            let dp_start_rank = config.data_parallel_start_rank();
+        let has_available = eligibility.any_eligible_worker_rank(&configs, |worker, config| {
+            checked_any = true;
             let max_batched = config
                 .max_num_batched_tokens()
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+            (tokens as f64) <= threshold * (max_batched as f64)
+        });
 
-            for dp_rank in dp_start_rank..dp_start_rank + dp_size {
-                checked_any = true;
-                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-                if (tokens as f64) <= threshold * (max_batched as f64) {
-                    return false;
-                }
-            }
-        }
-        checked_any
+        checked_any && !has_available
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
+    use async_trait::async_trait;
     use rustc_hash::FxHashMap;
     use tokio::sync::{Barrier, watch};
 
@@ -661,24 +809,20 @@ mod tests {
                 rendezvous.wait_for_peer();
             }
 
-            let Some(worker) = workers
-                .iter()
-                .filter(|(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
-                .flat_map(|(worker_id, config)| {
-                    let dp_start = config.data_parallel_start_rank();
-                    let dp_end = dp_start + config.data_parallel_size();
-                    (dp_start..dp_end)
-                        .map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
-                })
-                .min_by_key(|worker| {
-                    (
-                        request.prefill_tokens_for(*worker),
-                        request.decode_blocks.get(worker).copied().unwrap_or(0),
-                        worker.worker_id,
-                        worker.dp_rank,
-                    )
-                })
-            else {
+            let mut best_worker = None;
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                let key = (
+                    request.prefill_tokens_for(worker),
+                    request.decode_blocks.get(&worker).copied().unwrap_or(0),
+                    worker.worker_id,
+                    worker.dp_rank,
+                );
+                if best_worker.is_none_or(|(_, best_key)| key < best_key) {
+                    best_worker = Some((worker, key));
+                }
+            });
+
+            let Some((worker, _)) = best_worker else {
                 return Err(KvSchedulerError::NoEndpoints);
             };
 
@@ -875,6 +1019,173 @@ mod tests {
             FcfsPolicy,
             None,
             Some(overloaded_worker_provider),
+        ));
+
+        (queue, slots)
+    }
+
+    struct CountingRefresher {
+        calls: AtomicUsize,
+        response: RefreshedOverlap,
+    }
+
+    #[async_trait]
+    impl OverlapScoresRefresh for CountingRefresher {
+        async fn refresh(&self, _block_hashes: &[LocalBlockHash]) -> Option<RefreshedOverlap> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Some(self.response.clone())
+        }
+    }
+
+    struct BlockingRefresher {
+        calls: AtomicUsize,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        response: RefreshedOverlap,
+    }
+
+    impl BlockingRefresher {
+        fn new(response: RefreshedOverlap) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                started: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                response,
+            }
+        }
+
+        async fn wait_for_calls(&self, target: usize) {
+            while self.calls.load(Ordering::Relaxed) < target {
+                self.started.notified().await;
+            }
+        }
+
+        fn release_one(&self) {
+            self.release.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl OverlapScoresRefresh for BlockingRefresher {
+        async fn refresh(&self, _block_hashes: &[LocalBlockHash]) -> Option<RefreshedOverlap> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.started.notify_one();
+            self.release.notified().await;
+            Some(self.response.clone())
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_refresher(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        refresher: Arc<CountingRefresher>,
+    ) -> (
+        Arc<
+            SchedulerQueue<
+                NoopSequencePublisher,
+                SimpleWorkerConfig,
+                FcfsPolicy,
+                DefaultWorkerSelector,
+                CountingRefresher,
+            >,
+        >,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
+        for id in 0..num_workers as u64 {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let queue = Arc::new(SchedulerQueue::new_with_overlap_refresh(
+            Arc::clone(&slots),
+            cfg_rx,
+            threshold_frac,
+            RouterQueueDepthTiers::unbounded_cap(),
+            block_size,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+            Some(refresher),
+            None,
+        ));
+
+        (queue, slots)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_blocking_refresher(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        refresher: Arc<BlockingRefresher>,
+    ) -> (
+        Arc<
+            SchedulerQueue<
+                NoopSequencePublisher,
+                SimpleWorkerConfig,
+                FcfsPolicy,
+                DefaultWorkerSelector,
+                BlockingRefresher,
+            >,
+        >,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
+        for id in 0..num_workers as u64 {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let queue = Arc::new(SchedulerQueue::new_with_overlap_refresh(
+            Arc::clone(&slots),
+            cfg_rx,
+            threshold_frac,
+            RouterQueueDepthTiers::unbounded_cap(),
+            block_size,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+            Some(refresher),
+            None,
         ));
 
         (queue, slots)
@@ -1602,5 +1913,160 @@ mod tests {
         let _ = slots.free(&"req-1".to_string(), decay_now());
         let _ = slots.mark_prefill_completed(&"req-2".to_string(), decay_now());
         let _ = slots.free(&"req-2".to_string(), decay_now());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn update_refresh_can_change_selected_worker_after_queue_wait() {
+        let block_size = 16u32;
+        let isl = 64usize;
+        let refresher = Arc::new(CountingRefresher {
+            calls: AtomicUsize::new(0),
+            response: RefreshedOverlap {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::from([
+                    (WorkerWithDpRank::new(0, 0), 1.0),
+                    (WorkerWithDpRank::new(1, 0), 9.0),
+                ]),
+                effective_cached_tokens: HashMap::from([
+                    (WorkerWithDpRank::new(0, 0), 16),
+                    (WorkerWithDpRank::new(1, 0), 144),
+                ]),
+            },
+        });
+        let (queue, slots) =
+            make_queue_with_refresher(2, block_size, isl, Some(0.0), refresher.clone());
+
+        let (mut req1, rx1) = make_request("req-1", isl);
+        req1.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(0, 0), 3.0);
+        req1.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(0, 0), 48);
+        queue.enqueue(req1).await;
+        let resp1 = rx1.await.expect("rx1 dropped").expect("req-1 failed");
+        assert_eq!(resp1.best_worker, WorkerWithDpRank::new(0, 0));
+
+        let (mut req2, rx2) = make_request("req-2", isl);
+        req2.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(1, 0), 3.0);
+        req2.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(1, 0), 48);
+        queue.enqueue(req2).await;
+        let resp2 = rx2.await.expect("rx2 dropped").expect("req-2 failed");
+        assert_eq!(resp2.best_worker, WorkerWithDpRank::new(1, 0));
+
+        let (mut req3, rx3) = make_request("req-3", isl);
+        req3.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(0, 0), 8.0);
+        req3.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(1, 0), 2.0);
+        req3.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(0, 0), 128);
+        req3.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(1, 0), 32);
+        queue
+            .enqueue_with_block_hashes(req3, Some(vec![LocalBlockHash(42)]))
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(refresher.calls.load(Ordering::Relaxed), 0);
+
+        tokio::time::advance(Duration::from_secs(11)).await;
+
+        slots.free(&"req-1".to_string(), decay_now()).unwrap();
+        slots.free(&"req-2".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        let resp3 = rx3.await.expect("rx3 dropped").expect("req-3 failed");
+        assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(resp3.best_worker, WorkerWithDpRank::new(1, 0));
+        assert_eq!(resp3.effective_overlap_blocks, 9.0);
+        assert_eq!(resp3.cached_tokens, 144);
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn update_requeues_head_if_workers_become_busy_during_refresh() {
+        let block_size = 16u32;
+        let isl = 64usize;
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) =
+            make_queue_with_blocking_refresher(1, block_size, isl, Some(0.0), refresher.clone());
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.expect("rx1 dropped").expect("req-1 failed");
+
+        let (mut req2, mut rx2) = make_request("req-2", isl);
+        req2.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(0, 0), 4.0);
+        req2.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(0, 0), 64);
+        queue
+            .enqueue_with_block_hashes(req2, Some(vec![LocalBlockHash(42)]))
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+
+        slots
+            .mark_prefill_completed(&"req-1".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"req-1".to_string(), decay_now()).unwrap();
+
+        tokio::time::advance(Duration::from_secs(11)).await;
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                queue.update().await;
+            })
+        };
+        refresher.wait_for_calls(1).await;
+
+        slots
+            .add_request(
+                SequenceRequest {
+                    request_id: "occupy-during-refresh".to_string(),
+                    token_sequence: None,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: Some(PrefillLoadHint {
+                        initial_effective_prefill_tokens: isl,
+                        expected_prefill_duration: None,
+                    }),
+                    worker: WorkerWithDpRank::new(0, 0),
+                    lora_name: None,
+                },
+                decay_now(),
+            )
+            .unwrap();
+
+        refresher.release_one();
+        update.await.unwrap();
+
+        assert_eq!(queue.pending_count(), 1, "request should be requeued");
+        assert!(
+            rx2.try_recv().is_err(),
+            "request must remain queued while worker became busy again"
+        );
+
+        slots
+            .mark_prefill_completed(&"occupy-during-refresh".to_string(), decay_now())
+            .unwrap();
+        slots
+            .free(&"occupy-during-refresh".to_string(), decay_now())
+            .unwrap();
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                queue.update().await;
+            })
+        };
+        refresher.wait_for_calls(2).await;
+        refresher.release_one();
+        update.await.unwrap();
+
+        let resp2 = rx2.await.expect("rx2 dropped").expect("req-2 failed");
+        assert_eq!(refresher.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(resp2.best_worker, WorkerWithDpRank::new(0, 0));
+        assert_eq!(queue.pending_count(), 0);
     }
 }

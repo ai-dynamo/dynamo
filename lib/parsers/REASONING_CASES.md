@@ -4,7 +4,7 @@ Reference taxonomy for unit testing **reasoning** parsers under
 `src/reasoning/` (Granite, GPT-OSS, Gemma, Qwen3 think-tag, Minimax,
 DeepSeek V3 think-tag, etc.). Sibling files cover adjacent stages:
 
-- **Tool-call parsers** (`src/tool_calling/`): see `PARSER_CASES.md`.
+- **Tool-call parsers** (`src/tool_calling/`): see `TOOLCALLING_CASES.md`.
 - **Frontend gating**: see
   `components/src/dynamo/frontend/tests/FRONTEND_CASES.md`.
 - **Pipeline boundary**: see `PIPELINE_CASES.md`.
@@ -15,7 +15,7 @@ format axes:
 - **Stage** — `REASONING.*` (this file).
 - **Mode** — `batch` (entire model output as one string) or `stream`
   (incremental `delta_text`).
-- **Format** — `PARSER.fmt|xml|harmony.*` tags from `PARSER_CASES.md`
+- **Format** — `TOOLCALLING.fmt|xml|harmony.*` tags from `TOOLCALLING_CASES.md`
   also attach to reasoning tests when the reasoning parser consumes
   the corresponding format. The format tag describes the *grammar*,
   not the parser stage.
@@ -112,6 +112,10 @@ content.
 - **`REASONING.batch.2.f`** Complex reasoning body — large blocks, multi-paragraph, special characters, Unicode, newlines, and marker-looking strings inside the reasoning body.
 - **`REASONING.batch.3.a`** Closed reasoning followed by downstream tool-call text — reasoning parser must extract the think content **and leave a valid paired-parser tool-call payload intact in `normal_text`** for the downstream tool-call parser to consume.
 - **`REASONING.batch.3.b`** Open reasoning interrupted by downstream tool-call text — tool-call markers can terminate or escape an open reasoning span for families that define that boundary.
+- **`REASONING.batch.3.c`** Recipientless downstream channel text — format-specific non-tool commentary or equivalent content should remain visible as normal text.
+- **`REASONING.batch.3.d`** Directed downstream tool-call channel without reasoning — parser must suppress tool-call payload from visible normal text when that payload belongs to the downstream tool parser.
+- **`REASONING.batch.3.e`** Directed reasoning-channel tool-call payload — parser must keep the payload in reasoning output when the format labels the channel as reasoning/analysis.
+- **`REASONING.batch.3.f`** Reasoning, downstream directed tool call, then final answer — parser must extract reasoning, suppress downstream tool payload from visible normal text, and preserve later final text.
 - **`REASONING.batch.4`** Malformed reasoning marker syntax — dangling close marker, invalid channel marker, or marker that does not belong to the family grammar.
 - **`REASONING.batch.5`** Missing end-marker recovery — engine hit `max_tokens` mid-think; pin behavior: recover partial reasoning, surface as truncated, or treat all as `normal_text`.
 - **`REASONING.batch.6.a`** Multiple reasoning spans, adjacent or separated by normal text — e.g., two `<think>...</think>` blocks in one response. Behavior is impl-defined: concatenate, surface only the first, or document a divergence.
@@ -166,18 +170,18 @@ fixture `ref` field.
 
 ### Format-conditional tags (cross-stage)
 
-The `PARSER.fmt|xml|harmony.*` tags from `PARSER_CASES.md` also apply
+The `TOOLCALLING.fmt|xml|harmony.*` tags from `TOOLCALLING_CASES.md` also apply
 to reasoning parsers when they consume the corresponding format. For
 example, the GPT-OSS reasoning parser exercises Harmony's
 `<|channel|>analysis<|message|>...<|end|>` envelope, so its tests
-carry both `REASONING.batch.2.a` and `PARSER.harmony.1`.
+carry both `REASONING.batch.2.a` and `TOOLCALLING.harmony.1`.
 
 ### Categories that are N/A for reasoning parsers
 
-- `PARSER.batch.2` — "multiple tool calls" maps to `REASONING.batch.6.*`
+- `TOOLCALLING.batch.2` — "multiple tool calls" maps to `REASONING.batch.6.*`
   (multiple reasoning spans), not directly. The tool-call-shaped tag
   doesn't apply.
-- `PARSER.batch.8` — interleaved tool-call markers and normal text;
+- `TOOLCALLING.batch.8` — interleaved tool-call markers and normal text;
   reasoning's analog is `REASONING.batch.2.{b,c,d}` (reasoning +
   normal text) or `REASONING.batch.3.*` (reasoning + downstream tool
   call).
@@ -223,6 +227,7 @@ extract the reasoning content and preserve the tool-call-shaped text in
   closed before downstream tool-call text begins.
 - `3.b` applies only to parser families that intentionally configure a
   downstream boundary while reasoning is still open.
+- `3.c` through `3.f` pin format-specific downstream channel behavior: visible recipientless channel text, directed tool-call handoff preservation, directed reasoning payload extraction, and final-text recovery after a directed downstream tool call.
 - Failure mode: greedy reasoning parser eats the tool-call content
   that follows. Pin the boundary explicitly.
 
@@ -288,7 +293,7 @@ the right boundary and preserve the downstream parser's input.
 
 ## Customer-incident regression tests
 
-Same convention as `PARSER_CASES.md`: include the originating
+Same convention as `TOOLCALLING_CASES.md`: include the originating
 reference inline in the `#[test]` comment.
 
 ```rust
@@ -319,5 +324,5 @@ parser family is considered complete, add:
 6. `REASONING.stream.{1, 2, 3, 4}` — streaming. Add `stream.4.*`
    before declaring complete coverage for any parser with an explicit
    downstream tool-call boundary.
-7. Format tags where applicable: `PARSER.harmony.1` for parsers
+7. Format tags where applicable: `TOOLCALLING.harmony.1` for parsers
    consuming Harmony-format input, etc.

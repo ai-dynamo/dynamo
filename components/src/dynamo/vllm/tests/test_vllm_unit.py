@@ -42,7 +42,9 @@ pytestmark = [
     # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
     # runners with "Failed to infer device type" even for mock tests.
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
     pytest.mark.pre_merge,
 ]
 
@@ -294,6 +296,7 @@ def test_uses_nixl_connector_direct_and_nested():
     assert _uses_nixl_connector(_make_engine_cfg("NixlConnector")) is True
     assert _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheConnectorV1")) is False
+    assert _uses_nixl_connector(_make_engine_cfg("LMCacheMPConnector")) is False
     assert _uses_nixl_connector(_make_engine_cfg("FlexKVConnectorV1")) is False
     assert _uses_nixl_connector(_make_engine_cfg()) is False
 

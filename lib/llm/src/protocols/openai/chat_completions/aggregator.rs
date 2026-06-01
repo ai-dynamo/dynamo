@@ -390,7 +390,12 @@ impl DeltaAggregator {
                     };
 
                 if !tool_calls.is_empty() {
-                    choice.tool_calls = Some(tool_calls);
+                    choice.tool_calls = Some(
+                        tool_calls
+                            .into_iter()
+                            .map(super::tool_call_response_to_protocol)
+                            .collect(),
+                    );
                     choice.text = content.unwrap_or_default();
                 } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
                     choice.text = content.unwrap_or_default();

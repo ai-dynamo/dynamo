@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: pythonic
+mode: batch
+cases:
+  TOOLCALLING.batch.4.a:
+    description: Bracket form with garbage call
+    ref: dynamo
+    model_text: '[not a valid python call]'
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls: []
+        normal_text: '[not a valid python call]'
+      vllm: *id001
+      sglang: *id001
+  TOOLCALLING.batch.4.b:
+    description: Missing closing bracket
+    ref: dynamo
+    model_text: '[get_weather(location="NYC"'
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        calls: []
+        normal_text: '[get_weather(location="NYC"'
+      vllm: *id003
+      sglang: *id003
+  TOOLCALLING.batch.4.d:
+    description: Mismatched paren / bracket
+    ref: dynamo
+    model_text: '[get_weather(location="NYC"]'
+    tools:
+    - *id002
+    expected:
+      dynamo: &id004
+        calls: []
+        normal_text: '[get_weather(location="NYC"]'
+      vllm: *id004
+      sglang: *id004
+  TOOLCALLING.batch.4.c:
+    description: Malformed variant 4.c — not yet authored for this family
+    reason: |-
+      Malformed-input variant 4.c not yet authored for pythonic; see 4.a / 4.b / 4.d for this family's malformed-input scenarios.
+  TOOLCALLING.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      TOOLCALLING.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in TOOLCALLING.batch.4.a through 4.d.
+  TOOLCALLING.batch.4.f:
+    description: Tool-name XML tag case - n/a for this family's syntax
+    reason: |-
+      TOOLCALLING.batch.4.f is specific to Qwen3-Coder XML syntax, where the model may emit a tool-name tag such as <terminal> inside <tool_call> instead of the required <function=Terminal> opener. This family does not use Qwen3-Coder's <function=...> opener.

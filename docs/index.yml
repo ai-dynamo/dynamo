@@ -52,6 +52,9 @@ navigation:
     path: digest/index.mdx
     slug: digest
     contents:
+      - page: "DynoSim: Simulating the Pareto Frontier"
+        path: digest/dynosim/dynosim-pareto-frontier.md
+        slug: dynosim-pareto-frontier
       - page: "Dynamo Day 0 support for TokenSpeed"
         path: digest/tokenspeed/tokenspeed-day-0.md
         slug: tokenspeed-day-0
@@ -242,12 +245,24 @@ navigation:
             path: fault-tolerance/testing.md
       - page: Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Simulation with Mocker
+      - section: DynoSim
+        slug: dynosim
         contents:
-          - page: Testing with Mocker
-            path: mocker/mocker.md
-          - page: Mocker Offline Trace Replay
-            path: benchmarks/mocker-trace-replay.md
+          - page: DynoSim Overview
+            path: dynosim/README.md
+            slug: overview
+          - page: Live Simulation with Mocker
+            path: dynosim/mocker.md
+            slug: mocker
+          - page: DynoSim Runs
+            path: dynosim/runs.md
+            slug: runs
+          - page: DynoSim Sweeps
+            path: dynosim/sweeps.md
+            slug: sweeps
+          - page: Planner DynoSim Benchmarking
+            path: dynosim/planner-benchmarking.md
+            slug: planner-benchmarking
       - page: Writing Python Workers (lower-level)
         path: development/backend-guide.md
       - page: Writing Python Unified Backends
@@ -483,9 +498,6 @@ navigation:
       # -- Benchmarks --
       - page: KV Router A/B Testing
         path: benchmarks/kv-router-ab-testing.md
-      # -- Simulation with Mocker --
-      - page: Simulation with Mocker
-        path: mocker/mocker.md
       # -- Templates --
       - section: Templates
         path: templates/README.md

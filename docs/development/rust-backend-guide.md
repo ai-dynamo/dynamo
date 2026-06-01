@@ -60,46 +60,87 @@ guide.
 
 ## Feature gaps
 
-The unified backend is in beta and does not yet cover the full feature
-set of Dynamo's existing (non-unified) backend paths. The summary
-below is the common contract — what every engine on the unified path
-gets, whether written in Rust directly or plugged in from Python via
-the PyO3 `Worker` shim. Per-engine gaps (vLLM, SGLang, TRT-LLM
-specifics like LoRA, diffusion, attention DP scheduling) live in the
+The unified backend is in beta. The summary below is the common
+contract — what every engine on the unified path gets, whether
+written in Rust directly or plugged in from Python via the PyO3
+`Worker` shim. Per-engine specifics (vLLM sleep/wake, SGLang
+diffusion, TRT-LLM custom logits processors, etc.) live in the
 [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
 
 **Supported today**
 
+Lifecycle and runtime:
 - Aggregated token-in-token-out inference
-- Disaggregated serving (`Aggregated` / `Prefill` / `Decode`) with
-  bootstrap (SGLang) or internal KV transport (vLLM, TRT-LLM); the
-  Rust [mocker example](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/examples/mocker)
+- Disaggregated serving (`Aggregated` / `Prefill` / `Decode`) — KV
+  transfer uses NIXL across all production engines; SGLang exchanges
+  a Dynamo-level bootstrap address, vLLM and TRT-LLM use an
+  engine-internal handshake. The Rust
+  [mocker example](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/examples/mocker)
   exercises the same wire format CPU-only
 - Model registration with discovery and endpoint types
 - Request cancellation via in-stream `ctx.is_stopped()` polling plus
   the framework's out-of-band `abort()` monitor
+- `drain()` hook for pre-cleanup work
 - Typed `DynamoError` with `ErrorType::Backend(BackendError::X)`
-- Graceful shutdown with signal handling, `drain()` hook, and 3-phase
+- Graceful shutdown with signal handling and 3-phase
   distributed-runtime teardown
 - Debug-build stream validator and the `testing::run_conformance` kit
 
-**Not yet on the unified path**
+Observability:
+- Health-check canary via `LLMEngine::health_check_payload()` plus
+  the operator override (`DYN_HEALTH_CHECK_PAYLOAD` /
+  `--health-check-payload`)
+- Vendor-registry bridge into the runtime's `/metrics` output via
+  `LLMEngine::setup_metrics()`, plus framework-owned lifecycle
+  gauges (`dynamo_component_{cleanup_time_seconds,
+  drain_time_seconds, model_load_time_seconds}`) and per-rank
+  `dynamo_component_*` gauges driven by `SnapshotPublisher`
+- KV event publishing via `kv_event_sources()` returning
+  `KvEventSource::Zmq` or `KvEventSource::Push`
+- KV-aware routing (DP-rank-aware) — engines advertise their slice
+  via `EngineConfig::data_parallel_size` /
+  `data_parallel_start_rank`; read the router-forced rank off
+  `request.routing.dp_rank` in `generate()`
+- OpenTelemetry tracing — the framework auto-opens an
+  `engine.generate` span around every `generate()` call with
+  attributes for `model` / `input_tokens` / `disagg_role` / `ttft_ms`
+  / `output_tokens` / `finish_reason` / ITL percentiles. Static-name
+  spans opened with `tracing::info_span!` inside `generate()` nest
+  under it automatically; for dynamic span names use
+  `dynamo_backend_common::telemetry::start_span(name)`. For outbound
+  calls that need to carry trace context (custom HTTP/TCP
+  transports), use
+  `dynamo_runtime::logging::inject_trace_headers_into_map`. NATS
+  egress is auto-injected — engines do nothing.
+
+Request handling:
+- Guided decoding — request shape carries
+  `SamplingOptions::guided_decoding` (`GuidedDecodingOptions`);
+  engine-side coverage on the existing Python-bridged engines is:
+  vLLM and TRT-LLM forward JSON schema / regex / grammar / choice;
+  SGLang forwards JSON schema only (regex / grammar / choice are
+  silently dropped today). A new Rust engine should forward whichever
+  variants its backend supports
+- Structural tag generation — `WorkerConfig::structural_tag_{mode,
+  scope, schema}` (typed enums)
+- Custom Jinja chat templates — `WorkerConfig::custom_jinja_template`
+  flows to `LocalModelBuilder::custom_template_path` and the
+  frontend applies the template at preprocessing time
+- Tool / reasoning parser configuration on `WorkerConfig`
+  (`tool_call_parser`, `reasoning_parser`,
+  `exclude_tools_when_tool_choice_none`)
+
+**Not yet on the unified path (common to all engines)**
 
 | Feature | What's missing |
 |---------|----------------|
-| Metrics & Prometheus | Engine-level metrics, KV utilization gauges, multiprocess registry |
-| KV event publishing | Prefix cache events (BlockStored / Removed) to router via ZMQ or NATS |
-| Health check payloads | Per-engine custom health probes |
-| Logprobs | Selected + top-k logprob extraction and streaming |
-| Guided decoding | JSON schema, regex, grammar, choice constraints |
-| OpenTelemetry tracing | Trace headers, request perf metrics, OTEL propagation |
-| Engine routes | Profiling, memory release/resume, weight updates (disk/tensor/distributed/IPC) |
-| Data-parallel routing | DP rank extraction, DP-aware scheduling |
+| Logprob response wire | `PreprocessedRequest.output_options.{logprobs, prompt_logprobs}` exists on the request shape. Of the existing engines (Python-bridged through PyO3), only vLLM passes the option through to its sampling params on the unified path; SGLang and TRT-LLM unified `generate()` ignore it. No engine populates `log_probs` / `top_logprobs` / `cum_log_probs` on `LLMEngineOutput` — the response wire is open but unused |
 | Text-in-text-out mode | `ModelInput::Text` is rejected at startup — `Tokens` only |
-| Custom Jinja chat templates | Plumbed through `WorkerConfig` but not yet honored end-to-end |
-| Snapshot/checkpoint | CRIU-based engine state save/restore |
-| Multimodal | Images, video, embeddings, separate encode workers |
-| LoRA adapters | Dynamic load/unload, per-adapter serialization |
+| Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers; `ENCODE` disaggregation role |
+| Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
+| LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization |
+| Engine routes | Profile start/stop, sleep / wake / quiesce, weight updates (disk / tensor / distributed / IPC), KV block clearing, prefix cache reset |
+| Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
 
 If you need one of these features today, keep that workload on the
 existing per-engine entry point until the unified path catches up.

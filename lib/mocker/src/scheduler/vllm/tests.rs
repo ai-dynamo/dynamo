@@ -111,6 +111,8 @@ mod core_behavior {
             "first request should emit immediately"
         );
         assert_eq!(core.state.waiting.len(), 0);
+        assert_eq!(pass.mocker_metrics.running_requests, 2);
+        assert_eq!(pass.mocker_metrics.waiting_requests, 0);
         assert_eq!(
             core.state.running.iter().copied().collect::<Vec<_>>(),
             vec![r1, r2]
@@ -326,13 +328,16 @@ mod core_behavior {
         }
 
         let mut collector = crate::replay::TraceCollector::default();
-        core.execute_pass(&mut collector, 0.0);
-        core.execute_pass(&mut collector, 1.0);
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+        let pass2 = core.execute_pass(&mut collector, 1.0);
         let request = core.state.requests.get(&r2).unwrap();
         assert_eq!(request.status, RequestStatus::Preempted);
         assert_eq!(request.num_computed_tokens, 0);
         assert_eq!(request.num_preemptions, 1);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
+        assert_eq!(pass1.mocker_metrics.vllm_preemptions_total, 0);
+        assert_eq!(pass2.mocker_metrics.vllm_preemptions_total, 1);
+        assert_eq!(pass2.mocker_metrics.waiting_requests, 1);
     }
 
     #[test]
@@ -439,6 +444,13 @@ mod router_events {
             pass.router_event_visibility,
             RouterEventVisibility::PassStart
         );
+        assert!(!pass.kv_events.is_empty());
+        assert!(
+            pass.kv_events
+                .iter()
+                .all(|event| event.worker_id == ROUTER_TEST_WORKER_ID)
+        );
+        assert!(pass.kv_events.iter().all(|event| event.event.dp_rank == 0));
     }
 
     #[tokio::test]

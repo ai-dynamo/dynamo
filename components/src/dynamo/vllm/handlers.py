@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import inspect
 import logging
 import os
 
 # MM kwargs NIXL transfer (frontend → backend pre-rendered path)
 import pickle
+import struct
 import tempfile
 import threading
 import time
@@ -52,6 +54,7 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
@@ -352,6 +355,9 @@ def build_sampling_params(
             choice=guided_decoding.get("choice"),
             grammar=guided_decoding.get("grammar"),
             whitespace_pattern=guided_decoding.get("whitespace_pattern"),
+            structural_tag=serialize_structural_tag(
+                guided_decoding.get("structural_tag")
+            ),
         )
 
     # Apply remaining sampling_options
@@ -2923,9 +2929,12 @@ class EmbeddingWorkerHandler:
         The Rust frontend forwards the request dict directly. Expected keys:
         ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``.
         Optional ``dimensions`` (Matryoshka truncation; first N floats of each
-        embedding). ``encoding_format=base64`` is not yet supported end-to-end
-        (the Rust response type rejects strings); tracked as a separate
-        follow-up.
+        embedding). Optional ``encoding_format`` (``"float"`` -- default --
+        or ``"base64"``); when ``"base64"`` is requested, each per-input
+        vector is serialized as a base64-encoded string of little-endian
+        ``f32`` bytes per the OpenAI spec, applied after any
+        ``dimensions`` truncation so the byte count matches the requested
+        dimensionality.
         """
         # Lazy import to avoid pulling PoolingParams into handlers.py at module
         # load time for non-embedding workers.
@@ -2955,6 +2964,13 @@ class EmbeddingWorkerHandler:
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
 
+        encoding_format = request.get("encoding_format", "float")
+        if encoding_format not in ("float", "base64"):
+            raise ValueError(
+                f"Invalid 'encoding_format' value {encoding_format!r}; "
+                "expected 'float' or 'base64'"
+            )
+
         pooling_params = PoolingParams()
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
@@ -2964,10 +2980,7 @@ class EmbeddingWorkerHandler:
         # unique enough to scope a vLLM ``request_id``.
         base_request_id = context.id()
 
-        embedding_objects: list[Dict[str, Any]] = []
-        prompt_tokens = 0
-
-        for idx, prompt in enumerate(prompts):
+        async def _encode_one(idx: int, prompt: Any):
             request_id = f"{base_request_id}-{idx}"
             encode_arg: Any = (
                 prompt
@@ -2982,12 +2995,35 @@ class EmbeddingWorkerHandler:
                     request_id=request_id,
                 ):
                     final_output = out
-
             if final_output is None:
                 raise RuntimeError(
                     f"vLLM engine.encode produced no output for input index {idx}"
                 )
+            return final_output
 
+        # Submit every prompt to the engine in the same event-loop tick so
+        # vLLM's continuous-batching scheduler can coalesce them into a
+        # single forward pass instead of N sequential ones. ``asyncio.gather``
+        # returns results in input order, so ``outputs[k]`` matches ``prompts[k]``
+        # regardless of engine completion order.
+        #
+        # Use explicit tasks + a ``finally`` cancellation pass so that if one
+        # ``_encode_one`` raises, we cancel siblings still in flight instead
+        # of leaving them running -- otherwise vLLM keeps consuming engine
+        # capacity for output that this handler will discard.
+        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
+        try:
+            outputs = await asyncio.gather(*tasks)
+        finally:
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        embedding_objects: list[Dict[str, Any]] = []
+        prompt_tokens = 0
+        for idx, final_output in enumerate(outputs):
             embedding = _pooling_output_to_list(final_output.outputs.data)
             if dimensions is not None:
                 if dimensions > len(embedding):
@@ -2997,10 +3033,17 @@ class EmbeddingWorkerHandler:
                     )
                 embedding = embedding[:dimensions]
 
+            # Always emit base64 over the worker->frontend wire format. The
+            # Rust frontend decodes back to float when the client's
+            # ``encoding_format`` is float (or unset). 15x1024-float responses
+            # serialized as JSON arrays cost ~110 ms in Python json.dumps +
+            # Rust serde parse; base64 bytes are ~3x smaller and ~10x faster
+            # to (de)serialize. Client-visible wire format is preserved
+            # because Rust converts at the HTTP boundary.
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": embedding,
+                    "embedding": _encode_floats_to_base64(embedding),
                     "index": idx,
                 }
             )
@@ -3112,3 +3155,16 @@ def _pooling_output_to_list(data: Any) -> list[float]:
         f"Unsupported PoolingOutput.data type {type(data).__name__}; "
         "expected torch.Tensor or list"
     )
+
+
+def _encode_floats_to_base64(floats: list[float]) -> str:
+    """Encode an embedding vector as a base64 string per the OpenAI
+    ``encoding_format=base64`` spec: raw little-endian ``float32`` bytes
+    are concatenated and base64-encoded with the standard alphabet.
+
+    Mirrors the Rust ``encode_floats_to_base64`` helper in
+    ``lib/llm/src/preprocessor.rs`` so the two backend code paths
+    produce identical bytes for the same input.
+    """
+    packed = struct.pack(f"<{len(floats)}f", *floats)
+    return base64.b64encode(packed).decode("ascii")
