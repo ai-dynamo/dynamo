@@ -122,9 +122,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git init /tmp/criu \
+RUN CRIU_REMOTE="${CRIU_REPO}" \
+    && case "${CRIU_REMOTE}" in \
+        *://*|git@*) ;; \
+        */*) CRIU_REMOTE="https://github.com/${CRIU_REMOTE}.git" ;; \
+        *) CRIU_REMOTE="https://github.com/${CRIU_REMOTE}/criu.git" ;; \
+    esac \
+    && echo "Using CRIU remote ${CRIU_REMOTE} ref ${CRIU_REF}" \
+    && git init /tmp/criu \
     && cd /tmp/criu \
-    && git remote add origin ${CRIU_REPO} \
+    && git remote add origin ${CRIU_REMOTE} \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
     && make -j$(nproc) \

@@ -22,6 +22,26 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_snapshot:
+        description: 'Build and push snapshot-agent image, tagged with branch name'
+        type: boolean
+        default: false
+      build_placeholder:
+        description: 'Build and push vLLM placeholder image, tagged with branch name'
+        type: boolean
+        default: false
+      criu_repo:
+        description: 'CRIU repository URL or GitHub owner/name for snapshot builds'
+        type: string
+        default: 'https://github.com/checkpoint-restore/criu.git'
+      criu_ref:
+        description: 'CRIU ref for snapshot builds'
+        type: string
+        default: 'criu-dev'
+      placeholder_base_image:
+        description: 'Base runtime image for placeholder builds'
+        type: string
+        default: ''
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -187,6 +207,74 @@ jobs:
           done
 
   # ============================================================================
+  # SNAPSHOT AGENT / PLACEHOLDER (build-only)
+  # ============================================================================
+
+  snapshot-agent:
+    needs: [init]
+    if: inputs.build_snapshot
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          build_target: agent
+          extra_build_args: |
+            CRIU_REPO=${{ inputs.criu_repo }}
+            CRIU_REF=${{ inputs.criu_ref }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent
+
+  placeholder:
+    needs: [init, vllm-copy-to-acr]
+    if: inputs.build_placeholder
+    name: vLLM Placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Resolve placeholder base image
+        id: base
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.placeholder_base_image }}" ]]; then
+            echo "image=${{ inputs.placeholder_base_image }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda13" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ github.sha }}-vllm-placeholder
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          build_target: placeholder
+          extra_build_args: |
+            CRIU_REPO=${{ inputs.criu_repo }}
+            CRIU_REF=${{ inputs.criu_ref }}
+            BASE_IMAGE=${{ steps.base.outputs.image }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
+
+  # ============================================================================
   # CLEANUP
   # ============================================================================
 
@@ -194,7 +282,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-agent, placeholder]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

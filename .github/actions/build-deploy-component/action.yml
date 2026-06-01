@@ -40,6 +40,14 @@ inputs:
     description: 'Optional newline-separated list of fully-qualified extra image URIs to also tag and push'
     required: false
     default: ''
+  extra_build_args:
+    description: 'Optional newline-separated Docker build args'
+    required: false
+    default: ''
+  build_target:
+    description: 'Optional Docker build target override'
+    required: false
+    default: ''
 
 outputs:
   image_tag:
@@ -98,14 +106,26 @@ runs:
         echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
         TARGET_FLAG=""
-        if [[ "${{ inputs.component }}" == "snapshot" ]]; then
-          TARGET_FLAG="--target agent"
+        BUILD_TARGET="${{ inputs.build_target }}"
+        if [[ -z "${BUILD_TARGET}" && "${{ inputs.component }}" == "snapshot" ]]; then
+          BUILD_TARGET="agent"
         fi
+        if [[ -n "${BUILD_TARGET}" ]]; then
+          TARGET_FLAG="--target ${BUILD_TARGET}"
+        fi
+
+        BUILD_ARGS=()
+        while IFS= read -r build_arg; do
+          if [[ -n "$build_arg" ]]; then
+            BUILD_ARGS+=(--build-arg "$build_arg")
+          fi
+        done <<< "${{ inputs.extra_build_args }}"
 
         docker buildx build --push \
             --platform ${{ steps.settings.outputs.build_platforms }} \
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
             --build-context snapshot=../snapshot \
+            "${BUILD_ARGS[@]}" \
             ${TARGET_FLAG} \
             ${TAGGING_FLAGS} -f Dockerfile .
 
