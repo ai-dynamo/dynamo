@@ -248,6 +248,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return None
         if not isinstance(mm_hashes, list):
             return None
+        # Fail closed if a non-string slipped into the list — downstream
+        # SGLang treats mm_hashes as List[str] and a bad element would
+        # crash the worker mid-request. Routing falls back to text-prefix.
+        if not all(isinstance(h, str) for h in mm_hashes):
+            logging.warning(
+                "extra_args.mm_hashes contained non-str entries; "
+                "ignoring routing-side hashes and letting SGLang recompute"
+            )
+            return None
         return mm_hashes
 
     def cleanup(self) -> None:
