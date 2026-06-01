@@ -371,6 +371,7 @@ vllm_configs = {
             "--dyn-tool-call-parser",
             "hermes",
         ],
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         delayed_start=0,
         timeout=600,
         env={"DYN_MM_ALLOW_INTERNAL": "1"},
