@@ -518,10 +518,18 @@ impl Worker {
 
         let registry = endpoint.drt().engine_routes();
         let control_count = controls.len();
+        // Serialize discovery-mutating controls so a concurrent resume cannot
+        // re-register the endpoint between a quiesce control's unregister and
+        // its engine-state mutation (and vice versa).
+        let control_lock = Arc::new(tokio::sync::Mutex::new(()));
         for control_name in controls {
             let callback = engine_control_callback(control_name.clone(), self.engine.clone());
-            let callback =
-                wrap_engine_control_callback(control_name.clone(), callback, endpoint.clone());
+            let callback = wrap_engine_control_callback(
+                control_name.clone(),
+                callback,
+                endpoint.clone(),
+                control_lock.clone(),
+            );
             registry.register(&control_name, callback);
         }
         tracing::info!(control_count, "registered engine management controls");
@@ -958,12 +966,14 @@ fn wrap_engine_control_callback(
     control_name: String,
     callback: EngineRouteCallback,
     endpoint: dynamo_runtime::component::Endpoint,
+    control_lock: Arc<tokio::sync::Mutex<()>>,
 ) -> EngineRouteCallback {
     let policy = engine_control_policy(&control_name);
     Arc::new(move |body| {
         let callback = callback.clone();
         let endpoint = endpoint.clone();
         let control_name = control_name.clone();
+        let control_lock = control_lock.clone();
         Box::pin(async move {
             match policy {
                 EngineControlPolicy::Direct => callback(body).await,
@@ -971,6 +981,10 @@ fn wrap_engine_control_callback(
                     if let Some(response) = control_request_body_error(&body) {
                         return Ok(response);
                     }
+
+                    // Hold across unregister + callback so a concurrent resume
+                    // cannot re-register between them.
+                    let _guard = control_lock.lock().await;
 
                     if let Err(e) = endpoint.unregister_endpoint_instance().await {
                         return Ok(control_error_response(format!(
@@ -999,6 +1013,10 @@ fn wrap_engine_control_callback(
                     }
                 }
                 EngineControlPolicy::RegisterAfter => {
+                    // Hold across callback + register so a concurrent quiesce
+                    // cannot unregister between them.
+                    let _guard = control_lock.lock().await;
+
                     let response = callback(body).await?;
                     if !control_response_is_error(&response)
                         && let Err(e) = endpoint.register_endpoint_instance().await
