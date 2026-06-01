@@ -25,8 +25,8 @@ impl tokenizer_traits::Encoder for TestTokenizer {
 }
 
 impl tokenizer_traits::Decoder for TestTokenizer {
-    fn decode(&self, ids: &[u32], skip_special: bool) -> Result<String> {
-        Ok(ids
+    fn decode(&self, ids: &[u32], skip_special: bool) -> Result<tokenizer_traits::DecodeResult> {
+        let text: String = ids
             .iter()
             .filter_map(|&id| match id {
                 EOS if skip_special => None,
@@ -36,7 +36,8 @@ impl tokenizer_traits::Decoder for TestTokenizer {
                 EOS => Some("</s>"),
                 _ => Some("?"),
             })
-            .collect())
+            .collect();
+        Ok(text.into())
     }
 }
 
@@ -133,5 +134,24 @@ fn stop_token_priority_over_sequence() {
     assert!(matches!(
         result.stop_trigger,
         Some(StopTrigger::HiddenStopTokenDetected(id)) if id == STOP
+    ));
+}
+
+#[test]
+fn user_stop_token_reports_distinct_trigger() {
+    let tokenizer: Arc<dyn tokenizer_traits::Tokenizer> = Arc::new(TestTokenizer);
+    let decode_stream = tokenizers::DecodeStream::new(tokenizer, &[], false);
+    let stop_conditions = StopConditions {
+        stop_token_ids: Some(vec![STOP]),
+        stop_token_ids_hidden: Some(vec![EOS]),
+        ..Default::default()
+    };
+    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+    let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("hi"));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::UserStopTokenDetected(id)) if id == STOP
     ));
 }

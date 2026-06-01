@@ -78,6 +78,7 @@ impl KserveGrpcService {
         // If runtime_config is provided, create and save a ModelDeploymentCard
         // so the ModelConfig endpoint can return model configuration
         if let Some(runtime_config) = runtime_config {
+            runtime_config.validate_config()?;
             let mut card = RsModelDeploymentCard::with_name_only(&model);
             card.model_type = ModelType::TensorBased;
             card.model_input = ModelInput::Tensor;

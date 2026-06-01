@@ -13,6 +13,11 @@ source "$SCRIPT_DIR/../../../../common/launch_utils.sh" # print_launch_banner, w
 
 export VLLM_TARGET_DEVICE=xpu
 
+# Device affinity: Use auto-selected device via ZE_AFFINITY_MASK if set by test framework,
+# otherwise default to device 0
+ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0}
+export ZE_AFFINITY_MASK
+
 # Default model
 MODEL="Qwen/Qwen3-0.6B"
 

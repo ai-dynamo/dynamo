@@ -5,6 +5,8 @@
 issues/
 plans/
 *rendered.Dockerfile
+rendered.*.Dockerfile
+.metrics_parity_*/
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
 [Oo][Bb][Jj]/
@@ -116,7 +118,9 @@ core.*
 /.cursor/instructions.md.bak
 /.cursor
 /.claude/*
-!/.claude/skills/
+!/.claude/skills
+/.agents/*
+!/.agents/skills
 /CLAUDE.md
 /CLAUDE.md.bak
 
@@ -140,3 +144,6 @@ package-lock.json
 # macOS
 .DS_Store
 **/.DS_Store
+
+# HuggingFace hub cache downloaded by tests (never commit; committed fixtures use plain dir names)
+lib/llm/tests/data/sample-models/models--*/

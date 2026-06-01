@@ -15,15 +15,13 @@ from dynamo.common.storage import get_fs
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.llm import ModelInput, ModelType, fetch_model, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, fetch_model, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
-from dynamo.vllm.omni.tts_utils import (
-    cleanup_dummy_tokenizer_for_tts,
-    ensure_dummy_tokenizer_for_tts,
-)
+from dynamo.vllm.omni.stage_router import init_omni_stage_router
+from dynamo.vllm.omni.stage_worker import init_omni_stage
 
 from .args import OmniConfig, parse_omni_args
 
@@ -73,34 +71,27 @@ async def init_omni(
     if model_type is None:
         model_type = ModelType.Images
 
-    # Audio/TTS models (e.g., Qwen3-TTS) don't ship a standard tokenizer.json,
-    # which causes register_model to fail when building the ModelDeploymentCard.
-    # Create a minimal placeholder so the Rust card loader doesn't bail,
-    # then delete it immediately after so vLLM-Omni's inference-time
-    # AutoTokenizer.from_pretrained() doesn't pick up the fake file.
-    dummy_tokenizer_paths = []
-    if "audio" in config.output_modalities:
-        dummy_tokenizer_paths = ensure_dummy_tokenizer_for_tts(config.model)
-
-    await register_model(
-        ModelInput.Text,
-        model_type,
-        generate_endpoint,
-        config.model,
-        config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-    )
-
-    if dummy_tokenizer_paths:
-        cleanup_dummy_tokenizer_for_tts(dummy_tokenizer_paths)
-
-    logger.info("Starting to serve Omni worker endpoint...")
-
-    health_check_payload = (
-        await VllmOmniHealthCheckPayload.create(handler.engine_client)
-    ).to_dict()
-
     try:
+        await register_model(
+            ModelInput.Text,
+            model_type,
+            generate_endpoint,
+            config.model,
+            config.served_model_name,
+            kv_cache_block_size=config.engine_args.block_size,
+            # Omni workers serve the full multi-stage pipeline behind one
+            # endpoint; there is no prefill/decode split visible to the
+            # frontend, so they register as Aggregated.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
+
+        logger.info("Starting to serve Omni worker endpoint...")
+
+        health_check_payload = (
+            await VllmOmniHealthCheckPayload.create(handler.engine_client)
+        ).to_dict()
+
         await generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
@@ -117,7 +108,7 @@ async def init_omni(
             health_check_payload=health_check_payload,
         )
     except Exception as e:
-        logger.error("Failed to serve Omni endpoint: %s", e)
+        logger.error("Omni worker failed: %s", e)
         raise
     finally:
         logger.debug("Cleaning up Omni worker")
@@ -140,13 +131,19 @@ async def worker():
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
-        use_kv_events=False,
     )
 
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
-    await init_omni(runtime, config, shutdown_event)
-    logger.debug("Omni worker completed, exiting...")
+    if config.stage_id is not None:
+        await init_omni_stage(runtime, config, shutdown_endpoints, shutdown_event)
+        logger.debug("init_omni_stage completed (stage %d)", config.stage_id)
+    elif config.omni_router:
+        await init_omni_stage_router(runtime, config, shutdown_endpoints)
+        logger.debug("init_omni_stage_router completed")
+    else:
+        await init_omni(runtime, config, shutdown_event)
+        logger.debug("Omni worker completed, exiting...")
 
 
 def main():

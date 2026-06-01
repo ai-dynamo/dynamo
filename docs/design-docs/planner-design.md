@@ -178,6 +178,16 @@ Each engine emits per-iteration `ForwardPassMetrics` via ZMQ -> FpmEventRelay ->
 - **queued_requests**: queued prefill/decode load for TTFT/ITL simulation
 - Idle heartbeats (wall_time=0) are skipped
 
+### Diagnostics
+
+Each tick, the scaling state machine fills `TickDiagnostics` with intermediate decision data—estimated latencies, predicted load, per-engine RPS, and decision reasons—via internal `_diag_*` fields. The adapter layer reads this from `PlannerEffects.diagnostics` and:
+
+- Sets Prometheus gauges (e.g. `dynamo_planner_estimated_ttft_ms` and related estimates)
+- Records enum metrics for load-scaling decision reasons (`dynamo_planner_load_scaling_decision`)
+- Feeds `DiagnosticsRecorder`, which accumulates per-tick snapshots and emits Plotly-based HTML reports on a schedule
+
+Per-engine FPM queue depths from `_collect_fpm()` are exported as labeled Prometheus gauges.
+
 ### Regression Models
 
 Three specialized regression models (`fpm_regression.py`):

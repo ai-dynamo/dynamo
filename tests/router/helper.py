@@ -8,7 +8,8 @@ import os
 import random
 import string
 import sys
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import aiohttp
 import nats
@@ -118,8 +119,13 @@ def verify_response_worker_ids(
     )
 
 
-def verify_response_timing(timing_info: dict[str, Any]) -> None:
-    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0)."""
+def verify_response_timing(timing_info: dict[str, Any], disagg: bool = False) -> None:
+    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0).
+
+    Args:
+        timing_info: Dict of timing fields from nvext.timing in the response.
+        disagg: If True, also verify kv_transfer_estimated_latency_ms > 0 (disaggregated mode only).
+    """
     ttft_ms = timing_info.get("ttft_ms")
     total_time_ms = timing_info.get("total_time_ms")
 
@@ -133,6 +139,21 @@ def verify_response_timing(timing_info: dict[str, Any]) -> None:
     logger.info(
         f"✓ Verified timing: ttft_ms={ttft_ms:.2f}, total_time_ms={total_time_ms:.2f}"
     )
+
+    if disagg:
+        kv_transfer_estimated_latency_ms = timing_info.get(
+            "kv_transfer_estimated_latency_ms"
+        )
+        assert (
+            kv_transfer_estimated_latency_ms is not None
+            and kv_transfer_estimated_latency_ms > 0
+        ), (
+            f"Expected kv_transfer_estimated_latency_ms > 0 in disaggregated mode, "
+            f"got: {kv_transfer_estimated_latency_ms}"
+        )
+        logger.info(
+            f"✓ Verified kv_transfer_estimated_latency_ms={kv_transfer_estimated_latency_ms:.2f}"
+        )
 
 
 ########################################################
@@ -236,6 +257,46 @@ async def wait_for_frontend_ready(
         await asyncio.sleep(1)
 
 
+async def poll_for_worker_instances(
+    endpoint,
+    expected_num_workers: int,
+    max_wait_time: int = 60,
+) -> list[int]:
+    """Poll the endpoint's discovery client until the expected number of worker instances appear.
+
+    Args:
+        endpoint: The endpoint object to get the client from
+        expected_num_workers: Number of worker instances to wait for
+        max_wait_time: Timeout in seconds
+
+    Returns:
+        List of discovered instance IDs (unsorted).
+
+    Raises:
+        AssertionError: If the expected number of workers don't appear within max_wait_time.
+    """
+    logger.info(f"Waiting for {expected_num_workers} worker instance(s) to register...")
+    client = await endpoint.client()
+    instance_ids: list[int] = []
+    start_time = asyncio.get_running_loop().time()
+
+    while len(instance_ids) < expected_num_workers:
+        instance_ids = client.instance_ids()
+        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
+
+        if len(instance_ids) >= expected_num_workers:
+            break
+
+        if asyncio.get_running_loop().time() - start_time > max_wait_time:
+            raise AssertionError(
+                f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
+            )
+
+        await asyncio.sleep(1.0)
+
+    return instance_ids
+
+
 async def wait_for_workers_ready(
     endpoint,
     router: KvRouter,
@@ -260,31 +321,7 @@ async def wait_for_workers_ready(
     Raises:
         AssertionError: If workers don't become ready or warmup request fails.
     """
-    logger.info("Waiting for workers to be ready")
-
-    # Get the client from the endpoint
-    client = await endpoint.client()
-
-    # Poll for instance IDs until we have the expected number
-    instance_ids: list[int] = []
-    max_wait_time = 60  # seconds
-    start_time = asyncio.get_running_loop().time()
-
-    while len(instance_ids) < expected_num_workers:
-        instance_ids = client.instance_ids()
-        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
-
-        if len(instance_ids) >= expected_num_workers:
-            break
-
-        # Check timeout
-        if asyncio.get_running_loop().time() - start_time > max_wait_time:
-            raise AssertionError(
-                f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
-            )
-
-        # Wait 1 second before polling again
-        await asyncio.sleep(1.0)
+    instance_ids = await poll_for_worker_instances(endpoint, expected_num_workers)
 
     # Send a warmup request to verify workers can handle requests
     test_token_ids = [random.randint(1, 10000) for _ in range(4)]
@@ -295,8 +332,6 @@ async def wait_for_workers_ready(
             kv_python_router=router,
             model_name=model_name,
             token_ids=test_token_ids,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,
                 "max_tokens": 2,
@@ -408,12 +443,17 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime(store_backend="etcd", request_plane="tcp"):
+def get_runtime(
+    store_backend: str = "etcd",
+    request_plane: str = "tcp",
+    event_plane: Optional[str] = None,
+):
     """Create a DistributedRuntime instance for testing.
 
     Args:
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "tcp".
+        request_plane: How frontend talks to backend ("tcp", "nats"). Defaults to "tcp".
+        event_plane: How KV events are transported ("nats" or "zmq"). Defaults to runtime behavior.
     """
     try:
         # Try to get running loop (works in async context)
@@ -422,7 +462,9 @@ def get_runtime(store_backend="etcd", request_plane="tcp"):
         # No running loop, create a new one (sync context)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return DistributedRuntime(loop, store_backend, request_plane)
+    return DistributedRuntime(
+        loop, store_backend, request_plane, event_plane=event_plane
+    )
 
 
 async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
@@ -527,8 +569,8 @@ async def send_request_via_python_kv_router(
     kv_python_router: KvRouter,
     model_name: str,
     token_ids: list,
-    initial_wait: float,
-    max_retries: int,
+    initial_wait: float = 0.25,
+    max_retries: int = 8,
     stop_conditions: Optional[dict] = None,
     sampling_options: Optional[dict] = None,
     output_options: Optional[dict] = None,
@@ -658,3 +700,24 @@ async def send_request_via_python_kv_router(
         }
 
     return True
+
+
+def topology_env(
+    tmp_path: Path,
+    name: str,
+    topology_domains: Dict[str, str],
+    *,
+    transfer_domain: str = "zone",
+    enforcement: str = "required",
+) -> Dict[str, str]:
+    topology_dir = tmp_path / name
+    topology_dir.mkdir()
+    for domain, value in topology_domains.items():
+        (topology_dir / domain).write_text(value)
+
+    return {
+        "DYN_TOPOLOGY_ENABLED": "true",
+        "DYN_TOPOLOGY_MOUNT_PATH": str(topology_dir),
+        "DYN_KV_TRANSFER_DOMAIN": transfer_domain,
+        "DYN_KV_TRANSFER_ENFORCEMENT": enforcement,
+    }

@@ -68,9 +68,8 @@ jobs:
       docs: ${{ steps.changes.outputs.docs }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        # Do not use fetch-depth: 0 — changed-files now works with shallow clone
       - name: Check for changes
         id: changes
         uses: ./.github/actions/changed-files
@@ -91,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -114,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -152,13 +151,13 @@ jobs:
           fi
 
       - name: Checkout source branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           path: source-checkout
           fetch-depth: 1
 
       - name: Checkout docs-website branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: docs-website
           path: docs-checkout
@@ -172,7 +171,7 @@ jobs:
           rm -rf docs-checkout/fern/pages-dev
           mkdir -p docs-checkout/fern/pages-dev
           rsync -a \
-            --exclude='blogs' \
+            --exclude='digest' \
             --exclude='index.yml' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
 
@@ -206,11 +205,12 @@ jobs:
             cp -r source-checkout/fern/components docs-checkout/fern/components
           fi
 
-          # Sync blogs/ directory
-          if [ -d source-checkout/docs/blogs ]; then
-            echo "Syncing blogs/ to docs-website branch..."
-            rm -rf docs-checkout/fern/blogs
-            cp -r source-checkout/docs/blogs docs-checkout/fern/blogs
+          # Sync digest/ directory
+          if [ -d source-checkout/docs/digest ]; then
+            echo "Syncing digest/ to docs-website branch..."
+            # Keep fern/blogs for older versioned docs that still reference ../blogs.
+            rm -rf docs-checkout/fern/digest
+            cp -r source-checkout/docs/digest docs-checkout/fern/digest
           fi
 
           # Sync main.css
@@ -223,11 +223,11 @@ jobs:
         run: |
           # In the source repo, index.yml uses paths relative to docs/ (e.g. getting-started/quickstart.md).
           # On docs-website, fern/versions/dev.yml needs ../pages-dev/ prefix for content
-          # and ../ prefix for blogs (which are a sibling of pages/, not inside it).
+          # and ../ prefix for digest (which is a sibling of pages/, not inside it).
           #
-          # Order matters: transform blogs/ first so the second sub() won't re-match them
+          # Order matters: transform digest/ first so the second sub() won't re-match it
           # (they'll start with ../ which doesn't match ^[a-zA-Z]).
-          yq -i '(.. | select(has("path")).path) |= sub("^blogs/", "../blogs/")' docs-checkout/fern/versions/dev.yml
+          yq -i '(.. | select(has("path")).path) |= sub("^digest/", "../digest/")' docs-checkout/fern/versions/dev.yml
           yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-dev/${1}")' docs-checkout/fern/versions/dev.yml
 
       - name: Convert GitHub callouts to Fern format
@@ -387,10 +387,9 @@ jobs:
           echo "Processing version: $VERSION (tag: $TAG)"
 
       - name: Checkout docs-website branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: docs-website
-          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check if version already exists

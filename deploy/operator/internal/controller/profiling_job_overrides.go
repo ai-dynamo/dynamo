@@ -46,6 +46,91 @@ func applyProfilingJobOverrides(job *batchv1.Job, overrides *batchv1.JobSpec) {
 	applyPodTemplateOverrides(&job.Spec.Template, &overrides.Template)
 }
 
+// ensureOutputCopierKubeAPIAccess preserves the user's pod-level
+// automountServiceAccountToken=false setting while keeping the controller-owned
+// output-copier sidecar able to update the DGDR output ConfigMap.
+func ensureOutputCopierKubeAPIAccess(job *batchv1.Job) {
+	spec := &job.Spec.Template.Spec
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		return
+	}
+
+	spec.Volumes = mergeNamedSlice(
+		spec.Volumes,
+		[]corev1.Volume{outputCopierKubeAPIAccessVolume()},
+		func(v corev1.Volume) string { return v.Name },
+	)
+
+	for i := range spec.Containers {
+		spec.Containers[i].VolumeMounts = removeVolumeMountByName(
+			spec.Containers[i].VolumeMounts,
+			VolumeNameOutputCopierKubeAPIAccess,
+		)
+		if spec.Containers[i].Name == ContainerNameOutputCopier {
+			spec.Containers[i].VolumeMounts = append(spec.Containers[i].VolumeMounts, corev1.VolumeMount{
+				Name:      VolumeNameOutputCopierKubeAPIAccess,
+				MountPath: ServiceAccountTokenPath,
+				ReadOnly:  true,
+			})
+		}
+	}
+}
+
+func outputCopierKubeAPIAccessVolume() corev1.Volume {
+	expirationSeconds := int64(ServiceAccountTokenExpirationSeconds)
+	return corev1.Volume{
+		Name: VolumeNameOutputCopierKubeAPIAccess,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{
+					{
+						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+							Path:              "token",
+							ExpirationSeconds: &expirationSeconds,
+						},
+					},
+					{
+						ConfigMap: &corev1.ConfigMapProjection{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: ConfigMapNameKubeRootCA,
+							},
+							Items: []corev1.KeyToPath{{
+								Key:  "ca.crt",
+								Path: "ca.crt",
+							}},
+						},
+					},
+					{
+						DownwardAPI: &corev1.DownwardAPIProjection{
+							Items: []corev1.DownwardAPIVolumeFile{{
+								Path: "namespace",
+								FieldRef: &corev1.ObjectFieldSelector{
+									APIVersion: "v1",
+									FieldPath:  "metadata.namespace",
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func removeVolumeMountByName(mounts []corev1.VolumeMount, name string) []corev1.VolumeMount {
+	if len(mounts) == 0 {
+		return mounts
+	}
+
+	result := make([]corev1.VolumeMount, 0, len(mounts))
+	for _, mount := range mounts {
+		if mount.Name != name {
+			result = append(result, mount)
+		}
+	}
+	return result
+}
+
 // applyJobSpecOverrides merges JobSpec-level scalar fields.
 func applyJobSpecOverrides(spec *batchv1.JobSpec, overrides *batchv1.JobSpec) {
 	if overrides.BackoffLimit != nil {

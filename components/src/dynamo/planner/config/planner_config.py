@@ -15,17 +15,28 @@
 
 import json
 import logging
+import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
+from urllib.parse import parse_qsl
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
+from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 
 logger = logging.getLogger(__name__)
+
+
+def _prometheus_ssl_verify_default() -> bool:
+    return os.environ.get("PROMETHEUS_SSL_VERIFY", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 class PlannerPreDeploymentSweepMode(str, Enum):
@@ -50,17 +61,47 @@ class PlannerConfig(BaseModel):
         "kubernetes", "virtual", "global-planner"
     ] = SLAPlannerDefaults.environment
     namespace: str = Field(
-        default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo")
+        default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo"),
+        exclude=True,
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
+    optimization_target: Literal["throughput", "latency", "load", "sla"] = Field(
+        default="throughput",
+        description=(
+            "Scaling optimization target. "
+            "'throughput' (default) and 'latency' use static thresholds on queue "
+            "depth and KV cache utilization — no SLA targets or profiling needed. "
+            "'load' uses user-defined prefill queue token and decode KV "
+            "utilization thresholds. "
+            "'sla' uses regression-based scaling that targets specific ttft_ms/itl_ms values."
+        ),
+    )
 
-    no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
-    throughput_adjustment_interval: int = (
-        SLAPlannerDefaults.throughput_adjustment_interval
+    throughput_adjustment_interval_seconds: int = Field(
+        default=SLAPlannerDefaults.throughput_adjustment_interval_seconds,
+        validation_alias=AliasChoices(
+            "throughput_adjustment_interval_seconds",
+            "throughput_adjustment_interval",
+        ),
     )
     max_gpu_budget: int = SLAPlannerDefaults.max_gpu_budget
+    min_gpu_budget: int = SLAPlannerDefaults.min_gpu_budget
+    """Per-DGD GPU floor enforced by the local planner. -1 disables (default).
+
+    When set alongside ``max_gpu_budget`` with ``min == max``, the local
+    planner pins the per-DGD total and only redistributes replicas between
+    prefill and decode. Tolerance band:
+    ``[min_gpu_budget - tolerance, max_gpu_budget + tolerance]`` where
+    ``tolerance = max(prefill_engine_num_gpu, decode_engine_num_gpu)`` —
+    needed because integer worker steps from pools with different per-replica
+    GPU counts can't always exactly cancel.
+
+    This is per-DGD scope. The GlobalPlanner has a separate cluster-wide
+    ``min_total_gpus`` flag for cross-DGD enforcement; the two are
+    orthogonal and can both be set.
+    """
     min_endpoint: int = SLAPlannerDefaults.min_endpoint
 
     decode_engine_num_gpu: Optional[int] = None
@@ -68,8 +109,25 @@ class PlannerConfig(BaseModel):
 
     profile_results_dir: str = SLAPlannerDefaults.profile_results_dir
 
-    ttft: float = SLAPlannerDefaults.ttft
-    itl: float = SLAPlannerDefaults.itl
+    aic_interpolation: Optional[AICInterpolationSpec] = Field(
+        default=None,
+        description=(
+            "AIConfigurator interpolation spec populated by the profiler in "
+            "rapid mode. When set, the planner runs the AIC sweep in-process "
+            "at bootstrap and uses the resulting FPMs to seed the regression "
+            "models (priority 2 between the get_perf_metrics endpoint and "
+            "the legacy profile_results_dir file loader)."
+        ),
+    )
+
+    ttft_ms: float = Field(
+        default=SLAPlannerDefaults.ttft_ms,
+        validation_alias=AliasChoices("ttft_ms", "ttft"),
+    )
+    itl_ms: float = Field(
+        default=SLAPlannerDefaults.itl_ms,
+        validation_alias=AliasChoices("itl_ms", "itl"),
+    )
 
     # Load predictor settings
     load_predictor: str = SLAPlannerDefaults.load_predictor
@@ -88,8 +146,76 @@ class PlannerConfig(BaseModel):
         default_factory=lambda: os.environ.get(
             "PROMETHEUS_ENDPOINT",
             "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
-        )
+        ),
+        exclude=True,
     )
+    metric_pulling_prometheus_token: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN"),
+        exclude=True,
+        description=(
+            "Optional bearer token sent as `Authorization: Bearer <token>` on "
+            "every PromQL request. Useful for hardened monitoring stacks "
+            "(OpenShift thanos-querier, OAuth-proxied Prometheus). Token is "
+            "read once at startup."
+        ),
+    )
+    metric_pulling_prometheus_token_file: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN_FILE"),
+        exclude=True,
+        description=(
+            "Optional path to a file containing a bearer token. When set, "
+            "the token is re-read before every PromQL request so rotated "
+            "tokens (Kubernetes projected ServiceAccount tokens, OpenShift "
+            "OAuth SA tokens) are picked up without restarting the planner."
+        ),
+    )
+    metric_pulling_prometheus_ssl_verify: bool = Field(
+        default_factory=_prometheus_ssl_verify_default,
+        exclude=True,
+        description=(
+            "Verify the upstream Prometheus TLS certificate. Default False "
+            "preserves the previous PrometheusConnect(disable_ssl=True) "
+            "behavior. Set True for hardened monitoring stacks; pair with "
+            "an injected CA bundle if the upstream uses a private CA."
+        ),
+    )
+    metric_pulling_prometheus_extra_query_params: Optional[Dict[str, str]] = Field(
+        default_factory=lambda: (
+            dict(
+                parse_qsl(
+                    os.environ.get("PROMETHEUS_EXTRA_QUERY_PARAMS", ""),
+                    strict_parsing=True,
+                )
+            )
+            or None
+        ),
+        exclude=True,
+        description=(
+            "Fixed key/value pairs appended as URL query parameters on every PromQL "
+            "request. Set via PROMETHEUS_EXTRA_QUERY_PARAMS as a URL query string, "
+            "e.g. `namespace=my-ns&tenant=foo`."
+        ),
+    )
+    metric_pulling_prometheus_ca_bundle: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_CA_BUNDLE"),
+        exclude=True,
+        validate_default=True,
+        description=(
+            "Path to a CA bundle for verifying the upstream Prometheus TLS certificate. "
+            "No-op unless ssl_verify is enabled."
+        ),
+    )
+
+    @field_validator("metric_pulling_prometheus_ca_bundle", mode="after")
+    @classmethod
+    def _validate_ca_bundle_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not Path(v).is_file():
+            raise ValueError(
+                f"metric_pulling_prometheus_ca_bundle path does not exist or is not a file: {v!r}. "
+                "Check that PROMETHEUS_CA_BUNDLE points to a valid CA bundle file."
+            )
+        return v
+
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
@@ -97,7 +223,6 @@ class PlannerConfig(BaseModel):
         "frontend", "router"
     ] = SLAPlannerDefaults.throughput_metrics_source
 
-    no_correction: bool = SLAPlannerDefaults.no_correction
     model_name: Optional[str] = None
 
     # Global planner environment
@@ -108,22 +233,183 @@ class PlannerConfig(BaseModel):
     enable_load_scaling: bool = SLAPlannerDefaults.enable_load_scaling
 
     # Load-based scaling settings
-    load_adjustment_interval: int = SLAPlannerDefaults.load_adjustment_interval
-    load_learning_window: int = SLAPlannerDefaults.load_learning_window
+    load_adjustment_interval_seconds: int = Field(
+        default=SLAPlannerDefaults.load_adjustment_interval_seconds,
+        validation_alias=AliasChoices(
+            "load_adjustment_interval_seconds", "load_adjustment_interval"
+        ),
+        description=(
+            "Interval for FPM regression model updates AND load-based "
+            "scaling decisions. Even when only throughput-based scaling is enabled, "
+            "live FPM observations are fed into the regression at this interval to "
+            "keep the performance model accurate. Must be shorter than "
+            "throughput_adjustment_interval_seconds."
+        ),
+    )
+    max_num_fpm_samples: int = SLAPlannerDefaults.max_num_fpm_samples
+    fpm_sample_bucket_size: int = SLAPlannerDefaults.fpm_sample_bucket_size
     load_scaling_down_sensitivity: int = (
         SLAPlannerDefaults.load_scaling_down_sensitivity
+    )
+    prefill_scale_up_queue_tokens: Optional[int] = Field(
+        default=SLAPlannerDefaults.prefill_scale_up_queue_tokens,
+        ge=0,
+        description=(
+            "Prefill queue token count that triggers scale-up when "
+            "optimization_target='load'."
+        ),
+    )
+    prefill_scale_down_queue_tokens: Optional[int] = Field(
+        default=SLAPlannerDefaults.prefill_scale_down_queue_tokens,
+        ge=0,
+        description=(
+            "Prefill queue token count that allows scale-down when "
+            "optimization_target='load'."
+        ),
+    )
+    decode_scale_up_kv_rate: Optional[float] = Field(
+        default=SLAPlannerDefaults.decode_scale_up_kv_rate,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices(
+            "decode_scale_up_kv_rate", "decode_sacle_up_kv_rate"
+        ),
+        description=(
+            "Decode KV utilization percentage that triggers scale-up when "
+            "optimization_target='load'. Accepts 0-100."
+        ),
+    )
+    decode_scale_down_kv_rate: Optional[float] = Field(
+        default=SLAPlannerDefaults.decode_scale_down_kv_rate,
+        ge=0,
+        le=100,
+        description=(
+            "Decode KV utilization percentage that allows scale-down when "
+            "optimization_target='load'. Accepts 0-100."
+        ),
     )
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
+    # Advisory mode: compute and log decisions without executing scaling
+    advisory: bool = SLAPlannerDefaults.advisory
+
+    # Diagnostics report settings
+    report_interval_hours: Optional[float] = Field(
+        default=24.0,
+        description=(
+            "Generate an HTML diagnostics report every N hours (simulated time). "
+            "Set to None to disable periodic report generation."
+        ),
+    )
+    report_output_dir: str = Field(
+        default="./planner_reports",
+        description="Directory for HTML diagnostics reports.",
+    )
+    report_filename: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fixed filename for HTML diagnostics reports. "
+            "When set, reports are written to report_output_dir/report_filename "
+            "instead of the default timestamped name."
+        ),
+    )
+    report_write_gzip_log: bool = Field(
+        default=True,
+        description=(
+            "Write a compressed JSONL diagnostics log next to each HTML report. "
+            "The gzip sidecar uses the same report basename with .log.jsonl.gz."
+        ),
+    )
+    live_dashboard_port: int = Field(
+        default=8080,
+        description=(
+            "Port for the live diagnostics dashboard HTTP server. "
+            "Set to 0 to disable. When enabled, visit http://host:port/ "
+            "to view a real-time Plotly report of accumulated snapshots."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
-        # global-planner environment requires a namespace
+        if self.ttft_ms <= 0:
+            raise ValueError(f"ttft_ms must be > 0, got {self.ttft_ms}")
+
+        if self.report_interval_hours is not None:
+            if (
+                not math.isfinite(self.report_interval_hours)
+                or self.report_interval_hours <= 0
+            ):
+                raise ValueError(
+                    "report_interval_hours must be a positive finite number or None"
+                )
+
+        sqrt = math.isqrt(self.fpm_sample_bucket_size)
+        if sqrt * sqrt != self.fpm_sample_bucket_size:
+            raise ValueError(
+                f"fpm_sample_bucket_size must be a perfect square, "
+                f"got {self.fpm_sample_bucket_size}"
+            )
+
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(
                 "global_planner_namespace is required when environment='global-planner'. "
                 "Please specify the namespace where GlobalPlanner is running."
             )
+
+        if self.optimization_target == "load":
+            if self.mode in ("disagg", "prefill"):
+                if (
+                    self.prefill_scale_up_queue_tokens is None
+                    or self.prefill_scale_down_queue_tokens is None
+                ):
+                    raise ValueError(
+                        "optimization_target='load' requires "
+                        "prefill_scale_up_queue_tokens and "
+                        "prefill_scale_down_queue_tokens for prefill scaling"
+                    )
+                if (
+                    self.prefill_scale_up_queue_tokens
+                    <= self.prefill_scale_down_queue_tokens
+                ):
+                    raise ValueError(
+                        "prefill_scale_up_queue_tokens must be greater than "
+                        "prefill_scale_down_queue_tokens"
+                    )
+            if self.mode in ("disagg", "decode", "agg"):
+                if (
+                    self.decode_scale_up_kv_rate is None
+                    or self.decode_scale_down_kv_rate is None
+                ):
+                    raise ValueError(
+                        "optimization_target='load' requires "
+                        "decode_scale_up_kv_rate and decode_scale_down_kv_rate "
+                        "for decode scaling"
+                    )
+                if self.decode_scale_up_kv_rate <= self.decode_scale_down_kv_rate:
+                    raise ValueError(
+                        "decode_scale_up_kv_rate must be greater than "
+                        "decode_scale_down_kv_rate"
+                    )
+
+        # Easy mode: force load scaling on, throughput scaling off
+        if self.optimization_target != "sla":
+            if self.optimization_target == "load" and self.enable_throughput_scaling:
+                logger.warning(
+                    "optimization_target='load' disables throughput-based scaling; "
+                    "using reactive load-based scaling only"
+                )
+            self.enable_load_scaling = True
+            self.enable_throughput_scaling = False
+            if (
+                self.ttft_ms != SLAPlannerDefaults.ttft_ms
+                or self.itl_ms != SLAPlannerDefaults.itl_ms
+            ):
+                logger.warning(
+                    "optimization_target=%s ignores ttft_ms/itl_ms values; "
+                    "set optimization_target='sla' to use SLA-based scaling",
+                    self.optimization_target,
+                )
 
         # At least one scaling mode must be enabled
         if not self.enable_throughput_scaling and not self.enable_load_scaling:
@@ -143,26 +429,28 @@ class PlannerConfig(BaseModel):
                     "enable_throughput_scaling is True. Throughput-based scaling "
                     "requires pre-deployment sweeping to profile engine performance."
                 )
+            if (
+                self.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.Rapid
+                and self.aic_interpolation is None
+            ):
+                logger.warning(
+                    "pre_deployment_sweeping_mode='rapid' but aic_interpolation "
+                    "is not set; planner will fall back to profile_results_dir "
+                    "files if the get_perf_metrics endpoint is unavailable."
+                )
 
         if self.enable_load_scaling:
-            # Load-based interval must be shorter than throughput interval
             if self.enable_throughput_scaling:
-                if self.load_adjustment_interval >= self.throughput_adjustment_interval:
+                if (
+                    self.load_adjustment_interval_seconds
+                    >= self.throughput_adjustment_interval_seconds
+                ):
                     raise ValueError(
-                        f"load_adjustment_interval ({self.load_adjustment_interval}s) "
-                        f"must be shorter than throughput_adjustment_interval ({self.throughput_adjustment_interval}s). "
+                        f"load_adjustment_interval_seconds ({self.load_adjustment_interval_seconds}s) "
+                        f"must be shorter than throughput_adjustment_interval_seconds ({self.throughput_adjustment_interval_seconds}s). "
                         "Load-based scaling is the fast reactive loop; throughput-based is the "
                         "slow predictive loop."
                     )
-
-            # Auto-disable correction factor when load-based scaling is enabled
-            if not self.no_correction:
-                logger.warning(
-                    "Correction factor is automatically disabled when load-based "
-                    "scaling is enabled. Load-based scaling already accounts for "
-                    "actual latency conditions."
-                )
-                self.no_correction = True
 
         return self
 

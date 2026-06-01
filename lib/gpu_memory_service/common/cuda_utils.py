@@ -5,15 +5,50 @@
 
 from __future__ import annotations
 
-import atexit
 import os
 
-from cuda.bindings import driver as cuda
-from gpu_memory_service.common.types import GrantedLockType
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import fail
 
-_primary_contexts: dict[int, object] = {}
-_primary_context_release_registered = False
+try:
+    from cuda.bindings import driver as cuda
+except ImportError:
+    # Keep import-time collection working in CPU-only environments and let the
+    # first real CUDA call fail with a targeted message instead.
+    class _MissingCuda:
+        def __getattr__(self, name):
+            raise RuntimeError(
+                "cuda-python is required for GPU Memory Service CUDA operations"
+            )
+
+    cuda = _MissingCuda()
+
+try:
+    from cuda.bindings import runtime as cuda_runtime
+except ImportError:
+    # Keep CPU-only import/collection working. Runtime calls fail with a
+    # targeted message when the sharded-SSD backend is actually used.
+    class _MissingCudaRuntime:
+        def __getattr__(self, name):
+            raise RuntimeError(
+                "cuda-python is required for GPU Memory Service CUDA runtime operations"
+            )
+
+    cuda_runtime = _MissingCudaRuntime()
+
+
+def list_devices() -> list[int]:
+    """Return list of CUDA device indices visible to this process via NVML."""
+    import pynvml
+
+    pynvml.nvmlInit()
+    try:
+        count = pynvml.nvmlDeviceGetCount()
+    finally:
+        pynvml.nvmlShutdown()
+    if count == 0:
+        raise SystemExit("no nvidia devices found")
+    return list(range(count))
 
 
 def cuda_check_result(result: cuda.CUresult, name: str) -> None:
@@ -159,26 +194,102 @@ def cuda_synchronize() -> None:
     cuda_check_result(result, "cuCtxSynchronize")
 
 
-def cuda_set_current_device(device: int) -> None:
-    global _primary_context_release_registered
+def cuda_runtime_check_result(result, name: str):
+    if isinstance(result, tuple):
+        code = result[0]
+        payload = result[1:]
+    else:
+        code = result
+        payload = ()
+    if code == cuda_runtime.cudaError_t.cudaSuccess:
+        if len(payload) == 1:
+            return payload[0]
+        return payload
 
-    ctx = _primary_contexts.get(device)
-    if ctx is None:
-        result, ctx = cuda.cuDevicePrimaryCtxRetain(device)
-        cuda_check_result(result, "cuDevicePrimaryCtxRetain")
-        _primary_contexts[device] = ctx
-        if not _primary_context_release_registered:
-            _primary_context_release_registered = True
-            atexit.register(_release_primary_contexts)
-    (result,) = cuda.cuCtxSetCurrent(ctx)
-    cuda_check_result(result, "cuCtxSetCurrent")
+    message_result = cuda_runtime.cudaGetErrorString(code)
+    if isinstance(message_result, tuple):
+        message = message_result[1] if len(message_result) > 1 else message_result[0]
+    else:
+        message = message_result
+    if isinstance(message, bytes):
+        err_msg = message.decode("utf-8", errors="replace")
+    else:
+        err_msg = str(message)
+    raise RuntimeError(f"CUDA runtime error in {name}: {err_msg}")
 
 
-def _release_primary_contexts() -> None:
-    for device in list(_primary_contexts):
-        try:
-            (result,) = cuda.cuDevicePrimaryCtxRelease(device)
-        except Exception:
-            continue
-        if result == cuda.CUresult.CUDA_SUCCESS:
-            _primary_contexts.pop(device, None)
+def cuda_runtime_set_device(device: int) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaSetDevice(device),
+        f"cudaSetDevice({device})",
+    )
+
+
+def cuda_host_register(ptr: int, size: int) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaHostRegister(ptr, size, 0),
+        "cudaHostRegister",
+    )
+
+
+def cuda_host_unregister(ptr: int) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaHostUnregister(ptr), "cudaHostUnregister"
+    )
+
+
+def cuda_stream_create_nonblocking():
+    flag = getattr(cuda_runtime, "cudaStreamNonBlocking", 1)
+    return cuda_runtime_check_result(
+        cuda_runtime.cudaStreamCreateWithFlags(flag),
+        "cudaStreamCreateWithFlags",
+    )
+
+
+def cuda_stream_destroy(stream) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaStreamDestroy(stream), "cudaStreamDestroy"
+    )
+
+
+def cuda_stream_synchronize(stream) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaStreamSynchronize(stream),
+        "cudaStreamSynchronize",
+    )
+
+
+def cuda_memcpy_h2d_async(
+    dst_ptr: int,
+    src_ptr: int,
+    size: int,
+    stream,
+) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaMemcpyAsync(
+            dst_ptr,
+            src_ptr,
+            size,
+            cuda_runtime.cudaMemcpyKind.cudaMemcpyHostToDevice,
+            stream,
+        ),
+        "cudaMemcpyAsync",
+    )
+
+
+def cuda_memcpy_d2h_async(
+    dst_ptr: int,
+    src_ptr: int,
+    size: int,
+    stream,
+) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaMemcpyAsync(
+            dst_ptr,
+            src_ptr,
+            size,
+            cuda_runtime.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+            stream,
+        ),
+        "cudaMemcpyAsync",
+    )

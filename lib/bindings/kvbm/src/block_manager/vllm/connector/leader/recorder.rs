@@ -92,6 +92,7 @@ impl KvConnectorLeaderRecorder {
         leader_py: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        consolidator_mode: Option<String>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeaderRecorder initialized with worker_id: {}",
@@ -131,6 +132,7 @@ impl KvConnectorLeaderRecorder {
             // Capture consolidator endpoints for the async block
             let consolidator_vllm_ep = consolidator_vllm_endpoint.clone();
             let consolidator_output_ep = consolidator_output_endpoint.clone();
+            let consolidator_mode = super::parse_consolidator_mode(consolidator_mode.clone());
 
             handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
@@ -156,6 +158,7 @@ impl KvConnectorLeaderRecorder {
                         vllm_ep,
                         Some(output_ep),
                         EventSource::Vllm,
+                        consolidator_mode,
                     );
                 }
 

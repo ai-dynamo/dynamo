@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-kvbm
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-8B
+          - --max-model-len
+          - "32000"
+          - --enforce-eager
+          - --kv-transfer-config
+          - '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: DYN_KVBM_CPU_CACHE_GB
+            value: "100"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              memory: 250Gi
+              nvidia.com/gpu: "1"
+            requests:
+              memory: 200Gi
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: worker

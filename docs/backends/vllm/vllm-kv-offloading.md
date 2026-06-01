@@ -38,11 +38,12 @@ For configuration details, see the [KVBM Guide](../../components/kvbm/kvbm-guide
 [LMCache](https://github.com/LMCache/LMCache) is an open-source KV cache engine that provides prefill-once, reuse-everywhere caching with multi-level storage backends (CPU RAM, local storage, Redis, GDS, InfiniStore/Mooncake).
 
 
-| Deployment                        | Launch Script                                                                                 |
-| --------------------------------- | --------------------------------------------------------------------------------------------- |
-| Aggregated                        | [`agg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache.sh)                     |
-| Aggregated (multiprocess metrics) | [`agg_lmcache_multiproc.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_multiproc.sh) |
-| Disaggregated                     | [`disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh)               |
+| Deployment                                | Launch Script                                                                                                                       |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Aggregated (MP sidecar — recommended)     | [`agg_lmcache_mp.sh`](/examples/backends/vllm/launch/agg_lmcache_mp.sh)                 |
+| Aggregated (legacy, in-process)           | [`agg_lmcache.sh`](/examples/backends/vllm/launch/agg_lmcache.sh)                       |
+| Aggregated (legacy, multiprocess metrics) | [`agg_lmcache_multiproc.sh`](/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)   |
+| Disaggregated                             | [`disagg_lmcache.sh`](/examples/backends/vllm/launch/disagg_lmcache.sh)                 |
 
 
 For configuration details, see the [LMCache Integration Guide](../../integrations/lmcache-integration.md).
@@ -64,6 +65,5 @@ For configuration details, see the [FlexKV Integration Guide](../../integrations
 ## See Also
 
 - **[KVBM Design](../../design-docs/kvbm-design.md)**: Architecture and design of Dynamo's built-in KV cache offloading
-- **[KV-Aware Routing](../../components/router/router-guide.md)**: Routing requests based on KV cache state
+- **[Routing Concepts](../../components/router/router-concepts.md)**: Routing requests based on KV cache state
 - **[Disaggregated Serving](../../design-docs/disagg-serving.md)**: Prefill/decode separation architecture
-

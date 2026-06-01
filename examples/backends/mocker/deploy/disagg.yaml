@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# NOTE: There is no dedicated `mocker-runtime` image. The published
+# `dynamo-planner` image includes the ai-dynamo wheel, ai-dynamo-runtime, and
+# planner/profiler dependencies needed by `python3 -m dynamo.mocker`.
+# Replace `my-tag` below with the Dynamo release tag you deploy.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -12,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/mocker-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
     prefill:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -20,7 +24,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/mocker-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
           workingDir: /workspace
           command:
           - python3
@@ -44,7 +48,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/mocker-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
           workingDir: /workspace
           command:
           - python3

@@ -121,7 +121,8 @@ mod tests {
             .clone();
 
         // set up the other rank
-        let context_rank1 = Context::with_id((), context_rank0.id().to_string());
+        let context_rank1 =
+            Context::with_id_and_metadata((), context_rank0.id().to_string(), Default::default());
 
         // connect to the server socket
         let mut send_stream = client::TcpClient::create_response_stream(
@@ -145,12 +146,8 @@ mod tests {
         send_stream.send_prologue(None).await.unwrap();
 
         // [server] next - now pending connections should be connected
-        let recv_stream = pending_connection
-            .recv_stream
-            .unwrap()
-            .stream_provider
-            .await
-            .unwrap();
+        let (_conn_info, stream_provider) = pending_connection.recv_stream.unwrap().into_parts();
+        let recv_stream = stream_provider.await.unwrap();
 
         println!("Server paired");
 

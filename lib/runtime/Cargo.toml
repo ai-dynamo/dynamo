@@ -3,7 +3,6 @@
 
 [package]
 name = "dynamo-runtime"
-readme = "README.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -11,6 +10,9 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Dynamo Runtime Library"
+
+[package.metadata.cargo-machete]
+ignored = ["mio"]
 
 [features]
 default = []
@@ -38,7 +40,6 @@ chrono = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
-dynamo-config = { workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
 futures = { workspace = true }
@@ -55,7 +56,7 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
-hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
+mio = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 opentelemetry = { workspace = true }
@@ -71,6 +72,7 @@ xxhash-rust = { workspace = true }
 cudarc = { workspace = true, features = ["nvtx"], optional = true }
 
 arc-swap = { version = "1" }
+crossbeam-queue = { version = "0.3" }
 async-once-cell = { version = "0.5.4" }
 bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }

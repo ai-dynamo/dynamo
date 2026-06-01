@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
+use super::local_model::RoutingConstraints;
 use super::*;
 use crate::Endpoint;
 #[cfg(feature = "kv-indexer")]
@@ -16,8 +17,6 @@ use clap::Parser;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
-#[cfg(feature = "kv-indexer-runtime")]
-use dynamo_kv_router::standalone_indexer::RuntimeConfig;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
@@ -71,26 +70,6 @@ struct KvIndexerCli {
     /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
     #[arg(long)]
     peers: Option<String>,
-
-    /// Enable Dynamo runtime integration (discovery, event plane, request plane).
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long)]
-    dynamo_runtime: bool,
-
-    /// Dynamo namespace to register the indexer component under.
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long, default_value = "default")]
-    namespace: String,
-
-    /// Component name for this indexer in the Dynamo runtime.
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long, default_value = "kv-indexer")]
-    component_name: String,
-
-    /// Component name that workers register under.
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long, default_value = "backend")]
-    worker_component: String,
 }
 
 pub fn run_kv_indexer_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -104,31 +83,6 @@ where
             std::iter::once(OsString::from("python -m dynamo.indexer"))
                 .chain(args.into_iter().map(Into::into)),
         )?;
-
-        #[cfg(feature = "kv-indexer-runtime")]
-        if cli.dynamo_runtime {
-            dynamo_runtime::logging::init();
-            let worker = dynamo_runtime::Worker::from_settings()?;
-            return worker.execute(move |runtime| {
-                standalone_indexer::run_with_runtime(
-                    runtime,
-                    IndexerConfig {
-                        block_size: cli.block_size,
-                        port: cli.port,
-                        threads: cli.threads,
-                        workers: cli.workers,
-                        model_name: cli.model_name,
-                        tenant_id: cli.tenant_id,
-                        peers: cli.peers,
-                    },
-                    RuntimeConfig {
-                        namespace: cli.namespace,
-                        component_name: cli.component_name,
-                        worker_component: cli.worker_component,
-                    },
-                )
-            });
-        }
 
         init_standalone_logging();
 
@@ -257,6 +211,27 @@ pub(crate) struct KvEventPublisher {
     warning_count: Arc<AtomicU32>,
 }
 
+impl KvEventPublisher {
+    /// Wrap an already-constructed Rust publisher as the Python pyclass.
+    ///
+    /// Used by the unified-backend bridge (`crate::backend`) so the Worker
+    /// can hand a publisher built from a [`PushSource`] back to the Python
+    /// engine without going through the Python-side `__init__` (which
+    /// requires an `Endpoint` and rebuilds the publisher from scratch).
+    pub(crate) fn from_arc(
+        inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
+        dp_rank: DpRank,
+    ) -> Self {
+        let kv_block_size = inner.kv_block_size() as usize;
+        Self {
+            inner,
+            kv_block_size,
+            dp_rank,
+            warning_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+}
+
 #[pymethods]
 impl KvEventPublisher {
     /// Create a KV event publisher that batches raw engine events before forwarding
@@ -264,7 +239,8 @@ impl KvEventPublisher {
     ///
     /// Args:
     ///     endpoint: The Dynamo component endpoint for this worker.
-    ///     worker_id: Identifier of this worker (default 0).
+    ///     worker_id: Optional worker identity override. When None, the publisher
+    ///         uses the endpoint's local connection id.
     ///     kv_block_size: KV cache block size in tokens; must be > 0.
     ///     dp_rank: Data-parallel rank of this worker (default 0).
     ///     enable_local_indexer: When True, a local KV indexer is kept in-process
@@ -278,11 +254,11 @@ impl KvEventPublisher {
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
-        worker_id: WorkerId,
+        worker_id: Option<WorkerId>,
         kv_block_size: usize,
         dp_rank: DpRank,
         enable_local_indexer: bool,
@@ -290,8 +266,6 @@ impl KvEventPublisher {
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
     ) -> PyResult<Self> {
-        let _ = worker_id;
-
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
@@ -304,15 +278,17 @@ impl KvEventPublisher {
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();
 
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component,
-            kv_block_size as u32,
-            source_config,
-            enable_local_indexer,
-            dp_rank,
-            batching_timeout_ms,
-        )
-        .map_err(to_pyerr)?;
+        let inner =
+            llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id(
+                component,
+                worker_id,
+                kv_block_size as u32,
+                source_config,
+                enable_local_indexer,
+                dp_rank,
+                batching_timeout_ms,
+            )
+            .map_err(to_pyerr)?;
 
         Ok(Self {
             inner: inner.into(),
@@ -353,6 +329,7 @@ impl KvEventPublisher {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                    start_position: None,
                     blocks: create_stored_blocks(
                         kv_block_size,
                         &token_ids,
@@ -732,27 +709,52 @@ async fn create_kv_router_from_endpoint(
         llm_rs::discovery::WORKER_TYPE_DECODE
     };
 
-    // Query discovery once so we can derive both model_name (for remote indexer)
-    // and Eagle routing semantics from the model card.
+    // Look up the worker's model card so we can derive both model_name (required
+    // for remote/served indexer) and Eagle routing semantics. When the model_name
+    // is required but no worker has registered yet, wait via the discovery watch
+    // stream until one appears so we don't race worker startup. Bounded by
+    // `DYN_ROUTER_MODEL_CARD_WAIT_SECS` (default 600s).
     let needs_model_name = kv_router_config
         .as_ref()
-        .map(|cfg| cfg.remote_indexer_component.is_some())
+        .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
     let (model_name, enable_eagle) = {
-        let discovery = endpoint.inner.component().drt().discovery();
-        let instances = discovery
-            .list(rs::discovery::DiscoveryQuery::EndpointModels {
-                namespace: endpoint_id.namespace.clone(),
-                component: endpoint_id.component.clone(),
-                endpoint: endpoint_id.name.clone(),
-            })
-            .await
-            .map_err(to_pyerr)?;
-
-        let maybe_card = instances.into_iter().find_map(|inst| {
-            inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+        let maybe_card = if needs_model_name {
+            let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
-        });
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600);
+            tracing::info!(
+                namespace = %endpoint_id.namespace,
+                component = %endpoint_id.component,
+                endpoint = %endpoint_id.name,
+                wait_secs,
+                "Waiting for worker model card in discovery (required for remote/served indexer)"
+            );
+            llm_rs::discovery::wait_for_endpoint_model_card(
+                &endpoint.inner,
+                std::time::Duration::from_secs(wait_secs),
+                None,
+            )
+            .await
+            .map_err(to_pyerr)?
+        } else {
+            // Non-blocking snapshot — used only to detect Eagle routing semantics
+            // when a card happens to already be registered.
+            let discovery = endpoint.inner.component().drt().discovery();
+            let instances = discovery
+                .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                    namespace: endpoint_id.namespace.clone(),
+                    component: endpoint_id.component.clone(),
+                    endpoint: endpoint_id.name.clone(),
+                })
+                .await
+                .map_err(to_pyerr)?;
+            instances.into_iter().find_map(|inst| {
+                inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                    .ok()
+            })
+        };
 
         match maybe_card {
             Some(card) => {
@@ -916,6 +918,9 @@ impl KvRouter {
                         config.model_path(),
                         config.tp_size(),
                         config.backend_version(),
+                        config.moe_tp_size(),
+                        config.moe_ep_size(),
+                        config.attention_dp_size(),
                     )
                 })
             })
@@ -957,7 +962,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None, routing_constraints=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -973,6 +978,7 @@ impl KvRouter {
         block_mm_infos: Option<PyObject>,
         multi_modal_data: Option<PyObject>,
         mm_routing_info: Option<PyObject>,
+        routing_constraints: Option<RoutingConstraints>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
@@ -1048,10 +1054,11 @@ impl KvRouter {
             .tracker(Some(tracker.clone()));
 
         // Set routing hints if worker_id or dp_rank is provided
-        if worker_id.is_some() || dp_rank.is_some() {
+        if worker_id.is_some() || dp_rank.is_some() || routing_constraints.is_some() {
             let routing = llm_rs::protocols::common::preprocessor::RoutingHints {
                 backend_instance_id: worker_id,
                 dp_rank,
+                routing_constraints: routing_constraints.map(Into::into),
                 ..Default::default()
             };
             request_builder.routing(Some(routing));
@@ -1087,7 +1094,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -1097,6 +1104,7 @@ impl KvRouter {
         update_indexer: bool,
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
+        routing_constraints: Option<RoutingConstraints>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1114,35 +1122,73 @@ impl KvRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
-                .find_best_match(
+            let outcome = chooser
+                .find_best_match_details(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
+                    false,
                     lora_name.clone(),
                     0.0,
                     None,
+                    None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
+                    routing_constraints.map(Into::into).unwrap_or_default(),
                 )
                 .await
                 .map_err(to_pyerr)?;
+            let (best_worker, overlap_blocks) = match outcome {
+                llm_rs::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    ..
+                } => (worker, overlap_blocks),
+                llm_rs::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                } => {
+                    // Note: Backpressure is currently treated as Unavailable and falls through
+                    // to the error path. Distinguishing backpressure from regular errors in Python
+                    // would require returning a structured result type instead of raising an exception,
+                    // which is a breaking API change. For now, callers should treat any error from
+                    // best_worker as potentially transient and implement retry logic accordingly.
+                    // The backpressure info (reason, queued_isl_tokens, max_queued_isl_tokens) is logged but
+                    // not exposed to Python callers.
+                    tracing::warn!(
+                        reason = ?reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens = ?max_queued_isl_tokens,
+                        "Router backpressure - treating as unavailable"
+                    );
+                    return Err(to_pyerr(anyhow::anyhow!(
+                        "router backpressure: {:?} (queued_isl_tokens={}, max_queued_isl_tokens={:?})",
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens
+                    )));
+                }
+            };
 
-            if update_indexer && !chooser.kv_router_config().use_kv_events {
-                let mut tokens_with_hashes =
-                    TokensWithHashes::new(token_ids.clone(), chooser.block_size())
-                        .with_is_eagle(chooser.is_eagle());
-                if let Some(infos) = block_mm_infos.as_ref() {
-                    tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+            if update_indexer {
+                let cfg = chooser.kv_router_config();
+                if !cfg.use_kv_events || cfg.predict_on_route_enabled() {
+                    let mut tokens_with_hashes =
+                        TokensWithHashes::new(token_ids.clone(), chooser.block_size())
+                            .with_is_eagle(chooser.is_eagle());
+                    if let Some(infos) = block_mm_infos.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+                    }
+                    if let Some(lora_name) = lora_name.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
+                    }
+                    chooser
+                        .record_routing_decision(tokens_with_hashes, best_worker)
+                        .await
+                        .map_err(to_pyerr)?;
                 }
-                if let Some(lora_name) = lora_name.as_ref() {
-                    tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
-                }
-                chooser
-                    .record_routing_decision(tokens_with_hashes, best_worker)
-                    .await
-                    .map_err(to_pyerr)?;
             }
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
@@ -1204,6 +1250,48 @@ impl KvRouter {
             // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
             Python::with_gil(|py| {
                 pythonize(py, &loads)
+                    .map(|obj| obj.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
+    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None, lora_name=None, include_shared=true))]
+    fn get_overlap_scores<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+        block_mm_infos: Option<PyObject>,
+        lora_name: Option<String>,
+        include_shared: bool,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            let override_config: RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
+        } else {
+            None
+        };
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let scores = chooser
+                .get_overlap_scores(
+                    &token_ids,
+                    router_config_override.as_ref(),
+                    block_mm_infos.as_deref(),
+                    lora_name.as_deref(),
+                    include_shared,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            Python::with_gil(|py| {
+                pythonize(py, &scores)
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)
             })

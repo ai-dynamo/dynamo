@@ -20,6 +20,7 @@ export MODALITY=${MODALITY:-"text"}
 
 
 ENABLE_OTEL=false
+USE_UNIFIED=false
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -27,10 +28,15 @@ while [[ $# -gt 0 ]]; do
             ENABLE_OTEL=true
             shift
             ;;
+        --unified)
+            USE_UNIFIED=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  --unified            Use unified_main entry point (Worker)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Any additional options are passed through to dynamo.trtllm."
@@ -71,8 +77,12 @@ python3 -m dynamo.frontend &
 
 # run worker
 # Additional command line args can be passed
+WORKER_MODULE="dynamo.trtllm"
+if [ "$USE_UNIFIED" = true ]; then
+    WORKER_MODULE="dynamo.trtllm.unified_main"
+fi
 OTEL_SERVICE_NAME=dynamo-worker \
-python3 -m dynamo.trtllm \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality "$MODALITY" \

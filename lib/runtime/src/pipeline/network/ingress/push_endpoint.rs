@@ -52,7 +52,7 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
+            .set_endpoint_registered(endpoint_name_local.as_str());
 
         loop {
             let req = tokio::select! {

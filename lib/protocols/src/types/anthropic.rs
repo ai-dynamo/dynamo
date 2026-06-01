@@ -7,9 +7,9 @@
 //! streaming events, error shapes, and count-tokens types.
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+
 /// Anthropic-style cache control hint for prefix pinning with TTL.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct CacheControl {
     #[serde(rename = "type")]
     pub control_type: CacheControlType,
@@ -18,7 +18,7 @@ pub struct CacheControl {
     pub ttl: Option<String>,
 }
 
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CacheControlType {
     #[default]
@@ -214,6 +214,9 @@ pub struct AnthropicMessage {
 pub enum AnthropicRole {
     User,
     Assistant,
+    /// Compatibility for clients that place system instructions in `messages[]`
+    /// instead of the top-level `system` field.
+    System,
 }
 
 /// Message content -- either a plain string or an array of content blocks.
@@ -807,6 +810,7 @@ impl AnthropicCountTokensRequest {
             total_len += match msg.role {
                 AnthropicRole::User => 4,
                 AnthropicRole::Assistant => 9,
+                AnthropicRole::System => 6,
             };
             // Count content
             match &msg.content {

@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from dynamo.common.constants import EmbeddingTransferMode
 from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
+from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.embedding_transfer import (
     AbstractEmbeddingReceiver,
     AbstractEmbeddingSender,
@@ -41,6 +42,7 @@ EMBEDDING_RECEIVER_FACTORIES: dict[
 
 __all__ = [
     "AsyncEncoderCache",
+    "AudioLoader",
     "EMBEDDING_RECEIVER_FACTORIES",
     "EMBEDDING_SENDER_FACTORIES",
     "ImageLoader",

@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: hello-world
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - python3 client.py
+          command:
+          - /bin/sh
+          - -c
+          image: my-registry/dynamo:my-tag
+          livenessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - echo ok
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+          name: main
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - echo ok
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+            requests:
+              cpu: "1"
+              memory: 2Gi
+          workingDir: /workspace/examples/custom_backend/hello_world/
+    replicas: 1
+    type: frontend
+  - name: HelloWorldWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - python3 hello_world.py
+          command:
+          - /bin/sh
+          - -c
+          image: my-registry/dynamo:my-tag
+          livenessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - exit 0
+            failureThreshold: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+          name: main
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - exit 0
+            failureThreshold: 10
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 30
+          resources:
+            limits:
+              cpu: "1"
+              memory: 4Gi
+            requests:
+              cpu: "1"
+              memory: 4Gi
+          workingDir: /workspace/examples/custom_backend/hello_world/
+    replicas: 1
+    type: worker

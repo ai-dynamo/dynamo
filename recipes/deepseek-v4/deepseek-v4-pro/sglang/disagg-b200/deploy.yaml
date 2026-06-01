@@ -1,0 +1,259 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek-V4-Pro SGLang Disaggregated P/D on B200 (InfiniBand)
+#
+# Topology: 2 nodes, single-node TP8 each
+#   prefill: 1 node × 8 GPUs = TP8
+#   decode:  1 node × 8 GPUs = TP8
+#
+# Prerequisites:
+#   - dynamo-platform HelmRelease applied
+#   - Model weights cached on shared-model-cache PVC
+#   - hf-token-secret created: kubectl create secret generic hf-token-secret \
+#       --from-literal=HF_TOKEN=<your-token> -n <namespace>
+#
+# RDMA: Disaggregated KV transfer requires InfiniBand RDMA for NIXL.
+# See README.md for cluster-specific details.
+#
+# EAGLE disabled: crashes on long context (>18k) and tool calling on TP8
+# due to insufficient GPU memory headroom (4.23 GB/GPU with vs 7.75 without)
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-pro-disagg
+  namespace: <your-namespace>
+spec:
+  backendFramework: sglang
+  envs:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: hf-token-secret
+          key: HF_TOKEN
+    - name: HF_HOME
+      value: /models
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+    - name: NCCL_SOCKET_IFNAME
+      value: eth0
+
+  pvcs:
+    - name: shared-model-cache
+      create: false
+
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      extraPodSpec:
+        mainContainer:
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2
+          imagePullPolicy: Always
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+          custom:
+            rdma/ib: "8"
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        mainContainer:
+          command:
+            - bash
+            - -c
+          args:
+            - >-
+              ulimit -l unlimited && ulimit -n 1048576 &&
+              exec python3 -m dynamo.sglang
+              --model-path deepseek-ai/DeepSeek-V4-Pro
+              --served-model-name deepseek-ai/DeepSeek-V4-Pro
+              --trust-remote-code
+              --tp 8
+              --moe-runner-backend flashinfer_mxfp4
+              --chunked-prefill-size 4096
+              --disable-flashinfer-autotune
+              --dyn-tool-call-parser deepseek_v4
+              --dyn-reasoning-parser deepseek_v4
+              --mem-fraction-static 0.82
+              --host 0.0.0.0
+              --disaggregation-mode decode
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+              --prefill-round-robin-balance
+              --watchdog-timeout 3600
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+              value: "0"
+            - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+              value: "1"
+            # --- UCX (IB RDMA transport) ---
+            - name: UCX_TLS
+              value: "rc_x,rc,cuda_copy,cuda_ipc"
+            - name: UCX_NET_DEVICES
+              value: "mlx5_0:1"
+            - name: UCX_IB_ADDR_TYPE
+              value: "eth"
+            - name: UCX_RNDV_SCHEME
+              value: "get_zcopy"
+            - name: UCX_RNDV_THRESH
+              value: "0"
+            # --- NCCL ---
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            # --- NIXL ---
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          workingDir: /workspace/
+
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+          custom:
+            rdma/ib: "8"
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        mainContainer:
+          command:
+            - bash
+            - -c
+          args:
+            - >-
+              ulimit -l unlimited && ulimit -n 1048576 &&
+              exec python3 -m dynamo.sglang
+              --model-path deepseek-ai/DeepSeek-V4-Pro
+              --served-model-name deepseek-ai/DeepSeek-V4-Pro
+              --trust-remote-code
+              --tp 8
+              --moe-runner-backend flashinfer_mxfp4
+              --chunked-prefill-size 4096
+              --disable-flashinfer-autotune
+              --dyn-tool-call-parser deepseek_v4
+              --dyn-reasoning-parser deepseek_v4
+              --mem-fraction-static 0.82
+              --host 0.0.0.0
+              --disaggregation-mode prefill
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+              --load-balance-method round_robin
+              --watchdog-timeout 3600
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+              value: "0"
+            - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+              value: "1"
+            # --- UCX (IB RDMA transport) ---
+            - name: UCX_TLS
+              value: "rc_x,rc,cuda_copy,cuda_ipc"
+            - name: UCX_NET_DEVICES
+              value: "mlx5_0:1"
+            - name: UCX_IB_ADDR_TYPE
+              value: "eth"
+            - name: UCX_RNDV_SCHEME
+              value: "get_zcopy"
+            - name: UCX_RNDV_THRESH
+              value: "0"
+            # --- NCCL ---
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            # --- NIXL ---
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          workingDir: /workspace/

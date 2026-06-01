@@ -20,7 +20,7 @@ use dynamo_protocols::types::{
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, FunctionName,
-    FunctionObject, ImageUrl, ReasoningContent,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
 };
 use uuid::Uuid;
 
@@ -29,6 +29,31 @@ use crate::protocols::openai::chat_completions::{
 };
 use crate::protocols::openai::common_ext::CommonExt;
 
+// ---------------------------------------------------------------------------
+// Conversion: AnthropicCreateMessageRequest -> NvCreateChatCompletionRequest
+// ---------------------------------------------------------------------------
+fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequestMessage>) {
+    messages.push(ChatCompletionRequestMessage::System(
+        ChatCompletionRequestSystemMessage {
+            content: ChatCompletionRequestSystemMessageContent::Text(content),
+            name: None,
+        },
+    ));
+}
+
+fn system_message_content(content: &AnthropicMessageContent) -> String {
+    match content {
+        AnthropicMessageContent::Text { content } => content.clone(),
+        AnthropicMessageContent::Blocks { content } => content
+            .iter()
+            .filter_map(|block| match block {
+                AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -37,19 +62,16 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 
         // Prepend system message if present
         if let Some(system_content) = &req.system {
-            messages.push(ChatCompletionRequestMessage::System(
-                ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(
-                        system_content.text.clone(),
-                    ),
-                    name: None,
-                },
-            ));
+            push_system_message(system_content.text.clone(), &mut messages);
         }
 
         // Convert each Anthropic message
         for msg in &req.messages {
             match (&msg.role, &msg.content) {
+                // System messages may appear in messages[] from agent clients.
+                (AnthropicRole::System, content) => {
+                    push_system_message(system_message_content(content), &mut messages);
+                }
                 // User with plain text
                 (AnthropicRole::User, AnthropicMessageContent::Text { content }) => {
                     messages.push(ChatCompletionRequestMessage::User(
@@ -137,6 +159,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 None
             },
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         })
     }
@@ -312,7 +335,7 @@ fn convert_assistant_blocks(
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: id.clone(),
-                    r#type: ChatCompletionToolType::Function,
+                    r#type: FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
                         name: name.clone(),
                         arguments: serde_json::to_string(input).unwrap_or_default(),
@@ -541,6 +564,7 @@ pub fn chat_completion_to_anthropic_response(
         usage,
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +651,48 @@ mod tests {
         ));
         assert!(matches!(
             &chat_req.inner.messages[1],
+            ChatCompletionRequestMessage::User(_)
+        ));
+    }
+
+    #[test]
+    fn test_message_level_system_role_conversion() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Keep answers short."},
+                        {"type": "text", "text": "Use the available shell."}
+                    ]
+                },
+                {"role": "user", "content": "List files"}
+            ]
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req.messages[1].role, AnthropicRole::System));
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat_req.inner.messages.len(), 3);
+        assert!(matches!(
+            &chat_req.inner.messages[0],
+            ChatCompletionRequestMessage::User(_)
+        ));
+        match &chat_req.inner.messages[1] {
+            ChatCompletionRequestMessage::System(system) => match &system.content {
+                ChatCompletionRequestSystemMessageContent::Text(text) => {
+                    assert_eq!(text, "Keep answers short.\nUse the available shell.");
+                }
+                other => panic!("expected text content, got {other:?}"),
+            },
+            other => panic!("expected system message, got {other:?}"),
+        }
+        assert!(matches!(
+            &chat_req.inner.messages[2],
             ChatCompletionRequestMessage::User(_)
         ));
     }
@@ -800,7 +866,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None,
                 }],
                 created: 1726000000,
@@ -1381,88 +1446,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_control_passthrough() {
-        use dynamo_protocols::types::anthropic::{CacheControl, CacheControlType};
-
-        let req = AnthropicCreateMessageRequest {
-            model: "test-model".into(),
-            max_tokens: 100,
-            messages: vec![AnthropicMessage {
-                role: AnthropicRole::User,
-                content: AnthropicMessageContent::Text {
-                    content: "Hello".into(),
-                },
-            }],
-            system: None,
-            temperature: None,
-            top_p: None,
-            top_k: None,
-            stop_sequences: None,
-            stream: false,
-            metadata: None,
-            tools: None,
-            tool_choice: None,
-            cache_control: Some(CacheControl {
-                control_type: CacheControlType::Ephemeral,
-                ttl: None,
-            }),
-            thinking: None,
-            service_tier: None,
-            container: None,
-            output_config: None,
-        };
-
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(chat_req.nvext.is_none());
-    }
-
-    #[test]
-    fn test_cache_control_1h_ttl_passthrough() {
-        let json = r#"{
-            "model": "test",
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "Hello"}],
-            "cache_control": {"type": "ephemeral", "ttl": "1h"}
-        }"#;
-        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        assert!(req.cache_control.is_some());
-
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(chat_req.nvext.is_none());
-    }
-
-    #[test]
-    fn test_no_cache_control_passthrough() {
-        let req = AnthropicCreateMessageRequest {
-            model: "test-model".into(),
-            max_tokens: 100,
-            messages: vec![AnthropicMessage {
-                role: AnthropicRole::User,
-                content: AnthropicMessageContent::Text {
-                    content: "Hello".into(),
-                },
-            }],
-            system: None,
-            temperature: None,
-            top_p: None,
-            top_k: None,
-            stop_sequences: None,
-            stream: false,
-            metadata: None,
-            tools: None,
-            tool_choice: None,
-            cache_control: None,
-            thinking: None,
-            service_tier: None,
-            container: None,
-            output_config: None,
-        };
-
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(chat_req.nvext.is_none());
-    }
-
-    #[test]
     fn test_per_block_cache_control_deserialization() {
         let json = r#"{
             "model": "test",
@@ -1493,67 +1476,6 @@ mod tests {
             }
             _ => panic!("expected blocks"),
         }
-    }
-
-    #[test]
-    fn test_per_block_cache_control_last_wins() {
-        let json = r#"{
-            "model": "test",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "system context", "cache_control": {"type": "ephemeral"}},
-                        {"type": "text", "text": "recent context", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
-                    ]
-                }
-            ]
-        }"#;
-        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(chat_req.nvext.is_none());
-    }
-
-    #[test]
-    fn test_top_level_cache_control_overrides_per_block() {
-        let json = r#"{
-            "model": "test",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "context", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
-                    ]
-                }
-            ],
-            "cache_control": {"type": "ephemeral"}
-        }"#;
-        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(chat_req.nvext.is_none());
-    }
-
-    #[test]
-    fn test_system_block_array_with_cache_control() {
-        let json = r#"{
-            "model": "test",
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "Hello"}],
-            "system": [
-                {"type": "text", "text": "You are a helpful assistant.", "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": "Be concise."}
-            ]
-        }"#;
-        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        let system = req.system.as_ref().unwrap();
-        assert_eq!(system.text, "You are a helpful assistant.\nBe concise.");
-        // The LAST block with cache_control wins (first block here)
-        assert!(system.cache_control.is_some());
-
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(chat_req.nvext.is_none());
     }
 
     #[test]

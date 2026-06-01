@@ -26,9 +26,11 @@ on:
 jobs:
   resolve-params:
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion != 'skipped'
+    # Disabled: gh-pages branch bloated to ~1GB after 72 commits of Allure reports
+    if: false
+    # if: >-
+    #   github.event_name == 'workflow_dispatch' ||
+    #   github.event.workflow_run.conclusion != 'skipped'
     outputs:
       run_id: ${{ steps.params.outputs.run_id }}
       subdir: ${{ steps.params.outputs.subdir }}

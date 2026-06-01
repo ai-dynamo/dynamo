@@ -105,6 +105,7 @@ pub(super) fn create_aic_callback(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_aic_prefill_load_estimator(
     py: Python<'_>,
     backend_name: &str,
@@ -112,13 +113,62 @@ pub(super) fn create_aic_prefill_load_estimator(
     model_path: &str,
     tp_size: usize,
     backend_version: Option<&str>,
+    moe_tp_size: Option<usize>,
+    moe_ep_size: Option<usize>,
+    attention_dp_size: Option<usize>,
 ) -> PyResult<Arc<dyn PrefillLoadEstimator>> {
     let module = py.import("dynamo._internal.aic")?;
     let session = module.call_method1(
         "create_session",
-        (backend_name, system, model_path, tp_size, backend_version),
+        (
+            backend_name,
+            system,
+            model_path,
+            tp_size,
+            backend_version,
+            moe_tp_size,
+            moe_ep_size,
+            attention_dp_size,
+        ),
     )?;
     Ok(Arc::new(PyAicCallback {
         session: session.into(),
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn estimate_aic_num_gpu_blocks(
+    py: Python<'_>,
+    backend_name: &str,
+    system: &str,
+    model_path: &str,
+    tp_size: usize,
+    block_size: usize,
+    max_num_batched_tokens: usize,
+    gpu_memory_utilization: f64,
+    mem_fraction_static: Option<f64>,
+    backend_version: Option<&str>,
+    moe_tp_size: Option<usize>,
+    moe_ep_size: Option<usize>,
+    attention_dp_size: Option<usize>,
+) -> PyResult<usize> {
+    let module = py.import("dynamo._internal.aic")?;
+    let blocks = module.call_method1(
+        "estimate_num_gpu_blocks",
+        (
+            backend_name,
+            system,
+            model_path,
+            tp_size,
+            block_size,
+            max_num_batched_tokens,
+            gpu_memory_utilization,
+            mem_fraction_static,
+            backend_version,
+            moe_tp_size,
+            moe_ep_size,
+            attention_dp_size,
+        ),
+    )?;
+    blocks.extract()
 }

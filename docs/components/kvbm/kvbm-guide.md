@@ -9,7 +9,17 @@ The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to h
 
 KVBM is modular and can be used standalone via `pip install kvbm` or as the memory management component in the full Dynamo stack. This guide covers installation, configuration, and deployment of the Dynamo KV Block Manager (KVBM) and other KV cache management systems.
 
-## Quick Start
+## Quick start with the pre-built NGC container
+
+The fastest path is the published Dynamo container, which includes KVBM:
+
+```bash
+docker run --gpus all --rm -it \
+  nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1 \
+  /bin/bash
+```
+
+For installation from source or custom builds, see [Local Installation](../../getting-started/local-installation.md) and [Release Artifacts](../../reference/release-artifacts.md).
 
 ## Run KVBM Standalone
 
@@ -31,11 +41,29 @@ To build KVBM from source, see the detailed instructions in the [KVBM bindings R
 
 ```bash
 # Start up etcd for KVBM leader/worker registration and discovery
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
+```
 
+Pick one of the following to get a Dynamo vLLM container with KVBM built in. The subsequent serving commands are the same either way.
+
+**Option A: Pre-built NGC container (recommended for quick start)**
+
+```bash
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+```
+
+See the [Local Installation Guide](../../getting-started/local-installation.md) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.md#container-images) for available versions.
+
+**Option B: Build from source**
+
+```bash
 # Build a dynamo vLLM container (KVBM is built in by default)
-python container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+# x86_64
+python container/render.py --framework vllm --target runtime --output-short-filename --platform linux/amd64
+docker buildx build --platform linux/amd64 -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+# arm64 (Grace, Jetson, arm64 EC2)
+python container/render.py --framework vllm --target runtime --output-short-filename --platform linux/arm64
+docker buildx build --platform linux/arm64 -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
 container/run.sh --image dynamo:latest-vllm-runtime -it --mount-workspace --use-nixl-gds
@@ -82,11 +110,29 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 
 ```bash
 # Start up etcd for KVBM leader/worker registration and discovery
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
+```
 
+Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built in. The subsequent serving commands are the same either way.
+
+**Option A: Pre-built NGC container (recommended for quick start)**
+
+```bash
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.1
+```
+
+See the [Local Installation Guide](../../getting-started/local-installation.md) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.md#container-images) for available versions.
+
+**Option B: Build from source**
+
+```bash
 # Build a dynamo TRTLLM container (KVBM is built in by default)
-python container/render.py --framework trtllm --target runtime --output-short-filename
-docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
+# x86_64
+python container/render.py --framework trtllm --target runtime --output-short-filename --cuda-version=13.1 --platform linux/amd64
+docker buildx build --platform linux/amd64 -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
+# arm64 with NVIDIA GPUs (GH200, GB200, P6e-GB200 UltraServer — *not* generic Graviton instances, which have no GPU)
+python container/render.py --framework trtllm --target runtime --output-short-filename --cuda-version=13.1 --platform linux/arm64
+docker buildx build --platform linux/arm64 -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
 container/run.sh --image dynamo:latest-trtllm-runtime -it --mount-workspace --use-nixl-gds
@@ -167,7 +213,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-> **Learn more:** See the [SGLang HiCache Integration Guide](../../integrations/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
+> **Learn more:** See the [SGLang HiCache Integration Guide](../../backends/sglang/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
 
 ## Disaggregated Serving with KVBM
 
@@ -258,7 +304,7 @@ When disabled (default), each GPU loads KV blocks independently. Set `DYN_KVBM_N
 
 ```bash
 # Start basic services (etcd & natsd), along with Prometheus and Grafana
-docker compose -f deploy/docker-observability.yml up -d
+docker compose -f dev/docker-observability.yml up -d
 ```
 
 ### Enable Metrics for vLLM
@@ -448,4 +494,4 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connect
 - [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache-integration.md)
 - [FlexKV Integration](../../integrations/flexkv-integration.md)
-- [SGLang HiCache](../../integrations/sglang-hicache.md)
+- [SGLang HiCache](../../backends/sglang/sglang-hicache.md)

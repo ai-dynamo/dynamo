@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
 
 from tests.utils.managed_process import ManagedProcess
 
@@ -22,17 +23,21 @@ class FrontendRouterProcess(ManagedProcess):
         namespace: str,
         store_backend: str = "etcd",
         enforce_disagg: bool = False,
-        blocks_threshold: float | None = None,
-        tokens_threshold: float | None = None,
-        tokens_threshold_frac: float | None = None,
+        blocks_threshold: float | str | None = None,
+        tokens_threshold: int | str | None = None,
+        tokens_threshold_frac: float | str | None = None,
+        router_queue_threshold: float | str | None = None,
         request_plane: str = "nats",
         durable_kv_events: bool = False,
         router_mode: str = "kv",
         min_initial_workers: int | None = None,
         router_aic_config: dict[str, str | int] | None = None,
+        serve_indexer: bool = False,
+        use_remote_indexer: bool = False,
+        event_plane: str | None = None,
     ):
         command = [
-            "python3",
+            sys.executable,
             "-m",
             "dynamo.frontend",
             "--router-mode",
@@ -62,8 +67,17 @@ class FrontendRouterProcess(ManagedProcess):
                 ["--active-prefill-tokens-threshold-frac", str(tokens_threshold_frac)]
             )
 
+        if router_queue_threshold is not None:
+            command.extend(["--router-queue-threshold", str(router_queue_threshold)])
+
         if durable_kv_events:
             command.append("--router-durable-kv-events")
+
+        if serve_indexer:
+            command.append("--serve-indexer")
+
+        if use_remote_indexer:
+            command.append("--use-remote-indexer")
 
         if router_aic_config is not None:
             command.extend(
@@ -91,6 +105,10 @@ class FrontendRouterProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
+        if event_plane is not None:
+            env["DYN_EVENT_PLANE"] = event_plane
+        if event_plane == "zmq" and request_plane != "nats":
+            env.pop("NATS_SERVER", None)
         if min_initial_workers is not None:
             env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = str(min_initial_workers)
 
@@ -105,6 +123,7 @@ class FrontendRouterProcess(ManagedProcess):
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
+            display_name=f"dynamo-frontend-{router_mode}",
         )
         self.port = frontend_port
         self.router_mode = router_mode
@@ -133,7 +152,7 @@ class DirectRouterProcess(ManagedProcess):
         request_plane: str = "nats",
     ):
         command = [
-            "python3",
+            sys.executable,
             "-m",
             "dynamo.frontend",
             "--router-mode",
@@ -161,6 +180,7 @@ class DirectRouterProcess(ManagedProcess):
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
+            display_name="dynamo-frontend-direct",
         )
         self.port = frontend_port
 

@@ -10,11 +10,14 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
+from gpu_memory_service.client.torch.module import register_module_tensors
+from gpu_memory_service.common.locks import RequestedLockType
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
+GMS_TAGS = ("weights", "kv_cache")
 
 
 def get_gms_lock_mode(extra_config: dict):
@@ -22,12 +25,23 @@ def get_gms_lock_mode(extra_config: dict):
 
     Returns RO if gms_read_only=True, otherwise RW_OR_RO (default).
     """
-    from gpu_memory_service.common.types import RequestedLockType
-
     if extra_config.get("gms_read_only", False):
         logger.info("[GMS] gms_read_only=True, forcing RO mode")
         return RequestedLockType.RO
     return RequestedLockType.RW_OR_RO
+
+
+def get_gms_ro_connect_timeout_ms(extra_config: dict) -> int | None:
+    """Weight RO reconnect timeout in ms. None waits indefinitely."""
+    raw = extra_config.get("gms_ro_connect_timeout_ms")
+    if raw is None:
+        return None
+    timeout_ms = int(raw)
+    if timeout_ms < 0:
+        raise ValueError(
+            f"gms_ro_connect_timeout_ms must be non-negative, got {timeout_ms}"
+        )
+    return timeout_ms
 
 
 def strip_gms_model_loader_config(load_config, load_format: str):
@@ -68,9 +82,6 @@ def finalize_gms_write(
     Returns:
         Total bytes committed.
     """
-    from gpu_memory_service.client.torch.module import register_module_tensors
-    from gpu_memory_service.common.types import RequestedLockType
-
     register_module_tensors(allocator, model)
     total_bytes = allocator.total_bytes
 

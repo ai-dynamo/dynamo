@@ -34,12 +34,6 @@ inputs:
   aws_account_id:
     description: 'AWS Account ID'
     required: false
-  aws_access_key_id:
-    description: 'AWS Access Key ID'
-    required: false
-  aws_secret_access_key:
-    description: 'AWS Secret Access Key'
-    required: false
 
 outputs:
   image_tag:
@@ -86,7 +80,9 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
-        curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+        curl --retry 5 --retry-delay 2 --fail --show-error -sSL -o /tmp/rustup-init.sh https://sh.rustup.rs
+        sh /tmp/rustup-init.sh -y --default-toolchain stable
+        rm -f /tmp/rustup-init.sh
         . "$HOME/.cargo/env"
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         cargo install cbindgen
@@ -106,8 +102,6 @@ runs:
         GITHUB_TOKEN: ${{ inputs.ci_token }}
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
         SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
         GITHUB_RUN_ID: ${{ github.run_id }}

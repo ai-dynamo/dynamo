@@ -17,21 +17,39 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.common.utils.prometheus import LLMBackendMetrics
-from dynamo.llm import ModelInput, ModelType
+from dynamo.common.utils.prometheus import (
+    LLMBackendMetrics,
+    register_embedding_cache_metrics,
+)
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
+from .cache_info import configure_kv_event_block_size
+from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
-from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
-from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .handlers import (
+    BaseWorkerHandler,
+    DecodeWorkerHandler,
+    EmbeddingWorkerHandler,
+    PrefillWorkerHandler,
+    get_dp_range_for_worker,
+)
+from .health_check import (
+    VllmEmbeddingHealthCheckPayload,
+    VllmHealthCheckPayload,
+    VllmPrefillHealthCheckPayload,
+)
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
 
 logger = logging.getLogger(__name__)
 
 # (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
-EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
+# component_gauges is None on the embedding-worker path: pooling engines
+# have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
+# LLMBackendMetrics registration there.
+EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
@@ -127,6 +145,16 @@ class WorkerFactory:
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
 
+        # Embedding worker is selected first because it crosses worker shapes
+        # (pooling AsyncLLM, ModelType.Embedding) rather than being a variant
+        # of decode. Aggregated-only — exclusivity with disagg modes is
+        # enforced earlier in DynamoVllmConfig._validate_embedding_worker_exclusivity.
+        if config.embedding_worker:
+            await self._create_embedding_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
+            return
+
         # NOTE: --benchmark-mode is only supported for prefill/decode workers.
         # The encode worker path does not wire benchmark waiting or
         # the get_perf_metrics endpoint.
@@ -183,6 +211,142 @@ class WorkerFactory:
             raise
         finally:
             handler.cleanup()
+
+    async def _create_embedding_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+    ) -> None:
+        """Initialize an aggregated text-embedding worker.
+
+        Pooling models have no KV cache, no decode phase, and no streamed
+        output, so several pieces of the decode-worker setup are intentionally
+        skipped here:
+
+        - KV-events publisher: no KV cache → nothing to publish.
+        - Forward-pass-metrics relay: relays decode-phase ZMQ metrics; no
+          decode here.
+        - StatLoggerFactory wiring: built around per-batch sampling/decoding
+          stats which the pooling engine does not emit.
+        - InstrumentedScheduler: hard-codes ``pooling_params=None`` (see
+          components/src/dynamo/vllm/instrumented_scheduler.py), which would
+          silently disable the pooling pass. ``setup_vllm_engine`` only
+          installs it when ``--benchmark-mode`` is set, which is rejected
+          for embedding workers via config validation.
+
+          We are deliberately not extending ``--benchmark-mode`` with an
+          ``embed`` choice. That flag exists primarily to expose a worker's
+          capability curve (RPS / p99 vs. concurrency, throughput knee) at
+          startup for capacity planning, engine-arg tuning, and as input to
+          the Dynamo planner's auto-scaling decisions. Decode workloads
+          benefit because they have many interacting knobs (max-num-seqs,
+          chunked prefill, prefill/decode mix). Embedding workloads are
+          essentially ``(batch_size × ISL → latency)`` -- a clean two-axis
+          function -- so the value of in-process self-profiling is much
+          lower than external HTTP load testing, which is what every other
+          embedding-serving stack uses anyway. The single remaining wedge
+          is planner integration: if/when the Dynamo planner needs
+          in-process embedding capability curves to auto-scale embedding
+          fleets, add ``--benchmark-mode embed`` at that point together
+          with the planner's embedding-capability model.
+
+        The engine itself is the standard ``AsyncLLM`` constructed by
+        ``setup_vllm_engine``; pooling vs. generation is selected by the
+        user's ``--runner pooling`` argument flowing through ``engine_args``.
+        """
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        # Embedding workers run on pooling engines: no KV cache, no
+        # scheduler stats, no decode loop. The factory still has to exist
+        # because vLLM unconditionally invokes it during AsyncLLM init,
+        # but it returns a no-op stat logger and setup_vllm_engine() skips
+        # the chat-shaped LLMBackendMetrics registration.
+        factory = StatLoggerFactory(
+            endpoint=generate_endpoint,
+            embedding_worker=True,
+        )
+        (
+            engine_client,
+            vllm_config,
+            _default_sampling_params,
+            _prometheus_temp_dir,
+            _component_gauges,
+        ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+
+        handler = EmbeddingWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            shutdown_event=shutdown_event,
+        )
+
+        embedding_health_check_payload = VllmEmbeddingHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
+        logger.info("Starting to serve the embedding worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                    health_check_payload=embedding_health_check_payload,
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Embedding,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    # Embedding workers have no prefill/decode split — they
+                    # always serve a single pooling pass, so they advertise
+                    # as Aggregated with no peer dependencies.
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to serve embedding worker endpoint: {e}")
+            raise
+        finally:
+            handler.cleanup()
+
+    async def _maybe_wait_for_failover_lock(
+        self,
+        handler,
+        runtime: DistributedRuntime,
+        config: Config,
+    ) -> None:
+        # Shadow mode: lock-driven activation.
+        # Flow: sleep → startup probe passes → block on lock → wake → register.
+        if not config.gms_shadow_mode:
+            return
+
+        await handler._quiesce_controller.quiesce(1)
+
+        runtime.set_health_status(True)
+        logger.info(
+            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+        )
+
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        lock = FlockFailoverLock(lock_path)
+        await lock.acquire(engine_id=f"engine-{engine_id}")
+        logger.info("[Shadow] Lock acquired, waking engine")
+
+        await handler._quiesce_controller.resume()
+        handler._quiesce_controller.mark_resumed()
+        logger.info("[Shadow] Engine awake, registering with discovery")
 
     async def _create_decode_worker(
         self,
@@ -258,9 +422,15 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
-        factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
         factory.init_publish()
 
         # Currently routing to worker is still controlled by the worker
@@ -276,6 +446,7 @@ class WorkerFactory:
             engine_client,
             default_sampling_params,
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
+            model_config=getattr(vllm_config, "model_config", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
@@ -317,13 +488,18 @@ class WorkerFactory:
             handler.fpm_relays = fpm_relays
 
         self.setup_metrics_collection(config, generate_endpoint, logger)
-        # Register sleep/wake_up engine routes
-        runtime.register_engine_route("sleep", handler.sleep)
-        runtime.register_engine_route("wake_up", handler.wake_up)
-        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
-        logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
-        )
+
+        embedding_cache = getattr(handler, "embedding_cache_manager", None)
+        if embedding_cache is not None:
+            register_embedding_cache_metrics(
+                endpoint=generate_endpoint,
+                cache=embedding_cache,
+                model_name=config.served_model_name or config.model,
+                component_name=config.component,
+            )
+
+        # Register engine routes
+        self.register_engine_routes(runtime, handler)
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -340,27 +516,7 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        if config.gms_shadow_mode:
-            # Shadow mode: lock-driven activation.
-            # Flow: sleep → startup probe passes → block on lock → wake → register.
-            await handler._quiesce_controller.quiesce(1)
-
-            runtime.set_health_status(True)
-            logger.info(
-                "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
-            )
-
-            from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-
-            lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
-            engine_id = os.environ.get("ENGINE_ID", "0")
-            lock = FlockFailoverLock(lock_path)
-            await lock.acquire(engine_id=f"engine-{engine_id}")
-            logger.info("[Shadow] Lock acquired, waking engine")
-
-            await handler._quiesce_controller.resume()
-            handler._quiesce_controller.mark_resumed()
-            logger.info("[Shadow] Engine awake, registering with discovery")
+        await self._maybe_wait_for_failover_lock(handler, runtime, config)
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -369,6 +525,16 @@ class WorkerFactory:
                 bench_cfg, vllm_config
             )
 
+        # What the worker is advertising itself as, and what other worker it needs to serve traffic.
+        if config.disaggregation_mode == DisaggregationMode.DECODE:
+            worker_type = WorkerType.Decode
+            needs_set: list[WorkerType] = [WorkerType.Prefill]
+        else:
+            # AGGREGATED
+            worker_type = WorkerType.Aggregated
+            needs_set = []
+        needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
         await self.register_vllm_model(
             model_input,
             model_type,
@@ -376,6 +542,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=worker_type,
+            needs=needs,
         )
 
         health_check_payload = VllmHealthCheckPayload(
@@ -489,6 +657,7 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
+        await configure_kv_event_block_size(engine_client, vllm_config)
 
         encode_worker_client = await self._maybe_get_encode_worker_client(
             runtime, config
@@ -500,6 +669,7 @@ class WorkerFactory:
             engine_client,
             default_sampling_params,
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
+            model_config=getattr(vllm_config, "model_config", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
@@ -541,13 +711,20 @@ class WorkerFactory:
             handler.fpm_relays = fpm_relays
 
         self.setup_metrics_collection(config, generate_endpoint, logger)
-        # Register sleep/wake_up engine routes
-        runtime.register_engine_route("sleep", handler.sleep)
-        runtime.register_engine_route("wake_up", handler.wake_up)
-        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
-        logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
-        )
+
+        embedding_cache = getattr(handler, "embedding_cache_manager", None)
+        if embedding_cache is not None:
+            register_embedding_cache_metrics(
+                endpoint=generate_endpoint,
+                cache=embedding_cache,
+                model_name=config.served_model_name or config.model,
+                component_name=config.component,
+            )
+
+        # Register engine routes
+        self.register_engine_routes(runtime, handler)
+
+        await self._maybe_wait_for_failover_lock(handler, runtime, config)
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -572,6 +749,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=WorkerType.Prefill,
+            needs=[[WorkerType.Decode]],
         )
 
         health_check_payload = VllmPrefillHealthCheckPayload(
@@ -629,3 +808,21 @@ class WorkerFactory:
             logger.info("Connected to encode workers")
             return encode_worker_client
         return None
+
+    def register_engine_routes(
+        self, runtime: DistributedRuntime, handler: BaseWorkerHandler
+    ) -> None:
+        """Register all engine routes for this handler.
+
+        Args:
+            runtime: The DistributedRuntime instance to register routes on.
+        """
+        runtime.register_engine_route("start_profile", handler.start_profile)
+        runtime.register_engine_route("stop_profile", handler.stop_profile)
+        runtime.register_engine_route("sleep", handler.sleep)
+        runtime.register_engine_route("wake_up", handler.wake_up)
+        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+
+        logger.info(
+            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep, /engine/start_profile, /engine/stop_profile"
+        )

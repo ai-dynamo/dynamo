@@ -260,6 +260,64 @@ def test_get_average_metric_multiple_matching_containers(mock_prometheus_result)
         assert result == expected
 
 
+def test_get_avg_request_count_uses_started_requests():
+    """Frontend request count uses started requests, not completed responses."""
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    started = [
+        {
+            "metric": {
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [1758857776.071, 150.0],
+        },
+        {
+            "metric": {
+                "dynamo_namespace": "other_namespace",
+                "model": "target_model",
+            },
+            "value": [1758857776.071, 1000.0],
+        },
+    ]
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.return_value = started
+
+        result = client.get_avg_request_count("30s", "TARGET_MODEL")
+
+    assert result == 150.0
+    queries = [call.kwargs["query"] for call in mock_query.call_args_list]
+    assert "dynamo_frontend_requests_started_total" in queries[0]
+    assert "increase(" in queries[0]
+    assert len(queries) == 1
+
+
+def test_get_avg_request_count_falls_back_to_completed_when_started_missing():
+    """Older frontend images without started counter still report completed count."""
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    completed = [
+        {
+            "metric": {
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [1758857776.071, 73.0],
+        }
+    ]
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.side_effect = [[], completed]
+
+        result = client.get_avg_request_count("30s", "target_model")
+
+    assert result == 73.0
+    queries = [call.kwargs["query"] for call in mock_query.call_args_list]
+    assert "dynamo_frontend_requests_started_total" in queries[0]
+    assert "dynamo_frontend_requests_total" in queries[1]
+
+
 # ---------------------------------------------------------------------------
 # Router metrics source tests
 # ---------------------------------------------------------------------------
@@ -324,6 +382,29 @@ class TestPrometheusAPIClientRouterSource:
         call_args = str(router_client.prom.custom_query.call_args)
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.OUTPUT_SEQUENCE_TOKENS}"
         assert expected_metric in call_args
+
+    def test_get_avg_kv_hit_rate_dispatches_to_router_histogram(self, router_client):
+        """get_avg_kv_hit_rate with router source queries dynamo_component_router_kv_hit_rate."""
+        # Return a plausible 0.0-1.0 ratio rather than the default 42.0 fixture.
+        router_client.prom.custom_query.return_value = [{"value": [0, "0.35"]}]
+        result = router_client.get_avg_kv_hit_rate("60s", "mymodel")
+        assert result == 0.35
+
+        call_args = str(router_client.prom.custom_query.call_args)
+        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}"
+        assert expected_metric in call_args
+
+    def test_get_avg_kv_hit_rate_returns_none_for_frontend_source(self):
+        """Frontend source doesn't publish an aggregate kv_hit_rate, so the
+        client should short-circuit to None rather than issue a PromQL query."""
+        client = PrometheusAPIClient(
+            "http://localhost:9090", "test-fe-namespace", metrics_source="frontend"
+        )
+        client.prom = MagicMock()
+        client.prom.custom_query.return_value = [{"value": [0, "42.0"]}]
+        result = client.get_avg_kv_hit_rate("60s", "mymodel")
+        assert result is None
+        client.prom.custom_query.assert_not_called()
 
     def test_get_avg_request_count_uses_router_requests_total(self, router_client):
         """get_avg_request_count with router source queries dynamo_component_router_requests_total."""

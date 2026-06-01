@@ -17,6 +17,18 @@ LLM inference breaks these assumptions:
 
 The Dynamo **Planner** is an autoscaler purpose-built for these constraints. It understands engine profiling data, tracks per-worker GPU utilization, predicts traffic patterns, and makes scaling decisions that directly target TTFT and ITL SLAs — not proxy metrics.
 
+## Getting Started: Optimization Targets
+
+The planner offers three `optimization_target` settings that control how scaling decisions are made:
+
+| Target | Description | Requires SLA? | Requires Profiling? |
+|--------|-------------|:-------------:|:-------------------:|
+| **`throughput`** (default) | Maximizes throughput by scaling based on queue depth and KV cache utilization. Scales up when engines are saturated, scales down when utilization drops. | No | No |
+| **`latency`** | Minimizes latency by scaling aggressively to keep queues short. Scales up at lower utilization thresholds. | No | No |
+| **`sla`** | Targets specific TTFT/ITL SLA values using regression-based performance models. Most precise, but requires configuration. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
+
+**We recommend starting with the default `throughput` target** — it works out of the box with zero configuration. Switch to `latency` if your workload is latency-sensitive, or to `sla` when you need precise SLA targeting with pre-deployment profiling.
+
 > **New to the Planner?** Start with the [Planner Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
 > **Need multi-DGD coordination?** See the [Global Planner Guide](global-planner.md) for shared-policy coordination across multiple DGDs and single-endpoint multi-pool deployments.
@@ -25,8 +37,8 @@ The Dynamo **Planner** is an autoscaler purpose-built for these constraints. It 
 
 The Planner supports two scaling modes that can run independently or together:
 
-- **Throughput-based scaling**: Uses pre-deployment profiling data and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Adjusts on a longer interval (default 180s). This is the primary mode for production deployments.
-- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and fits an online linear regression to make scaling decisions. No profiling data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
+- **Throughput-based scaling**: Uses pre-deployment engine performance data (from self-benchmark or profiler) and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Adjusts on a longer interval (default 180s). This is the primary mode for production deployments.
+- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and fits an online linear regression to make scaling decisions. No pre-deployment data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
 
 When both modes are enabled, throughput-based scaling provides a capacity floor (long-term planning) while load-based scaling handles real-time adjustments above that floor.
 
@@ -36,12 +48,12 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 |---------|:----------------:|:-------------------------:|
 | **Deployment** | | |
 | Disaggregated | Supported | Supported |
-| Aggregated | Unsupported | Supported |
+| Aggregated | Supported | Supported |
 | **LLM Framework** | | |
 | SGLang | Supported | Supported |
 | TensorRT-LLM | Supported | Supported |
 | vLLM | Supported | Supported |
-| **Requires Profiling Data** | Yes | No |
+| **Requires Pre-deployment Data** | Yes (self-benchmark or profiler) | No |
 | **Load Predictors** | ARIMA, Prophet, Kalman, Constant | N/A |
 | **Router** | | |
 | Any (round-robin, random, etc.) | Supported | Not supported |
@@ -52,8 +64,8 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 
 ## When to Use Which Mode
 
-- **Throughput-based scaling** should be enabled whenever engine profiling data is available (through pre-deployment profiling). It provides stable, prediction-based capacity planning.
-- **Load-based scaling** should be enabled when traffic is bursty or hard to predict. It reacts quickly to real-time load changes without requiring profiling data.
+- **Throughput-based scaling** should be enabled whenever engine performance data is available (through self-benchmark or pre-deployment profiling). It provides stable, prediction-based capacity planning.
+- **Load-based scaling** should be enabled when traffic is bursty or hard to predict. It reacts quickly to real-time load changes without requiring pre-deployment data.
 - **Both modes together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `--adjustment-interval` for throughput-based scaling.
 
 ## Quick Start
@@ -63,39 +75,48 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 - Dynamo platform installed on Kubernetes ([Installation Guide](../../kubernetes/installation-guide.md))
 - kube-prometheus-stack installed ([Metrics Setup](../../kubernetes/observability/metrics.md))
 
-For throughput-based scaling, pre-deployment profiling is also required ([Profiling Guide](../profiler/profiler-guide.md)).
+### Default Mode (zero config)
 
-### Throughput-Based Scaling (with DGDR)
-
-The fastest path to a throughput-based planner deployment is through a DynamoGraphDeploymentRequest, which automatically profiles your model:
-
-```bash
-kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
-```
-
-See [Planner Guide](planner-guide.md) for the full workflow.
-
-### Load-Based Scaling (without profiling)
-
-To deploy with load-based scaling only (no profiling required), add these arguments to the planner service in your DGD:
+The planner works out of the box with no configuration needed. By default, `optimization_target` is set to `throughput`, which uses static thresholds on queue depth and KV cache utilization — no SLAs or profiling required:
 
 ```yaml
-args:
-  - --enable-loadbased-scaling
-  - --disable-throughput-scaling
-  - --loadbased-adjustment-interval=5
+# Minimal planner config — uses throughput optimization by default
+features:
+  planner:
+    mode: disagg
+    backend: vllm
 ```
 
-The planner will auto-discover the frontend metrics endpoint from the DGD. See [disagg_planner.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_planner.yaml) for a complete example.
+For latency-sensitive workloads:
 
-### Manual DGD Deployment
-
-For manual control with throughput-based scaling, use the disaggregated planner templates:
-
-```bash
-# After profiling is complete
-kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
+```yaml
+features:
+  planner:
+    mode: disagg
+    backend: vllm
+    optimization_target: latency
 ```
+
+### SLA-Based Scaling (advanced)
+
+For precise SLA targeting with pre-deployment profiling, set `optimization_target: sla`:
+
+```yaml
+features:
+  planner:
+    optimization_target: sla
+    enable_throughput_scaling: true
+    enable_load_scaling: true
+    ttft_ms: 500.0
+    itl_ms: 50.0
+    pre_deployment_sweeping_mode: rapid
+```
+
+The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest,
+which automatically profiles your model. See [Planner Examples](planner-examples.md)
+for copyable DGDR manifests.
+
+See [Planner Guide](planner-guide.md) for the full workflow.
 
 ## Current Limitations
 
@@ -103,7 +124,11 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 
 Load-based scaling has the following known limitations. Throughput-based scaling is not affected by any of these.
 
-**Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). FPM is currently only available for vllm and is automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set. The KV Router is **not** required for load-based scaling.
+**Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). The KV Router is **not** required for load-based scaling. FPM availability by backend:
+
+- **vLLM** — supported. Automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set.
+- **TensorRT-LLM** — supported for non-attention-DP workers (`attention_dp_size == 1`); gated off when `attention_dp_size > 1` pending per-rank FPM emission.
+- **SGLang** — pipeline wired in Dynamo, but the upstream SGLang FPM module is not included in the current 1.2.0 SGLang runtime image. See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) for the runtime-image prerequisite.
 
 ### General
 
@@ -128,26 +153,25 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 | `--namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
 | `--backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
 | `--mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
+| `--optimization-target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `sla` (regression-based SLA targeting) |
 | `--environment` | `kubernetes` | Deployment environment |
-| `--ttft` | `500.0` | Target Time To First Token (ms) |
-| `--itl` | `50.0` | Target Inter-Token Latency (ms) |
+| `ttft_ms` | `500.0` | Target Time To First Token (ms) |
+| `itl_ms` | `50.0` | Target Inter-Token Latency (ms) |
 | `--max-gpu-budget` | `8` | Maximum GPUs across all workers |
 | `--min-endpoint` | `1` | Minimum replicas per worker type |
 | `--decode-engine-num-gpu` | `1` | GPUs per decode engine |
 | `--prefill-engine-num-gpu` | `1` | GPUs per prefill engine |
-| `--no-operation` | `false` | Observation mode (no actual scaling) |
+| `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. |
 | **Throughput-based scaling** | | |
 | `--enable-throughput-scaling` | `true` | Enable throughput-based scaling |
 | `--adjustment-interval` | `180` | Seconds between throughput-based scaling decisions |
 | `--profile-results-dir` | `profiling_results` | Path to profiling data (NPZ/JSON) |
 | `--load-predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
-| `--no-correction` | `true` | Disable correction factors (auto-disabled when load-based scaling is on) |
 | **Load-based scaling** | | |
 | `--enable-loadbased-scaling` | `false` | Enable load-based scaling |
-| `--disable-throughput-scaling` | `false` | Disable throughput-based scaling (required for `agg` mode) |
-| `--loadbased-router-metrics-url` | auto-discovered | URL to router's `/metrics` endpoint |
-| `--loadbased-adjustment-interval` | `5` | Seconds between load-based scaling decisions |
-| `--loadbased-learning-window` | `50` | Sliding window size for regression model |
+| `--loadbased-adjustment-interval` | `5` | Seconds between FPM regression updates and load-based scaling decisions |
+| `--max-num-fpm-samples` | `64` | Maximum retained FPM observations for regression |
+| `--fpm-sample-bucket-size` | `16` | Number of buckets for observation retirement (must be perfect square) |
 | `--loadbased-scaling-down-sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
 | `--loadbased-metric-samples` | `10` | Number of metric samples per adjustment interval |
 | `--loadbased-min-observations` | `5` | Minimum observations before regression activates |
@@ -168,23 +192,72 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 Deploy the planner dashboard:
 
 ```bash
-kubectl apply -n monitoring -f deploy/observability/k8s/grafana-planner-dashboard-configmap.yaml
+kubectl apply -n monitoring -f deploy/observability/grafana-planner-dashboard-configmap.yaml
 ```
 
 The dashboard shows:
 - Worker counts and GPU usage over time
 - Observed TTFT, ITL, request rate, sequence lengths
 - Predicted load and recommended replica counts
-- Correction factors (actual vs. expected performance)
+- FPM regression model status
 
 ### Prometheus Metrics
+
+When `PLANNER_PROMETHEUS_PORT` is set, the planner serves its own metrics endpoint. Exported series use the `dynamo_planner_*` naming convention (underscores and standard unit suffixes), replacing older `planner:*`-style names.
 
 **Throughput-based scaling** pulls traffic metrics from the cluster-wide Prometheus server:
 - Request count and duration
 - TTFT and ITL distributions
 - Input/output sequence lengths
 
+Planner can read these traffic signals from either the public `Frontend` or a pool-local `LocalRouter`. Use `throughput_metrics_source: "frontend"` for a single-DGD deployment. Use `throughput_metrics_source: "router"` for GlobalPlanner / multi-pool deployments so each pool Planner reads its own router traffic instead of the shared public endpoint.
+
+| Planner input | Frontend source | Router source |
+|---|---|---|
+| Request count | `dynamo_frontend_requests_total` | `dynamo_component_router_requests_total` |
+| TTFT | `dynamo_frontend_time_to_first_token_seconds` | `dynamo_component_router_time_to_first_token_seconds` |
+| ITL | `dynamo_frontend_inter_token_latency_seconds` | `dynamo_component_router_inter_token_latency_seconds` |
+| Request duration | `dynamo_frontend_request_duration_seconds` | `dynamo_component_request_duration_seconds` until router-specific duration metrics are available |
+| Input sequence length / ISL | `dynamo_frontend_input_sequence_tokens` | `dynamo_component_router_input_sequence_tokens` |
+| Output sequence length / OSL | `dynamo_frontend_output_sequence_tokens` | `dynamo_component_router_output_sequence_tokens` |
+| KV hit rate | Not available from frontend source | `dynamo_component_router_kv_hit_rate` |
+
+The throughput planner uses request count, ISL, OSL, and optional KV hit rate as the core traffic forecast inputs. TTFT, ITL, and request duration are also scraped and exported as observed diagnostics.
+
 **Load-based scaling** uses ForwardPassMetrics (FPM) from the Dynamo event plane:
 - Per-iteration wall time, scheduled prefill/decode tokens, and queued request status
 - Delivered via `FpmEventSubscriber` with automatic engine discovery and lifecycle tracking
 - No router `/metrics` scraping required
+
+FPM observes engine-side scheduled and queued work. It does not include requests still queued in the `LocalRouter` before engine assignment.
+
+Core gauges on the planner port include replica counts (`dynamo_planner_num_prefill_replicas`, `dynamo_planner_num_decode_replicas`), observed traffic (`dynamo_planner_observed_*`), replica recommendations (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), and cumulative `dynamo_planner_gpu_hours`.
+
+Throughput prediction gauges `dynamo_planner_predicted_requests_per_second`, `dynamo_planner_predicted_input_sequence_tokens`, and `dynamo_planner_predicted_output_sequence_tokens` are wired from throughput-scaling traffic prediction and exposed alongside observed sequence-length metrics.
+
+### Advisory mode
+
+Set `advisory: true` to run the local Planner in suggestion-only mode. This is recommended when you are evaluating a new Planner configuration, validating SLA targets, or reviewing how the Planner would react to production traffic before allowing it to scale workers.
+
+In advisory mode, the Planner still observes traffic and FPM data, computes recommended prefill and decode replica counts, logs recommendation summaries, exports predicted replica metrics, and includes recommendations in diagnostics reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions, send replica changes to Kubernetes or GlobalPlanner, or mutate the deployment.
+
+#### Diagnostics metrics
+
+Additional series support dashboards and offline analysis:
+
+- **Regression-based latency estimates:** `dynamo_planner_estimated_ttft_ms` and `dynamo_planner_estimated_itl_ms` reflect the maximum estimated TTFT and ITL from the online regression across engines.
+- **Engine capacity:** `dynamo_planner_engine_prefill_requests_per_second` and `dynamo_planner_engine_decode_requests_per_second` report single-engine prefill and decode capacity under the configured SLA.
+- **Scaling decision reasons:** `dynamo_planner_load_scaling_decision` and `dynamo_planner_throughput_scaling_decision` are Enum gauges whose state labels encode why each mode chose to scale, hold, or skip (for example `scale_up`, `no_fpm_data`, `set_lower_bound`).
+- **Per-engine FPM queue depths:** `dynamo_planner_engine_queued_prefill_tokens`, `dynamo_planner_engine_queued_decode_kv_tokens`, and `dynamo_planner_engine_inflight_decode_kv_tokens` are labeled with `worker_id` and `dp_rank` for each engine.
+
+### HTML diagnostics reports
+
+The planner can emit periodic, self-contained HTML diagnostics files with interactive Plotly charts.
+
+Configure this in `PlannerConfig` (or the equivalent YAML / constructor wiring your deployment uses):
+
+- `report_interval_hours`: interval in **simulated** time between reports (default `24.0` hours); set to `None` to disable.
+- `report_output_dir`: directory where HTML files are written (default `./planner_reports`).
+- `live_dashboard_port`: port for a real-time HTTP dashboard (default `8080`). Set to `0` to disable. An aiohttp server starts on the given port and serves the current accumulated snapshot data as an interactive Plotly report at `http://<host>:<port>/`. Unlike periodic reports, the live dashboard does **not** clear snapshots — it always shows all data accumulated since the last periodic report (or since startup if periodic reports are disabled).
+
+Reports aggregate per-tick snapshots and use `TickInput.now_s` for timestamps, so they behave the same in live runs (wall clock) and in **replay** with a simulated clock. Typical charts cover worker counts, recommended replica counts, observed versus estimated latencies versus SLA targets, request rate, engine capacity, scaling decision timelines, and input/output sequence lengths. In the Replica Counts plot, actual replicas are shown as lines and the Planner's recommended prefill and decode replica counts are shown as discrete markers at the ticks where recommendations were produced. This is especially useful with `advisory: true` because those recommendations are suggestions only.

@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# `|2+` simply means a single newline ("\n"); see tests/parity/README.md for the full decode.
+
+family: minimax_m2
+mode: batch
+cases:
+  TOOLCALLING.batch.2.a:
+    description: Two invokes inside one tool_call wrapper
+    ref: dynamo
+    model_text: |-
+      <minimax:tool_call>
+      <invoke name="get_weather">
+      <parameter name="location">NYC</parameter>
+      </invoke>
+      <invoke name="get_time">
+      <parameter name="timezone">EST</parameter>
+      </invoke>
+      </minimax:tool_call>
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - &id003
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  TOOLCALLING.batch.2.b:
+    description: Two back-to-back tool_call wrappers
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L207
+    model_text: |-
+      <minimax:tool_call>
+      <invoke name="get_weather">
+      <parameter name="location">NYC</parameter>
+      </invoke>
+      </minimax:tool_call>
+      <minimax:tool_call>
+      <invoke name="get_time">
+      <parameter name="timezone">EST</parameter>
+      </invoke>
+      </minimax:tool_call>
+    tools:
+    - *id002
+    - *id003
+    expected:
+      dynamo: &id004
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *id004
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: |2+
+
+        reason: "SGLang parser preserves the newline separator between adjacent MiniMax tool-call wrappers (`</minimax:tool_call>\\n<minimax:tool_call>`)."
+  TOOLCALLING.batch.2.c:
+    description: Parallel with surrounding narration
+    ref: dynamo
+    model_text: |-
+      Both: <minimax:tool_call>
+      <invoke name="get_weather">
+      <parameter name="location">NYC</parameter>
+      </invoke>
+      <invoke name="get_time">
+      <parameter name="timezone">EST</parameter>
+      </invoke>
+      </minimax:tool_call> Done.
+    tools:
+    - *id002
+    - *id003
+    expected:
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both: '
+      vllm: *id005
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:  Done.'
+        reason: "SGLang preserves normal text after parsed MiniMax tool-call wrappers; Dynamo aligns with vLLM by keeping only text before the first parsed tool call."
+  TOOLCALLING.batch.2.d:
+    description: Same-name twice
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L331
+    model_text: |-
+      <minimax:tool_call>
+      <invoke name="get_weather">
+      <parameter name="location">NYC</parameter>
+      </invoke>
+      <invoke name="get_weather">
+      <parameter name="location">LA</parameter>
+      </invoke>
+      </minimax:tool_call>
+    tools:
+    - *id002
+    - *id002
+    expected:
+      dynamo: &id006
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id006
+      sglang: *id006

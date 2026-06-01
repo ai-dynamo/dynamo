@@ -51,18 +51,18 @@ def test_all_fields_work():
         namespace="test-ns",
         backend="vllm",
         environment="kubernetes",
-        ttft=200,
-        itl=50,
+        ttft_ms=200,
+        itl_ms=50,
         max_gpu_budget=16,
-        throughput_adjustment_interval=60,
+        throughput_adjustment_interval_seconds=60,
     )
     assert config.namespace == "test-ns"
     assert config.backend == "vllm"
     assert config.environment == "kubernetes"
-    assert config.ttft == 200
-    assert config.itl == 50
+    assert config.ttft_ms == 200
+    assert config.itl_ms == 50
     assert config.max_gpu_budget == 16
-    assert config.throughput_adjustment_interval == 60
+    assert config.throughput_adjustment_interval_seconds == 60
 
 
 def test_throughput_metrics_source_default():
@@ -87,3 +87,37 @@ def test_throughput_metrics_source_invalid():
     """throughput_metrics_source rejects invalid values."""
     with pytest.raises(ValidationError):
         PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
+
+
+@pytest.mark.parametrize("bucket_size", [1, 4, 9, 16, 25])
+def test_fpm_sample_bucket_size_accepts_perfect_squares(bucket_size):
+    """fpm_sample_bucket_size must be a perfect square (valid values)."""
+    config = PlannerConfig(namespace="test-ns", fpm_sample_bucket_size=bucket_size)
+    assert config.fpm_sample_bucket_size == bucket_size
+
+
+@pytest.mark.parametrize("bucket_size", [2, 3, 5, 7, 10])
+def test_fpm_sample_bucket_size_rejects_non_squares(bucket_size):
+    """fpm_sample_bucket_size rejects values that are not perfect squares."""
+    with pytest.raises(ValidationError, match="perfect square"):
+        PlannerConfig(namespace="test-ns", fpm_sample_bucket_size=bucket_size)
+
+
+def test_max_num_fpm_samples_field():
+    """max_num_fpm_samples configures the FPM sample retention (formerly load_learning_window)."""
+    config = PlannerConfig(namespace="test-ns", max_num_fpm_samples=100)
+    assert config.max_num_fpm_samples == 100
+
+
+def test_agg_mode_supports_throughput_scaling():
+    """Agg mode supports throughput-based scaling."""
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="agg",
+        optimization_target="sla",
+        enable_throughput_scaling=True,
+        enable_load_scaling=False,
+    )
+    assert config.mode == "agg"
+    assert config.enable_throughput_scaling is True
+    assert config.scaling_enabled() is True

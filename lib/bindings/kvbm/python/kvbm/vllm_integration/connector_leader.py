@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from kvbm import KvbmLeader
 from kvbm.utils import is_dyn_runtime_enabled
+from kvbm.vllm_integration.consolidator_config import get_consolidator_mode
 from kvbm.vllm_integration.rust import KvbmRequest
 from kvbm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -72,10 +73,12 @@ class KvConnectorLeader:
         # Get kv event consolidator endpoints from vllm_config (pre-computed in main.py)
         consolidator_vllm_endpoint = None
         consolidator_output_endpoint = None
+        consolidator_mode = None
         self._consolidator_output_port = None
 
         _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
         if _consolidator_eps:
+            consolidator_mode = get_consolidator_mode()
             # Unpack all three endpoints
             # [0]: vllm_endpoint (for consolidator to subscribe to vLLM)
             # [1]: output_bind_endpoint (for consolidator to bind/publish)
@@ -97,6 +100,7 @@ class KvConnectorLeader:
                 leader,
                 consolidator_vllm_endpoint=consolidator_vllm_endpoint,
                 consolidator_output_endpoint=consolidator_output_endpoint,
+                consolidator_mode=consolidator_mode,
             )
         else:
             # No kv event consolidator - pass None to Rust
@@ -107,6 +111,7 @@ class KvConnectorLeader:
                 leader,
                 consolidator_vllm_endpoint=None,
                 consolidator_output_endpoint=None,
+                consolidator_mode=None,
             )
 
     # KV Connector

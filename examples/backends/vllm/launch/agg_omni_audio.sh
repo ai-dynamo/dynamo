@@ -6,6 +6,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
@@ -26,6 +27,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 print_launch_banner --no-curl "Launching vLLM-Omni Audio/TTS (1 GPU)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
   curl -X POST http://localhost:${HTTP_PORT}/v1/audio/speech \\
@@ -56,6 +58,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --media-output-fs-url file:///tmp/dynamo_media \
     --trust-remote-code \
     --enforce-eager \
+    $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
