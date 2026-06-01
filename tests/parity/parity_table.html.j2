@@ -20,14 +20,14 @@ th a:hover { background: #ffd; }
 td.model, td.parser { white-space: nowrap; }
 td.parser a { color: inherit; text-decoration: none; }
 td.parser a:hover { background: #ffd; }
-td.cell { text-align: center; min-width: 24px; }
+td.cell { text-align: center; min-width: 24px; font-weight: 400; }
 td.cell.ok         { color: #0a7d2c; }
-td.cell.donly      { color: #555; }
+td.cell.donly      { color: #8b949e; }
 td.cell.documented { color: #555; }
-td.cell.research   { color: #b00;    font-weight: bold; }
-td.cell.leak       { color: #b00;    font-weight: bold; }
-td.cell.err        { color: #b00;    font-weight: bold; }
-td.cell.na         { color: #aaa; }
+td.cell.research   { color: #b00; }
+td.cell.leak       { color: #b00; }
+td.cell.err        { color: #b00; }
+td.cell.na         { color: #aeb6bf; }
 td.cell.missing    { color: #8a6d3b; }
 td.cell a { color: inherit; text-decoration: none; display: block; }
 td.cell a:hover { background: #ffd; }
@@ -37,6 +37,60 @@ tr.section td { background: #eef; font-weight: bold; text-align: left; }
 .stats span { font-family: ui-monospace, monospace; font-weight: bold; }
 .generated { color: #888; font-size: 12px; margin-top: -0.5em; }
 .versions { color: #555; font-size: 12px; margin-top: 0.2em; }
+.table-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0.7em 0 0.8em; }
+.radio-group { display: flex; align-items: center; gap: 8px; border: 1px solid #d0d7de; background: #f8fafc; border-radius: 6px; padding: 6px 8px; }
+.radio-group-label { font-size: 13px; font-weight: 600; }
+.radio-option { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
+.radio-option input { margin: 0; }
+.checkbox-option { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #d0d7de; background: #f8fafc; border-radius: 6px; padding: 6px 8px; font-size: 13px; cursor: pointer; }
+.checkbox-option input { margin: 0; }
+.view-overview .parity-option { display: none; }
+.view-overview .details-only { display: none; }
+.view-details .summary-only { display: none; }
+.parity-explainer { display: none; }
+.view-details.parity-mode .parity-explainer { display: block; }
+.summary-key { display: inline-block; width: 12px; height: 12px; border: 1px solid rgba(0,0,0,0.22); margin: 0 4px 0 10px; vertical-align: -2px; }
+.summary-key:first-of-type { margin-left: 0; }
+.summary-key.ok { background: #76b884; }
+.summary-key.problem { background: #db7777; }
+.summary-key.na { background: #d3d8de; }
+.view-overview td.cell, .view-details td.cell { box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04); }
+.view-overview.parser-dynamo td.cell[data-status-dynamo="ok"],
+.view-overview.parser-vllm td.cell[data-status-vllm="ok"],
+.view-overview.parser-sglang td.cell[data-status-sglang="ok"] { background: #76b884; color: #76b884; }
+.view-overview.parser-dynamo td.cell[data-status-dynamo="problem"],
+.view-overview.parser-vllm td.cell[data-status-vllm="problem"],
+.view-overview.parser-sglang td.cell[data-status-sglang="problem"] { background: #db7777; color: #db7777; }
+.view-overview.parser-dynamo td.cell[data-status-dynamo="na"],
+.view-overview.parser-vllm td.cell[data-status-vllm="na"],
+.view-overview.parser-sglang td.cell[data-status-sglang="na"] { background: #d3d8de; color: #d3d8de; }
+.view-details.parser-dynamo td.cell[data-status-dynamo="ok"],
+.view-details.parser-vllm td.cell[data-status-vllm="ok"],
+.view-details.parser-sglang td.cell[data-status-sglang="ok"] { background: #bfe3c6; }
+.view-details.parser-dynamo td.cell[data-status-dynamo="problem"],
+.view-details.parser-vllm td.cell[data-status-vllm="problem"],
+.view-details.parser-sglang td.cell[data-status-sglang="problem"] { background: #efb3b3; }
+.view-details.parser-dynamo td.cell[data-status-dynamo="na"],
+.view-details.parser-vllm td.cell[data-status-vllm="na"],
+.view-details.parser-sglang td.cell[data-status-sglang="na"] { background: #e4e8ec; }
+.view-overview td.cell > a { color: inherit; }
+.view-overview td.cell > a:hover { background: transparent; }
+.view-overview td.cell:hover { filter: brightness(0.98); }
+.view-details td.cell { color: transparent; }
+.view-details td.cell::before { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #111; pointer-events: none; }
+.view-details.parser-dynamo td.cell[data-status-dynamo="na"]::before,
+.view-details.parser-vllm td.cell[data-status-vllm="na"]::before,
+.view-details.parser-sglang td.cell[data-status-sglang="na"]::before { color: #aeb6bf; }
+.view-details td.cell.donly::before { color: #8b949e; }
+.view-details.parser-dynamo td.cell::before { content: attr(data-marker-dynamo); }
+.view-details.parser-vllm td.cell::before { content: attr(data-marker-vllm); }
+.view-details.parser-sglang td.cell::before { content: attr(data-marker-sglang); }
+.view-details.parity-mode.parser-dynamo td.cell::before { content: attr(data-marker-parity-dynamo); }
+.view-details.parity-mode.parser-vllm td.cell::before { content: attr(data-marker-parity-vllm); }
+.view-details.parity-mode.parser-sglang td.cell::before { content: attr(data-marker-parity-sglang); }
+.view-details td.cell a { color: transparent; }
+.view-details td.cell a:hover { background: rgba(255,255,255,0.35); }
+.view-details td.cell .ttip { font-weight: 400; }
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid #ccc; margin: 1em 0; }
 .tab-button { appearance: none; border: 1px solid #ccc; border-bottom: 0; background: #f5f5f5; color: #222; padding: 6px 10px; font: inherit; cursor: pointer; border-radius: 4px 4px 0 0; }
 .tab-button.active { background: #fff; font-weight: 600; position: relative; top: 1px; }
@@ -77,13 +131,14 @@ table.glossary tr.category td { background: #eef; font-family: -apple-system, sy
  * `td.parser` participates so parser metadata tooltips use the same styling
  * as data-cell tooltips. */
 td.cell, td.parser { position: relative; }
+td.cell:hover, td.parser:hover, td.cell:focus-within, td.parser:focus-within { z-index: 2000; }
 .ttip {
     visibility: hidden;
     opacity: 0;
     position: absolute;
     left: 0;
     top: 100%;
-    z-index: 100;
+    z-index: 3000;
     background: #1f2937;
     color: #e5e7eb;
     padding: 8px 10px;
@@ -131,7 +186,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 .tt-h-other { color: #22d3ee; }
 </style>
 </head>
-<body>
+<body class="view-overview parser-dynamo">
 <h1>{{ title|e }}</h1>
 <p class="generated">
   Auto-generated on {{ stamp|e }}{% if sha %} on commit <a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha|e }}"><code>{{ short_sha|e }}</code></a>{% endif %}:
@@ -147,6 +202,20 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 {% endfor %}
 </div>
 {% endif %}
+<div class="table-toolbar">
+  <div class="radio-group" role="radiogroup" aria-label="Parity table view">
+    <span class="radio-group-label">View:</span>
+    <label class="radio-option"><input type="radio" name="parity-view" value="overview" data-view-toggle checked> Overview</label>
+    <label class="radio-option"><input type="radio" name="parity-view" value="details" data-view-toggle> Details</label>
+  </div>
+  <div class="radio-group" role="radiogroup" aria-label="Parser implementation">
+    <span class="radio-group-label">Parser:</span>
+    <label class="radio-option"><input type="radio" name="parity-parser" value="dynamo" data-parser-toggle checked> Dynamo</label>
+    <label class="radio-option"><input type="radio" name="parity-parser" value="vllm" data-parser-toggle> vLLM</label>
+    <label class="radio-option"><input type="radio" name="parity-parser" value="sglang" data-parser-toggle> SGLang</label>
+  </div>
+  <label class="checkbox-option parity-option"><input type="checkbox" data-parity-toggle> Parity</label>
+</div>
 {% for panel in panels %}
 <section id="{{ panel.id|e }}" class="tab-panel{% if panel.active %} active{% endif %}" role="tabpanel"{% if tabs|length > 1 %} aria-labelledby="{{ panel.id|e }}-button"{% endif %}>
 <table data-parity-table>
@@ -160,7 +229,13 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 {% endfor %}
 </tbody>
 </table>
-<p class="legend">
+<p class="legend summary-only">
+  <strong>Overview:</strong>
+  <span class="summary-key ok" aria-hidden="true"></span>green = selected implementation output is clean ·
+  <span class="summary-key problem" aria-hidden="true"></span>red = selected implementation leaks parser markup or has an expected error ·
+  <span class="summary-key na" aria-hidden="true"></span>gray = not applicable, unavailable, or missing fixture.
+</p>
+<p class="legend details-only">
 {% if panel.legend_html is defined and panel.legend_html %}
   {{ panel.legend_html|safe }}
 {% elif legend_html is defined and legend_html %}
@@ -168,7 +243,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 {% else %}
   <strong>Legend:</strong>
   <span style="color:#0a7d2c">=</span> all captured peers match Dynamo ·
-  <span style="color:#555">D</span> Dynamo-only fixture
+  <span style="color:#8b949e">·</span> Dynamo-only fixture
   (both peers unavailable) ·
   <span style="color:#555">V/S</span> divergence
   (V = vLLM, S = SGLang; intentional, has <code>reason:</code>) ·
@@ -197,7 +272,19 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   {% endif %}
 {% endif %}
 </p>
-<p class="stats">
+<p class="legend details-only parity-explainer">
+  <strong>Parity:</strong>
+  <span style="color:#0a7d2c">=</span> all three outputs match ·
+  <span style="color:#555">D</span>/<span style="color:#555">V</span>/<span style="color:#555">S</span> names parser output that differs from the selected parser ·
+  multiple letters mean multiple peer outputs differ from the selected parser.
+</p>
+<p class="stats summary-only">
+  Stats for selected perspective:
+  <span style="color:#0a7d2c" data-overview-count="ok">0</span> green ·
+  <span style="color:#b00" data-overview-count="problem">0</span> red ·
+  <span style="color:#555" data-overview-count="na">0</span> gray.
+</p>
+<p class="stats details-only">
   Stats: {{ panel.stats.families }} families × {{ panel.stats.sub_cases }} sub-cases
   = {{ panel.stats.slots }} grid slots ({{ panel.stats.na }} n/a, {{ panel.stats.missing }} missing).
   <strong>{{ panel.stats.real }}</strong> real cases:
@@ -210,6 +297,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   <span style="color:#b00">{{ panel.stats.errors }} expected-errors</span>.
 </p>
 {% if panel.glossary_groups %}
+<div class="details-only">
 <h2 id="case-descriptions-{{ panel.case_section_id|default(panel.mode)|e }}">Case descriptions</h2>
 <p>Full case definitions:
 {% if panel.case_docs_href is defined %}
@@ -239,6 +327,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 {% endfor %}
 </tbody>
 </table>
+</div>
 {% endif %}
 </section>
 {% endfor %}
@@ -251,6 +340,139 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   const columnKeys = Array.from(new Set(columnButtons.map(function (button) {
     return button.dataset.colToggle;
   })));
+  const viewRadios = Array.from(document.querySelectorAll('[data-view-toggle]'));
+  const viewKeys = new Set(viewRadios.map(function (radio) {
+    return radio.value;
+  }));
+  const parserRadios = Array.from(document.querySelectorAll('[data-parser-toggle]'));
+  const parserKeys = new Set(parserRadios.map(function (radio) {
+    return radio.value;
+  }));
+  const parityToggle = document.querySelector('[data-parity-toggle]');
+
+  function readActiveView() {
+    const requested = new URLSearchParams(window.location.search).get('view');
+    return viewKeys.has(requested) ? requested : 'overview';
+  }
+
+  function readActiveParser() {
+    const params = new URLSearchParams(window.location.search);
+    const requested = params.get('parser') || params.get('perspective');
+    return parserKeys.has(requested) ? requested : 'dynamo';
+  }
+
+  function readParityMode() {
+    const requested = new URLSearchParams(window.location.search).get('parity');
+    return requested === '1' || requested === 'true';
+  }
+
+  function updateViewUrl(view) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('view');
+    if (view !== 'overview') {
+      url.searchParams.set('view', view);
+    }
+    window.history.replaceState(null, '', url.toString());
+  }
+
+  function updateParserUrl(parser) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('parser');
+    url.searchParams.delete('perspective');
+    if (parser !== 'dynamo') {
+      url.searchParams.set('parser', parser);
+    }
+    window.history.replaceState(null, '', url.toString());
+  }
+
+  function updateParityUrl(enabled) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('parity');
+    if (enabled) {
+      url.searchParams.set('parity', '1');
+    }
+    window.history.replaceState(null, '', url.toString());
+  }
+
+  function activeParser() {
+    const checked = parserRadios.find(function (radio) {
+      return radio.checked;
+    });
+    return checked ? checked.value : 'dynamo';
+  }
+
+  function updateOverviewStats() {
+    const parser = activeParser();
+    document.querySelectorAll('.tab-panel').forEach(function (panel) {
+      const counts = {ok: 0, problem: 0, na: 0};
+      panel.querySelectorAll('td.cell').forEach(function (cell) {
+        const status = cell.getAttribute('data-status-' + parser) || 'na';
+        counts[status] = (counts[status] || 0) + 1;
+      });
+      panel.querySelectorAll('[data-overview-count]').forEach(function (el) {
+        el.textContent = String(counts[el.dataset.overviewCount] || 0);
+      });
+    });
+  }
+
+  function applyView(view, shouldUpdateUrl) {
+    const activeView = viewKeys.has(view) ? view : 'overview';
+    document.body.classList.toggle('view-overview', activeView === 'overview');
+    document.body.classList.toggle('view-details', activeView === 'details');
+    viewRadios.forEach(function (radio) {
+      radio.checked = radio.value === activeView;
+    });
+    if (shouldUpdateUrl) {
+      updateViewUrl(activeView);
+    }
+  }
+
+  function applyParser(parser, shouldUpdateUrl) {
+    const active = parserKeys.has(parser) ? parser : 'dynamo';
+    parserKeys.forEach(function (key) {
+      document.body.classList.toggle('parser-' + key, active === key);
+    });
+    parserRadios.forEach(function (radio) {
+      radio.checked = radio.value === active;
+    });
+    updateOverviewStats();
+    if (shouldUpdateUrl) {
+      updateParserUrl(active);
+    }
+  }
+
+  function applyParityMode(enabled, shouldUpdateUrl) {
+    document.body.classList.toggle('parity-mode', Boolean(enabled));
+    if (parityToggle) {
+      parityToggle.checked = Boolean(enabled);
+    }
+    if (shouldUpdateUrl) {
+      updateParityUrl(Boolean(enabled));
+    }
+  }
+
+  applyView(readActiveView(), false);
+  applyParser(readActiveParser(), false);
+  applyParityMode(readParityMode(), false);
+  viewRadios.forEach(function (radio) {
+    radio.addEventListener('change', function () {
+      if (radio.checked) {
+        applyView(radio.value, true);
+      }
+    });
+  });
+  parserRadios.forEach(function (radio) {
+    radio.addEventListener('change', function () {
+      if (radio.checked) {
+        applyParser(radio.value, true);
+      }
+    });
+  });
+  if (parityToggle) {
+    parityToggle.addEventListener('change', function () {
+      applyParityMode(parityToggle.checked, true);
+    });
+  }
 
   function defaultVisibleColumns() {
     const visible = new Set();
