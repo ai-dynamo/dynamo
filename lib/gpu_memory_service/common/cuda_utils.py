@@ -51,6 +51,19 @@ def list_devices() -> list[int]:
     return list(range(count))
 
 
+def device_memory_info(device: int) -> tuple[int, int]:
+    """Return ``(free_bytes, total_bytes)`` for a CUDA device via NVML."""
+    import pynvml
+
+    pynvml.nvmlInit()
+    try:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        return int(info.free), int(info.total)
+    finally:
+        pynvml.nvmlShutdown()
+
+
 def cuda_check_result(result: cuda.CUresult, name: str) -> None:
     if result != cuda.CUresult.CUDA_SUCCESS:
         err_result, err_str = cuda.cuGetErrorString(result)

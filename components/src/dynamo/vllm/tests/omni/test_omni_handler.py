@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -52,9 +53,9 @@ def _make_handler(stage_types=("diffusion",)):
 
     engine_client = MagicMock()
     engine_client.default_sampling_params_list = defaults
-    engine_client.engine.get_stage_metadata.side_effect = lambda i: {
-        "stage_type": stage_types[i]
-    }
+    engine_client.engine.get_stage_metadata.side_effect = lambda i: SimpleNamespace(
+        stage_type=stage_types[i]
+    )
     handler.engine_client = engine_client
     return handler
 

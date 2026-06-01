@@ -73,7 +73,7 @@ rather than hardcoding the URI:
 # Resolve base image from context.yaml (requires: pip install pyyaml)
 BASE_IMAGE=$(python container/compliance/resolve_base_image.py \
   --framework vllm \
-  --cuda-version 12.9)
+  --cuda-version 13.0)
 
 # Extract target image
 docker buildx build \
