@@ -26,6 +26,7 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
 
@@ -465,7 +466,8 @@ impl RouterHandles {
             self.prefill_router.register_workers(ids);
         }
 
-        self.prefill_router
+        let outcome = self
+            .prefill_router
             .query_prefill_worker(
                 tokens,
                 block_mm_infos,
@@ -479,7 +481,23 @@ impl RouterHandles {
             .map_err(|e| {
                 tracing::error!(error = ?e, "Prefill query failed");
                 QueryRouterResult::ErrQueryFailed
-            })
+            })?;
+        match outcome {
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
+            PrefillQueryOutcome::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            } => {
+                tracing::warn!(
+                    reason = ?reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens = ?max_queued_isl_tokens,
+                    "Prefill query rejected due to router backpressure"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
     }
 
     /// Query optimal decode worker for a request.
@@ -522,15 +540,18 @@ impl RouterHandles {
             None
         };
 
-        self.decode_router
-            .find_best_match(
+        let outcome = self
+            .decode_router
+            .find_best_match_details(
                 None,
                 tokens,
                 None,
                 config_override.as_ref(),
                 false,
+                false,
                 None,
                 priority_jump,
+                None,
                 None,
                 allowed_worker_ids,
                 routing_constraints,
@@ -539,7 +560,27 @@ impl RouterHandles {
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");
                 QueryRouterResult::ErrQueryFailed
-            })
+            })?;
+        match outcome {
+            dynamo_llm::kv_router::FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => Ok((worker, overlap_blocks)),
+            dynamo_llm::kv_router::FindBestMatchOutcome::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            } => {
+                tracing::warn!(
+                    reason = ?reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens = ?max_queued_isl_tokens,
+                    "Decode query rejected due to router backpressure"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
     }
 }
 
@@ -565,7 +606,13 @@ fn extract_priority_jump(
 /// Opaque handle for the router pair
 pub type RouterHandlesPtr = *mut RouterHandles;
 
-/// Result codes for query router C FFI
+/// Result codes for query router C FFI.
+///
+/// Numbering is append-only. Existing variants must keep their integer
+/// values so out-of-tree consumers (notably
+/// `deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer`, which pins
+/// these integers in a Go shim) keep working without recompilation. When
+/// adding a new variant, use the next free integer at the end.
 #[repr(u32)]
 pub enum QueryRouterResult {
     Ok = 0,
@@ -575,6 +622,7 @@ pub enum QueryRouterResult {
     ErrQueryFailed = 4,
     ErrDisaggEnforced = 5,
     ErrTimeout = 6,
+    ErrBackpressure = 7,
 }
 
 /// Build a `KvRouterConfig` from defaults, overridden by optional `DYN_*` environment variables.
@@ -638,7 +686,6 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_f64("DYN_ROUTER_PREDICTED_TTL_SECS") {
         cfg.router_predicted_ttl_secs = Some(v);
     }
-
     tracing::info!(
         overlap_score_credit = cfg.overlap_score_credit,
         prefill_load_scale = cfg.prefill_load_scale,
@@ -650,6 +697,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_track_prefill_tokens = cfg.router_track_prefill_tokens,
         router_queue_threshold = ?cfg.router_queue_threshold,
         router_predicted_ttl_secs = ?cfg.router_predicted_ttl_secs,
+        queue_depth_tiers_unbounded = cfg.router_queue_by_incoming_missing_isl.is_unbounded(),
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 

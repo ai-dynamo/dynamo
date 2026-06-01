@@ -344,8 +344,8 @@ impl CommonExtProvider for UnifiedRequest {
     }
 
     fn get_guided_json(&self) -> Option<serde_json::Value> {
-        // Delegate to the inner impl which handles tool_choice → guided_json
-        // and response_format → guided_json derivation.
+        // Delegate to the inner impl which handles guided_json and
+        // response_format → guided_json derivation.
         CommonExtProvider::get_guided_json(&self.inner)
     }
 
@@ -387,6 +387,10 @@ impl CommonExtProvider for UnifiedRequest {
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
         self.inner.common.skip_special_tokens
+    }
+
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        self.inner.common.prompt_logprobs
     }
 }
 

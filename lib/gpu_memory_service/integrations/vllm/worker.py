@@ -81,6 +81,44 @@ if os.environ.get("MX_ENABLED", "0") == "1":
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
 
 
+def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
+    """Return the CUDA device index vLLM will use for this worker.
+
+    vLLM adjusts ``self.local_rank`` inside ``Worker.init_device()`` for
+    intra-node data parallelism so that every local DP engine lands on a
+    different GPU:
+
+        DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
+
+    GMS intentionally connects before ``super().init_device()`` because the
+    initial vLLM ``MemorySnapshot`` needs GMS-aware committed-byte accounting.
+    That means GMS cannot observe vLLM's in-place local-rank adjustment yet, so
+    duplicate the upstream calculation here and use it only for the early GMS
+    socket/device selection.
+
+    TODO: add an upstream vLLM hook/API that exposes the resolved CUDA device
+    before the initial MemorySnapshot, then replace this duplicated vLLM logic.
+    """
+    adjusted_local_rank = local_rank
+    if (
+        parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+        and parallel_config.data_parallel_backend != "ray"
+        and parallel_config.nnodes_within_dp == 1
+    ):
+        # Use local DP rank if available, otherwise use global DP rank.
+        dp_local_rank = parallel_config.data_parallel_rank_local
+        if dp_local_rank is None:
+            dp_local_rank = parallel_config.data_parallel_index
+
+        tp_pp_world_size = (
+            parallel_config.pipeline_parallel_size
+            * parallel_config.tensor_parallel_size
+        )
+        adjusted_local_rank += dp_local_rank * tp_pp_world_size
+
+    return adjusted_local_rank
+
+
 class GMSWorker(Worker):
     """vLLM Worker subclass with GMS integration."""
 
@@ -92,8 +130,9 @@ class GMSWorker(Worker):
         """
         from vllm.platforms import current_platform
 
-        # Set CUDA device first (vLLM provides self.local_rank)
-        device = self.local_rank
+        # Set CUDA device first. Do not mutate self.local_rank here; the parent
+        # Worker will apply the same DP adjustment during super().init_device().
+        device = _get_dp_adjusted_local_rank(self.local_rank, self.parallel_config)
         current_platform.set_device(torch.device(f"cuda:{device}"))
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes).

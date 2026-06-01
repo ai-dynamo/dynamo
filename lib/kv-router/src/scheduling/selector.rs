@@ -7,7 +7,8 @@ use rand::Rng;
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
-use super::types::{KvSchedulerError, RoutingEligibility, SchedulingRequest, pinned_worker_config};
+use super::filter::{RoutingEligibility, WorkerEligibilityError};
+use super::types::{KvSchedulerError, SchedulingRequest};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// A trait that users can implement to define custom selection logic.
@@ -248,14 +249,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         };
 
         if let Some(worker) = pinned_worker {
-            let config = pinned_worker_config(workers, worker)?;
-            if !eligibility.allows_worker_ignoring_overload(worker.worker_id, config) {
-                return Err(KvSchedulerError::NoEndpoints);
-            }
-            if eligibility.is_worker_overloaded(worker.worker_id) {
-                return Err(KvSchedulerError::PinnedWorkerOverloaded {
-                    worker_id: worker.worker_id,
-                });
+            match eligibility.validate_worker_rank(workers, worker) {
+                Ok(_) => {}
+                Err(WorkerEligibilityError::WorkerOverloaded { .. }) => {
+                    return Err(KvSchedulerError::PinnedWorkerOverloaded {
+                        worker_id: worker.worker_id,
+                    });
+                }
+                Err(_) => return Err(KvSchedulerError::NoEndpoints),
             }
 
             let logit = self.worker_logit(request, worker, block_size, weights, "Pinned formula");
@@ -298,28 +299,18 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             }
         };
 
-        let worker_iter = workers
-            .iter()
-            .filter(move |(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
-            .flat_map(|(worker_id, config)| {
-                let data_parallel_size = config.data_parallel_size();
-                let data_parallel_start_rank = config.data_parallel_start_rank();
-                (data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size))
-                    .map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
-            });
-
         let (best_worker, best_logit) = if temperature == 0.0 {
             let mut best_worker = None;
             let mut best_logit = f64::INFINITY;
             let mut tie_count = 0usize;
             let mut rng = rand::rng();
-            for worker in worker_iter {
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let score = get_score(worker);
                 if score < best_logit {
                     best_worker = Some(worker);
                     best_logit = score;
                     tie_count = 1;
-                    continue;
+                    return;
                 }
 
                 if score == best_logit {
@@ -329,15 +320,18 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                         best_worker = Some(worker);
                     }
                 }
-            }
+            });
 
-            (best_worker.expect("worker_iter non-empty"), best_logit)
+            (
+                best_worker.expect("eligible worker rank non-empty"),
+                best_logit,
+            )
         } else {
             let mut worker_logits = FxHashMap::default();
-            for worker in worker_iter {
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let score = get_score(worker);
                 worker_logits.insert(worker, score);
-            }
+            });
 
             softmax_sample(&worker_logits, temperature)
         };

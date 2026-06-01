@@ -59,7 +59,12 @@ jobs:
           IMAGE_TAG=${{ github.sha }}-${TARGET_TAG_PLAIN}
           if [ -n "${CUDA_VERSION}" ]; then
             CUDA_MAJOR=${CUDA_VERSION%%.*}
-            IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA_MAJOR}"
+            # cuda13 is the implicit default — the primary ECR tag carries
+            # no cuda suffix. Non-13 majors (e.g. cuda12) stay explicit.
+            # Keep in sync with shared-build-image.yml and shared-test.yml.
+            if [ "${CUDA_MAJOR}" != "13" ]; then
+              IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA_MAJOR}"
+            fi
           fi
 
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT

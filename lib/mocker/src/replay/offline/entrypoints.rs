@@ -18,7 +18,7 @@ use super::disagg::{DisaggRuntime, ReplayMode as DisaggReplayMode};
 use super::normalize_trace_requests;
 use super::single::{SingleReplayMode, SingleRuntime};
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs};
-use crate::loadgen::{Trace, WorkloadDriver};
+use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::OfflineDisaggReplayConfig;
 use crate::replay::{
     ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTimedKvEvent, ReplayTimedOutputSignal,
@@ -209,6 +209,28 @@ pub(crate) fn simulate_trace_workload(
         record_per_request,
         max_sim_time_ms,
     )
+}
+
+pub(crate) fn simulate_agentic_trace_workload(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    if num_workers == 1 && args.engine_type == EngineType::Vllm {
+        simulate_agentic_trace_workload_single(args, trace)
+    } else {
+        simulate_agentic_trace_workload_multi(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -526,6 +548,18 @@ pub(crate) fn simulate_trace_workload_single(
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
+pub(crate) fn simulate_agentic_trace_workload_single(
+    args: MockEngineArgs,
+    trace: AgenticTrace,
+) -> Result<TraceSimulationReport> {
+    let started_at = Instant::now();
+    let args = args.normalized()?;
+    let engine_block_size = args.block_size;
+    let driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
+    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace).run()?;
+    Ok(finish_with_replay_wall_time(collector, started_at))
+}
+
 pub(crate) fn simulate_concurrency_workload_single(
     args: MockEngineArgs,
     trace: Trace,
@@ -643,6 +677,30 @@ pub(crate) fn simulate_trace_workload_multi(
     )?
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
+    .run()?;
+    Ok(finish_with_replay_wall_time(collector, started_at))
+}
+
+pub(crate) fn simulate_agentic_trace_workload_multi(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    let started_at = Instant::now();
+    let args = args.normalized()?;
+    let driver = trace.into_trace_driver_with_block_size(args.block_size)?;
+    let (collector, _) = AggRuntime::new_workload(
+        &args,
+        router_config,
+        prefill_load_estimator,
+        driver,
+        num_workers,
+        AggReplayMode::Trace,
+        router_mode,
+    )?
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
