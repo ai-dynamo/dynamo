@@ -27,44 +27,50 @@ import (
 	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 const (
-	// maxCombinedResourceNameLength is the maximum allowed combined length for Grove resource names.
-	// This constraint comes from Grove's PodCliqueSet webhook validation which enforces a 45-character
-	// limit on the combined length of PodCliqueSet name + PodCliqueScalingGroup name + PodClique name.
-	// Pod names follow formats like: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
-	// The random string and hyphens consume additional characters, leaving 45 for the resource names.
-	maxCombinedResourceNameLength = 45
+	// maxCombinedResourceNameLength is kept as a local alias for readability.
+	maxCombinedResourceNameLength = consts.MaxCombinedGroveResourceNameLength
+
+	// backendFrameworkVLLM is the spec.backendFramework value that identifies
+	// a vLLM deployment. Duplicated here (instead of importing from
+	// internal/dynamo) to avoid a webhook -> dynamo import cycle.
+	backendFrameworkVLLM = "vllm"
 )
 
 // DynamoGraphDeploymentValidator validates DynamoGraphDeployment resources.
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentValidator struct {
-	deployment *nvidiacomv1alpha1.DynamoGraphDeployment
-	mgr        ctrl.Manager // Optional: for API group detection via discovery client
+	deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
+	mgr          ctrl.Manager // Optional: for API group detection via discovery client
+	groveEnabled bool
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
-func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment) *DynamoGraphDeploymentValidator {
+// groveEnabled should reflect the operator's runtime config (global.grove.enabled).
+func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, groveEnabled bool) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
-		deployment: deployment,
-		mgr:        nil,
+		deployment:   deployment,
+		groveEnabled: groveEnabled,
 	}
 }
 
 // NewDynamoGraphDeploymentValidatorWithManager creates a validator with a manager for API group detection.
-func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
+func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager, groveEnabled bool) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
-		deployment: deployment,
-		mgr:        mgr,
+		deployment:   deployment,
+		mgr:          mgr,
+		groveEnabled: groveEnabled,
 	}
 }
 
@@ -95,6 +101,11 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 
 	// Validate topology constraints
 	if err := v.validateTopologyConstraints(ctx); err != nil {
+		return nil, err
+	}
+
+	// Validate KV transfer policy
+	if err := v.validateKvTransferPolicy(); err != nil {
 		return nil, err
 	}
 
@@ -171,6 +182,44 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 		if oldService.IsMultinode() != newService.IsMultinode() {
 			errs = append(errs, fmt.Errorf(
 				"spec.services[%s] cannot change node topology (between single-node and multi-node) after creation",
+				serviceName,
+			))
+		}
+	}
+
+	// Validate inter-pod GMS layout and failover immutability.
+	//
+	// Flipping the inter-pod GMS layout or toggling failover within an
+	// inter-pod layout both change the PodClique topology (weight-server PCLQ,
+	// per-rank engine PCLQs, shadow PCLQs, DRA ResourceClaimTemplates), which
+	// Grove cannot transform in place. Force the user to delete and recreate.
+	for serviceName, newService := range v.deployment.Spec.Services {
+		oldService, exists := old.Spec.Services[serviceName]
+		if !exists {
+			continue
+		}
+		oldInterPodGMS := oldService.IsInterPodGMSEnabled()
+		newInterPodGMS := newService.IsInterPodGMSEnabled()
+		if oldInterPodGMS != newInterPodGMS {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s].gpuMemoryService.mode: the inter-pod GMS layout cannot be toggled after creation; "+
+					"delete and recreate the DynamoGraphDeployment",
+				serviceName,
+			))
+		}
+		oldInterPodFailover := oldService.IsInterPodFailoverEnabled()
+		newInterPodFailover := newService.IsInterPodFailoverEnabled()
+		if oldInterPodFailover != newInterPodFailover {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s].failover: inter-pod GMS failover cannot be toggled after creation; "+
+					"delete and recreate the DynamoGraphDeployment",
+				serviceName,
+			))
+		}
+		if oldInterPodFailover && newInterPodFailover && oldService.Failover.NumShadows != newService.Failover.NumShadows {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s].failover.numShadows is immutable for inter-pod GMS failover; "+
+					"delete and recreate the DynamoGraphDeployment to change it",
 				serviceName,
 			))
 		}
@@ -279,6 +328,41 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 // validateService validates a single service configuration using SharedSpecValidator.
 // Returns warnings and error.
 func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
+	// The inter-pod GMS layout (with or without failover) requires the Grove
+	// pathway: the weight-server pod, per-rank PCLQs, and DRA ResourceClaim
+	// templates are all wired at the PodCliqueScalingGroup level, which only
+	// the Grove renderer produces.
+	if service.IsInterPodGMSEnabled() && !v.isGrovePathway() {
+		if !v.groveEnabled {
+			return nil, fmt.Errorf(
+				"spec.services[%s]: gpuMemoryService.mode=%q requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
+				serviceName, nvidiacomv1alpha1.GMSModeInterPod)
+		}
+		return nil, fmt.Errorf(
+			"spec.services[%s]: gpuMemoryService.mode=%q requires the Grove pathway; remove or unset the %q annotation (currently %q)",
+			serviceName, nvidiacomv1alpha1.GMSModeInterPod,
+			consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
+	}
+
+	// The inter-pod GMS layout is currently implemented only for vLLM (the
+	// engine relies on vLLM-specific runtime hooks like --load-format gms and
+	// DYN_VLLM_GMS_SHADOW_MODE that activate the GMS client path). Fail fast
+	// at admission rather than producing a broken deployment when another or
+	// no backend is configured — an empty BackendFramework means the operator
+	// cannot confirm the engine speaks vLLM, which is a hard prerequisite for
+	// inter-pod GMS (both standalone and with failover).
+	if service.IsInterPodGMSEnabled() &&
+		v.deployment.Spec.BackendFramework != backendFrameworkVLLM {
+		detected := v.deployment.Spec.BackendFramework
+		if detected == "" {
+			detected = "<unset>"
+		}
+		return nil, fmt.Errorf(
+			"spec.services[%s]: the inter-pod GMS layout (gpuMemoryService.mode=%q) is currently supported only for vLLM (detected: %s); "+
+				"set spec.backendFramework=%q",
+			serviceName, nvidiacomv1alpha1.GMSModeInterPod, detected, backendFrameworkVLLM)
+	}
+
 	// Validate service name length constraints for Grove PodCliqueSet naming
 	// Only validate when Grove pathway may be in use
 	if v.isGrovePathway() {
@@ -301,13 +385,16 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 	return sharedValidator.Validate(ctx)
 }
 
-// validateServiceNameLength validates that the service name combined with the DGD name
-// won't exceed Grove's 45-character limit for resource naming.
+// validateServiceNameLength validates that the service name combined with the
+// auto-truncated PCS name won't exceed Grove's 45-character limit.
 //
-// Grove generates PodCliqueSet resources with the following naming patterns:
-// - PodCliqueSet name: DGD name (e.g., "vllm-agg")
+// The operator auto-truncates the PCS name (see PCSNameForDGD), so this
+// validation acts as a safety net — it should rarely fire in practice.
+//
+// Grove generates resource names from:
+// - PodCliqueSet name: auto-truncated from DGD name
 // - For multinode services:
-//   - PodCliqueScalingGroup name: lowercase(serviceName) (e.g., "vllmprefillworker")
+//   - PodCliqueScalingGroup name: lowercase(serviceName)
 //   - PodClique names: lowercase(serviceName + "-ldr") and lowercase(serviceName + "-wkr")
 //
 // - For single-node services:
@@ -315,47 +402,76 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 //
 // The combined length of these names must not exceed 45 characters.
 func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
-	dgdName := v.deployment.Name
+	pcsName := dynamo.PCSNameForAlphaDGDServices(v.deployment.Name, v.deployment.Spec.Services)
 	lowerServiceName := strings.ToLower(serviceName)
 
-	// Check if this is a multinode service
 	isMultinode := service.GetNumberOfNodes() > 1
+	isInterPodGMS := service.IsInterPodGMSEnabled()
 
-	if isMultinode {
-		// For multinode: PodCliqueSet name + PodCliqueScalingGroup name + PodClique name (with leader suffix)
-		// The PodClique name is serviceName + "-ldr" (using GroveRoleSuffixLeader)
-		leaderPodCliqueName := lowerServiceName + "-" + consts.GroveRoleSuffixLeader
-		combinedLength := len(dgdName) + len(lowerServiceName) + len(leaderPodCliqueName)
+	// Determine the longest PodClique name that will be generated.
+	// Grove validates: len(PCS name) + len(PCSG name) + len(PCLQ name) <= 45
+	var longestPCLQName string
+	var pcsgName string
 
+	switch {
+	case isInterPodGMS:
+		// GMS services always get a PCSG named after the service.
+		// Longest PCLQ name is "serviceName-gms-0" (len + 6) or "serviceName-wkr-N".
+		pcsgName = lowerServiceName
+		gmsName := fmt.Sprintf("%s-%s-0", lowerServiceName, consts.GroveRoleSuffixGMS)
+		longestPCLQName = gmsName
+		if isMultinode {
+			// For high node counts, "svc-wkr-NN" can be longer than "svc-gms-0"
+			maxRank := service.GetNumberOfNodes() - 1
+			workerName := fmt.Sprintf("%s-%s-%d", lowerServiceName, consts.GroveRoleSuffixWorker, maxRank)
+			if len(workerName) > len(longestPCLQName) {
+				longestPCLQName = workerName
+			}
+		}
+
+	case isMultinode:
+		pcsgName = lowerServiceName
+		longestPCLQName = lowerServiceName + "-" + consts.GroveRoleSuffixLeader
+
+	default:
+		// Single-node non-GMS: no PCSG, only PCS + PCLQ
+		combinedLength := len(pcsName) + len(lowerServiceName)
 		if combinedLength > maxCombinedResourceNameLength {
 			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
 				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
-				"For multinode services, the combined length of DGD name + service name + service name with role suffix (e.g., '%s-ldr') must not exceed %d characters",
+				"The combined length of PCS name + service name must not exceed %d characters. "+
+				"The PCS name '%s' was auto-truncated from DGD name '%s'",
 				serviceName, combinedLength, maxCombinedResourceNameLength,
-				dgdName, len(dgdName), serviceName, len(serviceName),
-				lowerServiceName, maxCombinedResourceNameLength)
+				v.deployment.Name, len(v.deployment.Name), serviceName, len(serviceName),
+				maxCombinedResourceNameLength,
+				pcsName, v.deployment.Name)
 		}
-	} else {
-		// For single-node: PodCliqueSet name + PodClique name
-		combinedLength := len(dgdName) + len(lowerServiceName)
+		return nil
+	}
 
-		if combinedLength > maxCombinedResourceNameLength {
-			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
-				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
-				"The combined length of DGD name + service name must not exceed %d characters",
-				serviceName, combinedLength, maxCombinedResourceNameLength,
-				dgdName, len(dgdName), serviceName, len(serviceName),
-				maxCombinedResourceNameLength)
-		}
+	// For services with PCSG: PCS name + PCSG name + longest PCLQ name
+	combinedLength := len(pcsName) + len(pcsgName) + len(longestPCLQName)
+	if combinedLength > maxCombinedResourceNameLength {
+		return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
+			"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
+			"The combined length of PCS name + PCSG name + longest PodClique name ('%s') must not exceed %d characters. "+
+			"The PCS name '%s' was auto-truncated from DGD name '%s'",
+			serviceName, combinedLength, maxCombinedResourceNameLength,
+			v.deployment.Name, len(v.deployment.Name), serviceName, len(serviceName),
+			longestPCLQName, maxCombinedResourceNameLength,
+			pcsName, v.deployment.Name)
 	}
 
 	return nil
 }
 
 // isGrovePathway determines if Grove pathway may be used for this deployment.
-// Grove is used when the nvidia.com/enable-grove annotation is NOT explicitly set to "false".
-// This is a conservative check - if Grove might be used, we validate the name length constraints.
+// Grove requires both operator-level enablement (global.grove.enabled) and the
+// per-DGD annotation not being explicitly set to "false".
 func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
+	if !v.groveEnabled {
+		return false
+	}
 	return v.deployment.Annotations == nil ||
 		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
 }
@@ -796,19 +912,81 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 	return nil
 }
 
+// validateKvTransferPolicy validates the spec.experimental.kvTransferPolicy
+// configuration when set. In this phase only the `labelKey` path is supported
+// (clusterTopologyName is added in a future PR).
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
+	if v.deployment.Spec.Experimental == nil {
+		return nil
+	}
+	kvt := v.deployment.Spec.Experimental.KvTransferPolicy
+	if kvt == nil {
+		return nil
+	}
+
+	var errs []error
+	const fieldPath = "spec.experimental.kvTransferPolicy"
+
+	// labelKey is required (only supported path in this phase)
+	if kvt.LabelKey == "" {
+		errs = append(errs, fmt.Errorf("%s.labelKey is required", fieldPath))
+	} else if labelKeyErrs := k8svalidation.IsQualifiedName(kvt.LabelKey); len(labelKeyErrs) > 0 {
+		errs = append(errs, fmt.Errorf("%s.labelKey %q is not a valid Kubernetes label key: %s",
+			fieldPath, kvt.LabelKey, strings.Join(labelKeyErrs, "; ")))
+	}
+
+	// domain is required and must be a valid topology domain format
+	if kvt.Domain == "" {
+		errs = append(errs, fmt.Errorf("%s.domain is required", fieldPath))
+	} else if !nvidiacomv1alpha1.IsValidTopologyDomainFormat(kvt.Domain) {
+		errs = append(errs, fmt.Errorf("%s.domain %q is not a valid topology domain; "+
+			"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", fieldPath, kvt.Domain))
+	}
+
+	enforcement := kvt.Enforcement
+	if enforcement == "" {
+		enforcement = nvidiacomv1alpha1.KvTransferEnforcementRequired
+	}
+	if enforcement != nvidiacomv1alpha1.KvTransferEnforcementRequired &&
+		enforcement != nvidiacomv1alpha1.KvTransferEnforcementPreferred {
+		errs = append(errs, fmt.Errorf("%s.enforcement %q is invalid; "+
+			"must be \"required\" or \"preferred\"", fieldPath, kvt.Enforcement))
+	}
+
+	if enforcement == nvidiacomv1alpha1.KvTransferEnforcementPreferred && kvt.PreferredWeight == nil {
+		errs = append(errs, fmt.Errorf("%s.preferredWeight is required when enforcement is \"preferred\"", fieldPath))
+	}
+
+	if kvt.PreferredWeight != nil {
+		if *kvt.PreferredWeight < 0 || *kvt.PreferredWeight > 1 {
+			errs = append(errs, fmt.Errorf("%s.preferredWeight %g is invalid; "+
+				"must be >= 0 and <= 1", fieldPath, *kvt.PreferredWeight))
+		}
+		if enforcement == nvidiacomv1alpha1.KvTransferEnforcementRequired {
+			errs = append(errs, fmt.Errorf("%s.preferredWeight must not be set when enforcement is \"required\"", fieldPath))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 // validateFailoverRequiresDiscoveryMode checks that when any service has
-// failover enabled, the DGD carries the nvidia.com/dynamo-kube-discovery-mode
-// annotation set to "container". Failover pods produce multiple engine
-// containers that each need their own discovery identity.
+// intra-pod failover enabled, the DGD carries the nvidia.com/dynamo-kube-discovery-mode
+// annotation set to "container". Intra-pod failover produces multiple engine
+// containers within the same pod that each need their own discovery identity.
+// Inter-pod failover uses separate pods, so the annotation is not required.
 func (v *DynamoGraphDeploymentValidator) validateFailoverRequiresDiscoveryMode() error {
-	hasFailover := false
+	hasIntraPodFailover := false
 	for _, svc := range v.deployment.Spec.Services {
-		if svc != nil && svc.Failover != nil && svc.Failover.Enabled {
-			hasFailover = true
+		if svc == nil || svc.Failover == nil || !svc.Failover.Enabled {
+			continue
+		}
+		if svc.Failover.Mode == nvidiacomv1alpha1.GMSModeIntraPod {
+			hasIntraPodFailover = true
 			break
 		}
 	}
-	if !hasFailover {
+	if !hasIntraPodFailover {
 		return nil
 	}
 

@@ -143,8 +143,7 @@ runs:
       uses: ./.github/actions/bootstrap-buildkit
       with:
         builder_name: ${{ inputs.builder_name }}
-        buildkit_worker_addresses: ${{ steps.prepare.outputs.worker_addresses }}
-        fresh_builder: ${{ inputs.fresh_builder }}
+        buildkit_worker_addresses: ${{ inputs.fresh_builder != 'true' && steps.prepare.outputs.worker_addresses || '' }}
         ephemeral_storage: ${{ inputs.ephemeral_storage }}
         namespace: ${{ inputs.namespace }}
         replicas: ${{ inputs.replicas }}
@@ -152,4 +151,4 @@ runs:
         requests_memory: ${{ inputs.requests_memory }}
         limits_memory: ${{ inputs.limits_memory }}
         tolerations: ${{ inputs.tolerations }}
-
+        suppress_fallback_warning: ${{ inputs.fresh_builder }}

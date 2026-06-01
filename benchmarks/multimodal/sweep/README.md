@@ -29,7 +29,9 @@ python -m benchmarks.multimodal.sweep \
 model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
 concurrencies: [16, 32, 64, 128, 256]
 osl: 150                    # output sequence length
-request_count: 1000         # requests per concurrency level
+conversation_num: 10        # sessions per sweep value (optional; derived from
+                            # input JSONL's unique session_id count if unset;
+                            # flat JSONLs count each row as a 1-turn conversation)
 warmup_count: 5
 port: 8000
 timeout: 900                # seconds to wait for server readiness
@@ -64,9 +66,20 @@ python -m benchmarks.multimodal.sweep \
   --config experiments/embedding_cache/vllm_serve.yaml \
   --concurrencies 1,2,4 \
   --osl 200 \
-  --request-count 50 \
+  --conversation-num 10 \
   --skip-plots
 ```
+
+## Warmup semantics
+
+`warmup_count: N` is a **request (turn) budget**, not a session budget. For a
+10×10 JSONL with `warmup_count: 2`, warmup issues 2 total requests — both go
+to `user_0` (turns 0 and 1) because aiperf's continuation-turn priority keeps
+feeding the in-flight session until its budget runs out. Warmup does NOT
+consume 2 full sessions (20 requests). Profiling then starts at `user_1`,
+runs `user_1..user_9` to completion, and wraps to a fresh `user_0` instance
+for the 10th session. Keep `warmup_count` small (≤ turns-per-session) so
+warmup stays within a single session's prefix.
 
 ## Output Directory Structure
 

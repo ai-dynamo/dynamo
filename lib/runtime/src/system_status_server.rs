@@ -216,6 +216,17 @@ pub async fn spawn_system_status_server(
             );
     }
 
+    // Self-hosted MDC files. Always mounted; empty registry → 404.
+    // Suffix segment scopes per-registration (LoRA slug, or `_base`)
+    // so detaching one registration doesn't wipe another's entries.
+    app = app.route(
+        "/v1/metadata/{model_slug}/{model_suffix}/{*filename}",
+        get({
+            let state = Arc::clone(&server_state);
+            move |path| metadata_file_handler(State(state), path)
+        }),
+    );
+
     let app = app
         .fallback(|| async {
             tracing::info!("[fallback handler] called");
@@ -472,6 +483,45 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
                     count: None,
                 }),
             )
+        }
+    }
+}
+
+/// `GET /v1/metadata/{slug}/{suffix}/{filename}` — 404 on miss,
+/// 500 on read error, raw bytes on hit. Consumer blake3-verifies.
+async fn metadata_file_handler(
+    State(state): State<Arc<SystemStatusState>>,
+    Path((model_slug, model_suffix, filename)): Path<(String, String, String)>,
+) -> impl IntoResponse {
+    let path = match state
+        .drt()
+        .metadata_artifacts()
+        .get(&model_slug, &model_suffix, &filename)
+    {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                model_slug,
+                model_suffix,
+                filename,
+                "metadata artifact not registered for self-host"
+            );
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+    };
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (StatusCode::OK, bytes).into_response(),
+        Err(err) => {
+            tracing::error!(
+                model_slug,
+                model_suffix,
+                filename,
+                path = %path.display(),
+                %err,
+                "failed to read self-hosted metadata file"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response()
         }
     }
 }

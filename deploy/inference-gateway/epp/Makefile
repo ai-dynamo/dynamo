@@ -27,6 +27,12 @@ MULTIARCH_PLATFORMS ?= linux/amd64,linux/arm64
 DOCKER_PROXY ?=
 EXTRA_BUILD_ARGS ?=
 
+# sccache configuration for Rust compilation caching (CI only).
+# Leave USE_SCCACHE unset locally to build without S3 cache.
+USE_SCCACHE ?=
+SCCACHE_BUCKET ?=
+SCCACHE_REGION ?=
+
 DOCKER_BUILDX_CMD ?= docker buildx
 IMAGE_BUILD_CMD ?= $(DOCKER_BUILDX_CMD) build
 RUST_IMAGE ?= $(DOCKER_PROXY)rust:1.93.1
@@ -106,6 +112,22 @@ image-kind: image-load ## Build and load the image into kind cluster
 
 ##@ Multi-Architecture Builds
 
+# Collect sccache args only when USE_SCCACHE=true. IRSA secrets come from the
+# runner env (AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN); buildx mounts them
+# into the RUN step that invokes cargo so sccache can authenticate to S3.
+SCCACHE_ARGS =
+ifeq ($(USE_SCCACHE),true)
+  SCCACHE_ARGS += --build-arg USE_SCCACHE=true
+  SCCACHE_ARGS += --build-arg SCCACHE_BUCKET=$(SCCACHE_BUCKET)
+  SCCACHE_ARGS += --build-arg SCCACHE_REGION=$(SCCACHE_REGION)
+  ifneq ($(AWS_WEB_IDENTITY_TOKEN_FILE),)
+    ifneq ($(AWS_ROLE_ARN),)
+      SCCACHE_ARGS += --secret id=aws-web-identity-token,src=$(AWS_WEB_IDENTITY_TOKEN_FILE)
+      SCCACHE_ARGS += --secret id=aws-role-arn,env=AWS_ROLE_ARN
+    endif
+  endif
+endif
+
 .PHONY: image-multiarch
 image-multiarch: ## Build multi-arch image (requires --push ; --load not supported)
 	$(IMAGE_BUILD_CMD) -t $(IMAGE_TAG) \
@@ -116,7 +138,7 @@ image-multiarch: ## Build multi-arch image (requires --push ; --load not support
 		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
 		--build-arg BUILD_REF=$(GIT_TAG) \
-		$(EXTRA_BUILD_ARGS) $(PUSH) .
+		$(SCCACHE_ARGS) $(EXTRA_BUILD_ARGS) $(PUSH) .
 
 .PHONY: image-multiarch-push
 image-multiarch-push: PUSH=--push ## Build and push multi-arch image to registry

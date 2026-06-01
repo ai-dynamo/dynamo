@@ -3,19 +3,20 @@
 
 //! Rust-native offline replay benchmark entrypoint.
 //!
-//! Useful for profiling replay itself without the Python CLI wrapper. This keeps
-//! the default mocker perf model unless CLI overrides are provided.
+//! Useful for profiling replay itself without the Python CLI wrapper. This
+//! bench intentionally uses the mocker's internal polynomial perf model so the
+//! measurements stay focused on replay and router overhead.
 //!
 //! Run with: cargo bench --package dynamo-bench --bench offline_replay_bench -- --help
 
 use std::fs::File;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use dynamo_mocker::common::protocols::MockEngineArgs;
-use dynamo_mocker::replay::{ReplayRouterMode, simulate_trace_file_with_router_mode};
+use dynamo_mocker::loadgen::Trace;
+use dynamo_mocker::replay::{ReplayRouterMode, simulate_trace_workload_with_router_mode};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum RouterModeArg {
@@ -80,10 +81,6 @@ struct Args {
     #[arg(long)]
     decode_speedup_ratio: Option<f64>,
 
-    /// Explicit planner profile NPZ to use for perf-model timing
-    #[arg(long)]
-    planner_profile_data: Option<PathBuf>,
-
     /// Optional path to write the full replay report as pretty JSON
     #[arg(long)]
     report_json: Option<PathBuf>,
@@ -112,9 +109,6 @@ fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
     if let Some(decode_speedup_ratio) = args.decode_speedup_ratio {
         builder = builder.decode_speedup_ratio(decode_speedup_ratio);
     }
-    if let Some(planner_profile_data) = args.planner_profile_data.as_ref() {
-        builder = builder.planner_profile_data(Some(planner_profile_data.clone()));
-    }
     builder
         .build()
         .context("failed to build replay engine args")?
@@ -129,22 +123,21 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     let engine_args = build_engine_args(&args)?;
-    let started_at = Instant::now();
+    let trace = Trace::from_mooncake(&args.trace_file, args.trace_block_size)?
+        .normalize_session_starts()?
+        .speed_up_timing(args.arrival_speedup_ratio)?;
     let mut last_report = None;
     for _ in 0..args.iterations {
-        last_report = Some(simulate_trace_file_with_router_mode(
+        last_report = Some(simulate_trace_workload_with_router_mode(
             engine_args.clone(),
             None,
             None,
-            &args.trace_file,
-            args.trace_block_size,
+            trace.clone(),
             args.num_workers,
-            args.arrival_speedup_ratio,
             args.router_mode.into(),
         )?);
     }
     let report = last_report.expect("iterations must be at least 1");
-    let process_wall_time_ms = started_at.elapsed().as_secs_f64() * 1000.0;
 
     if let Some(report_path) = args.report_json.as_ref() {
         let file = File::create(report_path)
@@ -155,26 +148,7 @@ fn main() -> Result<()> {
     }
 
     println!("Offline replay report");
-    println!(
-        "  completed_requests: {}",
-        report.request_counts.completed_requests
-    );
-    println!(
-        "  request_throughput_rps: {:.6}",
-        report.throughput.request_throughput_rps
-    );
-    println!(
-        "  output_throughput_tok_s: {:.6}",
-        report.throughput.output_throughput_tok_s
-    );
-    println!("  mean_ttft_ms: {:.6}", report.latency.ttft.mean_ms);
-    println!("  mean_e2e_latency_ms: {:.6}", report.latency.e2e.mean_ms);
-    println!(
-        "  prefix_cache_reused_ratio: {:.6}",
-        report.prefix_cache_reused_ratio
-    );
-    println!("  wall_time_ms: {:.6}", report.throughput.wall_time_ms);
-    println!("  process_wall_time_ms: {:.6}", process_wall_time_ms);
+    println!("{report}");
 
     Ok(())
 }

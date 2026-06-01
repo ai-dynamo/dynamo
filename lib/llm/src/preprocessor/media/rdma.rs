@@ -51,6 +51,53 @@ pub struct RdmaMediaDataDescriptor {
     pub(crate) source_storage: Option<Arc<nixl::NixlRegistered<SystemStorage>>>,
 }
 
+impl RdmaMediaDataDescriptor {
+    /// xxh3-64 of `(shape, dtype, decoded byte payload)`. Returns `None` if
+    /// the descriptor was deserialized from the wire and no longer holds
+    /// local storage. Used by MM-aware KV routing to produce a
+    /// content-addressed `mm_hash` so the same image reached through
+    /// different (signed) URLs collides on the same routing key.
+    ///
+    /// `shape` + `dtype` are included in the preimage so two images that
+    /// happen to share a raw byte buffer but differ in dimensions or
+    /// element layout (e.g. `3x224x224` vs `224x224x3`) don't collide on
+    /// the same routing hash.
+    #[cfg(feature = "lightseek-mm")]
+    pub(crate) fn content_hash(&self) -> Option<u64> {
+        use dynamo_memory::MemoryDescriptor;
+        use xxhash_rust::xxh3::Xxh3;
+        let registered = self.source_storage.as_ref()?;
+        let storage = registered.storage();
+        let len = storage.size();
+        if len == 0 {
+            return None;
+        }
+        let mut hasher = Xxh3::new();
+        // shape (rank + per-dim u64s) — fixed width so distinct shapes
+        // can't alias each other after concatenation.
+        hasher.update(&(self.tensor_info.shape.len() as u64).to_le_bytes());
+        for &dim in &self.tensor_info.shape {
+            hasher.update(&(dim as u64).to_le_bytes());
+        }
+        // dtype as a single discriminant byte; widen if DataType ever grows.
+        let dtype_byte: u8 = match self.tensor_info.dtype {
+            DataType::UINT8 => 0,
+        };
+        hasher.update(&[dtype_byte]);
+        // raw payload via SystemStorage's Slice impl.
+        // SAFETY: `storage` is borrowed for the duration of this call;
+        // SystemStorage owns the malloc'd buffer and won't free or
+        // relocate it while the borrow is alive. The Slice trait's
+        // safety contract about no concurrent mutable access is upheld
+        // because `content_hash` is only invoked on descriptors during
+        // request building, before they're sent to NIXL.
+        use dynamo_memory::actions::Slice;
+        let bytes = unsafe { storage.as_slice().ok()? };
+        hasher.update(bytes);
+        Some(hasher.digest())
+    }
+}
+
 impl DecodedMediaData {
     pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
         let source_storage = self.data;

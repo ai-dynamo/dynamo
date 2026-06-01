@@ -116,10 +116,13 @@ RUN apt-get update -y \
 {% if device == "cuda" %}
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
+# --setopt=tsflags=nocontexts: skip SELinux file-context labeling. The manylinux
+# image lacks the SELinux policy store that some compute nodes expect; without
+# this flag, dnf fails with "ValueError: SELinux policy is not managed".
 RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
-    dnf install -y almalinux-release-synergy && \
+    dnf install -y --setopt=tsflags=nocontexts almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
-    dnf install -y \
+    dnf install -y --setopt=tsflags=nocontexts \
         # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
         autoconf \
         automake \
@@ -157,19 +160,19 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         libuuid-devel \
         zlib-devel
 
-# Build hwloc >= 2.3 from source (RHEL8 ships 2.2 which lacks hwloc_location API
-# required by nixl v1.0.x libfabric topology code)
-ARG HWLOC_VERSION=2.12.0
-RUN HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1-2)" && \
-    cd /tmp && \
-    curl --retry 3 -LO "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
-    tar xf hwloc-${HWLOC_VERSION}.tar.gz && \
-    cd hwloc-${HWLOC_VERSION} && \
-    ./configure --prefix=/usr/local && \
-    make -j$(nproc) && \
+# Default comes from context.yaml; keep it in sync with upstream NIXL's
+# contrib/Dockerfile.manylinux. NIXL v1.0.x needs newer hwloc than RHEL8 ships.
+ARG HWLOC_VERSION
+RUN cd /tmp && \
+    HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1,2)" && \
+    wget -q "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
+    tar -xzf "hwloc-${HWLOC_VERSION}.tar.gz" && \
+    cd "hwloc-${HWLOC_VERSION}" && \
+    ./configure --prefix=/usr/local --disable-nvml && \
+    make -j"$(nproc)" && \
     make install && \
     ldconfig && \
-    rm -rf /tmp/hwloc-*
+    rm -rf "/tmp/hwloc-${HWLOC_VERSION}" "/tmp/hwloc-${HWLOC_VERSION}.tar.gz"
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -212,7 +215,7 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 # Cache uv downloads; uv handles its own locking for this cache.
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
@@ -252,9 +255,16 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Always build FFmpeg so libs are available for Rust checks in CI
-# Do not delete the source tarball for legal reasons
+# Always build FFmpeg so libs are available for Rust checks in CI.
+# We also build the ffmpeg CLI with h264_nvenc + libvpx_vp9 encoders so Python
+# code can encode video without the GPL-licensed binary shipped by imageio-ffmpeg.
+# Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
+# NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
+# GPU images) and VP9 from libvpx (BSD).
+# Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
+ARG NV_CODEC_HEADERS_REF
+ARG LIBVPX_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
@@ -263,11 +273,26 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     if [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
-    apt-get update -y && apt-get install -y build-essential pkg-config xz-utils; \
+    apt-get update -y && apt-get install -y build-essential pkg-config xz-utils git yasm; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
     elif [ "$DEVICE" = "cuda" ]; then \
-    dnf install -y pkg-config xz; \
+    dnf install -y --setopt=tsflags=nocontexts pkg-config xz git yasm; \
     fi && \
+    # nv-codec-headers: provides the NVENC/NVDEC API headers ffmpeg compiles against.
+    # Header-only, no runtime dep here; libcuda/libnvidia-encode are loaded at runtime
+    # in the consuming container.
+    cd /tmp && \
+    git clone --depth 1 --branch ${NV_CODEC_HEADERS_REF} https://github.com/FFmpeg/nv-codec-headers.git && \
+    make -C nv-codec-headers PREFIX=/usr/local install && \
+    # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
+    # source so we don't need to track distro package names (libvpx-dev on Debian
+    # vs libvpx-devel via EPEL on RHEL/manylinux).
+    git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && \
+    cd libvpx && \
+    ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples --disable-unit-tests --disable-tools --disable-docs && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
     cd /tmp && \
     curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
@@ -276,17 +301,21 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --prefix=/usr/local \
         --disable-gpl \
         --disable-nonfree \
-        --disable-programs \
         --disable-doc \
         --disable-static \
         --disable-x86asm \
         --disable-network \
-        --disable-encoders \
-        --disable-muxers \
         --disable-bsfs \
         --disable-devices \
         --disable-libdrm \
-        --enable-shared && \
+        --enable-shared \
+        --enable-nvenc \
+        --enable-libvpx \
+        --disable-encoders \
+        --enable-encoder=h264_nvenc,libvpx_vp9 \
+        --disable-muxers \
+        --enable-muxer=mov,mp4,matroska,webm \
+        --enable-protocol=file,pipe && \
     make -j$(nproc) && \
     make install && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
@@ -362,6 +391,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
      ldconfig
 
 {% if device == "cuda" %}
+ARG NIXL_LIBFABRIC_REPO
 ARG NIXL_LIBFABRIC_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -371,7 +401,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone https://github.com/ofiwg/libfabric.git && \
+    git clone "${NIXL_LIBFABRIC_REPO}" && \
     cd libfabric && \
     git checkout $NIXL_LIBFABRIC_REF && \
     ./autogen.sh && \
@@ -391,11 +421,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
     echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
     ldconfig
+
+ENV PKG_CONFIG_PATH="/usr/local/libfabric/lib/pkgconfig:${PKG_CONFIG_PATH}"
 {% endif %}
 
 {% if framework == "vllm" and device == "cuda" %}
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
-ARG AWS_SDK_CPP_VERSION=1.11.760
+ARG AWS_SDK_CPP_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
@@ -441,9 +473,9 @@ ARG USE_SCCACHE
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
@@ -456,9 +488,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
     else \
-        maturin build --release --features "kv-indexer" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
@@ -482,7 +514,7 @@ COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% if device == "cuda" %}
 # Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         export UV_CACHE_DIR=/root/.cache/uv && \
         source ${VIRTUAL_ENV}/bin/activate && \
@@ -495,7 +527,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ##### wheel_builder ##############
 ##################################
 {% if "nixl_ref" in context[framework] %}
-# Builds nixl (native + Python wheel) and kvbm wheel, then consolidates all wheels.
+# Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
+# consolidates all wheels.
 # Runtime templates COPY from this stage.
 
 FROM wheel_builder_base AS wheel_builder
@@ -570,7 +603,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
@@ -591,9 +624,9 @@ COPY components/ /opt/dynamo/components/
 ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
@@ -626,6 +659,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+
 {% else %}
 # SGLang uses NIXL from the upstream lmsysorg/sglang runtime image and does not
 # build Dynamo KVBM. Keep this alias so downstream stages can still COPY Dynamo

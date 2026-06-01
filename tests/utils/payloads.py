@@ -14,9 +14,11 @@
 # limitations under the License.
 
 import base64
+import json
 import logging
 import math
 import re
+import struct
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -27,6 +29,8 @@ import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.prometheus import sum_metric_samples
+from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,12 @@ class BasePayload:
     body: Dict[str, Any]
     expected_response: List[Any]  # Can be List[str] or List[List[str]] for alternatives
     expected_log: List[str]
+    # Number of times to send this exact request in sequence. Each call must
+    # pass validation independently. Use >1 for cache/repeatability tests
+    # (e.g., CachedTokensChatPayload asserts a cache hit on the 2nd+ call).
+    # Independent of max_attempts: repeat_count=N means "N independent
+    # successes required"; max_attempts=N means "at least one success out of
+    # N tries".
     repeat_count: int = 1
     timeout: int = 60
 
@@ -51,6 +61,12 @@ class BasePayload:
     system_ports: list[int] = field(default_factory=list)
     # When True, the HTTP request is made with stream=True (for SSE responses).
     http_stream: bool = False
+    # Maximum number of attempts for validation inside run_serve_deployment.
+    # ``1`` (default) means no retry — first validation failure surfaces
+    # immediately. Set >1 only when the test target is non-deterministic and
+    # you've confirmed via tests/README.md "Flaky Tests" that retry is the
+    # right mitigation; the underlying flakiness still needs a tracking ticket.
+    max_attempts: int = 1
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")
@@ -114,6 +130,7 @@ class ChatPayload(BasePayload):
     """Payload for chat completions endpoint."""
 
     endpoint: str = "/v1/chat/completions"
+    expected_num_choices: Optional[int] = None
 
     @staticmethod
     def extract_content(response):
@@ -156,7 +173,7 @@ class ChatPayload(BasePayload):
             if field_content:
                 return field_content
 
-        raise ValueError(
+        raise AssertionError(
             "All possible content fields are empty in message. "
             f"Checked: content={repr(content)}, reasoning_content={repr(reasoning_content)}, "
             f"refusal={repr(refusal)}, tool_calls={tool_calls}"
@@ -164,6 +181,41 @@ class ChatPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return ChatPayload.extract_content(response)
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+
+        if self.expected_num_choices is None:
+            return
+
+        result = response.json()
+        choices = result.get("choices")
+        assert isinstance(choices, list), f"Missing choices list: {result}"
+        assert len(choices) == self.expected_num_choices, (
+            f"Expected {self.expected_num_choices} choices, "
+            f"got {len(choices)}: {result}"
+        )
+
+
+class RouterNvextChatPayload(ChatPayload):
+    """Chat payload that validates structured router metadata in nvext."""
+
+    def __init__(
+        self,
+        *args,
+        router_nvext_expectation: RouterNvextExpectation | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.router_nvext_expectation = router_nvext_expectation
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        validate_router_nvext(
+            response.json(),
+            self.router_nvext_expectation,
+            context=type(self).__name__,
+        )
 
 
 @dataclass
@@ -302,6 +354,37 @@ class ToolCallingChatPayload(ChatPayload):
 
 
 @dataclass
+class GuidedDecodingChatPayload(ChatPayload):
+    """ChatPayload that validates a json_schema response_format produces valid JSON."""
+
+    def __init__(self, *args, required_keys: Optional[List[str]] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.required_keys = required_keys or []
+
+    def validate(self, response, content: str) -> None:
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError) as e:
+            raise AssertionError(
+                "Guided decoding response is not valid JSON — grammar backend "
+                f"likely disabled. Content: {content!r}"
+            ) from e
+
+        assert isinstance(parsed, dict), (
+            "Guided decoding response should be a JSON object, "
+            f"got {type(parsed).__name__}: {content!r}"
+        )
+
+        for key in self.required_keys:
+            assert key in parsed, (
+                f"Guided decoding response missing required key {key!r}. "
+                f"Parsed: {parsed}"
+            )
+
+        logger.info(f"Guided decoding validation passed: {parsed}")
+
+
+@dataclass
 class CachedTokensChatPayload(ChatPayload):
     """
     Chat payload that validates cached tokens are populated in repeated requests.
@@ -321,6 +404,7 @@ class CachedTokensChatPayload(ChatPayload):
         expected_log: Optional[List[str]] = None,
         timeout: int = 60,
         min_cached_tokens: int = 1,
+        router_nvext_expectation: RouterNvextExpectation | None = None,
     ):
         super().__init__(
             body=body,
@@ -332,6 +416,7 @@ class CachedTokensChatPayload(ChatPayload):
         self.min_cached_tokens = min_cached_tokens
         self._request_count = 0
         self._cached_tokens_found = False
+        self.router_nvext_expectation = router_nvext_expectation
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -340,6 +425,11 @@ class CachedTokensChatPayload(ChatPayload):
 
         self._request_count += 1
         result = response.json()
+        validate_router_nvext(
+            result,
+            self.router_nvext_expectation,
+            context=f"{type(self).__name__} request {self._request_count}",
+        )
 
         # Check usage field for cached tokens
         # Expected structure: usage.prompt_tokens_details.cached_tokens
@@ -819,6 +909,14 @@ class EmbeddingPayload(BasePayload):
     def extract_embeddings(response):
         """
         Process embeddings API responses.
+
+        Accepts both shapes from the OpenAI spec:
+        - ``encoding_format="float"`` (default) -- each ``data[].embedding``
+          is a JSON array of floats.
+        - ``encoding_format="base64"`` -- each ``data[].embedding`` is a
+          base64-encoded string of little-endian f32 bytes. The string
+          is decoded here so the dimension count in the summary string
+          stays comparable across both shapes.
         """
         response.raise_for_status()
         result = response.json()
@@ -837,17 +935,161 @@ class EmbeddingPayload(BasePayload):
                 item["object"] == "embedding"
             ), f"Expected object='embedding', got {item['object']}"
             assert "embedding" in item, "Missing 'embedding' vector in item"
-            assert isinstance(
-                item["embedding"], list
-            ), "Embedding should be a list of floats"
-            assert len(item["embedding"]) > 0, "Embedding vector should not be empty"
-            embeddings.append(item["embedding"])
+            raw = item["embedding"]
+            if isinstance(raw, str):
+                # base64: decode to a float list so downstream dimension
+                # checks are uniform.
+                decoded = base64.b64decode(raw)
+                assert (
+                    len(decoded) % 4 == 0
+                ), f"base64 payload not f32-aligned: {len(decoded)} bytes"
+                count = len(decoded) // 4
+                vec = list(struct.unpack(f"<{count}f", decoded))
+            elif isinstance(raw, list):
+                vec = raw
+            else:
+                raise AssertionError(
+                    f"Embedding should be a list of floats or a base64 "
+                    f"string, got {type(raw).__name__}"
+                )
+            assert len(vec) > 0, "Embedding vector should not be empty"
+            embeddings.append(vec)
 
         # Return a summary string for validation
         return f"Generated {len(embeddings)} embeddings with dimension {len(embeddings[0])}"
 
     def response_handler(self, response: Any) -> str:
         return EmbeddingPayload.extract_embeddings(response)
+
+
+@dataclass
+class EmbeddingMultiWorkerDispatchPayload(BasePayload):
+    """Send ``repeat_count`` embedding requests to the frontend, capturing a
+    per-worker ``/metrics`` snapshot on the FIRST iteration and on the LAST
+    iteration. Assert the delta — i.e. requests attributed during *this*
+    burst — matches an expected per-worker pattern.
+
+    Diff semantics are important because the same fixture may run multiple
+    bursts back-to-back (e.g. one per model in a multi-model dispatch
+    test): the prior burst leaves a worker's absolute counter > 0, so only
+    deltas can prove the second burst did not also reach that worker.
+
+    Two routing properties of the embedding worker pool are checked
+    through this payload:
+
+    1. **Same-model load balancing** — when multiple workers serve the
+       same embedding model, ``select_worker_set_with()`` does
+       weighted-random selection across them, so both workers should see
+       ``>0`` delta. Set ``expected_workers_with_delta={port1, port2}``.
+
+    2. **Multi-model dispatch** — when workers serve different models,
+       the name-keyed ``get_embeddings_engine(model)`` lookup must route
+       only to the worker registered for the requested model. Set
+       ``expected_workers_with_delta={port_of_requested_model}`` so the
+       check asserts the wrong-model worker observed exactly 0 delta
+       during this burst.
+
+    The per-worker counter sampled is
+    ``dynamo_component_requests_total`` — the same counter exercised by
+    ``MetricsPayload`` for single-worker tests. The dispatch assertion
+    fires once after the last repeat.
+    """
+
+    endpoint: str = "/v1/embeddings"
+
+    # Indices into ``self.system_ports`` (inherited from BasePayload, with
+    # DefaultPort.SYSTEM{1,2} entries remapped to per-test dynamic ports
+    # by the harness). Each indexed worker must have observed >0 delta
+    # during this burst; other workers must observe exactly 0 delta.
+    #
+    # Index-based on purpose: the actual port values are not known at
+    # config-construction time because the harness assigns dynamic ports.
+    expected_worker_indices_with_delta: set[int] = field(default_factory=set)
+
+    # Lower bound on the SUM of per-worker deltas across all workers. Use
+    # ``repeat_count`` for an exact-match expectation in clean fixtures.
+    # Defaults to 0 (predicate-only — workers_with_delta must match).
+    min_total_delta: int = 0
+
+    # Settle delay applied around each /metrics scrape so the worker has
+    # time to flush the most recent counter increment.
+    settle_seconds: float = 1.0
+
+    # Internal: iteration counter and baseline snapshot. Both are mutated
+    # in validate(); the dataclass machinery treats them as normal
+    # attributes once the instance is constructed.
+    _calls_seen: int = 0
+    _baseline: dict[int, float] = field(default_factory=dict)
+
+    def with_model(self, model):
+        # Embedding body is set externally; this is a no-op.
+        return self
+
+    def response_handler(self, response: Any) -> str:
+        # Validate the per-iteration response shape so an HTML/JSON error
+        # surfaces immediately. The *dispatch* assertion happens in
+        # validate() on the final repeat.
+        return EmbeddingPayload.extract_embeddings(response)
+
+    def _scrape(self) -> dict[int, float]:
+        prefix = prometheus_names.name_prefix.COMPONENT
+        counter_name = f"{prefix}_{prometheus_names.work_handler.REQUESTS_TOTAL}"
+
+        counts: dict[int, float] = {}
+        for port in self.system_ports:
+            r = requests.get(
+                f"http://{self.host}:{port}/metrics",
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+            counts[port] = sum_metric_samples(r.text, counter_name)
+        return counts
+
+    def validate(self, response: Any, content: str) -> None:
+        """First repeat: snapshot baseline counts. Last repeat: scrape
+        again, compute deltas, and assert the dispatch pattern.
+        """
+        self._calls_seen += 1
+
+        if self._calls_seen == 1:
+            # Snapshot AFTER the first request; this is fine because the
+            # baseline is subtracted out below — we only care that the
+            # delta from this point forward matches expectations.
+            time.sleep(self.settle_seconds)
+            self._baseline = self._scrape()
+            logger.info("Baseline per-worker counts: %s", self._baseline)
+            return
+
+        if self._calls_seen < self.repeat_count:
+            return
+
+        # Last repeat — compute delta.
+        time.sleep(self.settle_seconds)
+        final = self._scrape()
+        delta = {p: final[p] - self._baseline.get(p, 0.0) for p in final}
+        logger.info(
+            "Per-worker delta (final - baseline) over %d requests: %s",
+            self.repeat_count - 1,
+            delta,
+        )
+
+        workers_with_delta_idx = {
+            i for i, port in enumerate(self.system_ports) if delta.get(port, 0) > 0
+        }
+        assert workers_with_delta_idx == self.expected_worker_indices_with_delta, (
+            f"Expected worker indices with delta "
+            f"{self.expected_worker_indices_with_delta}, got "
+            f"{workers_with_delta_idx}. Per-worker delta: {delta} "
+            f"(baseline={self._baseline}, final={final}, "
+            f"system_ports={self.system_ports})"
+        )
+
+        if self.min_total_delta > 0:
+            total_delta = sum(delta.values())
+            assert total_delta >= self.min_total_delta, (
+                f"Expected at least {self.min_total_delta} total delta across "
+                f"workers, got {int(total_delta)}. Per-worker delta: {delta}"
+            )
 
 
 @dataclass
@@ -863,17 +1105,93 @@ class MetricCheck:
 
 
 @dataclass
+class KvEventMetricsPayload(BasePayload):
+    """Validate structured KV event counters instead of grepping event logs."""
+
+    endpoint: str = "/metrics"
+    method: str = "GET"
+    port: int = DefaultPort.SYSTEM1.value
+    event_type: str = "stored"
+    min_received: int = 1
+    min_accepted: int = 1
+    settle_seconds: float = 0.5
+
+    def with_model(self, model):
+        return self
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        if self.settle_seconds > 0:
+            time.sleep(self.settle_seconds)
+
+        contents = []
+        seen_ports: set[int] = set()
+
+        for port in [self.port, *self.system_ports]:
+            if port in seen_ports:
+                continue
+            seen_ports.add(port)
+            metrics_response = requests.get(
+                f"http://{self.host}:{port}/{self.endpoint.lstrip('/')}",
+                timeout=self.timeout,
+            )
+            metrics_response.raise_for_status()
+            contents.append(metrics_response.text)
+
+        return "\n".join(contents)
+
+    def validate(self, response: Any, content: str) -> None:
+        metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kv_publisher.ZMQ_EVENTS_TOTAL}"
+        )
+        received = sum_metric_samples(
+            content,
+            metric_name,
+            {"stage": "received", "event_type": self.event_type},
+        )
+        accepted = sum_metric_samples(
+            content,
+            metric_name,
+            {"stage": "accepted", "event_type": self.event_type},
+        )
+
+        assert received >= self.min_received, (
+            f"Expected at least {self.min_received} received KV events with "
+            f"event_type={self.event_type!r}, got {received:g}"
+        )
+        assert accepted >= self.min_accepted, (
+            f"Expected at least {self.min_accepted} accepted KV events with "
+            f"event_type={self.event_type!r}, got {accepted:g}"
+        )
+
+        logger.info(
+            "SUCCESS: KV event metrics found for event_type=%s: "
+            "received=%s accepted=%s",
+            self.event_type,
+            received,
+            accepted,
+        )
+
+
+@dataclass
 class MetricsPayload(BasePayload):
     """Base class for Prometheus metrics validation payloads.
 
     Validates common dynamo_component_* metrics shared across all backends.
     Backend-specific subclasses handle engine-specific metrics.
+
+    Set ``check_lifecycle_gauges=True`` to additionally assert the unified-
+    only framework gauges (``cleanup_time_seconds``, ``drain_time_seconds``,
+    ``kv_cache_hit_rate``). Off by default because legacy entry points
+    don't emit them.
     """
 
     endpoint: str = "/metrics"
     method: str = "GET"
     port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
+    check_lifecycle_gauges: bool = False
 
     def with_model(self, model):
         # Metrics does not use model in request body
@@ -963,6 +1281,46 @@ class MetricsPayload(BasePayload):
             ),
         ]
 
+    def _get_lifecycle_gauge_checks(self) -> list[MetricCheck]:
+        """Unified-only framework lifecycle gauges. Legacy entry points
+        don't emit these — gated by ``check_lifecycle_gauges`` so legacy
+        callers don't trip on the absence.
+
+        - cleanup_time / drain_time: Rust-side ``LifecycleGauges``, owned
+          by ``dynamo_backend_common::Worker``. While the worker is
+          serving the values are 0 (set at shutdown). The "name appears"
+          check catches regressions where the gauges silently fail to
+          register against the runtime's ``MetricsRegistry``.
+
+        ``kv_cache_hit_rate`` is INTENTIONALLY not in this list. With the
+        Rust ``prometheus`` crate, a ``GaugeVec`` family with no labeled
+        children is skipped by the text encoder — so an engine that
+        legitimately reports ``kv_cache_hit_rate=None`` (no prefix cache,
+        or no requests observed) has no HELP line. That's the tri-state
+        contract working as designed; not a regression to test for here.
+        """
+        prefix = prometheus_names.name_prefix.COMPONENT
+
+        def metric_pattern(name):
+            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
+
+        return [
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.lifecycle.CLEANUP_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) >= 0,
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.lifecycle.DRAIN_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) >= 0,
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+        ]
+
     def _get_backend_specific_checks(self) -> list[MetricCheck]:
         """Get backend-specific metric checks. Override in subclasses."""
         return []
@@ -1022,9 +1380,11 @@ class MetricsPayload(BasePayload):
         """Validate Prometheus metrics output"""
         content = self._filter_bucket_metrics(content)
 
-        # Collect all checks: common + backend-specific
+        # Collect all checks: common + backend-specific (+ lifecycle if opted in)
         metrics_to_check = self._get_common_metric_checks()
         metrics_to_check.extend(self._get_backend_specific_checks())
+        if self.check_lifecycle_gauges:
+            metrics_to_check.extend(self._get_lifecycle_gauge_checks())
 
         # Run all validations
         self._validate_metric_checks(metrics_to_check, content)

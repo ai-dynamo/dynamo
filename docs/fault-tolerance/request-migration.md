@@ -4,6 +4,10 @@
 title: Request Migration
 ---
 
+<p align="left">
+  <a href="./request-migration.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 This document describes how Dynamo implements request migration to handle worker failures gracefully during LLM text generation. Request migration allows in-progress requests to continue on different workers when the original worker becomes unavailable, providing fault tolerance and improved user experience.
 
 ## Overview
@@ -148,6 +152,14 @@ These metrics can be used to:
 For more information on Dynamo metrics, see the [Metrics documentation](../observability/metrics.md).
 
 ## Known Limitations
+
+### Multiple Choices (`n > 1`)
+
+Request migration is **not supported** for OpenAI-compatible requests that ask for multiple generated choices with `n > 1`. Dynamo disables migration for those requests, even when `--migration-limit` is greater than 0.
+
+**Why:** Multi-choice generation maintains separate per-choice output state. Migrating a partially completed request would need to transfer the generated token state, remaining token budget, finish state, and decoder state for each choice independently. The current migration path preserves a single continuation state, so retrying an interleaved `n > 1` request could duplicate or drop choice-specific output.
+
+This limitation does not affect normal single-choice requests where `n` is omitted or set to 1.
 
 ### Guided Decoding (Structured Output)
 

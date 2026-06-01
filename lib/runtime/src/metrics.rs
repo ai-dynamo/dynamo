@@ -12,6 +12,7 @@ pub mod request_plane;
 pub mod tokio_perf;
 pub mod transport_metrics;
 pub mod work_handler_perf;
+pub mod work_handler_pool;
 
 use parking_lot::Mutex;
 use std::collections::HashSet;

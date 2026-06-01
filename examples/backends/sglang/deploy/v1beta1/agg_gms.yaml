@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GPU Memory Service (GMS) sidecar example.
+#
+# The operator injects a GMS sidecar init container that provides shared GPU
+# memory access via DRA (Dynamic Resource Allocation). The sidecar runs two GMS
+# processes per GPU (weights + kv_cache) and communicates with the main container
+# over UDS sockets on a shared emptyDir volume.
+#
+# Requires Kubernetes 1.32+ with DRA enabled and the NVIDIA GPU DRA driver installed.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-agg-gms
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: my-registry/sglang-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - experimental:
+      gpuMemoryService: {}
+    name: decode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --load-format
+          - gms
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/sglang-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/sglang
+    replicas: 1
+    type: worker

@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Check Deploy Component'
+description: 'Run validation checks for a deploy component'
+
+inputs:
+  component:
+    description: 'Component to check: operator or snapshot'
+    required: true
+  platform:
+    description: 'Docker platform used for linter and tester targets'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Linter
+      shell: bash
+      working-directory: ./deploy/${{ inputs.component }}
+      run: |
+        docker buildx build \
+          --platform ${{ inputs.platform }} \
+          --target linter \
+          --progress=plain \
+          --build-context snapshot=../snapshot \
+          .
+
+    - name: Tester
+      shell: bash
+      working-directory: ./deploy/${{ inputs.component }}
+      run: |
+        docker buildx build \
+          --platform ${{ inputs.platform }} \
+          --target tester \
+          --progress=plain \
+          --build-context snapshot=../snapshot \
+          .
+
+    - name: Set up Go
+      if: ${{ inputs.component == 'operator' }}
+      uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      with:
+        go-version: '1.25'
+
+    - name: Set up Python
+      if: ${{ inputs.component == 'operator' }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install Python dependencies for operator codegen
+      if: ${{ inputs.component == 'operator' }}
+      shell: bash
+      working-directory: ./deploy/operator
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
+
+    - name: Check operator generated files
+      if: ${{ inputs.component == 'operator' }}
+      shell: bash
+      working-directory: ./deploy/operator
+      run: |
+        make check

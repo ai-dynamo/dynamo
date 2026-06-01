@@ -1,3 +1,3 @@
-# Dynamo Observability
+# Dynamo Metrics Collection on Kubernetes
 
-For detailed documentation on Observability (Prometheus metrics, tracing, and logging), please refer to [docs/observability/](../../docs/observability/).
+For detailed documentation on collecting and visualizing metrics on Kubernetes, see [docs/kubernetes/observability/metrics.md](../../docs/kubernetes/observability/metrics.md).

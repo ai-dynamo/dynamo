@@ -24,19 +24,30 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - nodes
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   verbs:
   - create
   - delete
   - get
   - list
+  - watch
 - apiGroups:
   - ""
   resources:
   - pods
   verbs:
+  - delete
+  - deletecollection
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - apps
@@ -184,6 +195,7 @@ rules:
 - apiGroups:
   - networking.istio.io
   resources:
+  - destinationrules
   - virtualservices
   verbs:
   - create

@@ -23,8 +23,8 @@ pub(crate) use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
 pub use collector::{
-    TraceDistributionStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
-    TraceSimulationReport, TraceThroughputStats,
+    PerRequestRecord, TraceDistributionStats, TraceInterTokenLatencyStats, TraceLatencyStats,
+    TraceRequestCounts, TraceSimulationReport, TraceThroughputStats,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
@@ -61,21 +61,28 @@ impl OfflineDisaggReplayConfig {
 
 pub use entrypoints::{
     generate_trace_worker_artifacts_offline, simulate_concurrency_file,
-    simulate_concurrency_file_disagg_with_router_mode, simulate_concurrency_file_with_router_mode,
-    simulate_concurrency_live_file, simulate_concurrency_live_file_with_router_mode,
-    simulate_concurrency_live_requests, simulate_concurrency_live_requests_with_router_mode,
-    simulate_concurrency_live_workload, simulate_concurrency_live_workload_with_router_mode,
-    simulate_concurrency_requests, simulate_concurrency_requests_disagg_with_router_mode,
+    simulate_concurrency_file_disagg_with_router_mode,
+    simulate_concurrency_file_disagg_with_router_mode_and_format,
+    simulate_concurrency_file_with_router_mode,
+    simulate_concurrency_file_with_router_mode_and_format, simulate_concurrency_live_file,
+    simulate_concurrency_live_file_with_router_mode,
+    simulate_concurrency_live_file_with_router_mode_and_format, simulate_concurrency_live_requests,
+    simulate_concurrency_live_requests_with_router_mode, simulate_concurrency_live_workload,
+    simulate_concurrency_live_workload_with_router_mode, simulate_concurrency_requests,
+    simulate_concurrency_requests_disagg_with_router_mode,
     simulate_concurrency_requests_with_router_mode, simulate_concurrency_workload,
     simulate_concurrency_workload_disagg_with_router_mode,
     simulate_concurrency_workload_with_router_mode, simulate_trace_file,
-    simulate_trace_file_disagg_with_router_mode, simulate_trace_file_with_router_mode,
-    simulate_trace_live_file, simulate_trace_live_file_with_router_mode,
-    simulate_trace_live_requests, simulate_trace_live_requests_with_router_mode,
-    simulate_trace_live_workload, simulate_trace_live_workload_with_router_mode,
-    simulate_trace_requests, simulate_trace_requests_disagg_with_router_mode,
-    simulate_trace_requests_with_router_mode, simulate_trace_workload,
-    simulate_trace_workload_disagg_with_router_mode, simulate_trace_workload_with_router_mode,
+    simulate_trace_file_disagg_with_router_mode,
+    simulate_trace_file_disagg_with_router_mode_and_format, simulate_trace_file_with_router_mode,
+    simulate_trace_file_with_router_mode_and_format, simulate_trace_live_file,
+    simulate_trace_live_file_with_router_mode,
+    simulate_trace_live_file_with_router_mode_and_format, simulate_trace_live_requests,
+    simulate_trace_live_requests_with_router_mode, simulate_trace_live_workload,
+    simulate_trace_live_workload_with_router_mode, simulate_trace_requests,
+    simulate_trace_requests_disagg_with_router_mode, simulate_trace_requests_with_router_mode,
+    simulate_trace_workload, simulate_trace_workload_disagg_with_router_mode,
+    simulate_trace_workload_with_router_mode,
 };
 pub use planner_handle::{PlannerReplayHandle, PlannerTickData};
 pub use validate::validate_replay_args_mode;

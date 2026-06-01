@@ -15,9 +15,11 @@ from pydantic import BaseModel, ConfigDict, model_validator
 class StageEngine(Protocol):
     """Any engine that can generate outputs for a single pipeline stage.
 
-    Matches AsyncOmni.generate() signature — the only vllm_omni engine
-    with a consistent async generator interface for both LLM and diffusion.
+    Matches AsyncOmni — the only vllm_omni engine with a consistent async
+    generator interface for both LLM and diffusion.
     """
+
+    engine: Any  # AsyncOmniEngine — exposes output_processors for registration
 
     def generate(
         self,
@@ -26,6 +28,10 @@ class StageEngine(Protocol):
         *,
         sampling_params_list: Any = None,
     ) -> AsyncGenerator[Any, None]:
+        ...
+
+    def get_tokenizer(self) -> Any:
+        """Return the tokenizer (may be async — callers should await)."""
         ...
 
 

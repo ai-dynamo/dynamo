@@ -83,8 +83,8 @@ python3 -m "$WORKER_MODULE" \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --skip-tokenizer-init \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" &

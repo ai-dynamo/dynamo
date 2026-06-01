@@ -4,7 +4,7 @@
 use crate::common::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{PositionalLineageHash, TokenBlockSequence, Tokens};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, TokenBlockSequence, Tokens};
 use rand::random;
 use validator::Validate;
 
@@ -14,9 +14,9 @@ fn create_sequence_cache(
     tokens: &TokenBlockSequence,
     block_size: usize,
     enable_prefix_caching: bool,
-) -> (Vec<UniqueBlock>, Vec<u64>, Vec<PositionalLineageHash>) {
+) -> (Vec<UniqueBlock>, Vec<BlockHash>, Vec<PositionalLineageHash>) {
     let mut unique_blocks = Vec::with_capacity(tokens.blocks().len() + 1);
-    let mut block_hashes = Vec::with_capacity(tokens.blocks().len());
+    let mut block_hashes: Vec<BlockHash> = Vec::with_capacity(tokens.blocks().len());
     let mut plhs = Vec::with_capacity(tokens.blocks().len());
 
     for (pos, block) in tokens.blocks().iter().enumerate() {
@@ -46,7 +46,7 @@ fn create_sequence_cache(
 #[derive(Debug, Getters, Validate)]
 pub struct ActiveSequence {
     unique_blocks: Vec<UniqueBlock>,
-    block_hashes: Vec<u64>,
+    block_hashes: Vec<BlockHash>,
     plhs: Vec<PositionalLineageHash>,
 
     tokens: TokenBlockSequence,
@@ -164,11 +164,15 @@ impl ActiveSequence {
 
     /// Positional lineage hashes for all fully-tokenised blocks in the sequence.
     /// Mirrors `block_hashes()` but returns the PLH identity used by kvbm-logical.
-    pub fn positional_lineage_hashes(&self) -> Vec<PositionalLineageHash> {
+    pub fn positional_lineage_hashes(&self) -> &[PositionalLineageHash] {
+        &self.plhs
+    }
+
+    pub fn block_token_ids(&self) -> Vec<Vec<u32>> {
         self.tokens
             .blocks()
             .iter()
-            .map(|block| block.positional_lineage_hash())
+            .map(|block| block.tokens().to_vec())
             .collect()
     }
 
@@ -208,6 +212,7 @@ impl ActiveSequence {
     }
 
     /// Push a token to the sequence
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn push(&mut self, token: u32) -> Option<Vec<MoveBlock>> {
         self.tokens.append(token).expect("Token push failed.");
         self.generated_tokens += 1;
@@ -288,6 +293,7 @@ impl ActiveSequence {
     ///
     /// Calling this function when max_output_tokens has already been reached will cause a panic.
     /// Always check `generated_tokens < max_output_tokens` before calling this method.
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn generate(&mut self) -> Vec<MoveBlock> {
         // Assert that we haven't reached the maximum output tokens
         assert!(
@@ -325,7 +331,7 @@ impl ActiveSequence {
             .rev()
             .map(|block| match block {
                 UniqueBlock::PartialBlock(uuid) => {
-                    MoveBlock::Destroy(vec![UniqueBlock::PartialBlock(*uuid)])
+                    MoveBlock::Deref(vec![UniqueBlock::PartialBlock(*uuid)])
                 }
                 UniqueBlock::FullBlock(hash) => {
                     MoveBlock::Deref(vec![UniqueBlock::FullBlock(*hash)])
@@ -370,7 +376,7 @@ impl ActiveSequence {
 mod tests {
     use super::*;
 
-    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<u64> {
+    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<BlockHash> {
         seq.tokens
             .blocks()
             .iter()
@@ -394,7 +400,7 @@ mod tests {
     fn assert_use_signal(
         signal: &MoveBlock,
         expected_blocks: &[UniqueBlock],
-        expected_hashes: &[u64],
+        expected_hashes: &[BlockHash],
     ) {
         match signal {
             MoveBlock::Use(blocks, hashes, ..) => {
@@ -425,13 +431,13 @@ mod tests {
         }
     }
 
-    fn assert_destroy_partial(signal: &MoveBlock) {
+    fn assert_deref_partial(signal: &MoveBlock) {
         match signal {
-            MoveBlock::Destroy(blocks) => {
+            MoveBlock::Deref(blocks) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
-            _ => panic!("Expected MoveBlock::Destroy for partial block"),
+            _ => panic!("Expected MoveBlock::Deref for partial block"),
         }
     }
 
@@ -587,12 +593,12 @@ mod tests {
         let signals_third = seq.generate();
         assert_eq!(signals_third.len(), 0);
 
-        // Generate last token - we reach max_output_tokens, should trigger Destroy and Deref signals
+        // Generate last token - we reach max_output_tokens, should trigger Deref signals
         let signals_last = seq.generate();
         assert_eq!(signals_last.len(), 2);
 
-        // First signal should be Destroy for the partial block
-        assert_destroy_partial(&signals_last[0]);
+        // First signal should be Deref for the partial block
+        assert_deref_partial(&signals_last[0]);
 
         // Second signal should be Deref for the full block
         assert_deref_full(&signals_last[1]);

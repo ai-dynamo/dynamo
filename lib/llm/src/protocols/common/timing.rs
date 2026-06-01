@@ -105,8 +105,8 @@ pub struct RequestTracker {
     /// record the final finish time.
     request_finish_time: Mutex<Option<Instant>>,
 
-    /// KV cache overlap blocks (prefix cache hits) - set once via OnceLock
-    kv_overlap_blocks: OnceLock<u32>,
+    /// Effective KV cache overlap blocks (weighted prefix cache hits) - set once via OnceLock
+    kv_overlap_blocks: OnceLock<f64>,
 
     /// Input sequence length in blocks (for hit rate calculation) - set once via OnceLock
     isl_blocks: OnceLock<usize>,
@@ -114,7 +114,7 @@ pub struct RequestTracker {
     /// Input sequence length in tokens - set once via OnceLock
     isl_tokens: OnceLock<usize>,
 
-    /// Number of cached tokens (overlap_blocks * block_size) - set once via OnceLock
+    /// Number of cached tokens derived from the effective cache hit - set once via OnceLock
     cached_tokens: OnceLock<usize>,
 
     /// Output sequence length in tokens - updated atomically as tokens stream back
@@ -226,7 +226,7 @@ impl RequestTracker {
     }
 
     /// Record KV cache hit information. Returns true if this was the first call.
-    pub fn record_kv_hit(&self, overlap_blocks: u32, isl_blocks: usize) -> bool {
+    pub fn record_kv_hit(&self, overlap_blocks: f64, isl_blocks: usize) -> bool {
         let overlap_set = self.kv_overlap_blocks.set(overlap_blocks).is_ok();
         let isl_set = self.isl_blocks.set(isl_blocks).is_ok();
         overlap_set && isl_set
@@ -311,7 +311,7 @@ impl RequestTracker {
         if isl == 0 {
             return None;
         }
-        Some(overlap as f64 / isl as f64)
+        Some(overlap / isl as f64)
     }
 
     /// Set the request phase and return a permit that blocks subsequent phase changes.
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn test_kv_hit_rate() {
         let tracker = RequestTracker::new();
-        tracker.record_kv_hit(3, 10);
+        tracker.record_kv_hit(3.0, 10);
 
         let rate = tracker.kv_hit_rate().unwrap();
         assert!(
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn test_kv_hit_rate_zero_isl() {
         let tracker = RequestTracker::new();
-        tracker.record_kv_hit(0, 0);
+        tracker.record_kv_hit(0.0, 0);
         assert!(
             tracker.kv_hit_rate().is_none(),
             "KV hit rate should be None when isl_blocks is 0"

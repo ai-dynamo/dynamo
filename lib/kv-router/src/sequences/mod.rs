@@ -11,4 +11,5 @@ pub mod single;
 mod topology;
 
 pub use multi_worker::*;
+pub use prefill_tracker::PrefillTokenDeltas;
 pub use single::*;

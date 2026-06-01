@@ -25,10 +25,12 @@ from aiconfigurator.generator.module_bridge import task_config_to_generator_conf
 from aiconfigurator.generator.naive import build_naive_generator_params
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
+from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     needs_profile_data,
+    resolve_model_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,16 +78,37 @@ def _generate_dgd_from_pick(
         return None
 
     original_total_gpus = tc.total_gpus
-    if "total_gpus_needed" in row.index and row["total_gpus_needed"] > 0:
-        tc.total_gpus = int(row["total_gpus_needed"])
+    try:
+        if "total_gpus_needed" in row.index:
+            clamped_total_gpus, was_clamped = clamp_total_gpus_to_budget(
+                row["total_gpus_needed"],
+                original_total_gpus,
+            )
+            # Enforce DGDR hardware budget as a hard cap in rapid mode.
+            # Some AIC pickers expose total_gpus_needed as a ranking signal rather
+            # than a strict feasibility constraint.
+            if was_clamped:
+                logger.warning(
+                    "Picked config requests %d GPUs but DGDR budget is %d; "
+                    "clamping generated deployment to budget.",
+                    int(row["total_gpus_needed"]),
+                    original_total_gpus,
+                )
+            tc.total_gpus = clamped_total_gpus
 
-    k8s_overrides = _build_k8s_overrides(dgdr, tc.backend_name)
-    cfg = task_config_to_generator_config(
-        task_config=tc,
-        result_df=row,
-        generator_overrides={"K8sConfig": k8s_overrides} if k8s_overrides else None,
-    )
-    tc.total_gpus = original_total_gpus
+        k8s_overrides = _build_k8s_overrides(dgdr, tc.backend_name)
+        cfg = task_config_to_generator_config(
+            task_config=tc,
+            result_df=row,
+            generator_overrides={"K8sConfig": k8s_overrides} if k8s_overrides else None,
+        )
+    finally:
+        tc.total_gpus = original_total_gpus
+
+    service_cfg = cfg.get("ServiceConfig")
+    if isinstance(service_cfg, dict):
+        service_cfg["model_path"] = dgdr.model
+        service_cfg["served_model_path"] = dgdr.model
 
     artifacts = generate_backend_artifacts(
         params=cfg,
@@ -173,9 +196,10 @@ def _run_autoscale_sim(
             "Throughput-based scaling enabled — only disagg mode is supported."
         )
 
+    local_or_hf_model = resolve_model_path(dgdr)
     task = TaskConfig(
         serving_mode="disagg",
-        model_path=model,
+        model_path=local_or_hf_model,
         system_name=system,
         backend_name=backend,
         total_gpus=total_gpus,
@@ -221,8 +245,9 @@ def _run_default_sim(
     picking_mode: str,
 ) -> dict:
     """Build default task_configs, apply load_match kwargs, run simulation, generate DGD."""
+    local_or_hf_model = resolve_model_path(dgdr)
     task_configs = build_default_task_configs(
-        model_path=model,
+        model_path=local_or_hf_model,
         total_gpus=total_gpus,
         system=system,
         backend=backend,

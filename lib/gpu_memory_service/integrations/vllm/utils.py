@@ -1,45 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shadow mode utilities for GMS vLLM integration."""
+"""GMS vLLM integration utilities."""
 
 import logging
 import os
 
 logger = logging.getLogger(__name__)
-
-
-def is_shadow_mode() -> bool:
-    """True when DYN_GMS_SHADOW_MODE=1 (set by main.py at startup)."""
-    return os.environ.get("DYN_GMS_SHADOW_MODE", "0") == "1"
-
-
-def validate_cudagraph_mode(engine_args) -> None:
-    """Validate and set cudagraph mode for shadow engines.
-
-    Defaults unset mode to PIECEWISE (attention stubbed during graph capture).
-    Accepts NONE (e.g. enforce_eager). Rejects FULL variants which need
-    KV cache tensors that don't exist during shadow init.
-    """
-    from vllm.config import CompilationConfig, CUDAGraphMode
-
-    cc = engine_args.compilation_config
-    assert isinstance(cc, CompilationConfig), (
-        f"Expected CompilationConfig, got {type(cc).__name__}. "
-        f"vLLM's arg parsing may have changed."
-    )
-
-    if cc.cudagraph_mode is None:
-        cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
-        logger.info("[Shadow] cudagraph_mode defaulted to PIECEWISE")
-    elif cc.cudagraph_mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
-        pass  # compatible
-    else:
-        raise ValueError(
-            f"Shadow mode requires PIECEWISE or NONE cudagraph mode, "
-            f"got {cc.cudagraph_mode.name}. FULL modes capture attention ops "
-            f"that need KV cache tensors, which don't exist during shadow init."
-        )
 
 
 def configure_gms_lock_mode(engine_args) -> None:
@@ -72,3 +39,34 @@ def configure_gms_lock_mode(engine_args) -> None:
         extra["gms_read_only"] = True
 
     engine_args.model_loader_extra_config = extra
+
+
+def configure_mx_ports(engine_args) -> None:
+    """Offset MX metadata and gRPC base ports per engine to avoid bind collisions.
+
+    In failover pods, both engines share a network namespace. MX binds
+    NIXL metadata on ``MX_METADATA_PORT + device_id`` and worker gRPC on
+    ``MX_WORKER_GRPC_PORT + device_id``. Without offsetting, engines with
+    the same device_id collide (EADDRINUSE on the NIXL listener).
+
+    Offsets by ``engine_id * tp_size`` so each engine's port range is
+    non-overlapping:
+        engine 0, TP=2: metadata 5555-5556, gRPC 6555-6556
+        engine 1, TP=2: metadata 5557-5558, gRPC 6557-6558
+    """
+    if os.environ.get("MX_ENABLED", "0") != "1":
+        return
+
+    engine_id = int(os.environ.get("ENGINE_ID", "0"))
+    offset = engine_id * (engine_args.tensor_parallel_size or 1)
+    mx_metadata_base = int(os.environ.get("MX_METADATA_PORT", "5555")) + offset
+    mx_grpc_base = int(os.environ.get("MX_WORKER_GRPC_PORT", "6555")) + offset
+    os.environ["MX_METADATA_PORT"] = str(mx_metadata_base)
+    os.environ["MX_WORKER_GRPC_PORT"] = str(mx_grpc_base)
+
+    logger.info(
+        "[GMS-MX] MX ports for engine-%d: metadata=%d, grpc=%d",
+        engine_id,
+        mx_metadata_base,
+        mx_grpc_base,
+    )

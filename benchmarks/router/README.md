@@ -30,7 +30,7 @@ This benchmark requires etcd and NATS. To quickly set them up, run:
 
 ```bash
 # From the repository root:
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 This will start both etcd and NATS with the required configurations in the background.

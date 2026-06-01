@@ -4,6 +4,9 @@
 //! Python bindings for Forward Pass Metrics (FPM = ForwardPassMetrics) event plane integration.
 //!
 //! - `FpmEventRelay`: thin wrapper around `dynamo_llm::fpm_publisher::FpmEventRelay`
+//!   (used by the vLLM adapter — ZMQ bridge from EngineCore child process).
+//! - `FpmDirectPublisher`: thin wrapper around `dynamo_llm::fpm_publisher::FpmDirectPublisher`
+//!   (used by the TRT-LLM adapter — direct event-plane publish, no ZMQ hop).
 //! - `FpmEventSubscriber`: wraps `EventSubscriber::for_component` for the consumer side.
 //!   Supports two mutually exclusive modes:
 //!   - **recv mode**: call `recv()` to pull one message at a time (existing behaviour).
@@ -11,6 +14,7 @@
 //!     retrieve the latest FPM bytes keyed by `(worker_id, dp_rank)`.
 
 use dashmap::{DashMap, DashSet};
+use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher};
 use futures::StreamExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -59,6 +63,122 @@ impl FpmEventRelay {
     }
 
     /// Shut down the relay task.
+    fn shutdown(&self) {
+        self.inner.shutdown();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Direct publisher: TRT-LLM adapter -> event plane (no ZMQ hop)
+// ---------------------------------------------------------------------------
+
+/// Direct Forward Pass Metrics publisher for in-process producers such as
+/// the TRT-LLM adapter. The underlying Rust `FpmDirectPublisher` owns per-DP
+/// serialization tasks (each with its own 1s idle heartbeat timer) and a
+/// single event-plane publisher task. Python callers do not need to manage
+/// heartbeat — the Rust side emits a zeroed snapshot when no data arrives
+/// for `IDLE_HEARTBEAT_INTERVAL` (matches vLLM's `HEARTBEAT_INTERVAL = 1.0`).
+#[pyclass]
+pub(crate) struct FpmDirectPublisher {
+    // Owns the CancellationToken that drives Drop-based shutdown of all
+    // per-rank serialization tasks and the event-plane publisher task. Held
+    // by reference only — keep the field non-underscored so a future cleanup
+    // pass does not delete it as "dead", which would leak every spawned task.
+    inner: llm_rs::fpm_publisher::FpmDirectPublisher,
+    publishers: Vec<FpmPublisher>,
+}
+
+#[pymethods]
+impl FpmDirectPublisher {
+    /// Construct a publisher that owns `dp_size` per-DP-rank channels.
+    ///
+    /// Args:
+    ///     endpoint: Dynamo component endpoint (provides runtime + discovery).
+    ///     worker_id: Unique worker identifier stamped on every emitted FPM.
+    ///     dp_size: Number of DP ranks to allocate handles for; use 1 when
+    ///         attention DP is disabled.
+    #[new]
+    #[pyo3(signature = (endpoint, worker_id, dp_size=1))]
+    fn new(endpoint: Endpoint, worker_id: String, dp_size: u32) -> PyResult<Self> {
+        let component = endpoint.inner.component().clone();
+        let rt = component.drt().runtime().secondary();
+        let (inner, publishers) = rt
+            .block_on(async {
+                llm_rs::fpm_publisher::FpmDirectPublisher::new(component, worker_id, dp_size).await
+            })
+            .map_err(to_pyerr)?;
+        Ok(Self { inner, publishers })
+    }
+
+    /// Publish one iteration's FPM snapshot for the given DP rank.
+    ///
+    /// All parameters are keyword-only on the Python side — adjacent ints
+    /// with similar units (`scheduled_*` vs `queued_*`, `*_prefill_*` vs
+    /// `*_decode_*`) cannot be distinguished by the type system, so a
+    /// transposition would silently corrupt every published snapshot.
+    /// Forcing kwargs at the boundary is a zero-cost guard.
+    ///
+    /// Variance fields (`var_prefill_length`, `var_decode_kv_tokens`,
+    /// `var_queued_prefill_length`, `var_queued_decode_kv_tokens`) are
+    /// defaulted to 0.0 per the MVP scope — the active planner does not
+    /// consume them on origin/main. A follow-up PR can add Welford-based
+    /// variance computation in TRT-LLM's PyExecutor and a new overload here.
+    #[pyo3(signature = (
+        *,
+        dp_rank,
+        scheduled_num_prefill_requests,
+        scheduled_sum_prefill_tokens,
+        scheduled_sum_prefill_kv_tokens,
+        scheduled_num_decode_requests,
+        scheduled_sum_decode_kv_tokens,
+        queued_num_prefill_requests,
+        queued_sum_prefill_tokens,
+        queued_num_decode_requests,
+        queued_sum_decode_kv_tokens,
+        wall_time_secs,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn publish(
+        &self,
+        dp_rank: u32,
+        scheduled_num_prefill_requests: u32,
+        scheduled_sum_prefill_tokens: u64,
+        scheduled_sum_prefill_kv_tokens: u64,
+        scheduled_num_decode_requests: u32,
+        scheduled_sum_decode_kv_tokens: u64,
+        queued_num_prefill_requests: u32,
+        queued_sum_prefill_tokens: u64,
+        queued_num_decode_requests: u32,
+        queued_sum_decode_kv_tokens: u64,
+        wall_time_secs: f64,
+    ) -> PyResult<()> {
+        let idx = dp_rank as usize;
+        if idx >= self.publishers.len() {
+            return Err(PyRuntimeError::new_err(format!(
+                "dp_rank {dp_rank} out of range; FpmDirectPublisher was constructed with dp_size={}",
+                self.publishers.len()
+            )));
+        }
+        let snapshot = ForwardPassSnapshot {
+            num_prefill_requests: scheduled_num_prefill_requests,
+            sum_prefill_tokens: scheduled_sum_prefill_tokens,
+            var_prefill_length: 0.0,
+            sum_prefill_kv_tokens: scheduled_sum_prefill_kv_tokens,
+            num_decode_requests: scheduled_num_decode_requests,
+            sum_decode_kv_tokens: scheduled_sum_decode_kv_tokens,
+            var_decode_kv_tokens: 0.0,
+            num_queued_prefill: queued_num_prefill_requests,
+            sum_queued_prefill_tokens: queued_sum_prefill_tokens,
+            var_queued_prefill_length: 0.0,
+            num_queued_decode: queued_num_decode_requests,
+            sum_queued_decode_kv_tokens: queued_sum_decode_kv_tokens,
+            var_queued_decode_kv_tokens: 0.0,
+            wall_time_secs,
+        };
+        self.publishers[idx].publish(snapshot).map_err(to_pyerr)
+    }
+
+    /// Shut down the publisher and its per-rank serialization tasks.
     fn shutdown(&self) {
         self.inner.shutdown();
     }

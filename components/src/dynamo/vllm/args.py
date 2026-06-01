@@ -38,7 +38,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     custom_jinja_template: Optional[str] = None
     discovery_backend: str
     request_plane: str
-    event_plane: str
+    event_plane: Optional[str] = None
     enable_local_indexer: bool = True
     use_kv_events: bool
 
@@ -237,9 +237,7 @@ def update_engine_config_with_dynamo(
     if _uses_nixl_connector(engine_config):
         ensure_side_channel_host()
 
-    defaults = {
-        # vLLM 0.13+ renamed 'task' to 'runner'
-        "runner": "generate",
+    defaults: Dict[str, Any] = {
         # As of vLLM >=0.10.0 the engine unconditionally calls
         # `sampling_params.update_from_tokenizer(...)`, so we can no longer
         # skip tokenizer initialisation.  Setting this to **False** avoids
@@ -248,6 +246,9 @@ def update_engine_config_with_dynamo(
         "enable_log_requests": False,
         "disable_log_stats": False,
     }
+
+    if hasattr(engine_config, "runner"):
+        logger.debug(f"Using runner={engine_config.runner} from engine args")
 
     kv_cfg = create_kv_events_config(dynamo_config, engine_config)
     defaults["kv_events_config"] = kv_cfg
