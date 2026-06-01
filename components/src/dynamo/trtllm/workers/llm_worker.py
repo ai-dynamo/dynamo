@@ -43,8 +43,8 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.common.utils.worker_id import make_fpm_worker_id
 from dynamo.common.utils.topology import apply_topology_config
+from dynamo.common.utils.worker_id import make_fpm_worker_id
 from dynamo.llm import (
     KvEventPublisher,
     MediaDecoder,
