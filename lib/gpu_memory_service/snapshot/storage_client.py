@@ -17,6 +17,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.profiling import profile_log, seconds_summary
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.snapshot.disk import (
     DeviceToFileWriter,
@@ -213,20 +214,59 @@ class GMSStorageClient:
         t0 = time.monotonic()
         id_map: Dict[str, str] = {}
         targets: Dict[str, GMSTransferTarget] = {}
+        allocate_s: list[float] = []
+        export_s: list[float] = []
+        reserve_s: list[float] = []
+        map_s: list[float] = []
+        bookkeeping_s: list[float] = []
+        profiled_bytes = 0
         for entry in manifest.allocations:
             old_id = entry.allocation_id
-            va = mm.create_mapping(size=entry.size, tag=entry.tag)
-            id_map[old_id] = mm.mappings[va].allocation_id
+            profiled_bytes += int(entry.aligned_size)
+
+            step_t0 = time.monotonic()
+            allocation_id, layout_slot = mm.allocate_handle(entry.size, entry.tag)
+            allocate_s.append(time.monotonic() - step_t0)
+
+            step_t0 = time.monotonic()
+            fd = mm.export_handle(allocation_id)
+            export_s.append(time.monotonic() - step_t0)
+
+            step_t0 = time.monotonic()
+            va = mm.reserve_va(entry.aligned_size)
+            reserve_s.append(time.monotonic() - step_t0)
+
+            step_t0 = time.monotonic()
+            mm.map_va(fd, va, entry.size, allocation_id, entry.tag, layout_slot)
+            map_s.append(time.monotonic() - step_t0)
+
+            step_t0 = time.monotonic()
+            id_map[old_id] = allocation_id
             targets[old_id] = GMSTransferTarget(
                 allocation_id=old_id,
                 va=va,
                 device=self.device,
                 byte_count=entry.aligned_size,
             )
+            bookkeeping_s.append(time.monotonic() - step_t0)
         logger.info(
             "Allocated %d restore target GMS VAs in %.3fs",
             len(targets),
             time.monotonic() - t0,
+        )
+        profile_log(
+            logger,
+            "restore target allocation detail: allocations=%d bytes=%.2f GiB "
+            "total=%.6fs allocate_handle={%s} export_fd={%s} "
+            "reserve_va={%s} import_map_set_access={%s} bookkeeping={%s}",
+            len(targets),
+            profiled_bytes / (1024**3),
+            time.monotonic() - t0,
+            seconds_summary(allocate_s),
+            seconds_summary(export_s),
+            seconds_summary(reserve_s),
+            seconds_summary(map_s),
+            seconds_summary(bookkeeping_s),
         )
         return id_map, targets
 
@@ -240,6 +280,8 @@ class GMSStorageClient:
     ) -> Dict[str, str]:
         backend_name = transfer_backend or self._transfer_backend
 
+        load_t0 = time.monotonic()
+        phase_t0 = time.monotonic()
         backend = create_transfer_backend(
             backend_name,
             GMSSnapshotConfig(
@@ -252,38 +294,138 @@ class GMSStorageClient:
                 },
             ),
         )
+        profile_log(
+            logger,
+            "load_to_gms phase backend_created backend=%s elapsed=%.6fs",
+            backend_name,
+            time.monotonic() - phase_t0,
+        )
         session = None
         id_map: Dict[str, str] = {}
 
         try:
+            phase_t0 = time.monotonic()
             manifest, saved_metadata = load_manifest_and_metadata(input_dir)
+            profile_log(
+                logger,
+                "load_to_gms phase manifest_loaded allocations=%d metadata=%d "
+                "elapsed=%.6fs",
+                len(manifest.allocations),
+                len(saved_metadata),
+                time.monotonic() - phase_t0,
+            )
+
+            phase_t0 = time.monotonic()
             sources = build_file_transfer_sources(input_dir, manifest.allocations)
+            total_bytes = sum(source.byte_count for source in sources)
+            profile_log(
+                logger,
+                "load_to_gms phase sources_built sources=%d bytes=%.2f GiB "
+                "elapsed=%.6fs",
+                len(sources),
+                total_bytes / (1024**3),
+                time.monotonic() - phase_t0,
+            )
+
+            phase_t0 = time.monotonic()
             session = backend.start_restore(sources)
+            profile_log(
+                logger,
+                "load_to_gms phase backend_start_restore backend=%s "
+                "elapsed=%.6fs",
+                backend_name,
+                time.monotonic() - phase_t0,
+            )
+
+            phase_t0 = time.monotonic()
             with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
+                profile_log(
+                    logger,
+                    "load_to_gms phase memory_manager_created elapsed=%.6fs",
+                    time.monotonic() - phase_t0,
+                )
+
+                phase_t0 = time.monotonic()
                 mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
+                profile_log(
+                    logger,
+                    "load_to_gms phase rw_connect elapsed=%.6fs",
+                    time.monotonic() - phase_t0,
+                )
                 if clear_existing:
                     logger.info("RW connect cleared any previously committed GMS state")
 
+                phase_t0 = time.monotonic()
                 id_map, targets = self._allocate_restore_targets(mm, manifest)
+                profile_log(
+                    logger,
+                    "load_to_gms phase restore_targets_allocated targets=%d "
+                    "elapsed=%.6fs",
+                    len(targets),
+                    time.monotonic() - phase_t0,
+                )
+
+                phase_t0 = time.monotonic()
                 session.restore(targets)
+                profile_log(
+                    logger,
+                    "load_to_gms phase session_restore backend=%s elapsed=%.6fs",
+                    backend_name,
+                    time.monotonic() - phase_t0,
+                )
                 logger.info(
                     "%s restored %d allocation(s) to GMS memory",
                     backend_name,
                     len(manifest.allocations),
                 )
 
+                phase_t0 = time.monotonic()
                 self._restore_metadata(mm, saved_metadata, id_map)
+                profile_log(
+                    logger,
+                    "load_to_gms phase metadata_restored metadata=%d elapsed=%.6fs",
+                    len(saved_metadata),
+                    time.monotonic() - phase_t0,
+                )
+
+                phase_t0 = time.monotonic()
                 if not mm.commit():
                     raise RuntimeError("GMS commit failed after restore")
+                profile_log(
+                    logger,
+                    "load_to_gms phase commit elapsed=%.6fs",
+                    time.monotonic() - phase_t0,
+                )
         finally:
+            phase_t0 = time.monotonic()
             if session is not None:
                 session.close()
+            profile_log(
+                logger,
+                "load_to_gms phase session_close elapsed=%.6fs",
+                time.monotonic() - phase_t0,
+            )
+            phase_t0 = time.monotonic()
             backend.close()
+            profile_log(
+                logger,
+                "load_to_gms phase backend_close elapsed=%.6fs",
+                time.monotonic() - phase_t0,
+            )
 
         logger.info(
             "load_to_gms complete: %d allocations, %d metadata keys",
             len(id_map),
             len(saved_metadata),
+        )
+        profile_log(
+            logger,
+            "load_to_gms total backend=%s allocations=%d metadata=%d "
+            "elapsed=%.6fs",
+            backend_name,
+            len(id_map),
+            len(saved_metadata),
+            time.monotonic() - load_t0,
         )
         return id_map
 

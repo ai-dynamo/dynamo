@@ -22,6 +22,7 @@ from gpu_memory_service.common.cuda_utils import (
     cumem_release,
     device_memory_info,
 )
+from gpu_memory_service.common.profiling import profile_log
 
 logger = logging.getLogger(__name__)
 
@@ -102,13 +103,17 @@ class GMSAllocationManager:
         aligned_size = align_to_granularity(size, self._granularity)
         started_at = time.monotonic()
         reported_oom = False
+        attempts = 0
         while True:
             if is_connected is not None and not is_connected():
                 raise ConnectionAbortedError(
                     "RW client disconnected during allocation retry"
                 )
 
+            attempts += 1
+            create_t0 = time.monotonic()
             allocated, handle = cumem_create_tolerate_oom(aligned_size, self._device)
+            create_elapsed = time.monotonic() - create_t0
             if allocated:
                 break
 
@@ -150,7 +155,9 @@ class GMSAllocationManager:
             )
             await asyncio.sleep(self._allocation_retry_interval)
 
+        export_t0 = time.monotonic()
         export_fd = int(cumem_export_to_shareable_handle(int(handle)))
+        export_elapsed = time.monotonic() - export_t0
         info = AllocationInfo(
             allocation_id=str(uuid4()),
             size=size,
@@ -170,6 +177,21 @@ class GMSAllocationManager:
             aligned_size,
             tag,
             info.layout_slot,
+        )
+        profile_log(
+            logger,
+            "server allocation created allocation_id=%s size=%d aligned=%d "
+            "tag=%s slot=%d attempts=%d cuMemCreate=%.6fs "
+            "export_fd=%.6fs total=%.6fs",
+            info.allocation_id,
+            size,
+            aligned_size,
+            tag,
+            info.layout_slot,
+            attempts,
+            create_elapsed,
+            export_elapsed,
+            time.monotonic() - started_at,
         )
         return info
 

@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.profiling import profile_log
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
@@ -39,6 +40,7 @@ def _load_device(
     sharded_ssd_roots: list[str],
     sharded_ssd_queues_per_root: int,
 ) -> None:
+    device_t0 = time.monotonic()
     input_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info(
         "Loading GMS checkpoint: device=%d input_dir=%s transfer_backend=%s max_workers=%d",
@@ -52,21 +54,58 @@ def _load_device(
     # GMSStorageClient still publishes the restored layout from this thread.
     # Ensure the loader's main per-device thread has a current CUDA context for
     # the final synchronize/unmap/commit path.
+    phase_t0 = time.monotonic()
     cuda_utils.cuda_runtime_set_device(device)
+    profile_log(
+        logger,
+        "loader device=%d phase cuda_set_device elapsed=%.6fs",
+        device,
+        time.monotonic() - phase_t0,
+    )
+    phase_t0 = time.monotonic()
+    socket_path = get_socket_path(device)
+    profile_log(
+        logger,
+        "loader device=%d phase resolve_socket_path path=%s elapsed=%.6fs",
+        device,
+        socket_path,
+        time.monotonic() - phase_t0,
+    )
+    phase_t0 = time.monotonic()
     client = GMSStorageClient(
-        socket_path=get_socket_path(device),
+        socket_path=socket_path,
         device=device,
         transfer_backend=transfer_backend,
         sharded_ssd_roots=sharded_ssd_roots,
         sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
     )
+    profile_log(
+        logger,
+        "loader device=%d phase storage_client_created elapsed=%.6fs",
+        device,
+        time.monotonic() - phase_t0,
+    )
+    phase_t0 = time.monotonic()
     client.load_to_gms(
         input_dir,
         max_workers=max_workers,
         clear_existing=True,
     )
+    profile_log(
+        logger,
+        "loader device=%d phase load_to_gms elapsed=%.6fs",
+        device,
+        time.monotonic() - phase_t0,
+    )
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint loaded: device=%d elapsed=%.2fs", device, elapsed)
+    profile_log(
+        logger,
+        "loader device=%d total since_device_thread_start=%.6fs since_logical_load_start=%.6fs",
+        device,
+        time.monotonic() - device_t0,
+        elapsed,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -109,10 +148,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
+    t0 = time.monotonic()
     devices = cuda_utils.list_devices()
+    profile_log(
+        logger,
+        "loader phase list_cuda_devices devices=%s elapsed=%.6fs",
+        devices,
+        time.monotonic() - t0,
+    )
     if not checkpoint_dir:
         return devices
 
+    phase_t0 = time.monotonic()
     checkpoint_path = Path(checkpoint_dir)
     checkpoint_devices: set[int] = set()
     for child in checkpoint_path.iterdir():
@@ -141,12 +188,29 @@ def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
         checkpoint_path,
         devices,
     )
+    profile_log(
+        logger,
+        "loader phase scan_checkpoint_devices checkpoint_dir=%s checkpoint_devices=%s "
+        "elapsed=%.6fs",
+        checkpoint_path,
+        sorted(checkpoint_devices),
+        time.monotonic() - phase_t0,
+    )
     return devices
 
 
 def main(argv: list[str] | None = None) -> None:
+    process_t0 = time.monotonic()
+    parse_t0 = time.monotonic()
     parser = _build_parser()
     args = parser.parse_args(argv)
+    profile_log(
+        logger,
+        "loader phase parse_args transfer_backend=%s max_workers=%d elapsed=%.6fs",
+        args.transfer_backend,
+        args.max_workers,
+        time.monotonic() - parse_t0,
+    )
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"
@@ -166,10 +230,27 @@ def main(argv: list[str] | None = None) -> None:
         ",".join(sharded_ssd_roots) or "-",
         sharded_ssd_queues_per_root,
     )
+    devices_t0 = time.monotonic()
     devices = _list_checkpoint_devices(checkpoint_dir)
+    profile_log(
+        logger,
+        "loader phase devices_ready device_count=%d elapsed=%.6fs "
+        "since_process_main=%.6fs",
+        len(devices),
+        time.monotonic() - devices_t0,
+        time.monotonic() - process_t0,
+    )
 
     t0 = time.monotonic()
+    pool_t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+        profile_log(
+            logger,
+            "loader phase device_pool_created workers=%d elapsed=%.6fs",
+            len(devices),
+            time.monotonic() - pool_t0,
+        )
+        submit_t0 = time.monotonic()
         futures = {
             pool.submit(
                 _load_device,
@@ -182,12 +263,25 @@ def main(argv: list[str] | None = None) -> None:
             ): dev
             for dev in devices
         }
+        profile_log(
+            logger,
+            "loader phase device_futures_submitted count=%d elapsed=%.6fs",
+            len(futures),
+            time.monotonic() - submit_t0,
+        )
         for future in as_completed(futures):
             dev = futures[future]
             future.result()
             logger.info("Device %d load complete", dev)
     elapsed = time.monotonic() - t0
     logger.info("All %d devices loaded in %.2fs", len(devices), elapsed)
+    profile_log(
+        logger,
+        "loader total devices=%d load_elapsed=%.6fs process_main_elapsed=%.6fs",
+        len(devices),
+        elapsed,
+        time.monotonic() - process_t0,
+    )
 
     while True:
         time.sleep(3600)

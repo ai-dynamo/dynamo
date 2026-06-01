@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, TypeVar
 
+from gpu_memory_service.common.profiling import profile_log, seconds_summary
 from gpu_memory_service.snapshot.transfer import FileTransferSource
 
 NIXL_POSIX_BACKEND = "POSIX"
@@ -45,12 +46,15 @@ NixlWorkGroup = tuple[str, Sequence[NixlFileGroup]]
 
 
 def load_nixl_api() -> NixlApi:
+    t0 = time.monotonic()
     try:
         from nixl._api import nixl_agent, nixl_agent_config
     except ImportError as exc:
         raise RuntimeError(
             "NIXL Python bindings are required for the nixl GMS transfer backends"
         ) from exc
+    logger = logging.getLogger(__name__)
+    profile_log(logger, "NIXL Python API imported elapsed=%.6fs", time.monotonic() - t0)
     return NixlApi(agent_type=nixl_agent, agent_config_type=nixl_agent_config)
 
 
@@ -61,14 +65,31 @@ def create_nixl_agent(
     backend_name: str,
     backend_params: Optional[Mapping[str, str]] = None,
 ) -> Any:
+    logger = logging.getLogger(__name__)
+    total_t0 = time.monotonic()
+    construct_t0 = time.monotonic()
     agent = api.agent_type(
         agent_name,
         api.agent_config_type(backends=[]),
     )
+    construct_elapsed = time.monotonic() - construct_t0
+    backend_t0 = time.monotonic()
     if backend_params:
         agent.create_backend(backend_name, dict(backend_params))
     else:
         agent.create_backend(backend_name)
+    backend_elapsed = time.monotonic() - backend_t0
+    profile_log(
+        logger,
+        "NIXL agent created agent=%s backend=%s params=%s construct=%.6fs "
+        "create_backend=%.6fs total=%.6fs",
+        agent_name,
+        backend_name,
+        dict(backend_params) if backend_params else {},
+        construct_elapsed,
+        backend_elapsed,
+        time.monotonic() - total_t0,
+    )
     return agent
 
 
@@ -129,8 +150,17 @@ def open_direct_read_fd(
     if require_direct and not odirect:
         raise RuntimeError("O_DIRECT is not available on this platform")
 
+    t0 = time.monotonic()
     try:
-        return os.open(path, os.O_RDONLY | odirect)
+        fd = os.open(path, os.O_RDONLY | odirect)
+        profile_log(
+            logger,
+            "opened file for direct read path=%s fd=%d elapsed=%.6fs",
+            path,
+            fd,
+            time.monotonic() - t0,
+        )
+        return fd
     except OSError as exc:
         if odirect and exc.errno in {errno.EINVAL, errno.EOPNOTSUPP}:
             if require_direct:
@@ -141,7 +171,15 @@ def open_direct_read_fd(
                 "O_DIRECT unavailable for %s; falling back to buffered reads",
                 path,
             )
-            return os.open(path, os.O_RDONLY)
+            fd = os.open(path, os.O_RDONLY)
+            profile_log(
+                logger,
+                "opened file for buffered read path=%s fd=%d elapsed=%.6fs",
+                path,
+                fd,
+                time.monotonic() - t0,
+            )
+            return fd
         raise
 
 
@@ -190,29 +228,41 @@ def run_bounded_nixl_transfers(
     """Prepare, start, wait for, and release NIXL transfers with a bounded window."""
     pending: list[NixlTransferResources] = []
     max_inflight = max(1, int(max_inflight))
+    prepare_s: list[float] = []
+    start_s: list[float] = []
+    wait_release_s: list[float] = []
+    total_t0 = time.monotonic()
     try:
         for item in items:
+            prepare_t0 = time.monotonic()
             transfer = prepare_transfer(item)
+            prepare_s.append(time.monotonic() - prepare_t0)
             try:
+                start_t0 = time.monotonic()
                 start_transfer(agent, transfer.handle, transfer.label, backend_name)
+                start_s.append(time.monotonic() - start_t0)
             except Exception:
                 release_nixl_transfer_resources(agent, transfer)
                 raise
             pending.append(transfer)
 
             if len(pending) >= max_inflight:
+                wait_t0 = time.monotonic()
                 _wait_and_release_nixl_transfer(
                     agent,
                     backend_name,
                     pending.pop(0),
                 )
+                wait_release_s.append(time.monotonic() - wait_t0)
 
         while pending:
+            wait_t0 = time.monotonic()
             _wait_and_release_nixl_transfer(
                 agent,
                 backend_name,
                 pending.pop(0),
             )
+            wait_release_s.append(time.monotonic() - wait_t0)
     except Exception:
         _drain_pending_nixl_transfers(
             agent,
@@ -221,6 +271,18 @@ def run_bounded_nixl_transfers(
             logger,
         )
         raise
+    finally:
+        profile_log(
+            logger,
+            "%s bounded transfer orchestration: total=%.6fs max_inflight=%d "
+            "prepare={%s} start={%s} wait_release={%s}",
+            backend_name,
+            time.monotonic() - total_t0,
+            max_inflight,
+            seconds_summary(prepare_s),
+            seconds_summary(start_s),
+            seconds_summary(wait_release_s),
+        )
 
 
 def release_nixl_transfer_resources(

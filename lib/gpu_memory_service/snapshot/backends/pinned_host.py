@@ -8,9 +8,11 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import time
 from typing import Any, List, Sequence, Tuple
 
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.profiling import profile_log, seconds_summary
 
 PINNED_COPY_CHUNK_SIZE = 64 * 1024 * 1024
 
@@ -46,15 +48,33 @@ class PinnedCopySlot:
 
     def __init__(self, size: int = PINNED_COPY_CHUNK_SIZE) -> None:
         size = int(size)
+        slot_t0 = time.monotonic()
+        malloc_t0 = time.monotonic()
         self.view, self._raw, self.ptr = _allocate_aligned_buffer(size)
+        malloc_elapsed = time.monotonic() - malloc_t0
         self.stream = None
         self.busy = False
         self._registered = False
         self._closed = False
         try:
+            stream_t0 = time.monotonic()
             self.stream = cuda_utils.cuda_stream_create_nonblocking()
+            stream_elapsed = time.monotonic() - stream_t0
+            register_t0 = time.monotonic()
             cuda_utils.cuda_host_register(self.ptr, size)
+            register_elapsed = time.monotonic() - register_t0
             self._registered = True
+            profile_log(
+                _LOGGER,
+                "pinned copy slot created size=%d ptr=0x%x aligned_malloc=%.6fs "
+                "stream_create=%.6fs host_register=%.6fs total=%.6fs",
+                size,
+                self.ptr,
+                malloc_elapsed,
+                stream_elapsed,
+                register_elapsed,
+                time.monotonic() - slot_t0,
+            )
         except Exception:
             try:
                 if self.stream is not None:
@@ -119,9 +139,13 @@ class PinnedCopySlot:
 
 def make_pinned_copy_slots(count: int) -> List[PinnedCopySlot]:
     slots: List[PinnedCopySlot] = []
+    slot_s: list[float] = []
+    total_t0 = time.monotonic()
     try:
         for _ in range(count):
+            slot_t0 = time.monotonic()
             slots.append(PinnedCopySlot())
+            slot_s.append(time.monotonic() - slot_t0)
     except Exception:
         for slot in slots:
             try:
@@ -132,6 +156,13 @@ def make_pinned_copy_slots(count: int) -> List[PinnedCopySlot]:
                     exc_info=True,
                 )
         raise
+    profile_log(
+        _LOGGER,
+        "pinned copy slots created count=%d total=%.6fs per_slot={%s}",
+        count,
+        time.monotonic() - total_t0,
+        seconds_summary(slot_s),
+    )
     return slots
 
 

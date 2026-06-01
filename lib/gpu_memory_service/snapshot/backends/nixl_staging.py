@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Mapping, Optional, Sequence
 
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.profiling import profile_log, seconds_summary
 from gpu_memory_service.snapshot.backends.nixl_common import (
     DRAM_MEM_TYPE,
     FILE_MEM_TYPE,
@@ -151,8 +152,11 @@ class _NixlPosixStagingTransferSession:
         )
         self._cancel_event = threading.Event()
         self._prep_started_at = time.monotonic()
+        init_t0 = time.monotonic()
         grouped = group_sources(self._sources)
+        group_elapsed = time.monotonic() - init_t0
         self._logical_group_count = len(grouped)
+        split_t0 = time.monotonic()
         work_groups: List[NixlWorkGroup] = [
             (group_name, file_groups) for group_name, file_groups in grouped.items()
         ]
@@ -167,11 +171,15 @@ class _NixlPosixStagingTransferSession:
                 self._worker_count,
             )
         self._work_groups = split_work_groups(work_groups, self._worker_count)
+        split_elapsed = time.monotonic() - split_t0
         self._total_bytes = sum(source.byte_count for source in self._sources)
         self._prep_pool: Optional[ThreadPoolExecutor] = None
         self._prep_futures: dict[Future[_PreparedNixlGroup], str] = {}
         if self._work_groups:
+            pool_t0 = time.monotonic()
             self._prep_pool = ThreadPoolExecutor(max_workers=self._worker_count)
+            pool_elapsed = time.monotonic() - pool_t0
+            submit_t0 = time.monotonic()
             self._prep_futures = {
                 self._prep_pool.submit(
                     self._prepare_group,
@@ -183,6 +191,7 @@ class _NixlPosixStagingTransferSession:
                     self._work_groups
                 )
             }
+            submit_elapsed = time.monotonic() - submit_t0
             logger.info(
                 "%s staging prep started: work_groups=%d logical_%s_groups=%d "
                 "workers=%d bytes=%.2f GiB",
@@ -193,9 +202,35 @@ class _NixlPosixStagingTransferSession:
                 self._worker_count,
                 self._total_bytes / (1024**3),
             )
+            profile_log(
+                logger,
+                "%s start_restore setup: sources=%d bytes=%.2f GiB "
+                "logical_%s_groups=%d work_groups=%d workers=%d "
+                "group_sources=%.6fs split_groups=%.6fs "
+                "prep_pool_create=%.6fs prep_submit=%.6fs",
+                self._backend_name,
+                len(self._sources),
+                self._total_bytes / (1024**3),
+                self._group_kind,
+                self._logical_group_count,
+                len(self._work_groups),
+                self._worker_count,
+                group_elapsed,
+                split_elapsed,
+                pool_elapsed,
+                submit_elapsed,
+            )
 
     def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
+        validate_t0 = time.monotonic()
         validate_transfer_targets(self._sources, targets, device=self._device)
+        profile_log(
+            logger,
+            "%s restore phase validate_targets targets=%d elapsed=%.6fs",
+            self._backend_name,
+            len(targets),
+            time.monotonic() - validate_t0,
+        )
         if not self._work_groups:
             return
 
@@ -207,10 +242,13 @@ class _NixlPosixStagingTransferSession:
             self._backend_name,
             prep_overlap_s,
         )
+        submit_transfer_s: list[float] = []
+        prep_wait_s: list[float] = []
         try:
             with ThreadPoolExecutor(max_workers=self._worker_count) as pool:
                 transfer_futures: dict[Future[None], str] = {}
                 for prep_future in as_completed(self._prep_futures):
+                    prep_wait_t0 = time.monotonic()
                     group_name = self._prep_futures[prep_future]
                     try:
                         prepared = prep_future.result()
@@ -220,7 +258,9 @@ class _NixlPosixStagingTransferSession:
                             f"{self._backend_name} failed while preparing "
                             f"{self._group_kind} group {group_name}: {exc}"
                         ) from exc
+                    prep_wait_s.append(time.monotonic() - prep_wait_t0)
                     try:
+                        submit_t0 = time.monotonic()
                         transfer_futures[
                             pool.submit(
                                 self._restore_prepared_group,
@@ -228,6 +268,7 @@ class _NixlPosixStagingTransferSession:
                                 targets,
                             )
                         ] = group_name
+                        submit_transfer_s.append(time.monotonic() - submit_t0)
                     except Exception:
                         self._close_prepared_group(prepared)
                         raise
@@ -256,6 +297,17 @@ class _NixlPosixStagingTransferSession:
             throughput,
             self._group_kind,
             self._logical_group_count,
+        )
+        profile_log(
+            logger,
+            "%s restore phase transfer orchestration: prep_overlap=%.6fs "
+            "transfer_elapsed=%.6fs prep_future_result={%s} "
+            "transfer_submit={%s}",
+            self._backend_name,
+            prep_overlap_s,
+            elapsed,
+            seconds_summary(prep_wait_s),
+            seconds_summary(submit_transfer_s),
         )
 
     def close(self) -> None:
@@ -286,23 +338,31 @@ class _NixlPosixStagingTransferSession:
         try:
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
+            api_t0 = time.monotonic()
             api = (
                 self._api_future.result()
                 if self._api_future is not None
                 else load_nixl_api()
             )
+            api_elapsed = time.monotonic() - api_t0
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
+            set_device_t0 = time.monotonic()
             cuda_utils.cuda_runtime_set_device(self._device)
+            set_device_elapsed = time.monotonic() - set_device_t0
+            agent_t0 = time.monotonic()
             agent = create_nixl_agent(
                 api,
                 agent_name=agent_name,
                 backend_name=NIXL_POSIX_BACKEND,
                 backend_params=self._posix_backend_params,
             )
+            agent_elapsed = time.monotonic() - agent_t0
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
+            slots_t0 = time.monotonic()
             slots = make_pinned_copy_slots(_PINNED_COPY_BUFFERS_PER_WORKER)
+            slots_elapsed = time.monotonic() - slots_t0
             prep_elapsed_s = time.monotonic() - prep_t0
             logger.info(
                 "%s prepared %s=%s files=%d prep_elapsed=%.3fs "
@@ -313,6 +373,23 @@ class _NixlPosixStagingTransferSession:
                 len(file_groups),
                 prep_elapsed_s,
                 prep_started_after_s,
+            )
+            profile_log(
+                logger,
+                "%s prepared %s=%s setup_detail: files=%d "
+                "prep_started_after=%.6fs wait_nixl_api=%.6fs "
+                "cuda_set_device=%.6fs create_agent_backend=%.6fs "
+                "pinned_slots=%.6fs total=%.6fs",
+                self._backend_name,
+                self._group_kind,
+                group_name,
+                len(file_groups),
+                prep_started_after_s,
+                api_elapsed,
+                set_device_elapsed,
+                agent_elapsed,
+                slots_elapsed,
+                prep_elapsed_s,
             )
             return _PreparedNixlGroup(
                 group_name=group_name,
@@ -392,11 +469,18 @@ def restore_file_groups_with_nixl_staging(
         slots = []
     total_bytes = 0
     next_slot = 0
+    open_file_s: list[float] = []
+    wait_slot_s: list[float] = []
+    read_s: list[float] = []
+    h2d_submit_s: list[float] = []
+    final_wait_s: list[float] = []
     try:
         if owned_slots:
             slots = make_pinned_copy_slots(buffers_per_worker)
         for file_path, sources in file_groups:
+            open_t0 = time.monotonic()
             fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
+            open_file_s.append(time.monotonic() - open_t0)
             try:
                 for source in sources:
                     target = targets[source.allocation_id]
@@ -406,11 +490,14 @@ def restore_file_groups_with_nixl_staging(
                             raise CancelledError(f"{backend_name} cancelled")
 
                         slot = slots[next_slot]
-                        slot.wait()
                         chunk_size = min(
                             PINNED_COPY_CHUNK_SIZE,
                             source.byte_count - done,
                         )
+                        wait_t0 = time.monotonic()
+                        slot.wait()
+                        wait_slot_s.append(time.monotonic() - wait_t0)
+                        read_t0 = time.monotonic()
                         _read_file_to_dram(
                             agent,
                             agent_name,
@@ -421,7 +508,10 @@ def restore_file_groups_with_nixl_staging(
                             chunk_size,
                             backend_name,
                         )
+                        read_s.append(time.monotonic() - read_t0)
+                        h2d_t0 = time.monotonic()
                         slot.copy_to_device_async(target.va + done, chunk_size)
+                        h2d_submit_s.append(time.monotonic() - h2d_t0)
                         done += chunk_size
                         total_bytes += chunk_size
                         next_slot = (next_slot + 1) % len(slots)
@@ -429,7 +519,23 @@ def restore_file_groups_with_nixl_staging(
                 os.close(fd)
 
         for slot in slots:
+            wait_t0 = time.monotonic()
             slot.wait()
+            final_wait_s.append(time.monotonic() - wait_t0)
+        profile_log(
+            logger,
+            "%s staging group transfer detail: files=%d bytes=%.2f GiB "
+            "open_file={%s} wait_slot={%s} file_to_dram={%s} "
+            "h2d_submit={%s} final_slot_wait={%s}",
+            backend_name,
+            len(file_groups),
+            total_bytes / (1024**3),
+            seconds_summary(open_file_s),
+            seconds_summary(wait_slot_s),
+            seconds_summary(read_s),
+            seconds_summary(h2d_submit_s),
+            seconds_summary(final_wait_s),
+        )
         return total_bytes
     finally:
         if owned_slots:
@@ -454,20 +560,42 @@ def _read_file_to_dram(
     host_reg = None
     handle = None
     try:
+        file_reg_t0 = time.monotonic()
         file_reg = agent.register_memory(
             [(file_offset, size, fd, "")],
             FILE_MEM_TYPE,
         )
+        file_reg_elapsed = time.monotonic() - file_reg_t0
+        host_reg_t0 = time.monotonic()
         host_reg = agent.register_memory(
             [(host_ptr, size, 0, "")],
             DRAM_MEM_TYPE,
         )
+        host_reg_elapsed = time.monotonic() - host_reg_t0
+        init_t0 = time.monotonic()
         handle = agent.initialize_xfer(
             "READ",
             host_reg.trim(),
             file_reg.trim(),
             agent_name,
         )
+        init_elapsed = time.monotonic() - init_t0
+        transfer_t0 = time.monotonic()
         wait_for_transfer(agent, handle, file_path, backend_name)
+        transfer_elapsed = time.monotonic() - transfer_t0
+        profile_log(
+            logger,
+            "%s file->dram chunk setup: file=%s offset=%d size=%d "
+            "file_register=%.6fs host_register=%.6fs initialize_xfer=%.6fs "
+            "transfer_wait=%.6fs",
+            backend_name,
+            file_path,
+            file_offset,
+            size,
+            file_reg_elapsed,
+            host_reg_elapsed,
+            init_elapsed,
+            transfer_elapsed,
+        )
     finally:
         release_transfer_resources(agent, handle, host_reg, file_reg)
