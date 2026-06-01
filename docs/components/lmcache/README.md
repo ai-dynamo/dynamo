@@ -57,6 +57,7 @@ helm install dynamo-platform oci://nvcr.io/nvidia/ai-dynamo/dynamo-platform \
 >    ```
 > 3. **Replace the CRDs by hand** (helm doesn't update CRDs on install/upgrade):
 >    ```bash
+>    cd ../../..
 >    kubectl replace -f platform/components/operator/crds/nvidia.com_dynamographdeployments.yaml
 >    kubectl replace -f platform/components/operator/crds/nvidia.com_dynamocomponentdeployments.yaml
 >    ```
