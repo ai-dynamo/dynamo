@@ -51,6 +51,7 @@ from gpu_memory_service.common.cuda_utils import (
     cumem_unmap,
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.profiling import profile_log
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 
 logger = logging.getLogger(__name__)
@@ -382,10 +383,18 @@ class GMSClientMemoryManager:
         Access is set based on current lock_type. Returns the CUDA handle.
         """
         assert self._granted_lock_type is not None
+        total_t0 = time.monotonic()
         aligned_size = align_to_granularity(size, self.granularity)
+        import_t0 = time.monotonic()
         handle = cumem_import_from_shareable_handle_close_fd(fd)
+        import_elapsed = time.monotonic() - import_t0
+        map_t0 = time.monotonic()
         cumem_map(va, aligned_size, handle)
+        map_elapsed = time.monotonic() - map_t0
+        access_t0 = time.monotonic()
         cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
+        access_elapsed = time.monotonic() - access_t0
+        track_t0 = time.monotonic()
         self._track_mapping(
             LocalMapping(
                 allocation_id=allocation_id,
@@ -396,6 +405,23 @@ class GMSClientMemoryManager:
                 tag=tag,
                 layout_slot=layout_slot,
             )
+        )
+        track_elapsed = time.monotonic() - track_t0
+        profile_log(
+            logger,
+            "client map_va allocation_id=%s size=%d aligned=%d tag=%s "
+            "slot=%d import_fd=%.6fs cuMemMap=%.6fs cuMemSetAccess=%.6fs "
+            "track=%.6fs total=%.6fs",
+            allocation_id,
+            size,
+            aligned_size,
+            tag,
+            layout_slot,
+            import_elapsed,
+            map_elapsed,
+            access_elapsed,
+            track_elapsed,
+            time.monotonic() - total_t0,
         )
         return handle
 

@@ -15,6 +15,7 @@ import socket
 import time
 from typing import Optional, Tuple, Type, TypeVar
 
+from gpu_memory_service.common.profiling import profile_log
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     ErrorResponse,
@@ -117,11 +118,17 @@ class _GMSRPCTransport:
             raise RuntimeError("Attempted GMS request on disconnected transport")
 
         prefix = error_prefix or f"GMS request {type(request).__name__}"
+        request_type = type(request).__name__
+        total_t0 = time.monotonic()
         try:
+            send_t0 = time.monotonic()
             send_message_sync(self._socket, request)
+            send_elapsed = time.monotonic() - send_t0
+            recv_t0 = time.monotonic()
             response, fd, self._recv_buffer = recv_message_sync(
                 self._socket, self._recv_buffer
             )
+            recv_elapsed = time.monotonic() - recv_t0
         except Exception as exc:
             try:
                 self._socket.close()
@@ -130,6 +137,17 @@ class _GMSRPCTransport:
             self._socket = None
             raise ConnectionError(f"{prefix} failed: {exc}") from exc
 
+        profile_log(
+            logger,
+            "client rpc request=%s response=%s fd=%s send=%.6fs recv=%.6fs "
+            "total=%.6fs",
+            request_type,
+            type(response).__name__,
+            fd >= 0,
+            send_elapsed,
+            recv_elapsed,
+            time.monotonic() - total_t0,
+        )
         if isinstance(response, ErrorResponse):
             if fd >= 0:
                 os.close(fd)

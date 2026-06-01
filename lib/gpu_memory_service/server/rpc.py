@@ -10,8 +10,10 @@ import logging
 import os
 import select
 import socket
+import time
 from typing import Optional
 
+from gpu_memory_service.common.profiling import profile_log
 from gpu_memory_service.common.protocol.messages import (
     ErrorResponse,
     GetEventHistoryRequest,
@@ -229,6 +231,8 @@ class GMSRPCServer:
                 continue
 
             fd = -1
+            request_t0 = time.monotonic()
+            msg_type_name = type(msg).__name__
             try:
                 response, fd, should_close = await self._gms.handle_request(
                     conn,
@@ -271,12 +275,15 @@ class GMSRPCServer:
             except Exception as exc:
                 fail("fatal server error", exc_info=exc)
 
+            handle_elapsed = time.monotonic() - request_t0
             try:
+                send_t0 = time.monotonic()
                 await send_message(conn.writer, response, fd)
+                send_elapsed = time.monotonic() - send_t0
             except Exception as exc:
                 logger.warning(
                     "Response send failed for %s on session %s: %s",
-                    type(msg).__name__,
+                    msg_type_name,
                     conn.session_id,
                     exc,
                 )
@@ -285,6 +292,17 @@ class GMSRPCServer:
                 if fd >= 0:
                     os.close(fd)
 
+            profile_log(
+                logger,
+                "server rpc request=%s response=%s fd=%s handle=%.6fs "
+                "send_response=%.6fs total=%.6fs",
+                msg_type_name,
+                type(response).__name__,
+                fd >= 0,
+                handle_elapsed,
+                send_elapsed,
+                time.monotonic() - request_t0,
+            )
             if should_close:
                 return
 
