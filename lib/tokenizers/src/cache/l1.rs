@@ -176,11 +176,13 @@ impl L1Cache {
         None
     }
 
-    /// Insert prefix entries at every special-token boundary.
+    /// Insert prefix entries at every special-token boundary (e.g. to pre-seed the cache).
     ///
     /// Uses incremental hashing and incremental tokenization (per-segment encode of the
     /// delta text between adjacent boundaries) so populating N entries costs one full
-    /// re-tokenize total, split across the segments.
+    /// re-tokenize total, split across the segments. The miss path uses
+    /// [`Self::populate_and_encode`] instead, which reuses this same work to *also* return
+    /// the full token vector (avoiding a redundant second tokenization).
     pub fn insert_at_boundaries<E: Encoder + ?Sized>(
         &self,
         input: &str,
@@ -188,19 +190,59 @@ impl L1Cache {
         special_tokens: &[&str],
     ) -> anyhow::Result<()> {
         let boundaries = find_special_token_boundaries(input, special_tokens);
-
         if boundaries.is_empty() {
             return Ok(());
         }
+        self.populate_boundaries(input, &boundaries, tokenizer)?;
+        Ok(())
+    }
 
+    /// Miss-path encode: tokenize `input` exactly once, caching the cumulative prefix at
+    /// every special-token boundary as we go, and return the full token-id vector. This
+    /// replaces a separate full `encode` + [`Self::insert_at_boundaries`], which together
+    /// tokenized the input ~twice (once for the result, once split across segments).
+    ///
+    /// The concatenation of the per-segment encodes equals an uncached `encode(input)`
+    /// because special tokens are atomic in BPE — the same invariant the hit path relies
+    /// on. Returns token-ids only; the caller wraps them in [`crate::Encoding::Sp`].
+    pub fn populate_and_encode<E: Encoder + ?Sized>(
+        &self,
+        input: &str,
+        tokenizer: &E,
+        special_tokens: &[&str],
+    ) -> anyhow::Result<Vec<TokenIdType>> {
+        let boundaries = find_special_token_boundaries(input, special_tokens);
+        if boundaries.is_empty() {
+            // No special tokens present — nothing cacheable; a single plain encode.
+            return Ok(tokenizer.encode(input)?.token_ids().to_vec());
+        }
+
+        // Tokenize + cache every boundary prefix; `running` covers input[0..last boundary].
+        let mut running = self.populate_boundaries(input, &boundaries, tokenizer)?;
+
+        // The trailing segment after the last boundary is not a cache key (boundaries
+        // exclude input.len()); encoding it completes the full tokenization.
+        let tail_start = *boundaries.last().expect("boundaries is non-empty here");
+        let tail = tokenizer.encode(&input[tail_start..])?;
+        running.extend_from_slice(tail.token_ids());
+        Ok(running)
+    }
+
+    /// Shared core of the miss path: walk `boundaries`, hashing and tokenizing each
+    /// inter-boundary segment, caching the cumulative prefix at each boundary, and return
+    /// the running token vector (covering `input[0..boundaries.last()]`).
+    fn populate_boundaries<E: Encoder + ?Sized>(
+        &self,
+        input: &str,
+        boundaries: &[usize],
+        tokenizer: &E,
+    ) -> anyhow::Result<Vec<TokenIdType>> {
         let mut hasher = blake3::Hasher::new();
         let mut running_tokens: Vec<TokenIdType> = Vec::new();
         let mut last_pos = 0;
         let bytes = input.as_bytes();
 
-        for &boundary_pos in boundaries.iter() {
-            let delta_text = &input[last_pos..boundary_pos];
-
+        for &boundary_pos in boundaries {
             // 1. Incremental hash. `finalize(&self)` borrows, so no clone is needed.
             hasher.update(&bytes[last_pos..boundary_pos]);
             let hash_bytes: Blake3Hash = *hasher.finalize().as_bytes();
@@ -208,19 +250,18 @@ impl L1Cache {
             // 2. Incremental tokenization. Dynamo's Encoder has no `add_special_tokens`
             //    parameter — equivalent to upstream always passing `false` past the first
             //    segment (which is also what Dynamo's HF impl always does for the first).
-            let segment_encoding = tokenizer.encode(delta_text)?;
-            running_tokens.extend_from_slice(segment_encoding.token_ids());
+            let seg = tokenizer.encode(&input[last_pos..boundary_pos])?;
+            running_tokens.extend_from_slice(seg.token_ids());
 
-            // 3. Snapshot the cumulative prefix as Arc<[T]> for cheap sharing on hits and
-            //    hand it to moka (the weigher charges its token bytes against the budget;
-            //    admission/eviction is moka's responsibility).
+            // 3. Snapshot the cumulative prefix as Arc<[T]> and hand it to moka (the weigher
+            //    charges its token bytes against the budget; eviction is moka's job).
             let prefix_tokens: Arc<[TokenIdType]> = running_tokens.as_slice().into();
             self.cache.insert(hash_bytes, prefix_tokens);
 
             last_pos = boundary_pos;
         }
 
-        Ok(())
+        Ok(running_tokens)
     }
 
     /// Extend the cache on a *partial* hit so the next turn of a growing conversation
@@ -731,5 +772,70 @@ mod tests {
             );
             let _ = &text[..b]; // must not panic
         }
+    }
+
+    #[test]
+    fn populate_and_encode_matches_uncached_and_seeds_cache() {
+        // The fused miss path must (a) return ids byte-exact to an uncached encode and
+        // (b) leave the cache populated at the boundaries, so a follow-up lookup hits.
+        let tok = load_tokenizer();
+        let cache = L1Cache::new(8 * 1024 * 1024);
+        let input = "<s>system\nYou are helpful.</s><s>user\nHello there, friend.</s>";
+
+        let got = cache
+            .populate_and_encode(input, tok.as_ref(), SPECIALS)
+            .unwrap();
+        let plain = tok.encode(input).unwrap();
+        assert_eq!(
+            got,
+            plain.token_ids(),
+            "fused miss encode must equal uncached encode"
+        );
+
+        // It also seeded the cache: a follow-up lookup hits at a boundary.
+        assert!(
+            !cache.is_empty(),
+            "miss path must populate boundary entries"
+        );
+        let (_t, offset, _d) = cache
+            .longest_prefix_match(input, SPECIALS)
+            .expect("hit after populate");
+        assert!(offset > 0, "follow-up lookup should hit a cached boundary");
+    }
+
+    #[test]
+    fn populate_and_encode_handles_inputs_without_special_tokens() {
+        // No registered special appears in the input → no boundaries → one plain encode,
+        // nothing cached, still byte-exact.
+        let tok = load_tokenizer();
+        let cache = L1Cache::new(8 * 1024 * 1024);
+        let input = "plain text with no special tokens at all";
+
+        let got = cache
+            .populate_and_encode(input, tok.as_ref(), SPECIALS)
+            .unwrap();
+        let plain = tok.encode(input).unwrap();
+        assert_eq!(got, plain.token_ids());
+        assert!(cache.is_empty(), "nothing cacheable without boundaries");
+    }
+
+    #[test]
+    fn populate_and_encode_handles_trailing_special_token() {
+        // Input ending in a special token: the final boundary == input.len() is excluded,
+        // so the trailing `</s>` lands in the tail segment. The assembled ids must still
+        // equal an uncached encode.
+        let tok = load_tokenizer();
+        let cache = L1Cache::new(8 * 1024 * 1024);
+        let input = "<s>system\nDone.</s>";
+
+        let got = cache
+            .populate_and_encode(input, tok.as_ref(), SPECIALS)
+            .unwrap();
+        let plain = tok.encode(input).unwrap();
+        assert_eq!(
+            got,
+            plain.token_ids(),
+            "tail-segment assembly must be exact"
+        );
     }
 }

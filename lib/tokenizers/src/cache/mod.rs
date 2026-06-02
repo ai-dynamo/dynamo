@@ -26,11 +26,13 @@
 //!
 //! # Storage normalization
 //!
-//! Cache hits return [`Encoding::Sp`] (token-ids only), even when the inner
-//! tokenizer would have produced [`Encoding::Hf`] (rich offsets/attention/etc).
-//! All current downstream consumers in Dynamo only call [`Encoding::token_ids`],
-//! so this lossy normalization is safe; revisit if a caller starts reading
-//! offsets or attention masks from cached encodings.
+//! When L1 is enabled, **every** `encode` returns [`Encoding::Sp`] (token-ids only) —
+//! hits merge cached prefix ids with a fresh suffix encode, and misses assemble the ids
+//! from the per-boundary segment encodes (see [`L1Cache::populate_and_encode`]) — even
+//! when the inner tokenizer would have produced [`Encoding::Hf`] (rich offsets/attention/
+//! etc). All current downstream consumers in Dynamo only call [`Encoding::token_ids`], so
+//! this lossy normalization is safe; revisit if a caller starts reading offsets or
+//! attention masks from encodings produced through the cache.
 //!
 //! # Configuration
 //!
@@ -169,12 +171,16 @@ impl Encoder for CachedTokenizer {
             return Ok(Encoding::Sp(merged));
         }
 
-        // Miss path: full encode, then populate L1 at every boundary.
-        let encoding = self.inner.encode(input)?;
-        let _ = self
-            .l1
-            .insert_at_boundaries(input, self.inner.as_ref(), &specials);
-        Ok(encoding)
+        // Miss path: tokenize once, caching the cumulative prefix at every boundary as we
+        // go. The returned ids equal an uncached encode (special tokens are atomic), so we
+        // avoid the redundant second tokenization a separate full-encode + insert would
+        // cost. Returns Encoding::Sp — consistent with the hit path (see the storage-
+        // normalization note in the module docs).
+        Ok(Encoding::Sp(self.l1.populate_and_encode(
+            input,
+            self.inner.as_ref(),
+            &specials,
+        )?))
     }
 
     fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
