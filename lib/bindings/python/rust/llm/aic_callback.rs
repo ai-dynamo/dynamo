@@ -145,13 +145,6 @@ pub(super) fn create_aic_prefill_load_estimator(
 }
 
 /// Estimate the KV block pool size from AIC's base-model memory model.
-///
-/// Intentionally does NOT take ``nextn``/``nextn_accept_rates``: AIC's
-/// spec-dec memory scaling (``trtllm_backend._get_memory_usage`` applies
-/// ``activations * (nextn + 1)``) inflates non-KV bytes enough to push the
-/// KV budget negative on tight configs. The block pool should reflect the
-/// base model's footprint; spec-dec speedup is applied separately by the
-/// latency callback (``create_aic_callback``).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn estimate_aic_num_gpu_blocks(
     py: Python<'_>,
