@@ -101,6 +101,11 @@ def _local_dp_rank_range(server_args) -> tuple[int, int]:
 
 
 class SglangLLMEngine(LLMEngine):
+    # Class-level default so instances built via ``__new__`` (tests that skip
+    # ``__init__`` and call ``generate()`` directly) still expose the attribute
+    # ``generate()`` reads. ``start()`` overwrites it on the real path.
+    _logits_processor_spec: "LogitsProcessorSpec | None" = None
+
     def __init__(self, server_args, dynamo_args, serving_mode: DisaggregationMode):
         self.server_args = server_args
         self.dynamo_args = dynamo_args
@@ -238,7 +243,8 @@ class SglangLLMEngine(LLMEngine):
         forces skip_tokenizer_init=False for the hook, so the tokenizer exists
         here.
         """
-        assert self.engine is not None, "Engine not initialized"
+        if self.engine is None:
+            raise RuntimeError("Engine not initialized")
         tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
         tokenizer = getattr(tokenizer_manager, "tokenizer", None)
         if tokenizer is None:

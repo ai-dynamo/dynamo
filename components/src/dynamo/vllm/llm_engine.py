@@ -138,6 +138,11 @@ class _UnifiedStatLoggerFactory:
 
 
 class VllmLLMEngine(LLMEngine):
+    # Class-level default so instances built via ``__new__`` (tests that skip
+    # ``__init__`` and call ``generate()`` directly) still expose the attribute
+    # ``generate()`` reads. ``start()`` overwrites it on the real path.
+    _logits_processor_spec: "LogitsProcessorSpec | None" = None
+
     def __init__(
         self,
         engine_args,

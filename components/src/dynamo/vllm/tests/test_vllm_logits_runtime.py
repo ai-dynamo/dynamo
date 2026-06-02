@@ -92,6 +92,23 @@ def test_activate_stashes_serialized_entries():
     )
 
 
+def test_activate_clears_stale_payload_on_empty_entries():
+    """A no-activation request clears any pre-existing dynamo_logits (e.g. a
+    client-supplied vllm_xargs) so the engine-loaded adapter is not triggered,
+    while leaving other extra_args untouched."""
+    sampling_params = SimpleNamespace(
+        extra_args={
+            "dynamo_logits": [
+                {"kind": "forced_sequence", "token_ids": [1], "eos_token_id": 2}
+            ],
+            "kv_transfer_params": {"x": 1},
+        }
+    )
+    activate_logits_processors(sampling_params, [])
+    assert "dynamo_logits" not in sampling_params.extra_args
+    assert sampling_params.extra_args["kv_transfer_params"] == {"x": 1}
+
+
 def test_activate_preserves_existing_extra_args():
     sampling_params = SimpleNamespace(extra_args={"kv_transfer_params": {"x": 1}})
     activate_logits_processors(

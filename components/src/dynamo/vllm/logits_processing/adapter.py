@@ -129,16 +129,20 @@ def activate_logits_processors(
 ) -> None:
     """Stash serialized spec entries onto a request's ``SamplingParams``.
 
-    No-op on empty entries (the common, hook-off case). The engine-loaded
-    :class:`DynamoVllmLogitsProcessor` reads them back per request.
+    On empty entries, clear any pre-existing payload rather than no-op: vLLM
+    exposes ``extra_args`` to clients via ``vllm_xargs``, so a caller could
+    otherwise leave a stale ``dynamo_logits`` that the engine-loaded
+    :class:`DynamoVllmLogitsProcessor` would activate even when the shared
+    gating produced no entries for this request.
     """
+    extra_args = getattr(sampling_params, "extra_args", None)
     if not entries:
+        if extra_args is not None:
+            extra_args.pop(_DYNAMO_LOGITS_KEY, None)
         return
-    if getattr(sampling_params, "extra_args", None) is None:
-        sampling_params.extra_args = {}
-    sampling_params.extra_args[_DYNAMO_LOGITS_KEY] = serialize_logits_processor_entries(
-        entries
-    )
+    if extra_args is None:
+        sampling_params.extra_args = extra_args = {}
+    extra_args[_DYNAMO_LOGITS_KEY] = serialize_logits_processor_entries(entries)
 
 
 def register_dynamo_logits_processor(engine_args: Any) -> None:
