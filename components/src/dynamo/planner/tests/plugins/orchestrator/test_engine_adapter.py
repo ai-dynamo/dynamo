@@ -91,23 +91,30 @@ def test_initial_tick_with_throughput_scaling_enabled_does_not_attribute_error()
     assert tick.run_load_scaling or tick.run_throughput_scaling
 
 
-def test_merge_tolerance_matches_psm_500ms_window():
-    """``_MERGE_TOLERANCE_S`` must be the PSM 500ms wiggle-room, not a
-    float epsilon. Cadence advance anchors on ``tick_input.now_s``, so
-    after a single tick the load and throughput schedules drift apart
-    by however much wall-clock latency the tick took (typically a few
-    ms). With ``1e-9`` tolerance such ticks fail to merge and the
-    planner pays 2x scheduler overhead — PSM merges them into one.
+def test_pipeline_fires_at_scale_interval_cadence():
+    """Replaces the previous ``test_merge_tolerance_matches_psm_500ms_window``.
+
+    Under the scale_interval cadence model, the engine_adapter no longer
+    runs the PSM ``_MERGE_TOLERANCE_S = 0.5`` merge logic — there is no
+    dual ``_next_load_s`` / ``_next_throughput_s`` to reconcile.
+    Pipeline fires once per ``scale_interval_seconds`` from the last
+    tick moment.  Per-plugin throttling (in ``PluginScheduler._is_due``)
+    decides which plugins actually fire each tick — the merge-tolerance
+    concept that used to live here is now naturally absorbed by the
+    plugin scheduler, which evaluates each plugin's throttle
+    independently using the same ``now`` value.
+
+    Cadence-merge parity with PSM is preserved at the *decision* level
+    rather than the *tick-shape* level (see Decision 1 in
+    /tmp/scale_interval_design.md §11).  This test locks the new shape:
+    next_tick.at_s = last_tick + scale_interval, exactly.
     """
     adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
-    # Simulate cadences that are nearly coincident but offset by ~10ms
-    # of wall-clock latency — well inside the 500ms PSM merge window.
-    adapter._next_load_s = 180.010
-    adapter._next_throughput_s = 180.0
-    tick = adapter._compute_next_scheduled_tick()
-    assert tick.run_load_scaling, "load cadence within 500ms must merge"
-    assert tick.run_throughput_scaling, "throughput cadence within 500ms must merge"
-    assert tick.at_s == pytest.approx(180.0, abs=1e-9)
+    tick = adapter.initial_tick(start_s=0.0)
+    # Default scale_interval_seconds = 5.0 (see SchedulingConfig).
+    assert tick.at_s == pytest.approx(5.0, abs=1e-9)
+    assert tick.run_load_scaling, "scale_interval ticks fire both flags"
+    assert tick.run_throughput_scaling, "scale_interval ticks fire both flags"
 
 
 # ---------------------------------------------------------------------------

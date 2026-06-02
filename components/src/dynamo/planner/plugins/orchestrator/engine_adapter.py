@@ -98,10 +98,6 @@ from dynamo.planner.plugins.types import (
 
 log = logging.getLogger(__name__)
 
-# Matches ``PlannerStateMachine._MERGE_TOLERANCE_S`` so adapter next_tick
-# computation is bit-identical to PSM when both cadences are due.
-_MERGE_TOLERANCE_S = 0.5
-
 
 class OrchestratorEngineAdapter:
     """``EngineProtocol``-compatible wrapper around the 5-builtin chain.
@@ -141,7 +137,25 @@ class OrchestratorEngineAdapter:
         # never re-firing after the first tick.
         self._clock: Clock = clock if clock is not None else WallClock()
 
-        # Cadence tracking (mirrors PSM ``_next_load_s`` / ``_next_throughput_s``)
+        # Scale_interval cadence model — pipeline fires once per
+        # ``scale_interval_seconds`` regardless of individual plugin
+        # cadences.  Per-plugin throttling (via
+        # ``RegisteredPlugin.execution_interval_seconds``) handles
+        # which plugins actually fire each tick.  See design doc §4 and
+        # ``test_decision_level_parity`` for how this matches PSM's
+        # observable scaling decisions while collapsing the legacy
+        # dual-cadence book-keeping into one base interval.
+        self._scale_interval: float = float(
+            config.scheduling.scale_interval_seconds
+        )
+        self._last_tick_s: float = 0.0
+
+        # Legacy cadence fields preserved as a compatibility shim for
+        # any existing test that still reads them.  Not consulted by the
+        # scale_interval scheduling logic — pipeline tick selection runs
+        # entirely off ``self._last_tick_s + self._scale_interval``.
+        # Removed entirely once the PSM-parity test surface is rewritten
+        # to its decision-level form (see same design doc §11).
         self._next_load_s: float = float("inf")
         self._next_throughput_s: float = float("inf")
 
@@ -354,7 +368,19 @@ class OrchestratorEngineAdapter:
     # ------------------------------------------------------------------
 
     def initial_tick(self, start_s: float) -> ScheduledTick:
-        """Matches ``PlannerStateMachine.initial_tick``."""
+        """First scheduled tick under the scale_interval cadence model.
+
+        Pipeline fires at ``start_s + scale_interval`` regardless of
+        the legacy load / throughput interval configuration — those
+        intervals now live on individual plugin
+        ``execution_interval_seconds`` values rather than on the
+        pipeline cadence.
+
+        Legacy ``_next_load_s`` / ``_next_throughput_s`` still set for
+        any compatibility code still reading them (those reads are
+        scheduled for removal once decision-level parity is in place).
+        """
+        self._last_tick_s = start_s
         self._next_load_s = start_s + self._config.load_adjustment_interval_seconds
         if self._config.enable_throughput_scaling:
             self._next_throughput_s = (
@@ -399,16 +425,21 @@ class OrchestratorEngineAdapter:
         ):
             self._observe_fpm(tick_input.fpm_observations)
 
-        # 2. Advance cadence BEFORE running the tick — PSM does this in
-        #    on_tick too; doing it here keeps ``_next_scheduled_tick``
-        #    output aligned when returning PlannerEffects.next_tick.
-        if scheduled_tick.run_throughput_scaling:
+        # 2. Advance the scale_interval cadence pointer.  Under the new
+        #    model there is one base interval; pipeline tick fires every
+        #    ``scale_interval`` seconds and individual plugin cadences
+        #    are handled inside the orchestrator by per-plugin
+        #    ``execution_interval_seconds`` throttling.  The legacy
+        #    ``_next_load_s`` / ``_next_throughput_s`` are kept current
+        #    only for shim compatibility — they no longer drive next-
+        #    tick selection.
+        self._last_tick_s = tick_input.now_s
+        self._next_load_s = (
+            tick_input.now_s + self._config.load_adjustment_interval_seconds
+        )
+        if self._config.enable_throughput_scaling:
             self._next_throughput_s = (
                 tick_input.now_s + self._config.throughput_adjustment_interval_seconds
-            )
-        if scheduled_tick.run_load_scaling:
-            self._next_load_s = (
-                tick_input.now_s + self._config.load_adjustment_interval_seconds
             )
 
         # 3. Build PipelineContext + baseline and drive the orchestrator.
@@ -608,33 +639,70 @@ class OrchestratorEngineAdapter:
             reg.enabled = enabled
 
     def _compute_next_scheduled_tick(self) -> ScheduledTick:
-        """Mirror of ``PlannerStateMachine._next_scheduled_tick``.
+        """Next pipeline tick under the scale_interval cadence model.
 
-        Tracks upstream PSM commit `c388483ae` (KV-reuse awareness in
-        load + throughput scaling): in load-only deployments (no
-        throughput tick) load ticks carry a traffic-metrics scrape
-        over the load interval so the planner can discount prefill
-        work by KV hit rate. Without this branch, dual-path parity
-        diverges on easy-mode scenarios.
+        Pipeline fires at ``self._last_tick_s + scale_interval`` —
+        a single base cadence, no more dual ``_next_load_s`` /
+        ``_next_throughput_s`` merging.  Per-plugin
+        ``execution_interval_seconds`` throttling (in
+        ``PluginScheduler._is_due``) handles which plugins actually
+        fire each tick.
+
+        Observation collection (``need_traffic_metrics``,
+        ``traffic_metrics_duration_s``) is gated on whether any
+        registered plugin both lists ``observations.traffic`` in its
+        ``needs`` AND would be due at the next tick.  This recovers
+        PSM's lazy-pull cost profile (one Prometheus query per
+        ``throughput_adjustment_interval_seconds`` in mixed mode)
+        without leaking the cadence-type concept into the
+        ScheduledTick API — plugins only see the window they
+        themselves declared via ``observation_window_seconds``.
         """
-        at_s = min(self._next_load_s, self._next_throughput_s)
-        is_load = self._next_load_s <= at_s + _MERGE_TOLERANCE_S
-        is_throughput = self._next_throughput_s <= at_s + _MERGE_TOLERANCE_S
-        if is_throughput:
+        at_s = self._last_tick_s + self._scale_interval
+
+        # Lazy traffic pull: only when some currently-registered,
+        # currently-due plugin actually consumes
+        # ``observations.traffic``.  Without any such plugin the
+        # pipeline still ticks (e.g. for FPM-driven load decisions or
+        # worker-state-only constrain logic), it just skips the
+        # Prometheus query.
+        traffic_consumers_due = [
+            p
+            for p in self._orchestrator._registry.all_plugins()
+            if "observations.traffic" in p.needs
+            and self._orchestrator._scheduler._is_due(p, at_s)
+        ]
+        if traffic_consumers_due:
             need_traffic = True
-            traffic_duration_s = float(self._config.throughput_adjustment_interval_seconds)
-        elif is_load and not self._config.enable_throughput_scaling:
-            need_traffic = True
-            traffic_duration_s = float(self._config.load_adjustment_interval_seconds)
+            # Aggregation window: max declared
+            # ``observation_window_seconds`` across due consumers.
+            # Declared 0.0 means "scale_interval freshness" — i.e. the
+            # plugin doesn't need a longer window, so falls back to
+            # the base cadence here.
+            declared = [
+                p.observation_window_seconds
+                for p in traffic_consumers_due
+                if p.observation_window_seconds > 0
+            ]
+            traffic_duration_s = (
+                max(declared) if declared else float(self._scale_interval)
+            )
         else:
             need_traffic = False
             traffic_duration_s = 0.0
+
+        # ``run_load_scaling`` / ``run_throughput_scaling`` flags are
+        # preserved on ScheduledTick for back-compat with PSM-path
+        # tests and the diagnostics-projection methods below.  Under
+        # scale_interval both are always True — every pipeline tick is
+        # treated as an opportunity for either type of plugin to fire
+        # (subject to its own throttle).
         return ScheduledTick(
             at_s=at_s,
-            run_load_scaling=is_load,
-            run_throughput_scaling=is_throughput,
+            run_load_scaling=True,
+            run_throughput_scaling=True,
             need_worker_states=True,
-            need_worker_fpm=is_load,
+            need_worker_fpm=True,
             need_traffic_metrics=need_traffic,
             traffic_metrics_duration_s=traffic_duration_s,
         )
