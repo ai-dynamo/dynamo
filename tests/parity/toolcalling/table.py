@@ -92,9 +92,7 @@ _HIDDEN_TOOL_CALLING_FAMILIES = {"nemotron_deci", "nemotron_nano"}
 
 def _model_label_html(model: str) -> str:
     """Escape a model label, styling any ‡ marker like the †/§ suffixes."""
-    return html_lib.escape(model).replace(
-        "‡", '<span class="parser-suffix">‡</span>'
-    )
+    return html_lib.escape(model).replace("‡", '<span class="parser-suffix">‡</span>')
 
 
 def _make_jinja_env() -> Environment:
