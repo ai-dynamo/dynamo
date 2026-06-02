@@ -26,7 +26,8 @@ serves requests via the shared
 [`LLMEngine`](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/engine.rs) contract in
 [`dynamo-backend-common`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common) — no Python
 worker runtime required. For the Python version of the same contract
-see [Writing a Python Unified Backend](python-backend-guide.md).
+see [Writing a Python Unified Backend](python-backend-guide.md). For the
+language-neutral overview, see [Writing Unified Backends](unified-backends.md).
 
 Your backend lives in its own crate and **does not need to be part of
 the dynamo repository**. It pulls `dynamo-backend-common` in as a normal

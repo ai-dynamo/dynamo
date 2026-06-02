@@ -13,6 +13,8 @@ title: Writing a Python Unified Backend
 > engine already implement, and that any custom Python engine can plug
 > into the same way. For the Rust version of the same contract see
 > [Writing a Rust Unified Backend](rust-backend-guide.md). For the
+> language-neutral overview, see
+> [Writing Unified Backends](unified-backends.md). For the
 > older lower-level Python worker path (`register_model` +
 > `serve_endpoint`) — still the right choice for features the unified
 > backend does not yet cover — see

@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Snapshot
+title: Snapshotting GPU Workers
 ---
 
 > ⚠️ **Experimental Feature**: Dynamo Snapshot is currently in preview and may only be functional in some cluster setups. The `snapshot-agent` DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
@@ -18,6 +18,9 @@ title: Snapshot
 | **Warm Start** (restore from checkpoint) | ~10 sec | Restore from a ready checkpoint directory |
 
 > ⚠️ Restore time depends on storage bandwidth, GPU model, and whether the restore stays on the same node.
+
+For more background on the snapshot architecture and startup improvements, see
+[NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes](https://developer.nvidia.com/blog/nvidia-dynamo-snapshot-fast-startup-for-inference-workloads-on-kubernetes/).
 
 ## Prerequisites
 
