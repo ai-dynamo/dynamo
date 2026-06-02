@@ -48,7 +48,7 @@ try:  # pragma: no cover - availability depends on the optional Rust feature.
     )
 
     _RUST_SHIM_AVAILABLE = True
-except Exception:  # pragma: no cover - exercised in pure-Python planner tests.
+except ImportError:  # pragma: no cover - exercised in pure-Python planner tests.
     AicEngineConfig = None  # type: ignore[assignment]
     EngineCapacityRequest = None  # type: ignore[assignment]
     EnginePerfLimits = None  # type: ignore[assignment]
@@ -56,6 +56,8 @@ except Exception:  # pragma: no cover - exercised in pure-Python planner tests.
     RustEnginePerfModel = None  # type: ignore[assignment]
     RustEnginePerfOptions = None  # type: ignore[assignment]
     _RUST_SHIM_AVAILABLE = False
+
+_RUST_SHIM_FALLBACK_EXCEPTIONS = (RuntimeError, ValueError, TypeError)
 
 LegacyPerfModel = PrefillRegressionModel | DecodeRegressionModel | AggRegressionModel
 
@@ -138,7 +140,7 @@ class PlannerEnginePerfModel:
             if self._pending_iterations:
                 self._rust_model.tune_with_fpms(self._pending_iterations)
                 self._pending_iterations.clear()
-        except Exception as e:
+        except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning(
                 "Failed to initialize Rust engine perf model for %s; "
                 "falling back to Python regression: %s",
@@ -252,7 +254,7 @@ class PlannerEnginePerfModel:
         if self._rust_model is not None:
             try:
                 self._rust_model.tune_with_fpms(iterations)
-            except Exception as e:
+            except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
                 logger.warning("Rust perf model tuning failed: %s", e)
         else:
             self._pending_iterations.extend(iterations)
@@ -349,6 +351,8 @@ class PlannerEnginePerfModel:
 
         FPM v1 queued prefill does not know KV reuse. The planner applies the
         router-provided prefix-cache discount before calling the shim.
+        Rust query failures are treated as unavailable estimates so load
+        scaling can skip the current tick.
         """
         if self._rust_model is None:
             return self._legacy_queued_prefill_time(
@@ -374,7 +378,7 @@ class PlannerEnginePerfModel:
         ]
         try:
             return self._rust_model.get_queued_prefill_time(fpms)
-        except Exception as e:
+        except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning("Rust queued prefill estimate failed: %s", e)
             return None
 
@@ -387,7 +391,11 @@ class PlannerEnginePerfModel:
         include_queued_prefill_as_kv: bool = False,
         add_next_request: bool = True,
     ) -> Optional[float]:
-        """Estimate next-request ITL from scheduled decode work."""
+        """Estimate next-request ITL from scheduled decode work.
+
+        Rust query failures are treated as unavailable estimates so load
+        scaling can skip the current tick.
+        """
         if self._rust_model is None:
             return self._legacy_scheduled_decode_itl(
                 metrics_by_rank,
@@ -408,7 +416,7 @@ class PlannerEnginePerfModel:
         ]
         try:
             return self._rust_model.get_scheduled_decode_itl(fpms)
-        except Exception as e:
+        except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning("Rust scheduled decode estimate failed: %s", e)
             return None
 
@@ -422,7 +430,11 @@ class PlannerEnginePerfModel:
         e2e_latency_sla_ms: Optional[float] = None,
         kv_hit_rate: Optional[float] = None,
     ) -> Optional[PlannerEngineCapacity]:
-        """Estimate sustainable single-engine RPS for one request shape."""
+        """Estimate sustainable single-engine RPS for one request shape.
+
+        Rust query failures are treated as unavailable estimates so throughput
+        scaling can skip the current decision.
+        """
         if self._rust_model is None:
             return self._legacy_capacity(
                 isl=isl,
@@ -443,7 +455,7 @@ class PlannerEnginePerfModel:
                 optimization_target=OptimizationTarget.Throughput,
             )
             result = self._rust_model.find_engine_capacity_rps(request)
-        except Exception as e:
+        except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning("Rust capacity query failed: %s", e)
             return None
         if result is None:
@@ -475,11 +487,21 @@ class PlannerEnginePerfModel:
 
     @property
     def avg_isl(self) -> float:
-        return getattr(self._legacy_model, "avg_isl", 0.0)
+        if isinstance(
+            self._legacy_model,
+            (PrefillRegressionModel, AggRegressionModel),
+        ):
+            return self._legacy_model.avg_isl
+        return 0.0
 
     @property
     def avg_decode_length(self) -> float:
-        return getattr(self._legacy_model, "avg_decode_length", 0.0)
+        if isinstance(
+            self._legacy_model,
+            (DecodeRegressionModel, AggRegressionModel),
+        ):
+            return self._legacy_model.avg_decode_length
+        return 0.0
 
     def estimate_next_ttft(self, *args: Any, **kwargs: Any) -> Optional[float]:
         return self._legacy_model.estimate_next_ttft(*args, **kwargs)

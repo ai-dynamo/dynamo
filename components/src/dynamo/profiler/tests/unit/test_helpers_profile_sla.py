@@ -8,6 +8,7 @@ profiling pipeline.  External I/O (DGD generation, deployment) is mocked
 where needed.
 """
 
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -303,7 +304,9 @@ class TestValidateDgdrDynamoFeatures:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_throughput_scaling_aic_unsupported_rapid_sweep_passes(self):
+    def test_planner_throughput_scaling_aic_unsupported_rapid_sweep_passes(
+        self, caplog
+    ):
         """Throughput scaling + rapid sweep + AIC unsupported falls back."""
         dgdr = _make_dgdr(
             features=FeaturesSpec(
@@ -314,7 +317,10 @@ class TestValidateDgdrDynamoFeatures:
                 )
             )
         )
-        validate_dgdr_dynamo_features(dgdr, aic_supported=False)
+        with caplog.at_level(logging.WARNING):
+            validate_dgdr_dynamo_features(dgdr, aic_supported=False)
+        assert "AIC does not support" in caplog.text
+        assert "Rust perf shim fallback" in caplog.text
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0

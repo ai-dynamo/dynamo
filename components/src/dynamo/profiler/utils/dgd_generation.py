@@ -659,7 +659,11 @@ def build_aic_perf_model_spec(
         return None
     if resolved_backend not in ("trtllm", "vllm", "sglang"):
         return None
-    if best_prefill_pick is None and best_decode_pick is None:
+
+    mode = planner.mode
+    if mode in ("prefill", "disagg") and best_prefill_pick is None:
+        return None
+    if mode in ("decode", "agg", "disagg") and best_decode_pick is None:
         return None
 
     return AICPerfModelSpec(

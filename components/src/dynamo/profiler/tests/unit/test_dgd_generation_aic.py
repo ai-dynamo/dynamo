@@ -316,6 +316,38 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.aic_perf_model.prefill_pick == prefill_pick
         assert cfg.aic_perf_model.decode_pick == decode_pick
 
+    @pytest.mark.parametrize(
+        ("mode", "prefill_pick", "decode_pick"),
+        [
+            ("prefill", None, PickedParallelConfig(tp=1)),
+            ("decode", PickedParallelConfig(tp=1), None),
+            ("agg", PickedParallelConfig(tp=1), None),
+            ("disagg", None, PickedParallelConfig(tp=1)),
+            ("disagg", PickedParallelConfig(tp=1), None),
+        ],
+    )
+    def test_aic_perf_model_skips_mode_missing_required_pick(
+        self, mode, prefill_pick, decode_pick
+    ):
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            mode=mode,
+            optimization_target="sla",
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+        )
+        dgdr = _dgdr(planner=planner)
+
+        spec = build_aic_perf_model_spec(
+            dgdr,
+            best_prefill_pick=prefill_pick,
+            best_decode_pick=decode_pick,
+            resolved_backend="vllm",
+            system="h200_sxm",
+        )
+
+        assert spec is None
+
     def test_no_spec_leaves_aic_interpolation_none(self):
         planner = PlannerConfig(
             enable_throughput_scaling=False,
