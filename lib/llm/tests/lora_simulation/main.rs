@@ -779,15 +779,10 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
         .map(|i| WorkerWithDpRank::new(i as u64, 0))
         .collect();
 
-    // Register capacity for each worker (use a dummy LoRA to set capacity)
+    // Register per-worker capacity without loading a phantom adapter (a dummy LoRA would consume
+    // a real slot and add a phantom inactive pin).
     for &worker in &workers {
-        state_tracker.handle_mdc_addition(
-            worker,
-            &LoraInfo {
-                name: format!("__capacity_init_{}", worker.worker_id),
-                max_gpu_lora_count: Some(config.slots_per_backend as u32),
-            },
-        );
+        state_tracker.set_worker_capacity(worker, config.slots_per_backend as u32);
     }
 
     let mut metrics = ChurnMetrics::new("HRW");
@@ -797,13 +792,18 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     let mut registered_loras: HashSet<String> = HashSet::new();
 
     for tick in 0..config.total_ticks {
-        // Clear all loads from previous tick
-        // (We use absolute counts, not increments)
-        let prev_loads = load_estimator.get_current_load();
-        for (name, count) in &prev_loads {
-            for _ in 0..*count {
-                load_estimator.decrement_load(name);
-            }
+        // Fully clear the previous tick's load signal. `decrement_load` only touches the in-flight
+        // counter, not the windowed rate counter the controller actually reads via
+        // `get_current_load()`; since the whole simulation runs in one real-time instant, without
+        // `remove_lora` the rate counter would accumulate across ticks and the controller would see
+        // ever-growing load instead of this tick's pattern.
+        for name in load_estimator
+            .get_current_load()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            load_estimator.remove_lora(&name);
         }
 
         // Set loads for this tick
@@ -1009,14 +1009,9 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
         .map(|i| WorkerWithDpRank::new(i as u64, 0))
         .collect();
 
+    // Capacity only — no phantom adapter (see run_hrw_simulation).
     for &worker in &workers {
-        state_tracker.handle_mdc_addition(
-            worker,
-            &LoraInfo {
-                name: format!("__capacity_init_{}", worker.worker_id),
-                max_gpu_lora_count: Some(config.slots_per_backend as u32),
-            },
-        );
+        state_tracker.set_worker_capacity(worker, config.slots_per_backend as u32);
     }
 
     let mut metrics = ChurnMetrics::new("MCF");
@@ -1024,11 +1019,15 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     let mut registered_loras: HashSet<String> = HashSet::new();
 
     for tick in 0..config.total_ticks {
-        let prev_loads = load_estimator.get_current_load();
-        for (name, count) in &prev_loads {
-            for _ in 0..*count {
-                load_estimator.decrement_load(name);
-            }
+        // Fully clear the previous tick's load signal (see run_hrw_simulation: `decrement_load`
+        // leaves the windowed rate counter, which would otherwise accumulate across ticks).
+        for name in load_estimator
+            .get_current_load()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            load_estimator.remove_lora(&name);
         }
 
         for schedule in schedules {

@@ -28,6 +28,28 @@ import csv
 import sys
 from pathlib import Path
 
+# Plotting dependencies (matplotlib, numpy) are optional: reading CSVs works without them and
+# only the plotting entrypoints need them. Per .ai/python-guidelines.md these imports live at
+# module scope; the guard turns a missing install into a clear message from main() instead of an
+# import-time crash.
+try:
+    import matplotlib
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+    import numpy as np
+    from matplotlib.patches import Patch
+
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    matplotlib = None
+    mcolors = None
+    plt = None
+    ticker = None
+    np = None
+    Patch = None
+    MATPLOTLIB_AVAILABLE = False
+
 # ── Locate CSV directory ────────────────────────────────────────────────────
 
 SCRIPT_DIR = Path(__file__).parent
@@ -121,9 +143,6 @@ def build_title(name: str, meta: dict) -> str:
 
 def plot_scenario(name: str, csv_dir: Path, save: bool, out_dir: Path):
     """Generate a multi-panel figure for a single scenario."""
-    import matplotlib.pyplot as plt
-    import matplotlib.ticker as ticker
-    import numpy as np
 
     churn_file = csv_dir / f"{name}_churn.csv"
     load_file = csv_dir / f"{name}_load.csv"
@@ -328,7 +347,6 @@ def plot_scenario(name: str, csv_dir: Path, save: bool, out_dir: Path):
     load_model = meta.get("load_model", "")
     if load_model == "diurnal":
         # Draw the diurnal load envelope on the primary (load) axis
-        import numpy as np
 
         tpd = int(meta.get("ticks_per_day", 100))
         peak_l = float(meta.get("peak_total_load", 50))
@@ -373,7 +391,6 @@ def plot_scenario(name: str, csv_dir: Path, save: bool, out_dir: Path):
                 )
     elif load_model == "mmpp":
         # Shade background by MMPP state using the states CSV
-        import numpy as np
 
         states_file = csv_dir / "mmpp_states.csv"
         if states_file.exists():
@@ -405,7 +422,6 @@ def plot_scenario(name: str, csv_dir: Path, save: bool, out_dir: Path):
                     color=state_colors.get(prev_state, "#EEEEEE"),
                 )
             # Add state legend entries
-            from matplotlib.patches import Patch
 
             state_patches = [
                 Patch(facecolor=c, alpha=0.3, label=s) for s, c in state_colors.items()
@@ -461,7 +477,6 @@ def _plot_scenario_metrics(
     colors,
 ):
     """Draw a two-part metrics panel: total churn (left, log) + churn-free ratio (right)."""
-    import numpy as np
 
     n_ticks = len(ticks)
     hrw_zero = sum(1 for c in hrw_churn if c == 0)
@@ -543,7 +558,6 @@ def _plot_lifecycle_gantt(
     ax, lifecycle: list[dict], load_data: list[dict], meta: dict, colors: dict
 ):
     """Draw a Gantt-style timeline of each LoRA's active period with load heatmap."""
-    import matplotlib.pyplot as plt
 
     # Parse lifecycle data
     loras = []
@@ -648,8 +662,6 @@ def _plot_replica_distribution(
     X-axis = tick, Y-axis = number of LoRAs with that replica count.
     One panel per algorithm: HRW, Random, MCF.
     """
-    import matplotlib.pyplot as plt
-    import numpy as np
 
     # Discover all replica-count columns
     sample = replicas_data[0] if replicas_data else {}
@@ -702,8 +714,6 @@ def _plot_replica_distribution(
 
 def plot_comparison_summary(csv_dir: Path, save: bool, out_dir: Path):
     """Generate a summary bar chart of total churn (log scale) across all scenarios."""
-    import matplotlib.pyplot as plt
-    import numpy as np
 
     scenarios_found = []
     hrw_totals = []
@@ -831,8 +841,6 @@ def plot_comparison_summary(csv_dir: Path, save: bool, out_dir: Path):
 
 def plot_churn_free_ratio(csv_dir: Path, save: bool, out_dir: Path):
     """Bar chart: % of ticks with zero churn per algorithm, across all scenarios."""
-    import matplotlib.pyplot as plt
-    import numpy as np
 
     labels = []
     hrw_ratios, random_ratios, mcf_ratios = [], [], []
@@ -908,8 +916,6 @@ def plot_churn_free_ratio(csv_dir: Path, save: bool, out_dir: Path):
 
 def plot_churn_cdf(csv_dir: Path, save: bool, out_dir: Path):
     """Empirical CDF of per-tick churn values, one subplot per scenario."""
-    import matplotlib.pyplot as plt
-    import numpy as np
 
     available = []
     for name in SCENARIOS:
@@ -973,8 +979,6 @@ def plot_churn_cdf(csv_dir: Path, save: bool, out_dir: Path):
 
 def plot_efficiency_frontier(csv_dir: Path, save: bool, out_dir: Path):
     """Scatter: average slot utilization % vs total churn, one dot per (scenario, algo)."""
-    import matplotlib.pyplot as plt
-    import numpy as np
 
     colors = {"HRW": "#2196F3", "Random": "#F44336", "MCF": "#4CAF50"}
     markers = {"HRW": "o", "Random": "s", "MCF": "D"}
@@ -1076,9 +1080,6 @@ def plot_placement_stability(csv_dir: Path, save: bool, out_dir: Path):
     ticks on the x-axis, and color = load value. Stable allocations show
     smooth color bands; unstable ones flicker.
     """
-    import matplotlib.colors as mcolors
-    import matplotlib.pyplot as plt
-    import numpy as np
 
     # Pick the most interesting scenarios for this viz
     target_scenarios = ["hot_lora_poisson", "daily", "spike", "mmpp"]
@@ -1313,17 +1314,13 @@ def main():
         )
         sys.exit(1)
 
-    # Check matplotlib is available
-    try:
-        import matplotlib
-
-        if args.save:
-            matplotlib.use("Agg")  # Non-interactive backend for saving
-        import matplotlib.pyplot as plt  # noqa: F401
-    except ImportError:
+    # Plotting requires matplotlib (imported at module scope, guarded by MATPLOTLIB_AVAILABLE).
+    if not MATPLOTLIB_AVAILABLE:
         print("ERROR: matplotlib is required. Install with:")
         print("  pip install matplotlib")
         sys.exit(1)
+    if args.save:
+        matplotlib.use("Agg")  # Non-interactive backend for saving
 
     if args.save:
         out_dir.mkdir(parents=True, exist_ok=True)
