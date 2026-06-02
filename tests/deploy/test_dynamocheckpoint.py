@@ -38,7 +38,6 @@ TARGET_CONTAINER = "main"
 VLLM_MODEL = "Qwen/Qwen3-0.6B"
 VLLM_MAX_MODEL_LEN = "2048"
 VLLM_GPU_MEMORY_UTILIZATION = "0.30"
-DEFAULT_VLLM_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 
 CHECKPOINT_ID_LABEL = "nvidia.com/snapshot-checkpoint-id"
 CHECKPOINT_SOURCE_LABEL = "nvidia.com/snapshot-is-checkpoint-source"
@@ -69,7 +68,9 @@ def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
     raise AssertionError(f"component {name!r} not found in DGD spec")
 
 
-def _new_vllm_checkpoint_spec(name: str, namespace: str, image: str) -> DeploymentSpec:
+def _new_vllm_checkpoint_spec(
+    name: str, namespace: str, image: str, frontend_image: str
+) -> DeploymentSpec:
     spec_path = (
         Path(_get_workspace_dir())
         / "examples"
@@ -82,7 +83,7 @@ def _new_vllm_checkpoint_spec(name: str, namespace: str, image: str) -> Deployme
     deployment_spec = DeploymentSpec(str(spec_path))
     deployment_spec.name = name
     deployment_spec.namespace = namespace
-    deployment_spec.set_image(image, FRONTEND_COMPONENT)
+    deployment_spec.set_image(frontend_image, FRONTEND_COMPONENT)
     deployment_spec.set_image(image, DECODE_COMPONENT)
     deployment_spec.set_model(VLLM_MODEL, DECODE_COMPONENT)
 
@@ -272,6 +273,7 @@ async def _wait_for_restored_decode_pod(
                     "checkpoint": labels.get(CHECKPOINT_ID_LABEL),
                     "restore": annotations.get(RESTORE_STATUS_ANNOTATION),
                     "phase": pod.raw.get("status", {}).get("phase"),
+                    "node": pod.raw.get("spec", {}).get("nodeName"),
                 }
             )
             if name in old_pod_names:
@@ -282,6 +284,10 @@ async def _wait_for_restored_decode_pod(
                 continue
             if annotations.get(TARGET_CONTAINERS_ANNOTATION) != TARGET_CONTAINER:
                 continue
+            if annotations.get(RESTORE_STATUS_ANNOTATION) == "failed":
+                raise AssertionError(
+                    f"restore failed for decode pod {name}: {last_seen[-1]}"
+                )
             if annotations.get(RESTORE_STATUS_ANNOTATION) != "completed":
                 continue
             return pod
@@ -371,12 +377,27 @@ async def test_dgd_checkpoint_restore_deploy(
     request: pytest.FixtureRequest,
 ) -> None:
     """Verify a DGD worker can be checkpointed, restored, and still serve."""
+    if not image:
+        pytest.fail(
+            "--image is required for the checkpoint deploy test "
+            "(expected the CI-built vLLM checkpoint placeholder image)",
+            pytrace=False,
+        )
+    frontend_image = request.config.getoption("--frontend-image")
+    if not frontend_image:
+        pytest.fail(
+            "--frontend-image is required for the checkpoint deploy test "
+            "(expected the CI-built frontend image)",
+            pytrace=False,
+        )
+
     suffix = str(int(time.time() * 1000))
     deployment_name = f"vllm-checkpoint-{suffix}"
     deployment_spec = _new_vllm_checkpoint_spec(
         name=deployment_name,
         namespace=namespace,
-        image=image or DEFAULT_VLLM_IMAGE,
+        image=image,
+        frontend_image=frontend_image,
     )
 
     async with ManagedDeployment(
@@ -410,12 +431,12 @@ async def test_dgd_checkpoint_restore_deploy(
 
         logger.info("Scaling decode back up to trigger restore")
         await _scale_decode_component(deployment, replicas=1)
-        await deployment._wait_for_ready(timeout=900)
         await _wait_for_restored_decode_pod(
             deployment,
             old_pod_names=old_pod_names,
             checkpoint_hash=checkpoint_hash,
         )
+        await deployment._wait_for_ready(timeout=900)
 
         logger.info("Validating inference after restore")
         _assert_inference(base_url, deployment_spec.endpoint, VLLM_MODEL)

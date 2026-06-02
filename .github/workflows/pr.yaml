@@ -79,6 +79,7 @@ jobs:
       - planner-build
       - planner-test
       - frontend-build
+      - frontend-copy-to-acr
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -87,7 +88,7 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, snapshot-placeholder, deploy-test-checkpoint, deploy-cleanup]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, snapshot-placeholder, frontend-copy-to-acr, deploy-test-checkpoint, deploy-cleanup]
     if: always()
     steps:
       - name: Check all deploy test jobs
@@ -342,7 +343,11 @@ jobs:
   frontend-build:
     name: frontend
     needs: [changed-files]
-    if: needs.changed-files.outputs.frontend == 'true'
+    if: |
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true' ||
+      needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -605,6 +610,23 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
+  frontend-copy-to-acr:
+    name: frontend
+    needs: [changed-files, frontend-build]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      needs.frontend-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
   snapshot-placeholder:
     name: Snapshot Placeholder
     needs: [changed-files, vllm-copy-to-acr]
@@ -805,14 +827,15 @@ jobs:
 
   deploy-test-checkpoint:
     name: DynamoCheckpoint Deploy Test
-    needs: [changed-files, deploy-operator, deploy-snapshot-agent, snapshot-placeholder]
+    needs: [changed-files, deploy-operator, deploy-snapshot-agent, snapshot-placeholder, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
       needs.deploy-snapshot-agent.result == 'success' &&
-      needs.snapshot-placeholder.result == 'success'
+      needs.snapshot-placeholder.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
     permissions:
@@ -866,7 +889,9 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
           test_name: checkpoint_dgd_restore
           test_file: tests/deploy/test_dynamocheckpoint.py
-          extra_pytest_args: -m dynamocheckpoint
+          extra_pytest_args: >-
+            -m dynamocheckpoint
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
 
   deploy-cleanup:
     if: always()
