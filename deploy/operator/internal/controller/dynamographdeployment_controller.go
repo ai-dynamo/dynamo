@@ -1735,7 +1735,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
 			}
-			checkpointName := autoCheckpointName(dynamoDeployment, componentName, workerHash)
+			checkpointID := checkpoint.DGDCheckpointID(
+				dynamoDeployment.Namespace,
+				dynamoDeployment.Name,
+				string(dynamoDeployment.UID),
+				componentName,
+				workerHash,
+			)
+			checkpointName := fmt.Sprintf("checkpoint-%s", checkpointID)
 			refConfig := *alphaCheckpointConfig.DeepCopy()
 			refConfig.CheckpointRef = &checkpointName
 			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, &refConfig)

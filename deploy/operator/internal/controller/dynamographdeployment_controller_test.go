@@ -1834,14 +1834,13 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeCreatesDGD
 	if err != nil {
 		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
 	}
-	expectedID := checkpoint.DGDCheckpointID(
+	expectedName := fmt.Sprintf("checkpoint-%s", checkpoint.DGDCheckpointID(
 		dgd.Namespace,
 		dgd.Name,
 		string(dgd.UID),
 		"worker",
 		workerHash,
-	)
-	expectedName := fmt.Sprintf("checkpoint-%s", expectedID)
+	))
 	if checkpointStatuses["worker"].CheckpointName != expectedName {
 		t.Fatalf("checkpoint status name = %s, want %s", checkpointStatuses["worker"].CheckpointName, expectedName)
 	}
