@@ -173,7 +173,7 @@ jobs:
             --progress=plain \
             --platform linux/amd64 \
             --target release \
-            --build-arg BUILD_WHEEL_ARGS="--clean --benchmarks --skip-stubs --job_count 8 --cuda_architectures ${{ inputs.trtllm_cuda_archs }}" \
+            --build-arg BUILD_WHEEL_ARGS="--clean --benchmarks --job_count 8 --cuda_architectures ${{ inputs.trtllm_cuda_archs }}" \
             --build-arg GIT_COMMIT="${{ steps.resolve-ref.outputs.trtllm_commit }}" \
             --build-arg TRT_LLM_VER="${{ steps.resolve-ref.outputs.trtllm_version }}" \
             --tag "${{ steps.image-tags.outputs.ecr_image }}" \
