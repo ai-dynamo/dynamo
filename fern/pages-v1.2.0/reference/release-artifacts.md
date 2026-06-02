@@ -68,6 +68,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0; CRDs are now managed by
 | `dynamo-memory@1.2.0` | Memory management utilities | `v1.82` | [crates.io: dynamo-memory 1.2.0](https://crates.io/crates/dynamo-memory/1.2.0) |
 | `dynamo-config@1.2.0` | Configuration management | `v1.82` | [crates.io: dynamo-config 1.2.0](https://crates.io/crates/dynamo-config/1.2.0) |
 | `dynamo-tokens@1.2.0` | Tokenizer bindings for LLM inference | `v1.82` | [crates.io: dynamo-tokens 1.2.0](https://crates.io/crates/dynamo-tokens/1.2.0) |
+| `dynamo-tokenizers@1.2.0` | Tokenizer library for LLM inference | `v1.82` | [crates.io: dynamo-tokenizers 1.2.0](https://crates.io/crates/dynamo-tokenizers/1.2.0) |
 | `dynamo-mocker@1.2.0` | Inference engine simulator for benchmarking | `v1.82` | [crates.io: dynamo-mocker 1.2.0](https://crates.io/crates/dynamo-mocker/1.2.0) |
 | `dynamo-kv-router@1.2.0` | KV-aware request routing library | `v1.82` | [crates.io: dynamo-kv-router 1.2.0](https://crates.io/crates/dynamo-kv-router/1.2.0) |
 
@@ -147,6 +148,7 @@ cargo add dynamo-parsers@1.2.0
 cargo add dynamo-memory@1.2.0
 cargo add dynamo-config@1.2.0
 cargo add dynamo-tokens@1.2.0
+cargo add dynamo-tokenizers@1.2.0
 cargo add dynamo-mocker@1.2.0
 cargo add dynamo-kv-router@1.2.0
 ```
@@ -229,13 +231,14 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 | `dynamo-memory` | `0.8.0` | 2026-01-15 |
 | `dynamo-config` | `0.8.0` | 2026-01-15 |
 | `dynamo-tokens` | `0.9.0` | 2026-02-12 |
+| `dynamo-tokenizers` | `1.2.0` | 2026-06-02 |
 | `dynamo-mocker` | `1.0.0` | 2026-03-13 |
 | `dynamo-kv-router` | `1.0.0` | 2026-03-13 |
 | `dynamo-protocols` | `1.1.0` | 2026-05-04 |
 
 **`dynamo-async-openai`** is **deprecated**; **`1.0.2`** is its final crates.io release. Use **`dynamo-protocols`** for new dependencies ([crate](https://crates.io/crates/dynamo-protocols)).
 
-**`dynamo-tokenizers`** exists only in the Dynamo workspace and is **not** published on crates.io.
+**`dynamo-tokenizers`** is first published on crates.io at **`1.2.0`** (the placeholder reservation **`0.0.0-prerelease.0`** is omitted here like other reservation uploads).
 
 ### GitHub Releases
 
@@ -555,7 +558,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by
 
 ### Rust Crates
 
-> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-protocols](https://crates.io/crates/dynamo-protocols) | [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai) *(deprecated)* | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config) | [dynamo-tokens](https://crates.io/crates/dynamo-tokens)
+> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-protocols](https://crates.io/crates/dynamo-protocols) | [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai) *(deprecated)* | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config) | [dynamo-tokens](https://crates.io/crates/dynamo-tokens) | [dynamo-tokenizers](https://crates.io/crates/dynamo-tokenizers)
 >
 > To access a specific version: `https://crates.io/crates/{crate}/{version}`
 
@@ -690,6 +693,12 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 | `dynamo-tokens@1.0.0` | `v1.82` | |
 | `dynamo-tokens@0.9.1` | `v1.82` | |
 | `dynamo-tokens@0.9.0` | `v1.82` | Initial |
+
+#### dynamo-tokenizers (crate)
+
+| Crate | MSRV (Rust) | Notes |
+|-------|-------------|-------|
+| `dynamo-tokenizers@1.2.0` | `v1.82` | Initial |
 
 #### dynamo-mocker (crate)
 
