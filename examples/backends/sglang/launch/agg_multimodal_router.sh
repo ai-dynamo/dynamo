@@ -63,7 +63,7 @@ EOF
 done
 
 print_launch_banner --multimodal --no-curl \
-    "Lightseek MM Exact Routing (SGLang)" "${MODEL}" "${HTTP_PORT}" \
+    "MM Exact Routing (SGLang)" "${MODEL}" "${HTTP_PORT}" \
     "NUM_WORKERS:  ${NUM_WORKERS}" \
     "BLOCK_SIZE:   ${BLOCK_SIZE}" \
     "NAMESPACE:    ${NAMESPACE}"

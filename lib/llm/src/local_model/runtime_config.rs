@@ -99,7 +99,14 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
 
-    /// Backend framework serving this model (e.g. "sglang", "vllm").
+    /// Backend framework serving this model (e.g. "sglang", "vllm"). Used
+    /// by the frontend to apply backend-specific hints — for example, the
+    /// MM-aware KV router picks the per-image routing-token fill recipe
+    /// from this field (sglang fills with `pad_value(mm_hash)`, vLLM fills
+    /// with the placeholder token id and attaches mm_hashes via
+    /// `block_mm_infos`). Set by each backend at registration time
+    /// (`components/src/dynamo/sglang/register.py`,
+    /// `components/src/dynamo/vllm/main.py`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_framework: Option<String>,
 
