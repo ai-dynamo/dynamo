@@ -294,6 +294,25 @@ class SchedulingConfig(BaseModel):
             "Only used when ``use_orchestrator=True``."
         ),
     )
+    scale_interval_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        description=(
+            "Base pipeline cadence for the orchestrator path. Pipeline "
+            "fires one tick per ``scale_interval_seconds`` regardless of "
+            "individual plugin intervals; per-plugin throttling via "
+            "``RegisterRequest.execution_interval_seconds`` then governs "
+            "which plugins actually fire each tick. Must be <= every "
+            "plugin's ``execution_interval_seconds`` and a divisor of "
+            "every plugin's ``observation_window_seconds`` so windows "
+            "align to tick boundaries. Ignored when "
+            "``use_orchestrator=False`` (PSM path uses its legacy "
+            "load_adjustment_interval_seconds / "
+            "throughput_adjustment_interval_seconds two-cadence model). "
+            "Surface added in PR #10124; full lazy-pull behaviour lands "
+            "in the engine_adapter rewrite commit later in this PR."
+        ),
+    )
 
 
 class PlannerConfig(BaseModel):

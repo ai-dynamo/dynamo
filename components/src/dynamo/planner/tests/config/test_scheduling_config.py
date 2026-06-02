@@ -42,6 +42,37 @@ def test_scheduling_rejects_non_positive_tick_deadline():
 
 
 # ---------------------------------------------------------------------------
+# scale_interval_seconds (scale_interval cadence model surface)
+# ---------------------------------------------------------------------------
+
+
+def test_scale_interval_default_matches_load_cadence():
+    """Default 5.0s matches the default load_adjustment_interval_seconds
+    so an orchestrator-path deployment with default config sees
+    pipeline ticks at the same cadence the load cadence used to drive
+    (under the legacy PSM-mirror model). Behaviour-equivalent default."""
+    s = SchedulingConfig()
+    assert s.scale_interval_seconds == 5.0
+
+
+def test_scale_interval_rejects_zero_or_negative():
+    """Pipeline cannot fire at zero or negative cadence. Pydantic gt=0
+    catches at config-validation time."""
+    with pytest.raises(ValidationError):
+        SchedulingConfig(scale_interval_seconds=0)
+    with pytest.raises(ValidationError):
+        SchedulingConfig(scale_interval_seconds=-1.0)
+
+
+def test_scale_interval_accepts_explicit_value():
+    """Operators can override the default — e.g., set a 1s cadence for
+    high-frequency scenarios. Lock that the field accepts positive
+    floats."""
+    s = SchedulingConfig(scale_interval_seconds=1.0)
+    assert s.scale_interval_seconds == 1.0
+
+
+# ---------------------------------------------------------------------------
 # PlannerConfig integration — backwards compat
 # ---------------------------------------------------------------------------
 
