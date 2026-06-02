@@ -27,11 +27,12 @@ use std::{
     hash::BuildHasherDefault,
     mem::size_of_val,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
 
+use aho_corasick::AhoCorasick;
 use moka::sync::Cache;
 use rustc_hash::FxHasher;
 
@@ -47,33 +48,37 @@ type PrefixHasher = BuildHasherDefault<FxHasher>;
 /// Weighted W-TinyLFU cache mapping a prefix's blake3 digest to its cumulative tokens.
 type PrefixCache = Cache<Blake3Hash, Arc<[TokenIdType]>, PrefixHasher>;
 
-/// Find ALL special token boundaries in the text.
+/// All special-token boundaries in `text`: positions immediately after each special-token
+/// occurrence (where prefixes can be cached).
 ///
-/// **ONLY uses special tokens** — these are atomic (`special: true, normalized: false`)
-/// in BPE, guaranteeing `tokenize(prefix) + tokenize(suffix) == tokenize(prefix + suffix)`.
-///
-/// Returns positions immediately after each special token (where prefixes can be cached).
-/// Boundaries at the very end of the text are filtered out (no suffix left to tokenize).
+/// **ONLY uses special tokens** — these are atomic (`special: true, normalized: false`) in
+/// BPE, so a boundary right after one is a safe split point:
+/// `tokenize(prefix) + tokenize(suffix) == tokenize(prefix + suffix)`. A single overlapping
+/// Aho-Corasick pass reports every occurrence of every pattern (matching the per-token scan
+/// it replaces, for the non-self-overlapping special tokens real tokenizers use). Boundaries
+/// at the very end of the text are dropped (no suffix left to tokenize). Match ends land on
+/// char boundaries because the patterns are valid UTF-8 matched against valid UTF-8.
+fn boundaries_with(text: &str, matcher: &AhoCorasick) -> Vec<usize> {
+    let mut boundaries: Vec<usize> = matcher
+        .find_overlapping_iter(text)
+        .map(|m| m.end())
+        .filter(|&end| end < text.len())
+        .collect();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
+}
+
+/// Test-only reference: build a one-off automaton and find boundaries. Production goes
+/// through [`L1Cache::boundaries`], which reuses a process-once automaton.
+#[cfg(test)]
 fn find_special_token_boundaries(text: &str, special_tokens: &[&str]) -> Vec<usize> {
     if special_tokens.is_empty() {
         return Vec::new();
     }
-
-    let mut boundaries = Vec::new();
-    for &token in special_tokens {
-        let mut start = 0;
-        while let Some(pos) = text[start..].find(token) {
-            let boundary = start + pos + token.len();
-            if boundary < text.len() {
-                boundaries.push(boundary);
-            }
-            start = boundary;
-        }
-    }
-
-    boundaries.sort_unstable();
-    boundaries.dedup();
-    boundaries
+    let matcher = AhoCorasick::new(special_tokens)
+        .expect("special tokens form a valid Aho-Corasick automaton");
+    boundaries_with(text, &matcher)
 }
 
 /// Optional per-event observer. `on_hit` runs after each cache hit, `on_miss`
@@ -87,6 +92,9 @@ pub type CacheEventFn = Arc<dyn Fn() + Send + Sync>;
 pub struct L1Cache {
     /// Prefix entries keyed by the blake3 digest of `input[0..boundary]`.
     cache: PrefixCache,
+    /// Aho-Corasick automaton over the special tokens, built once on first use (the set is
+    /// fixed for the cache's lifetime). Lets boundary detection be a single pass.
+    matcher: OnceLock<AhoCorasick>,
     hits: AtomicU64,
     misses: AtomicU64,
     on_hit: Option<CacheEventFn>,
@@ -107,6 +115,7 @@ impl L1Cache {
 
         Self {
             cache,
+            matcher: OnceLock::new(),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             on_hit: None,
@@ -120,6 +129,22 @@ impl L1Cache {
         self.on_miss = Some(on_miss);
     }
 
+    /// Special-token boundaries in `text` via a process-once Aho-Corasick automaton — a
+    /// single pass over the input instead of one `str::find` sweep per token. The automaton
+    /// is built from `special_tokens` on first use and reused; the set is fixed for the
+    /// cache's lifetime (it's the owning tokenizer's special tokens), so every later call
+    /// passes the same `special_tokens` the automaton was built from.
+    fn boundaries(&self, text: &str, special_tokens: &[&str]) -> Vec<usize> {
+        if special_tokens.is_empty() {
+            return Vec::new();
+        }
+        let matcher = self.matcher.get_or_init(|| {
+            AhoCorasick::new(special_tokens)
+                .expect("special tokens form a valid Aho-Corasick automaton")
+        });
+        boundaries_with(text, matcher)
+    }
+
     /// Try to find the longest prefix match at a special-token boundary.
     ///
     /// Returns `(cached_tokens, byte_offset, deepest_boundary)` if found. The caller
@@ -131,7 +156,7 @@ impl L1Cache {
         input: &str,
         special_tokens: &[&str],
     ) -> Option<(Vec<TokenIdType>, usize, usize)> {
-        let boundaries = find_special_token_boundaries(input, special_tokens);
+        let boundaries = self.boundaries(input, special_tokens);
 
         if boundaries.is_empty() {
             self.misses.fetch_add(1, Ordering::Relaxed);
@@ -189,7 +214,7 @@ impl L1Cache {
         tokenizer: &E,
         special_tokens: &[&str],
     ) -> anyhow::Result<()> {
-        let boundaries = find_special_token_boundaries(input, special_tokens);
+        let boundaries = self.boundaries(input, special_tokens);
         if boundaries.is_empty() {
             return Ok(());
         }
@@ -211,7 +236,7 @@ impl L1Cache {
         tokenizer: &E,
         special_tokens: &[&str],
     ) -> anyhow::Result<Vec<TokenIdType>> {
-        let boundaries = find_special_token_boundaries(input, special_tokens);
+        let boundaries = self.boundaries(input, special_tokens);
         if boundaries.is_empty() {
             // No special tokens present — nothing cacheable; a single plain encode.
             return Ok(tokenizer.encode(input)?.token_ids().to_vec());
