@@ -34,6 +34,10 @@ spec:
           # needs runAsUser: 0 to write to the same PVC mount.
           securityContext:
             runAsUser: 0
+          volumeMounts:
+          - { name: model-cache, mountPath: /model-cache }
+        volumes:
+        - { name: model-cache, persistentVolumeClaim: { claimName: model-cache } }
       replicas: 1
       resources:
         requests: { cpu: "4" }

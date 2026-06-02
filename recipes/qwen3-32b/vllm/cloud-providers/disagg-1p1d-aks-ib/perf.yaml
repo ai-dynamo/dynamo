@@ -36,7 +36,7 @@ spec:
         mkdir -p "${BASE_DIR}/traces" "${BASE_DIR}/artifacts"
         if [ ! -f "${BASE_DIR}/traces/conversation_trace.jsonl" ]; then
           wget -qO "${BASE_DIR}/traces/conversation_trace.jsonl" \
-            https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/conversation_trace.jsonl
+            https://raw.githubusercontent.com/kvcache-ai/Mooncake/3cca71daccf2a7afb8fe3f0295358f70e3a69fdb/FAST25-release/traces/conversation_trace.jsonl
         fi
 
         export INPUT_FILE="${BASE_DIR}/traces/conversation_trace.jsonl"

@@ -16,7 +16,7 @@ This is the **Nscale managed K8s** member of the cross-provider benchmark family
 
 - **`rdma/ib: "1"` is a slot count, not an HCA count.** Requesting `rdma/ib: "8"` will leave pods Pending (no node will satisfy it under the shared-device plugin model). One slot grants access to all 8 NDR HCAs via `/dev/infiniband/`.
 - **`privileged: true` + `IPC_LOCK`** are still required for NIXL VRAM memory registration via UCX `ucp_mem_map` on B200.
-- **--UCX_NET_DEVICES needs to list devices explicitly** otherwise, workers won't start.
+- **`UCX_NET_DEVICES` must list the compute-fabric NICs explicitly** — otherwise workers won't start.
 
 ## Results
 

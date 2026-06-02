@@ -18,6 +18,8 @@ spec:
         - name: HF_HOME
           value: /shared-models
       extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-pull-secret
         # vllm-runtime:1.1.1 has a built-in ENTRYPOINT — overriding command crashes the Rust binary.
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
@@ -95,7 +97,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
           args:
-          # Local snapshot path bypasses ModelExpress + HF rate-limit (model is on lustre).
+          # Loaded by HF model id; the model is cached on the shared PVC (lustre).
           - --model
           - Qwen/Qwen3-32B
           - --served-model-name
@@ -239,7 +241,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
           args:
-          # Local snapshot path bypasses ModelExpress + HF rate-limit (model is on lustre).
+          # Loaded by HF model id; the model is cached on the shared PVC (lustre).
           - --model
           - Qwen/Qwen3-32B
           - --served-model-name

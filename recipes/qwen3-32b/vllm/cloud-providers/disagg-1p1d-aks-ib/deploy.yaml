@@ -191,7 +191,7 @@ spec:
           workingDir: /workspace
           args:
           - --model
-          - /shared-models/hub/models--Qwen--Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
+          - Qwen/Qwen3-32B
           - --served-model-name
           - Qwen/Qwen3-32B
           - --disaggregation-mode
