@@ -36,6 +36,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import (
     OrchestratorEngineAdapter,
 )
@@ -157,8 +158,18 @@ class ReplayPlannerAdapter:
         self._sm: Optional[PlannerStateMachine] = None
         self._engine: EngineProtocol
         if use_orchestrator:
+            # Inject a ``VirtualClock`` so plugin scheduler / circuit
+            # breaker / HOLD_LAST cache see *trace time*, not real
+            # wall-clock.  ``OrchestratorEngineAdapter.tick`` calls
+            # ``clock.advance`` at the start of every tick to keep this
+            # clock in sync with ``tick_input.now_s``.  Without this a
+            # fast-forward replay (e.g. 1hr trace in 10s real time)
+            # would leave plugins with ``execution_interval`` larger
+            # than the real-time duration never re-firing.
             self._engine = OrchestratorEngineAdapter(
-                planner_config, capabilities or WorkerCapabilities()
+                planner_config,
+                capabilities or WorkerCapabilities(),
+                clock=VirtualClock(),
             )
             # Replay's ``run()`` is synchronous; we own a scoped event
             # loop to drive the async engine calls without forcing

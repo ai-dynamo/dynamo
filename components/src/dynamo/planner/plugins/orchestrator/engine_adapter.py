@@ -77,7 +77,7 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
-from dynamo.planner.plugins.clock import WallClock
+from dynamo.planner.plugins.clock import Clock, VirtualClock, WallClock
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
 from dynamo.planner.plugins.registry.auth import AllowUnauthenticatedAuth
@@ -124,10 +124,22 @@ class OrchestratorEngineAdapter:
         self,
         config,  # PlannerConfig
         capabilities: WorkerCapabilities,
+        *,
+        clock: Optional[Clock] = None,
     ) -> None:
         self._config = config
         self._capabilities = capabilities
-        self._clock = WallClock()
+        # Clock is shared with all sub-components (CircuitBreaker,
+        # PluginRegistryServer, PluginScheduler, LocalPlannerOrchestrator).
+        # Default ``WallClock`` is correct for production / K8s smoke
+        # where ``tick_input.now_s`` already tracks wall-clock.
+        # Replay paths pass a ``VirtualClock`` and call
+        # ``advance_clock_to(tick_input.now_s)`` on each tick so plugin
+        # scheduler ``is_due`` checks see trace time, not real time.
+        # Without this hook a fast-forward replay (1hr trace in 10s real
+        # time) would leave plugins with execution_interval >> 10s
+        # never re-firing after the first tick.
+        self._clock: Clock = clock if clock is not None else WallClock()
 
         # Cadence tracking (mirrors PSM ``_next_load_s`` / ``_next_throughput_s``)
         self._next_load_s: float = float("inf")
@@ -355,6 +367,20 @@ class OrchestratorEngineAdapter:
         # adding a secondary gate only introduces divergence risk. See
         # test_engine_adapter::test_g3_parity_via_adapter — equivalence
         # with PSM requires leaving the always-on plugins enabled.
+
+        # 0. Sync the shared clock to ``tick_input.now_s`` when we hold a
+        #    manually-advanced clock (replay / test). Plugin scheduler
+        #    ``is_due``, CircuitBreaker cooldown, and HOLD_LAST cache age
+        #    all read ``self._clock.monotonic()`` — without this bump the
+        #    plugin layer would see real wall-clock instead of replay
+        #    trace time, and any plugin with ``execution_interval`` >>
+        #    fast-forward duration would never re-fire after the first
+        #    tick.  ``WallClock`` ignores this path (no-op) — production
+        #    K8s already runs in real time.
+        if isinstance(self._clock, VirtualClock):
+            delta = tick_input.now_s - self._clock.monotonic()
+            if delta > 0:
+                self._clock.advance(delta)
 
         # 1. Observe FPM into regressions (mirror PSM ``_observe_fpm``
         #    before ``_advance_load``).

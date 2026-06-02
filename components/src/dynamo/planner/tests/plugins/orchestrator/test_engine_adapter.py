@@ -3,7 +3,7 @@
 
 """Regression tests for ``OrchestratorEngineAdapter`` cadence parity.
 
-Covers two PSM-parity bugs caught after K8s smoke v14:
+Covers PSM-parity bugs caught after K8s smoke / dual-path review:
 
 - ``initial_tick`` previously read ``self._config.throughput_adjustment_interval``
   (missing ``_seconds`` suffix). The Pydantic ``validation_alias`` only affects
@@ -14,6 +14,12 @@ Covers two PSM-parity bugs caught after K8s smoke v14:
   of PSM's ``0.5`` (wall-clock-drift padding). With the tight tolerance a
   load tick and a throughput tick scheduled within ~ms of each other failed
   to merge — splitting into 2 ticks where PSM produces 1.
+
+- Hard-coded ``WallClock`` broke replay: plugin scheduler / CircuitBreaker
+  / HOLD_LAST cache all read ``self._clock.monotonic()``, but replay
+  fast-forwards trace time without advancing real wall-clock. Adapter now
+  accepts an injectable ``Clock`` and bumps it to ``tick_input.now_s`` on
+  every tick when the clock is manually-advanced (``VirtualClock``).
 """
 
 from __future__ import annotations
@@ -24,8 +30,10 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import (
     EngineCapabilities,
     ScheduledTick,
+    TickInput,
     WorkerCapabilities,
 )
+from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import (
     OrchestratorEngineAdapter,
 )
@@ -100,3 +108,85 @@ def test_merge_tolerance_matches_psm_500ms_window():
     assert tick.run_load_scaling, "load cadence within 500ms must merge"
     assert tick.run_throughput_scaling, "throughput cadence within 500ms must merge"
     assert tick.at_s == pytest.approx(180.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Clock injection for replay
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tick_advances_injected_virtual_clock_to_trace_time():
+    """When a ``VirtualClock`` is injected (replay path), every
+    ``engine_adapter.tick()`` must bump the clock to
+    ``tick_input.now_s`` so the plugin scheduler / CircuitBreaker /
+    HOLD_LAST cache see *trace time*, not real wall-clock.
+
+    Without this bump, a fast-forward replay (e.g. 1hr trace in 10s
+    real time) would leave every plugin with
+    ``execution_interval_seconds`` greater than the real elapsed time
+    never re-firing after its first call — breaking PSM-parity on the
+    replay path and blocking PR #10's ``use_orchestrator=True`` default.
+    """
+    vc = VirtualClock()
+    adapter = OrchestratorEngineAdapter(
+        _agg_config_throughput_on(), _caps(), clock=vc
+    )
+    # ``initial_tick`` is pure cadence math — no plugin scheduler call,
+    # so the clock must not advance from this alone.
+    initial = adapter.initial_tick(start_s=0.0)
+    assert vc.monotonic() == 0.0
+
+    # Drive a tick at trace time 180.0 — real wall-clock has barely
+    # moved, but ``tick_input.now_s`` says we're 180s into the trace.
+    await adapter.tick(initial, TickInput(now_s=180.0))
+    assert vc.monotonic() == pytest.approx(180.0)
+
+    # Subsequent tick at trace time 360.0 advances further.
+    next_tick = ScheduledTick(
+        at_s=360.0,
+        run_load_scaling=True,
+        run_throughput_scaling=True,
+        need_worker_states=True,
+        need_worker_fpm=True,
+        need_traffic_metrics=True,
+        traffic_metrics_duration_s=180.0,
+    )
+    await adapter.tick(next_tick, TickInput(now_s=360.0))
+    assert vc.monotonic() == pytest.approx(360.0)
+
+
+@pytest.mark.asyncio
+async def test_tick_does_not_advance_clock_backwards():
+    """Defensive: if ``tick_input.now_s`` is *before* the clock's
+    current monotonic, ``advance(negative)`` would raise
+    ``ValueError`` from VirtualClock. The bump must be gated on
+    ``delta > 0`` so this case is a silent no-op.
+
+    Trace time should never go backwards in practice, but a paranoid
+    replay driver that pre-advances the clock manually should not
+    crash the adapter.
+    """
+    vc = VirtualClock()
+    vc.advance(500.0)  # clock already at 500s
+    adapter = OrchestratorEngineAdapter(
+        _agg_config_throughput_on(), _caps(), clock=vc
+    )
+    initial = adapter.initial_tick(start_s=0.0)
+    # tick_input.now_s = 300.0 is *before* the clock — must not raise.
+    await adapter.tick(initial, TickInput(now_s=300.0))
+    # Clock stays put (no backwards advance).
+    assert vc.monotonic() == pytest.approx(500.0)
+
+
+def test_default_clock_is_wallclock():
+    """Production path: when no ``clock`` kwarg is supplied, the
+    adapter falls back to ``WallClock`` so existing K8s deployments
+    keep their real-time semantics. Lock the default so a future
+    refactor that flips it doesn't silently break production cadence
+    tracking.
+    """
+    from dynamo.planner.plugins.clock import WallClock
+
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    assert isinstance(adapter._clock, WallClock)
