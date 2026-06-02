@@ -153,7 +153,7 @@ harbor run \
   --agent pi \
   --model 'dynamo/MiniMaxAI/MiniMax-M2' \
   --ak api_base='http://127.0.0.1:8100/v1' \
-  --n-tasks 30 --n-concurrent 10 \
+  --n-tasks 30 --n-concurrent 128 \
   --network-mode host --override-cpus 2 --override-memory-mb 8192 \
   -v "$PI_DYNAMO_PROVIDER_PATH:/opt/pi-dynamo-provider:ro" \
   --jobs-dir /tmp/harbor-jobs --job-name ta-run --quiet
@@ -162,7 +162,7 @@ harbor run \
 ### Expected
 
 On 8×H100 with 30 SWE-bench-Lite tasks (20 astropy + 10 django) at
-`n_concurrent=10`, the Pi + Dynamo setup shows a **12-16% throughput
+`n_concurrent=128`, the Pi + Dynamo setup shows a **12-16% throughput
 improvement** from program-aware scheduling over the KV-routing-only baseline.
 Pass-rate deltas on this slice are within run-to-run noise.
 
