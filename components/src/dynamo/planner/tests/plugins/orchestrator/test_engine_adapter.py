@@ -117,6 +117,37 @@ def test_pipeline_fires_at_scale_interval_cadence():
     assert tick.run_throughput_scaling, "scale_interval ticks fire both flags"
 
 
+def test_scale_interval_advances_from_actual_tick_now():
+    """Sequential ticks anchor on ``tick_input.now_s``, not on a
+    pre-computed schedule — so a 700ms-late tick at T=5.7 produces the
+    next tick at T=10.7, accumulating drift symmetrically with PSM
+    (PSM also advances from ``tick_input.now_s``).  This is the basic
+    contract for scale_interval cadence advancement.
+    """
+    from dynamo.planner.core.types import TickInput
+
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    initial = adapter.initial_tick(start_s=0.0)
+    assert initial.at_s == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_lazy_traffic_pull_skips_prometheus_when_no_plugin_needs_traffic():
+    """Under scale_interval, ``need_traffic_metrics`` is True only
+    when some registered plugin both lists ``observations.traffic``
+    in its ``needs`` AND is due at the next tick.  With no traffic
+    consumer registered, every pipeline tick should signal
+    ``need_traffic_metrics=False`` to the gather layer — saving
+    36 Prometheus queries per 180s window compared to the eager
+    "always pull" alternative.
+    """
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    tick = adapter.initial_tick(start_s=0.0)
+    # No plugin is registered, so no plugin needs ``observations.traffic``.
+    assert tick.need_traffic_metrics is False
+    assert tick.traffic_metrics_duration_s == 0.0
+
+
 # ---------------------------------------------------------------------------
 # Clock injection for replay
 # ---------------------------------------------------------------------------

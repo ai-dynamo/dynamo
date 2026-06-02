@@ -394,12 +394,13 @@ class OrchestratorEngineAdapter:
         tick_input: TickInput,
     ) -> PlannerEffects:
         # NOTE: we intentionally do NOT gate plugins via ``plugin.enabled``
-        # per scheduled_tick flag. The plugins' own config-toggle checks
-        # (``if not self._config.enable_load_scaling: return accept``) are
-        # already per-tick no-ops when the corresponding toggle is off;
-        # adding a secondary gate only introduces divergence risk. See
-        # test_engine_adapter::test_g3_parity_via_adapter — equivalence
-        # with PSM requires leaving the always-on plugins enabled.
+        # on top of ``ScheduledTick.run_*_scaling`` flags. Each plugin's
+        # own config-toggle check (``if not self._config.enable_load_scaling:
+        # return accept``) is already a per-tick no-op when the corresponding
+        # toggle is off; adding a secondary gate would only introduce
+        # divergence risk. Decision-level parity with PSM (same ``scale_to``
+        # sequence at the same wall-clock moments) is preserved by keeping
+        # those config toggles authoritative for plugin self-gating.
 
         # 0. Sync the shared clock to ``tick_input.now_s`` when we hold a
         #    manually-advanced clock (replay / test). Plugin scheduler
