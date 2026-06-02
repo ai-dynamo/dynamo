@@ -38,14 +38,20 @@ Inject `agent_context` into each LLM request
 | `parent_trajectory_id` |    No    | Parent trajectory when using subagents.  |
 | `trajectory_final`     |    No    | `true` marks the trajectory's last request — a cleanup hint. |
 
-`trajectory_final` is an optional terminal marker: set it to `true` on the final
-request of a trajectory to signal that the run is over. Lifecycle-aware backends
-use it to release whatever per-trajectory state they hold (scheduling bookkeeping,
-routing affinity, cached identity) right away instead of waiting for an idle
-timeout; backends that don't track per-trajectory lifecycle simply ignore it.
-Producers usually send it on a dedicated final request rather than on a real turn,
-since a run's end is often only known *after* its last content turn has completed.
-It's purely a cleanup signal and carries no conversational payload.
+`trajectory_final` is an optional terminal marker: set it to `true` to signal that a
+trajectory is finished. Lifecycle-aware backends use it to release whatever
+per-trajectory state they hold (scheduling bookkeeping, routing affinity, cached
+identity) right away instead of waiting for an idle timeout; backends that don't track
+per-trajectory lifecycle ignore it.
+
+Send it as a **dedicated minimal request** (e.g. `max_tokens: 1` with a placeholder
+message), not piggybacked on a real turn. A reactive agent loop only learns a turn was
+terminal from its *response*, so the run's end is typically known only after the last
+real turn already returned — there is no live turn left to flag. (A harness with a hard
+turn budget may know earlier, but early termination still leaves the real last turn
+unflagged, so a post-hoc close is the robust contract.) Because a backend that acts on
+the marker may skip generation entirely, the request body is just a carrier — keep it
+minimal.
 
 **OpenAI client:** merge into `extra_body` / `extra_headers`:
 

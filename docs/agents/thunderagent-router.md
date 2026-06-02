@@ -103,8 +103,9 @@ The close is best-effort from the harness side; if it never arrives (crash, blac
 harness) the program lingers in the table, but its token weight decays toward zero so it
 stops counting against worker utilization — the scheduling impact self-heals even without
 an explicit close. `pi-dynamo-provider` fires the close automatically on `agent_end` /
-`session_shutdown` (a dedicated throwaway request, since a run's end is only known after
-its last real turn has completed).
+`session_shutdown` (a dedicated `max_tokens: 1` request — a reactive agent loop only
+learns a turn was terminal from its response, so a run's end is typically known only
+after its last real turn already returned, leaving no live turn to flag).
 
 ## Utilization-Driven Control Loop
 
