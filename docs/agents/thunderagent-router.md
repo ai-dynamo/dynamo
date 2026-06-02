@@ -100,9 +100,11 @@ bookkeeping so its tokens stop counting against worker utilization.
 ```
 
 The close is best-effort from the harness side; if it never arrives (crash, black-box
-harness) the program lingers, discounted by decay — a future idle-TTL backstop is the
-intended safety net. `pi-dynamo-provider` fires this automatically on `agent_end` /
-`session_shutdown`.
+harness) the program lingers in the table, but its token weight decays toward zero so it
+stops counting against worker utilization — the scheduling impact self-heals even without
+an explicit close. `pi-dynamo-provider` fires the close automatically on `agent_end` /
+`session_shutdown` (a dedicated throwaway request, since a run's end is only known after
+its last real turn has completed).
 
 ## Utilization-Driven Control Loop
 

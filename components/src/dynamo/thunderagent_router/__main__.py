@@ -54,7 +54,11 @@ def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
 
 def _is_trajectory_final(request: dict[str, Any]) -> bool:
     """A1 close signal: ``nvext.agent_context.trajectory_final`` marks the
-    trajectory's last turn -> release the program after this request runs."""
+    trajectory's last turn. The router releases the program and short-circuits
+    (the request is NOT forwarded to the engine; an empty completion returns).
+    Producers send it as a dedicated close ping -- e.g. pi-dynamo-provider fires
+    a throwaway request on ``agent_end`` -- since the end of a run is only known
+    after its last real turn has already completed."""
     ctx = request.get("agent_context")
     return isinstance(ctx, dict) and bool(ctx.get("trajectory_final"))
 
