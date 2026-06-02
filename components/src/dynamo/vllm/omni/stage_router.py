@@ -3,12 +3,17 @@
 
 """Stage router for disaggregated omni pipelines."""
 
+import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
+from vllm_omni.distributed.omni_connectors.adapter import (
+    compute_talker_prompt_ids_length,
+)
 
 from dynamo import prometheus_names
 from dynamo.common.storage import get_fs
@@ -22,9 +27,18 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.output_formatter import OutputFormatter
-from dynamo.vllm.omni.stage_worker import _resolve_model_type
+from dynamo.vllm.omni.stage_worker import (
+    _ASYNC_PREPARE_KEY,
+    _ASYNC_PREWARM_KEY,
+    _ASYNC_PREWARM_READY_KEY,
+    _resolve_model_type,
+)
 from dynamo.vllm.omni.types import StageOutput
-from dynamo.vllm.omni.utils import shm_deserialize
+from dynamo.vllm.omni.utils import (
+    load_omni_stage_configs,
+    shm_deserialize,
+    stage_configs_use_async_chunk,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +52,16 @@ class OmniStageRouter:
         stage_configs_path: str,
     ) -> None:
         self.config = config
-        _, self.stage_configs = load_and_resolve_stage_configs(
-            config.model,
-            stage_configs_path,
-            kwargs={},
-        )
+        self.stage_configs = load_omni_stage_configs(config.model, stage_configs_path)
+        self._async_chunk = stage_configs_use_async_chunk(self.stage_configs)
         self.stage_clients: Dict[str, Any] = {}
+        self._model_name = config.served_model_name or config.model
 
         media_fs = (
             get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
         )
         self._formatter = OutputFormatter(
-            model_name=config.served_model_name or config.model,
+            model_name=self._model_name,
             media_fs=media_fs,
             media_http_url=config.media_output_http_url,
             default_fps=config.default_video_fps,
@@ -67,17 +79,31 @@ class OmniStageRouter:
         request_id = str(uuid.uuid4())
         _, request_type = parse_request_type(request, self.config.output_modalities)
 
+        if self._async_chunk and len(self.stage_configs) > 1:
+            async for chunk in self._generate_async_chunk(
+                request,
+                request_id,
+                request_type,
+            ):
+                yield _coerce_router_chunk(
+                    chunk,
+                    request_id,
+                    self._model_name,
+                    request_type,
+                )
+            return
+
         stage_outputs: List[StageOutput] = []
         for stage_idx, stage_cfg in enumerate(self.stage_configs):
-            model_stage = getattr(
-                stage_cfg.engine_args, "model_stage", f"stage{stage_idx}"
-            )
+            model_stage = _model_stage_name(stage_cfg, stage_idx)
             client = self.stage_clients.get(model_stage)
             if client is None:
-                yield {
-                    "error": f"No client for stage '{model_stage}'",
-                    "finished": True,
-                }
+                yield _router_error_chunk(
+                    request_id,
+                    self._model_name,
+                    request_type,
+                    f"No client for stage '{model_stage}'",
+                )
                 return
 
             if stage_idx == 0:
@@ -101,43 +127,291 @@ class OmniStageRouter:
             stage_outputs.append(StageOutput.model_validate(raw_stage_output))
 
             if stage_outputs[-1].error:
-                yield {"error": stage_outputs[-1].error, "finished": True}
+                yield _router_error_chunk(
+                    request_id,
+                    self._model_name,
+                    request_type,
+                    stage_outputs[-1].error,
+                )
                 return
+            final_stage_id = stage_outputs[-1].final_stage_id
+            if final_stage_id is not None and final_stage_id <= stage_idx:
+                logger.info(
+                    "Router: stopping at requested final_stage_id=%d",
+                    final_stage_id,
+                )
+                break
 
         final = stage_outputs[-1]
+        async for chunk in self._format_final_output(
+            final,
+            request,
+            request_id,
+            request_type,
+        ):
+            yield _coerce_router_chunk(
+                chunk,
+                request_id,
+                self._model_name,
+                request_type,
+            )
+
+    async def _generate_async_chunk(
+        self,
+        request: dict,
+        request_id: str,
+        request_type: RequestType,
+    ) -> AsyncGenerator[dict, None]:
+        stage0_cfg = self.stage_configs[0]
+        stage0_client = self.stage_clients.get(_model_stage_name(stage0_cfg, 0))
+        if stage0_client is None:
+            yield {"error": "No client for stage 'stage0'", "finished": True}
+            return
+
+        prepare_output = await self._call_stage_raw(
+            stage0_client,
+            {"request_id": request_id, **request, _ASYNC_PREPARE_KEY: True},
+        )
+        if prepare_output.get("error"):
+            yield {"error": prepare_output["error"], "finished": True}
+            return
+
+        final_stage_id = prepare_output.get("final_stage_id")
+        target_stage_idx = (
+            len(self.stage_configs) - 1
+            if final_stage_id is None
+            else min(int(final_stage_id), len(self.stage_configs) - 1)
+        )
+
+        if target_stage_idx <= 0:
+            stage0_output = await self._call_stage(
+                stage0_client,
+                {"request_id": request_id, **request},
+            )
+            if stage0_output.error:
+                yield {"error": stage0_output.error, "finished": True}
+                return
+            async for chunk in self._format_final_output(
+                stage0_output,
+                request,
+                request_id,
+                request_type,
+            ):
+                yield _coerce_router_chunk(
+                    chunk,
+                    request_id,
+                    self._model_name,
+                    request_type,
+                )
+            return
+
+        first_downstream_prompt_len = _compute_async_prewarm_prompt_len(
+            prepare_output.get("prompt_token_ids") or []
+        )
+        base_prewarm_request = {
+            "request_id": request_id,
+            "original_prompt": prepare_output.get("original_prompt"),
+            "sampling_params_list": prepare_output.get("sampling_params_list"),
+            "final_stage_id": target_stage_idx,
+            _ASYNC_PREWARM_KEY: True,
+        }
+
+        downstream_tasks: dict[int, asyncio.Task[StageOutput]] = {}
+        prewarm_ready: dict[int, asyncio.Future[str | None]] = {}
+        try:
+            final_stage_cfg = self.stage_configs[target_stage_idx]
+            final_worker_type = _stage_worker_type(final_stage_cfg)
+            defer_final_stage = str(final_worker_type or "ar").lower() != "ar"
+            prewarm_end_stage = (
+                target_stage_idx - 1 if defer_final_stage else target_stage_idx
+            )
+
+            for stage_idx, stage_cfg in enumerate(
+                self.stage_configs[1 : prewarm_end_stage + 1],
+                start=1,
+            ):
+                model_stage = _model_stage_name(stage_cfg, stage_idx)
+                client = self.stage_clients.get(model_stage)
+                if client is None:
+                    await _cancel_downstream_tasks(downstream_tasks)
+                    yield {
+                        "error": f"No client for stage '{model_stage}'",
+                        "finished": True,
+                    }
+                    return
+                ready_future = asyncio.get_running_loop().create_future()
+                prewarm_ready[stage_idx] = ready_future
+                stage_prompt_len = (
+                    first_downstream_prompt_len
+                    if str(_stage_worker_type(stage_cfg) or "ar").lower() == "ar"
+                    else 0
+                )
+                prewarm_request = {
+                    **base_prewarm_request,
+                    "prompt_token_ids": [0] * stage_prompt_len,
+                }
+                downstream_tasks[stage_idx] = asyncio.create_task(
+                    self._call_stage(
+                        client,
+                        prewarm_request,
+                        prewarm_ready=ready_future,
+                    )
+                )
+
+            try:
+                if prewarm_ready:
+                    ready_errors = await asyncio.gather(*prewarm_ready.values())
+                    if ready_error := next((e for e in ready_errors if e), None):
+                        await _cancel_downstream_tasks(downstream_tasks)
+                        yield {"error": ready_error, "finished": True}
+                        return
+                stage0_output = await self._call_stage(
+                    stage0_client,
+                    {"request_id": request_id, **request},
+                )
+            except Exception as e:
+                await _cancel_downstream_tasks(downstream_tasks)
+                yield {"error": str(e), "finished": True}
+                return
+            if stage0_output.error:
+                await _cancel_downstream_tasks(downstream_tasks)
+                yield {"error": stage0_output.error, "finished": True}
+                return
+            stage0_text = _stage_output_text(stage0_output)
+
+            final: StageOutput | None = None
+            for stage_idx in range(1, prewarm_end_stage + 1):
+                try:
+                    output = await downstream_tasks[stage_idx]
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    await _cancel_downstream_tasks(downstream_tasks)
+                    yield {"error": str(e), "finished": True}
+                    return
+                if output.error:
+                    await _cancel_downstream_tasks(downstream_tasks)
+                    yield {"error": output.error, "finished": True}
+                    return
+                final = output
+
+            if defer_final_stage:
+                await _wait_for_async_chunk_key(request_id, target_stage_idx - 1)
+                model_stage = _model_stage_name(final_stage_cfg, target_stage_idx)
+                final_client = self.stage_clients.get(model_stage)
+                if final_client is None:
+                    yield {
+                        "error": f"No client for stage '{model_stage}'",
+                        "finished": True,
+                    }
+                    return
+                try:
+                    final = await self._call_stage(
+                        final_client,
+                        {**base_prewarm_request, "prompt_token_ids": []},
+                    )
+                except Exception as e:
+                    yield {"error": str(e), "finished": True}
+                    return
+                if final.error:
+                    yield {"error": final.error, "finished": True}
+                    return
+
+            if final is None:
+                yield {"error": "No final stage output", "finished": True}
+                return
+
+            async for chunk in self._format_final_output(
+                final,
+                request,
+                request_id,
+                request_type,
+                extra_ctx={"text": stage0_text} if stage0_text else None,
+            ):
+                yield _coerce_router_chunk(
+                    chunk,
+                    request_id,
+                    self._model_name,
+                    request_type,
+                )
+        finally:
+            await _cancel_downstream_tasks(downstream_tasks)
+
+    async def _call_stage(
+        self,
+        client: Any,
+        stage_request: dict,
+        *,
+        prewarm_ready: asyncio.Future[str | None] | None = None,
+    ) -> StageOutput:
+        return StageOutput.model_validate(
+            await self._call_stage_raw(
+                client,
+                stage_request,
+                prewarm_ready=prewarm_ready,
+            )
+        )
+
+    async def _call_stage_raw(
+        self,
+        client: Any,
+        stage_request: dict,
+        *,
+        prewarm_ready: asyncio.Future[str | None] | None = None,
+    ) -> dict:
+        raw_stage_output = {}
+        try:
+            async for chunk in await client.round_robin(stage_request):
+                data = chunk.data()
+                if isinstance(data, (str, bytes)):
+                    data = json.loads(data)
+                if data.pop(_ASYNC_PREWARM_READY_KEY, False):
+                    if prewarm_ready is not None and not prewarm_ready.done():
+                        prewarm_ready.set_result(None)
+                raw_stage_output.update(data)
+        except Exception as e:
+            if prewarm_ready is not None and not prewarm_ready.done():
+                prewarm_ready.set_result(str(e))
+            raise
+        if prewarm_ready is not None and not prewarm_ready.done():
+            error = raw_stage_output.get("error")
+            if error:
+                prewarm_ready.set_result(str(error))
+            else:
+                prewarm_ready.set_result("Stage prewarm completed without ready ack")
+        return raw_stage_output
+
+    async def _format_final_output(
+        self,
+        final: StageOutput,
+        request: dict,
+        request_id: str,
+        request_type: RequestType,
+        extra_ctx: dict | None = None,
+    ) -> AsyncGenerator[dict, None]:
         if not final.shm_meta:
             yield {"error": "No SHM output from final stage", "finished": True}
             return
 
-        # Build formatting context from the original request
-        nvext = request.get("nvext") or {}
-        fmt_ctx: Dict[str, Any] = {}
-        if nvext.get("fps") is not None:
-            fmt_ctx["fps"] = nvext["fps"]
-        if nvext.get("speed") is not None:
-            fmt_ctx["speed"] = nvext["speed"]
-        # If the request type is AUDIO_GENERATION,
-        # we need to normalize the data_source and response_format to
-        # align with other modalities.
-        response_format = (
-            request.get("data_source")
-            if request_type == RequestType.AUDIO_GENERATION
-            else request.get("response_format")
-        )
-        output_format = (
-            request.get("response_format")
-            if request_type == RequestType.AUDIO_GENERATION
-            else request.get("output_format")
-        )
-        if response_format is not None:
-            fmt_ctx["response_format"] = response_format
-        if output_format is not None:
-            fmt_ctx["output_format"] = output_format
+        fmt_ctx = _format_context(request, request_type)
+        if extra_ctx:
+            fmt_ctx.update(extra_ctx)
+        if (
+            request_type == RequestType.CHAT_COMPLETION
+            and _request_wants_text(request)
+            and (text := fmt_ctx.get("text"))
+        ):
+            yield _chat_text_chunk(request_id, self._model_name, str(text))
 
         async for chunk in self._format_output(
             final, request_id, request_type, fmt_ctx
         ):
-            yield chunk
+            yield _coerce_router_chunk(
+                chunk,
+                request_id,
+                self._model_name,
+                request_type,
+            )
 
     async def _format_output(
         self,
@@ -153,21 +427,42 @@ class OmniStageRouter:
             return
 
         result = shm_deserialize(shm_meta)
-        chunk = await self._formatter.format(
-            result, request_id, request_type=request_type, **ctx
+        results = result if isinstance(result, list) else [result]
+        emitted = False
+        final_output_type = "unknown"
+        audio_delta_state: dict[str, Any] | None = (
+            {} if request_type == RequestType.CHAT_COMPLETION else None
         )
-        if chunk:
-            yield chunk
-        else:
-            final_output_type = getattr(result, "final_output_type", "unknown")
+        for item in results:
+            final_output_type = getattr(item, "final_output_type", final_output_type)
+            item_ctx = ctx
+            if (
+                audio_delta_state is not None
+                and getattr(item, "final_output_type", None) == "audio"
+            ):
+                item_ctx = {**ctx, "audio_delta_state": audio_delta_state}
+            chunk = await self._formatter.format(
+                item, request_id, request_type=request_type, **item_ctx
+            )
+            if chunk:
+                emitted = True
+                yield _coerce_router_chunk(
+                    chunk,
+                    request_id,
+                    self._model_name,
+                    request_type,
+                )
+        if not emitted:
             logger.warning(
                 "Router: formatter returned None, final_output_type=%s",
                 final_output_type,
             )
-            yield {
-                "error": f"Formatter returned no output for type '{final_output_type}'",
-                "finished": True,
-            }
+            yield _router_error_chunk(
+                request_id,
+                self._model_name,
+                request_type,
+                f"Formatter returned no output for type '{final_output_type}'",
+            )
 
 
 async def init_omni_stage_router(
@@ -187,9 +482,7 @@ async def init_omni_stage_router(
 
     # Discover stage endpoints
     for stage_cfg in router.stage_configs:
-        model_stage = getattr(
-            stage_cfg.engine_args, "model_stage", f"stage{stage_cfg.stage_id}"
-        )
+        model_stage = _model_stage_name(stage_cfg, stage_cfg.stage_id)
         client = await runtime.endpoint(
             f"{config.namespace}.{model_stage}.generate"
         ).client()
@@ -235,3 +528,180 @@ async def init_omni_stage_router(
     except Exception as e:
         logger.error("OmniStageRouter endpoint failed: %s", e)
         raise
+
+
+def _model_stage_name(stage_cfg: Any, stage_idx: int) -> str:
+    engine_args = getattr(stage_cfg, "engine_args", None)
+    return getattr(engine_args, "model_stage", f"stage{stage_idx}")
+
+
+def _request_wants_text(request: dict) -> bool:
+    modalities = request.get("modalities")
+    if not isinstance(modalities, list):
+        return True
+    return any(str(modality).lower() == "text" for modality in modalities)
+
+
+def _chat_text_chunk(request_id: str, model_name: str, text: str) -> dict:
+    return {
+        "id": request_id,
+        "created": int(time.time()),
+        "object": "chat.completion.chunk",
+        "model": model_name,
+        "modality": "text",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+def _coerce_router_chunk(
+    chunk: dict,
+    request_id: str,
+    model_name: str,
+    request_type: RequestType,
+) -> dict:
+    if (
+        isinstance(chunk, dict)
+        and "error" in chunk
+        and "id" not in chunk
+        and _is_chat_request_type(request_type)
+    ):
+        return _router_error_chunk(
+            request_id, model_name, request_type, str(chunk["error"])
+        )
+    return chunk
+
+
+def _router_error_chunk(
+    request_id: str,
+    model_name: str,
+    request_type: RequestType,
+    error_message: str,
+) -> dict:
+    if not _is_chat_request_type(request_type):
+        return {"error": error_message, "finished": True}
+    return {
+        "id": request_id,
+        "created": int(time.time()),
+        "object": "chat.completion.chunk",
+        "model": model_name,
+        "modality": "text",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": f"Error: {error_message}",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+def _is_chat_request_type(request_type: RequestType) -> bool:
+    if request_type == RequestType.CHAT_COMPLETION:
+        return True
+    value = getattr(request_type, "value", request_type)
+    return str(value) in {"chat", "chat_completion"}
+
+
+async def _wait_for_async_chunk_key(
+    request_id: str,
+    from_stage: int,
+    timeout_s: float = 30.0,
+) -> None:
+    """Wait for the first async chunk in SHM before launching a deferred final stage."""
+    if from_stage < 0:
+        return
+    key_path = f"/dev/shm/{request_id}_{from_stage}_0"
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while True:
+        if os.path.exists(key_path):
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            logger.warning(
+                "Timed out waiting for async chunk key %s before final-stage launch",
+                key_path,
+            )
+            return
+        await asyncio.sleep(0.02)
+
+
+def _stage_worker_type(stage_cfg: Any) -> Any:
+    worker_type = getattr(stage_cfg, "worker_type", None)
+    if worker_type is not None:
+        return worker_type
+    engine_args = getattr(stage_cfg, "engine_args", None)
+    return getattr(engine_args, "worker_type", None)
+
+
+def _compute_async_prewarm_prompt_len(prompt_token_ids: list[int]) -> int:
+    if not prompt_token_ids:
+        return 1
+    try:
+        computed = int(compute_talker_prompt_ids_length(prompt_token_ids))
+    except Exception:
+        computed = 0
+    if computed > 1:
+        return computed
+    return max(2, len(prompt_token_ids))
+
+
+async def _cancel_downstream_tasks(tasks: dict[int, asyncio.Task[StageOutput]]) -> None:
+    if not tasks:
+        return
+    for task in tasks.values():
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+
+def _stage_output_text(stage_output: StageOutput) -> str:
+    if not stage_output.shm_meta:
+        return ""
+    try:
+        return _extract_result_text(shm_deserialize(stage_output.shm_meta))
+    except Exception:
+        logger.debug(
+            "Failed to read text output from async chunk stage 0", exc_info=True
+        )
+        return ""
+
+
+def _extract_result_text(result: Any) -> str:
+    request_output = getattr(result, "request_output", None) or result
+    outputs = getattr(request_output, "outputs", None) or []
+    if not outputs:
+        return ""
+    text = getattr(outputs[0], "text", "")
+    return text if isinstance(text, str) else ""
+
+
+def _format_context(request: dict, request_type: RequestType) -> Dict[str, Any]:
+    nvext = request.get("nvext") or {}
+    fmt_ctx: Dict[str, Any] = {}
+    if nvext.get("fps") is not None:
+        fmt_ctx["fps"] = nvext["fps"]
+    if nvext.get("speed") is not None:
+        fmt_ctx["speed"] = nvext["speed"]
+    response_format = (
+        request.get("data_source")
+        if request_type == RequestType.AUDIO_GENERATION
+        else request.get("response_format")
+    )
+    output_format = (
+        request.get("response_format")
+        if request_type == RequestType.AUDIO_GENERATION
+        else request.get("output_format")
+    )
+    if response_format is not None:
+        fmt_ctx["response_format"] = response_format
+    if output_format is not None:
+        fmt_ctx["output_format"] = output_format
+    return fmt_ctx

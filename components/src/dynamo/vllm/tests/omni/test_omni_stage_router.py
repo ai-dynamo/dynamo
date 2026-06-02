@@ -62,6 +62,8 @@ def _make_router(stage_configs, stage_clients, formatter=None, output_modalities
     )
     router.stage_configs = stage_configs
     router.stage_clients = stage_clients
+    router._async_chunk = False
+    router._model_name = "test-model"
     router._formatter = formatter or AsyncMock()
     return router
 
@@ -74,6 +76,36 @@ def _patched_generate(router, request, request_id="req-1", request_type="chat"):
         ),
         patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id),
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_uses_async_chunk_path_when_configured():
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={},
+    )
+    router._async_chunk = True
+    async_path_calls = []
+
+    async def fake_generate_async_chunk(request, request_id, request_type):
+        async_path_calls.append((request, request_id, request_type))
+        yield {"async": True, "finished": True}
+
+    router._generate_async_chunk = fake_generate_async_chunk
+
+    p1, p2 = _patched_generate(
+        router,
+        {"messages": []},
+        request_id="req-async",
+        request_type=RequestType.CHAT_COMPLETION,
+    )
+    with p1, p2:
+        chunks = [c async for c in router.generate({"messages": []}, None)]
+
+    assert chunks == [{"async": True, "finished": True}]
+    assert async_path_calls == [
+        ({"messages": []}, "req-async", RequestType.CHAT_COMPLETION)
+    ]
 
 
 def test_router_loads_stage_configs_from_model_deploy_config():

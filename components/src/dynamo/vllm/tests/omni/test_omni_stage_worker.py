@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 try:
+    from dynamo.vllm.omni import stage_worker
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
         _ensure_stage_connectors,
@@ -21,6 +22,7 @@ try:
         _Proxy,
         _stage_config_to_dict,
     )
+    from dynamo.vllm.omni.types import StageOutput
     from dynamo.vllm.omni.utils import _build_sampling_params
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
@@ -185,6 +187,57 @@ async def test_stage_connector_refs_builds_engine_core_request():
     assert engine.received_prompt.prompt_token_ids == [100, 200, 300]
     # Output processor should have been registered
     engine.engine.output_processors[0].add_request.assert_called_once()
+
+
+def test_stage_output_forwards_final_stage_id_to_next_stage():
+    stage_output = StageOutput.model_validate(
+        {
+            "original_prompt": {"prompt": "hello"},
+            "stage_connector_refs": {"0": {"name": "ref0"}},
+            "sampling_params_list": {"max_tokens": 1},
+            "final_stage_id": 2,
+            "finished": True,
+        }
+    )
+
+    next_request = stage_output.to_next_stage_request("req-final-stage")
+
+    assert next_request["request_id"] == "req-final-stage"
+    assert next_request["final_stage_id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_async_prewarm_preserves_explicit_empty_prompt_token_ids():
+    engine = _MockEngine()
+    built_prompt = SimpleNamespace(prompt_token_ids=[])
+    worker = _make_worker(
+        engine=engine,
+        stage_id=2,
+        stage_config=_make_stage_config(
+            engine_args=SimpleNamespace(async_chunk=True),
+            default_sampling_params={"temperature": 0.0, "max_tokens": 1},
+        ),
+    )
+    worker._build_engine_core_request_from_tokens = MagicMock(return_value=built_prompt)
+
+    chunks = [
+        chunk
+        async for chunk in worker.generate(
+            {
+                "request_id": "req-code2wav",
+                "prompt_token_ids": [],
+                "final_stage_id": 2,
+                "sampling_params_list": {"max_tokens": 1},
+                stage_worker._ASYNC_PREWARM_KEY: True,
+            },
+            _MockContext(),
+        )
+    ]
+
+    worker._build_engine_core_request_from_tokens.assert_called_once()
+    assert worker._build_engine_core_request_from_tokens.call_args.args[0] == []
+    assert engine.received_prompt is built_prompt
+    assert any(chunk.get(stage_worker._ASYNC_PREWARM_READY_KEY) for chunk in chunks)
 
 
 @pytest.mark.asyncio
@@ -550,6 +603,31 @@ def test_stage_config_to_dict_includes_engine_input_source():
     )
 
     assert result["engine_input_source"] == [0]
+
+
+def test_stage_config_to_dict_can_preserve_async_stage_topology():
+    result = _stage_config_to_dict(
+        SimpleNamespace(
+            stage_id=2,
+            stage_type="llm",
+            engine_args=SimpleNamespace(model_stage="stage2", async_chunk=True),
+            input_connectors={"from_stage_1": "connector_of_shared_memory"},
+            output_connectors={"to_stage_3": "connector_of_shared_memory"},
+            custom_process_input_func="pkg.module.processor",
+            requires_multimodal_data=True,
+            engine_input_source=[1],
+            final_output_type="audio",
+        ),
+        "llm",
+        preserve_stage_id=True,
+    )
+
+    assert result["stage_id"] == 2
+    assert result["engine_args"]["async_chunk"] is True
+    assert result["input_connectors"]["from_stage_1"] == "connector_of_shared_memory"
+    assert result["output_connectors"]["to_stage_3"] == "connector_of_shared_memory"
+    assert result["custom_process_input_func"] == "pkg.module.processor"
+    assert result["requires_multimodal_data"] is True
 
 
 def test_stage_config_to_dict_preserves_runtime_devices():
