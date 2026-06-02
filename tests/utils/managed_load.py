@@ -651,6 +651,16 @@ class ManagedLoad:
 
             except exceptions.ApiException as e:
                 self._logger.warning(f"Error checking {marker_description} status: {e}")
+            except Exception as e:
+                # Transient infra blips (e.g. a Teleport proxy 500 on the kr8s
+                # API-version negotiation, connection resets) must NOT kill a
+                # long-running poll. kr8s raises ServerError / httpx.HTTPStatusError,
+                # which are not exceptions.ApiException, so they previously escaped
+                # this loop and failed the whole test. Log and retry next tick;
+                # a genuinely persistent failure still surfaces as TimeoutError.
+                self._logger.warning(
+                    f"Transient error checking {marker_description} status, will retry: {e}"
+                )
 
             await asyncio.sleep(5)
 
