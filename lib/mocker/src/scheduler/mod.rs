@@ -105,6 +105,7 @@ pub(crate) fn build_fpm_snapshot(
         sum_queued_decode_kv_tokens: queued_decode_acc.sum as u64,
         var_queued_decode_kv_tokens: queued_decode_acc.variance(),
         wall_time_secs,
+        ..Default::default()
     }
 }
 
