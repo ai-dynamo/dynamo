@@ -9,6 +9,8 @@ Dynamo supports disaggregated serving where prefill (prompt processing) and deco
 
 For the high-level deployment matrix, see [Router Guide](router-guide.md). For the router flags used in this setup, see [Configuration and Tuning](router-configuration.md).
 
+If prefill and decode workers span topology domains such as zones or racks, use [Topology-Aware KV Transfer](topology-aware-kv-transfer.md) to constrain or bias decode routing toward workers in the selected prefill worker's transfer domain.
+
 ## Automatic Prefill Router Activation
 
 The prefill router is automatically created when:
@@ -88,3 +90,5 @@ graph TD
     linkStyle 0,1,2,3,4 stroke:#8b4513,stroke-width:2px
     linkStyle 5 stroke:#2196f3,stroke-width:2px
 ```
+
+When topology-aware KV transfer is enabled, the prefill router also derives decode `RoutingConstraints` from the selected prefill worker's runtime topology metadata before the request enters the decode router.

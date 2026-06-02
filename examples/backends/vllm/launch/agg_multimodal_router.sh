@@ -49,7 +49,7 @@ NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
 VLLM_SYSTEM_PORT_BASE="${VLLM_SYSTEM_PORT_BASE:-18081}"
 KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-5557}"
-DYN_LOG_VAL="${DYN_LOG:-info,lightseek_mm=debug,dynamo_kv_router::scheduling=debug}"
+DYN_LOG_VAL="${DYN_LOG:-info,lightseek_mm=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug}"
 
 # Pass-through extra args for `python -m dynamo.vllm`.
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
