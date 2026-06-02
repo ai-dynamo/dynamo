@@ -137,12 +137,9 @@ pub struct BackendOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
 
-    /// Additional arguments for extensibility — symmetric with
-    /// [`LLMEngineOutput::extra_args`]. Framework metadata is namespaced under the
-    /// `dynamo` key (e.g. `extra_args["dynamo"]["router_timing"]`) so a standalone
-    /// KV-router's per-request timing survives the Rust→Python→Rust router path to
-    /// the frontend without touching engine-owned fields. Dynamo-internal: consumed
-    /// by the frontend, not surfaced to clients.
+    /// Extensibility args, symmetric with [`LLMEngineOutput::extra_args`]. Framework
+    /// metadata lives under the `dynamo` key (e.g. `extra_args["dynamo"]["router_timing"]`);
+    /// Dynamo-internal, consumed by the frontend and not surfaced to clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 }

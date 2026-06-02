@@ -819,14 +819,9 @@ fn inject_worker_id_from_tracker(
     }
 }
 
-/// Inject this request's `TimingInfo` from the tracker into the terminal chunk's
-/// `extra_args["dynamo"]["router_timing"]`. A router built on these bindings runs in
-/// its own process, so the only way its timing reaches the frontend is by riding the
-/// data payload (annotations are stripped crossing the Rust->Python->Rust boundary,
-/// data is not). It goes under the framework-owned `dynamo` namespace in `extra_args`
-/// — never `disaggregated_params`/`engine_data`, which are engine-owned. Done once on
-/// the final chunk (finish_reason set) where the tracker's ttft/total timing is
-/// complete. The merge is non-clobbering: a non-object `extra_args` is left untouched.
+/// Merge the request's timing into `extra_args["dynamo"]["router_timing"]` so it
+/// survives the Rust->Python->Rust router path to the frontend (data survives,
+/// annotations don't). Framework namespace, not engine-owned fields. Non-clobbering.
 fn inject_timing_from_tracker(
     data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
     tracker: &RequestTracker,
@@ -887,10 +882,7 @@ impl KvRouter {
                         }
                     }
 
-                    // Terminal chunk: ship this request's complete timing to the
-                    // frontend via the data payload. record_finish() here captures
-                    // total time as of the final chunk crossing this boundary (the
-                    // router guard's own finish() runs only after the stream ends).
+                    // On the terminal chunk, finalize timing and attach it for the frontend.
                     if let (Some(tracker), Some(data)) = (&tracker, &mut response.data)
                         && data.finish_reason.is_some()
                     {

@@ -159,12 +159,8 @@ impl LLMMetricAnnotation {
     }
 }
 
-/// Extract and remove a `TimingInfo` injected by a standalone KV-router into the
-/// terminal chunk's `extra_args["dynamo"]["router_timing"]` (routing and frontend in
-/// separate processes; see `inject_timing_from_tracker` in the kv bindings). Timing
-/// rides the data payload because annotations are stripped crossing the
-/// Rust->Python->Rust boundary. Removing the key keeps this internal routing field
-/// off the wire to clients. Returns None for normal items.
+/// Take a standalone router's `TimingInfo` out of `extra_args["dynamo"]["router_timing"]`
+/// (see `inject_timing_from_tracker`). Removing it keeps the field off the client wire.
 fn take_router_timing(
     data: &mut Option<BackendOutput>,
 ) -> Option<crate::protocols::common::timing::TimingInfo> {
@@ -1871,12 +1867,8 @@ impl OpenAIPreprocessor {
                 }
 
                 if let Some(mut response) = inner.response_stream.next().await {
-                    // Split-topology timing: a standalone KV-router (running the PushRouter
-                    // bindings in its own process) injects its TimingInfo into the terminal
-                    // chunk's disaggregated_params. Overlay it onto this request's tracker so
-                    // the frontend's timing surfaces (the `timing` nvext field, metrics,
-                    // traces) populate even though the local record_* timestamps were never
-                    // set here. take_router_timing also strips the key from the payload.
+                    // Split topology: overlay a standalone router's forwarded timing onto
+                    // this request's tracker so the frontend's timing surfaces populate.
                     if let Some(timing) = take_router_timing(&mut response.data)
                         && let Some(tracker) = inner.response_generator.tracker()
                     {

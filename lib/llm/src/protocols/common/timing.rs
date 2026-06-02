@@ -175,17 +175,11 @@ pub struct RequestTracker {
     external_timing: OnceLock<TimingInfo>,
 }
 
-/// Namespace under an engine output's `extra_args` reserved for Dynamo framework
-/// metadata, keeping it cleanly separated from engine-owned payloads
-/// (`disaggregated_params`, `engine_data`). A standalone KV-router (running the
-/// `PushRouter` bindings in its own process) injects under
-/// `extra_args[EXTRA_ARGS_DYNAMO_NS][ROUTER_TIMING_KEY]` so per-request timing reaches
-/// the frontend across the process boundary — `extra_args` is plain data, so it
-/// survives the Rust->Python->Rust round-trip (annotations don't).
+/// Namespace under an engine output's `extra_args` for Dynamo framework metadata,
+/// kept separate from engine-owned payloads (`disaggregated_params`, `engine_data`).
 pub const EXTRA_ARGS_DYNAMO_NS: &str = "dynamo";
 
-/// Key under `extra_args["dynamo"]` carrying a standalone router's serialized
-/// [`TimingInfo`]. See [`EXTRA_ARGS_DYNAMO_NS`].
+/// Key under `extra_args["dynamo"]` carrying a standalone router's `TimingInfo`.
 pub const ROUTER_TIMING_KEY: &str = "router_timing";
 
 impl RequestTracker {
@@ -604,25 +598,15 @@ impl RequestTracker {
         }
     }
 
-    /// Inject timing computed in another process (e.g. a standalone router).
-    /// Once set, `get_timing_info()` returns it verbatim.
-    ///
-    /// **First-write-wins** (`OnceLock`): the first injected snapshot is kept.
-    /// In the default `n = 1` path the router emits timing once, on the single
-    /// terminal chunk, so this is exact. With `sampling_options.n > 1` the router
-    /// can emit a terminal chunk per choice; the first one to arrive fixes the
-    /// reported timing and later choices' snapshots are ignored. That's an
-    /// acceptable approximation — per-choice timing is out of scope for this
-    /// request-level snapshot.
+    /// Inject timing from another process (a standalone router); `get_timing_info`
+    /// then returns it verbatim. First-write-wins: with `n > 1` the first terminal
+    /// choice to arrive fixes the request-level snapshot (per-choice timing is out of scope).
     pub fn set_external_timing(&self, timing: TimingInfo) {
         let _ = self.external_timing.set(timing);
     }
 
-    /// Per-request timing. In the split-router topology this returns the snapshot
-    /// transported from the router (so `total_time_ms` reflects router-observed
-    /// completion, not frontend end-to-end); otherwise it's computed from this
-    /// process's local timestamps. See [`Self::set_external_timing`] for the
-    /// `n > 1` first-write-wins caveat.
+    /// Per-request timing: the router's injected snapshot if present (split topology),
+    /// else computed from this process's timestamps. See [`Self::set_external_timing`].
     pub fn get_timing_info(&self) -> TimingInfo {
         // Prefer timing injected from another process (split router topology).
         if let Some(external) = self.external_timing.get() {
