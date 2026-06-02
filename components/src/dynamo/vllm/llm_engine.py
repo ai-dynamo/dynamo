@@ -28,10 +28,15 @@ from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
+    TEST_LOGITS_PROCESSOR_ENV,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LogitsProcessorSpec,
+    is_generation_stage,
+    logits_processors_for_request,
+    resolve_test_logits_processor_spec,
 )
 from dynamo.common.backend.health_check import (
     bos_token_id_or,
@@ -53,6 +58,10 @@ from dynamo.vllm.cache_info import (
 from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import build_sampling_params, get_dp_range_for_worker
+from .logits_processing import (
+    activate_logits_processors,
+    register_dynamo_logits_processor,
+)
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -150,6 +159,9 @@ class VllmLLMEngine(LLMEngine):
         # factory call sees a valid object. `num_gpu_blocks` is patched
         # after KV profiling finishes.
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
+        # Resolved once in start() after AsyncLLM init; None when the smoke
+        # hook is off or this is a non-generation worker.
+        self._logits_processor_spec: LogitsProcessorSpec | None = None
 
     @classmethod
     async def from_args(
@@ -192,6 +204,17 @@ class VllmLLMEngine(LLMEngine):
         os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
+        # Register the engine-loaded logits-processor adapter before the
+        # engine config is built so vLLM instantiates it. Only for the smoke
+        # hook on a generation worker — PREFILL never attaches (gated again
+        # per request in generate()), and production paths are untouched.
+        # vLLM already initializes the tokenizer by default in Dynamo, so
+        # (unlike TRT-LLM/SGLang) there is no skip_tokenizer_init flag to flip.
+        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
+            self.disaggregation_mode
+        ):
+            register_dynamo_logits_processor(self.engine_args)
+
         self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
 
         self._default_sampling_params = (
@@ -211,6 +234,10 @@ class VllmLLMEngine(LLMEngine):
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
         )
+        # Resolve the engine-declared spec now the tokenizer is available;
+        # see logits_processor_spec(). None when the hook is off / non-gen role.
+        self._logits_processor_spec = await self.logits_processor_spec()
+
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
         per_rank_num_gpu_blocks = per_rank_kv_blocks(num_gpu_blocks, self._dp_range[1])
         if per_rank_num_gpu_blocks is None:
@@ -297,6 +324,16 @@ class VllmLLMEngine(LLMEngine):
                 sampling_params.extra_args = {}
             sampling_params.extra_args["kv_transfer_params"] = kv_params
 
+        # Activate engine-declared logits processors for this request. The
+        # shared gating returns [] for PREFILL / hook-off, so this is a no-op
+        # unless the smoke hook is on and this is a generation worker. The
+        # engine-loaded DynamoVllmLogitsProcessor reads these back per request.
+        entries = logits_processors_for_request(
+            self._logits_processor_spec,
+            disaggregation_mode=self.disaggregation_mode,
+        )
+        activate_logits_processors(sampling_params, entries)
+
         # Honour the router's DP rank decision; without it vLLM picks
         # its own rank and KV events land on the wrong publisher. vLLM
         # expects a local rank, so subtract this worker's `dp_start`.
@@ -367,6 +404,30 @@ class VllmLLMEngine(LLMEngine):
                             }
 
                 yield out
+
+    def _logits_tokenizer(self) -> Any:
+        """Tokenizer the smoke hook tokenizes ``"Hello world!"`` with.
+
+        Accessed lazily (only when the env hook is on, inside the resolver).
+        vLLM's ``AsyncLLM`` exposes the HF tokenizer as ``.tokenizer``; if a
+        future version moves it, this is the one place to adjust.
+        """
+        if self.engine_client is None:
+            raise RuntimeError("Engine not initialized")
+        tokenizer = getattr(self.engine_client, "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError(
+                "vLLM engine exposes no tokenizer; "
+                f"{TEST_LOGITS_PROCESSOR_ENV} requires tokenizer init"
+            )
+        return tokenizer
+
+    async def logits_processor_spec(self) -> LogitsProcessorSpec | None:
+        # Only generation roles ever attach (PREFILL gates out per request),
+        # so skip spec resolution — and the tokenizer it needs — otherwise.
+        if not is_generation_stage(self.disaggregation_mode):
+            return None
+        return resolve_test_logits_processor_spec(self._logits_tokenizer)
 
     def _kv_routing_enabled(self) -> bool:
         # Matches the legacy `setup_kv_event_publisher` gate.
