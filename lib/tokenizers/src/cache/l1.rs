@@ -740,4 +740,80 @@ mod tests {
         }
         assert!(cache.stats().memory_bytes > 0);
     }
+
+    #[test]
+    fn extend_after_match_persists_correct_deepest_entry() {
+        // The *saved* entry on a partial hit — not just the returned merge — must be
+        // byte-exact and retrievable: a fresh lookup hits at the just-cached deepest
+        // boundary and returns exactly `encode(input[0..deepest])`, so the next turn
+        // reuses a correct prefix. Also proves the deepest-only invariant: extend
+        // persists exactly one new entry.
+        let tok = load_tokenizer();
+        let turns = growing_chat_turns(3);
+
+        let cache = L1Cache::new(8 * 1024 * 1024);
+        cache
+            .insert_at_boundaries(&turns[0], tok.as_ref(), SPECIALS)
+            .unwrap();
+
+        let (prefix_tokens, prefix_len) = cache
+            .longest_prefix_match(&turns[1], SPECIALS)
+            .expect("partial hit on turns[1]");
+        let entries_before = cache.stats().entries;
+
+        let _merged = cache
+            .extend_after_match(&turns[1], prefix_tokens, prefix_len, tok.as_ref(), SPECIALS)
+            .unwrap();
+
+        assert_eq!(
+            cache.stats().entries,
+            entries_before + 1,
+            "extend must persist exactly one (deepest) entry"
+        );
+
+        // The deepest boundary strictly past the matched prefix is what extend cached.
+        let deepest = find_special_token_boundaries(&turns[1], SPECIALS)
+            .into_iter()
+            .rev()
+            .find(|&b| b > prefix_len)
+            .expect("a deeper boundary must exist in the appended turn");
+
+        // A fresh lookup must now hit AT that deepest boundary, and the stored tokens must
+        // equal the uncached encode of exactly that prefix.
+        let (saved_tokens, saved_offset) = cache
+            .longest_prefix_match(&turns[1], SPECIALS)
+            .expect("hit after extend");
+        assert_eq!(
+            saved_offset, deepest,
+            "lookup must now hit at the just-saved deepest boundary"
+        );
+        let expected = tok.encode(&turns[1][..deepest]).unwrap();
+        assert_eq!(
+            saved_tokens,
+            expected.token_ids(),
+            "persisted entry tokens must equal the uncached encode of the cached prefix"
+        );
+    }
+
+    #[test]
+    fn boundaries_detected_for_multibyte_deepseek_tool_tokens() {
+        // `find_special_token_boundaries` keys off byte offsets; DeepSeek's tool tokens use
+        // multibyte code points (｜ = U+FF5C, ▁ = U+2581, 3 bytes each). A boundary must
+        // land immediately after each occurrence at a valid char boundary, so the cache can
+        // split a tool-call block at its special tokens without panicking on a slice.
+        let specials = &["<｜tool▁calls▁begin｜>", "<｜tool▁call▁end｜>"];
+        let text = "<｜tool▁calls▁begin｜>payload<｜tool▁call▁end｜>tail";
+        let bounds = find_special_token_boundaries(text, specials);
+
+        let after_begin = "<｜tool▁calls▁begin｜>".len();
+        let after_end = text.find("<｜tool▁call▁end｜>").unwrap() + "<｜tool▁call▁end｜>".len();
+        assert_eq!(bounds, vec![after_begin, after_end]);
+        for &b in &bounds {
+            assert!(
+                text.is_char_boundary(b),
+                "boundary {b} is not a char boundary"
+            );
+            let _ = &text[..b]; // must not panic
+        }
+    }
 }

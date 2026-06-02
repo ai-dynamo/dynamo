@@ -45,6 +45,18 @@ const LLAMA31_PATH: &str = concat!(
     "/../llm/tests/data/sample-models/mock-llama-3.1-8b-instruct/tokenizer.json"
 );
 
+/// In-tree mock DeepSeek-R1 fixture. Empty BPE vocab like mock-llama-3.1, but registers
+/// DeepSeek's chat markers (`<｜begin▁of▁sentence｜>`, `<｜User｜>`, `<｜Assistant｜>`,
+/// `<｜end▁of▁sentence｜>`) and tool-call markers (`<｜tool▁calls▁begin｜>`,
+/// `<｜tool▁call▁begin｜>`, `<｜tool▁sep｜>`, `<｜tool▁call▁end｜>`, `<｜tool▁calls▁end｜>`).
+/// Exercises the cache on a third special-token family whose markers use multibyte code
+/// points (`｜`=U+FF5C, `▁`=U+2581), confirming boundary detection and the merge invariant
+/// hold for non-ASCII special tokens.
+const DEEPSEEK_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../llm/tests/data/sample-models/mock-deepseek-r1/tokenizer.json"
+);
+
 /// A tokenizer fixture together with the formatter that re-keys the chat corpus into
 /// that family's native special-token markers, plus the list of those markers for the
 /// `CachedTokenizer` constructor.
@@ -89,6 +101,41 @@ fn render_llama3(s: &str) -> String {
     out
 }
 
+/// Convert a TinyLlama-format chat string into DeepSeek-R1 format.
+///
+/// `<s>system\ncontent</s>`    → `content` (bare, immediately after the BOS)
+/// `<s>user\ncontent</s>`      → `<｜User｜>content`
+/// `<s>assistant\ncontent</s>` → `<｜Assistant｜>content<｜end▁of▁sentence｜>`
+/// with a single `<｜begin▁of▁sentence｜>` prepended once at the very start. Any role
+/// other than `system`/`assistant` opens with the `<｜User｜>` marker (matches the corpus,
+/// which only uses system/user/assistant).
+fn render_deepseek(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 64);
+    out.push_str("<｜begin▁of▁sentence｜>");
+    let mut remaining = s;
+    while let Some(rest) = remaining.strip_prefix("<s>") {
+        let end = rest
+            .find("</s>")
+            .expect("CHAT_TURNS turn must end with </s>");
+        let turn = &rest[..end];
+        let (role, content) = turn.split_once('\n').unwrap_or((turn, ""));
+        match role {
+            "system" => out.push_str(content),
+            "assistant" => {
+                out.push_str("<｜Assistant｜>");
+                out.push_str(content);
+                out.push_str("<｜end▁of▁sentence｜>");
+            }
+            _ => {
+                out.push_str("<｜User｜>");
+                out.push_str(content);
+            }
+        }
+        remaining = &rest[end + "</s>".len()..];
+    }
+    out
+}
+
 const SETUPS: &[Setup] = &[
     Setup {
         name: "tinyllama (Llama-2 family, <s>/</s>)",
@@ -106,6 +153,17 @@ const SETUPS: &[Setup] = &[
             "<|eot_id|>",
         ],
         render: render_llama3,
+    },
+    Setup {
+        name: "mock-deepseek-r1 (DeepSeek family, <｜begin▁of▁sentence｜>/<｜User｜>/<｜Assistant｜>/<｜end▁of▁sentence｜>)",
+        path: DEEPSEEK_PATH,
+        specials: &[
+            "<｜begin▁of▁sentence｜>",
+            "<｜User｜>",
+            "<｜Assistant｜>",
+            "<｜end▁of▁sentence｜>",
+        ],
+        render: render_deepseek,
     },
 ];
 
@@ -372,6 +430,202 @@ fn extend_off_hits_never_insert() {
             after.hits > hits_after_turn0,
             "[{}] later turns should have produced hits",
             setup.name
+        );
+    }
+}
+
+#[test]
+fn extend_on_partial_hit_adds_exactly_one_entry() {
+    // End-to-end deepest-only invariant at the `CachedTokenizer` level: turn 0 (miss)
+    // populates an entry at every boundary; each later turn is a partial hit that, with
+    // extend on, persists exactly ONE new entry (the suffix's deepest boundary) — never
+    // the intermediate boundaries. Holds on every family.
+    let turns = growing_chat_turns(6);
+    for setup in SETUPS {
+        let base = Arc::new(
+            HuggingFaceTokenizer::from_file(setup.path)
+                .unwrap_or_else(|e| panic!("load tokenizer {}: {e}", setup.path)),
+        );
+        let specials: Vec<String> = setup.specials.iter().map(|s| (*s).to_string()).collect();
+        let cached = CachedTokenizer::new(base, specials, 50 * 1024 * 1024).with_extend(true);
+
+        // Turn 0: miss path populates the cache at every boundary.
+        let _ = cached.encode(&(setup.render)(&turns[0])).unwrap();
+
+        for (i, raw) in turns.iter().enumerate().skip(1) {
+            let before = cached.cache_stats().entries;
+            let _ = cached.encode(&(setup.render)(raw)).unwrap();
+            let after = cached.cache_stats().entries;
+            assert_eq!(
+                after,
+                before + 1,
+                "[{}] turn {i}: partial-hit extend must add exactly one entry (before {before}, after {after})",
+                setup.name
+            );
+        }
+    }
+}
+
+/// Build an append-only DeepSeek-R1 tool-calling conversation. Each round appends a user
+/// question, an assistant turn whose body is a real DeepSeek tool-call block (five nested
+/// `<｜tool▁…｜>` special tokens around a JSON payload), a user-delivered tool result, and
+/// an assistant answer. `turns[i]` is a strict prefix of `turns[i + 1]`.
+fn growing_deepseek_tool_turns(n: usize) -> Vec<String> {
+    let mut convo = String::from("<｜begin▁of▁sentence｜>You are a helpful assistant with tools.");
+    let mut turns = Vec::with_capacity(n);
+    for i in 0..n {
+        convo.push_str(&format!(
+            "<｜User｜>What is the weather in city {i}?\
+             <｜Assistant｜><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{{\"city\": \"city {i}\"}}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>\
+             <｜User｜>Tool result: sunny in city {i}.\
+             <｜Assistant｜>It is sunny in city {i}.<｜end▁of▁sentence｜>"
+        ));
+        turns.push(convo.clone());
+    }
+    turns
+}
+
+#[test]
+fn extend_correct_with_deepseek_tool_calls() {
+    // Tool-call markers that ARE special tokens (DeepSeek's `<｜tool▁…｜>` family) add real
+    // cache boundaries. Encoding a growing tool conversation with extend on must stay
+    // byte-exact vs an uncached encode straight through the nested multibyte tool tokens.
+    let base = Arc::new(
+        HuggingFaceTokenizer::from_file(DEEPSEEK_PATH)
+            .unwrap_or_else(|e| panic!("load tokenizer {DEEPSEEK_PATH}: {e}")),
+    );
+    let specials: Vec<String> = [
+        "<｜begin▁of▁sentence｜>",
+        "<｜User｜>",
+        "<｜Assistant｜>",
+        "<｜end▁of▁sentence｜>",
+        "<｜tool▁calls▁begin｜>",
+        "<｜tool▁call▁begin｜>",
+        "<｜tool▁sep｜>",
+        "<｜tool▁call▁end｜>",
+        "<｜tool▁calls▁end｜>",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let cached = CachedTokenizer::new(base.clone(), specials, 8 * 1024 * 1024).with_extend(true);
+
+    // The tool-call-begin marker must be an atomic special the cache can split on.
+    let tool_begin = base
+        .encode("<｜tool▁calls▁begin｜>")
+        .unwrap()
+        .token_ids()
+        .to_vec();
+    assert_eq!(
+        tool_begin.len(),
+        1,
+        "tool-call-begin must encode atomically"
+    );
+
+    let turns = growing_deepseek_tool_turns(8);
+    let mut saw_tool_token = false;
+    for (i, turn) in turns.iter().enumerate() {
+        let plain = base.encode(turn).unwrap().token_ids().to_vec();
+
+        let first = cached.encode(turn).unwrap().token_ids().to_vec();
+        assert_eq!(first, plain, "turn {i}: extend-on first encode != uncached");
+
+        let second = cached.encode(turn).unwrap().token_ids().to_vec();
+        assert_eq!(
+            second, plain,
+            "turn {i}: extend-on second encode != uncached"
+        );
+
+        if plain.contains(&tool_begin[0]) {
+            saw_tool_token = true;
+        }
+    }
+    assert!(
+        saw_tool_token,
+        "the tool-call special token must actually appear in the encoded turns"
+    );
+    assert!(
+        cached.cache_stats().hits > 0,
+        "expected L1 hits across the growing tool conversation"
+    );
+}
+
+/// Build an append-only conversation whose assistant turns optionally wrap the tool call
+/// in plain-text `<tool_call>…</tool_call>` markup (Hermes/Qwen style). When
+/// `wrap_in_tool_call` is false the same JSON appears as ordinary assistant text. Both
+/// variants share an identical special-token (`<s>`/`</s>`) structure — only the plain
+/// text inside the assistant turns differs. Canonical `<s>role\ncontent</s>` form.
+fn growing_tool_turns(n: usize, wrap_in_tool_call: bool) -> Vec<String> {
+    let mut convo = String::from("<s>system\nYou are a helpful assistant with tools.</s>");
+    let mut turns = Vec::with_capacity(n);
+    for i in 0..n {
+        let call_body =
+            format!("{{\"name\": \"get_weather\", \"arguments\": {{\"city\": \"city {i}\"}}}}");
+        let assistant_call = if wrap_in_tool_call {
+            format!("<tool_call>{call_body}</tool_call>")
+        } else {
+            call_body
+        };
+        convo.push_str(&format!(
+            "<s>user\nWeather in city {i}?</s>\
+             <s>assistant\n{assistant_call}</s>\
+             <s>tool\nsunny in city {i}</s>\
+             <s>assistant\nIt is sunny in city {i}.</s>"
+        ));
+        turns.push(convo.clone());
+    }
+    turns
+}
+
+#[test]
+fn extend_transparent_to_plaintext_tool_markup() {
+    // Plain-text `<tool_call>…</tool_call>` markup is NOT a registered special token, so it
+    // must be transparent to the cache: (1) encoding stays byte-exact under extend, and
+    // (2) the markup adds no special-token boundary — a cache fed the markup variant ends
+    // with the same number of entries as one fed the bare-JSON variant (identical `<s>`/
+    // `</s>` structure). Run on the HF families where `<tool_call>` is genuinely text.
+    for setup in &SETUPS[..2] {
+        let markup = growing_tool_turns(8, true);
+        let bare = growing_tool_turns(8, false);
+
+        let build = || {
+            let base = Arc::new(
+                HuggingFaceTokenizer::from_file(setup.path)
+                    .unwrap_or_else(|e| panic!("load tokenizer {}: {e}", setup.path)),
+            );
+            let specials: Vec<String> = setup.specials.iter().map(|s| (*s).to_string()).collect();
+            let cached =
+                CachedTokenizer::new(base.clone(), specials, 50 * 1024 * 1024).with_extend(true);
+            (base, cached)
+        };
+
+        // Markup variant: every turn must encode byte-exact vs uncached.
+        let (base_m, cache_m) = build();
+        for (i, raw) in markup.iter().enumerate() {
+            let turn = (setup.render)(raw);
+            let plain = base_m.encode(&turn).unwrap().token_ids().to_vec();
+            let got = cache_m.encode(&turn).unwrap().token_ids().to_vec();
+            assert_eq!(
+                got, plain,
+                "[{}] markup turn {i}: extend encode != uncached",
+                setup.name
+            );
+        }
+
+        // Bare variant: same special-token structure, no `<tool_call>` tags.
+        let (_base_b, cache_b) = build();
+        for raw in &bare {
+            let _ = cache_b.encode(&(setup.render)(raw)).unwrap();
+        }
+
+        assert_eq!(
+            cache_m.cache_stats().entries,
+            cache_b.cache_stats().entries,
+            "[{}] plain-text <tool_call> markup must add no special-token boundaries \
+             (markup entries {}, bare entries {})",
+            setup.name,
+            cache_m.cache_stats().entries,
+            cache_b.cache_stats().entries
         );
     }
 }
