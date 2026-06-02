@@ -222,6 +222,8 @@ mod tests {
         JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            // Mirror the production nemotron_deci config (Config::nemotron_deci).
+            strip_markup_on_recovery: true,
             ..Default::default()
         }
     }
@@ -252,6 +254,39 @@ mod tests {
         assert_eq!(calls[0].function.name, "current_time");
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args, serde_json::json!({}));
+    }
+
+    /// Strict recovery with a leading preamble + orphan close tag. The model
+    /// emits prose, then a complete JSON array, then a stray `</TOOLCALL>` with
+    /// no opener: `Let me check.[{...}]</TOOLCALL>`. The extraction stages split
+    /// this into normal_text="Let me check." and json="[{...}]</TOOLCALL>", so
+    /// recovery must strip markers off `json` (not the re-glued full message) to
+    /// salvage the call. Regression for dropping recoverable calls when a
+    /// preamble is present.
+    #[test]
+    fn test_parse_nemotron_deci_preamble_orphan_close_recovers() {
+        // Mirror the finalize/batch path: the with-recovery dispatcher flips
+        // `allow_eof_recovery=true`, which is the only path strict recovery runs on.
+        let config = JsonParserConfig {
+            allow_eof_recovery: true,
+            ..nemotron_deci_config()
+        };
+        let input =
+            r#"Let me check.[{"name":"get_weather","arguments":{"location":"NYC"}}]</TOOLCALL>"#;
+        let (calls, normal) = try_tool_call_parse_json(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "preamble must not drop the recoverable call"
+        );
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"location": "NYC"}));
+        assert_eq!(
+            normal.as_deref(),
+            Some(""),
+            "wrapper markers and preamble are stripped, not leaked into normal_text"
+        );
     }
 
     /// TOOLCALLING.batch.9 — empty / null content variants. Truly-empty (zero bytes)
