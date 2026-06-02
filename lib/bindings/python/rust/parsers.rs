@@ -201,6 +201,7 @@ fn make_stream_chunk(chunk: &CaptureChunk) -> Annotated<NvCreateChatCompletionSt
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
             },
+            modality: None,
             nvext: None,
         }),
         event: None,

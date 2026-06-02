@@ -788,6 +788,7 @@ impl JailedStream {
                     service_tier: None,
                     system_fingerprint: None,
                     },
+                    modality: None,
                     nvext: None,
                 };
 
@@ -1643,6 +1644,7 @@ mod tests {
                     service_tier: None,
                     system_fingerprint: None,
                 },
+                modality: None,
                 nvext: None,
             }),
             id: None,
@@ -1743,6 +1745,7 @@ mod tests {
                     service_tier: None,
                     system_fingerprint: None,
                 },
+                modality: None,
                 nvext: None,
             }),
             id: None,

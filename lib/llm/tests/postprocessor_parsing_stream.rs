@@ -303,6 +303,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
             usage: None,
             service_tier: None,
         },
+        modality: None,
         nvext: None,
     }
 }
@@ -345,6 +346,7 @@ fn mock_multi_choice_content_chunk(
             usage: None,
             service_tier: None,
         },
+        modality: None,
         nvext: None,
     }
 }
@@ -418,6 +420,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
             usage: None,
             service_tier: None,
         },
+        modality: None,
         nvext: None,
     }
 }

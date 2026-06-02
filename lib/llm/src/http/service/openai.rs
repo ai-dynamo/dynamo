@@ -3708,6 +3708,7 @@ mod tests {
                     service_tier: None,
                     usage: None,
                 },
+                modality: None,
                 nvext: None,
             }),
             id: Some("msg-1".to_string()),
@@ -4004,6 +4005,7 @@ mod tests {
                 usage: None,
                 service_tier: None,
             },
+            modality: None,
             nvext: None,
         };
         Annotated {

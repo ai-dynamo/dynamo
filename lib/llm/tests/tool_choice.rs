@@ -37,6 +37,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
             ..Default::default()
         },
         common: Default::default(),
+        modality: None,
         nvext: None,
         chat_template_args: None,
         media_io_kwargs: None,
@@ -504,6 +505,7 @@ fn make_text_chunk(
             usage: None,
             service_tier: None,
         },
+        modality: None,
         nvext: None,
     }
 }

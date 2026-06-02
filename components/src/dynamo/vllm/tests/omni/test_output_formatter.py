@@ -103,7 +103,7 @@ class TestErrorChunk:
     def test_error_chunk_format(self):
         chunk = _error_chunk("req-1", "my-model", "something broke")
         assert chunk["choices"][0]["delta"]["content"] == "Error: something broke"
-        assert chunk["choices"][0]["finish_reason"] == "error"
+        assert chunk["choices"][0]["finish_reason"] == "stop"
         assert chunk["model"] == "my-model"
 
 
@@ -291,6 +291,46 @@ class TestAudioFormatterExtractTensor:
         audio_np, _ = f._extract_audio_tensor(mm)
         assert audio_np.ndim == 1
 
+    def test_chat_stream_delta_uses_last_audio_list_item(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {
+            "audio": [
+                np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                np.array([0.4, 0.5], dtype=np.float32),
+            ],
+            "sr": 24000,
+        }
+
+        audio_np, sr = f._extract_audio_tensor(mm, stream_delta=True)
+
+        assert sr == 24000
+        np.testing.assert_allclose(audio_np, np.array([0.4, 0.5], dtype=np.float32))
+
+    def test_non_stream_audio_concatenates_audio_list_items(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {
+            "audio": [
+                np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                np.array([0.4, 0.5], dtype=np.float32),
+            ],
+            "sr": 24000,
+        }
+
+        audio_np, sr = f._extract_audio_tensor(mm)
+
+        assert sr == 24000
+        np.testing.assert_allclose(
+            audio_np, np.array([0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float32)
+        )
+
 
 class TestAudioFormatterEncode:
     def test_wav_encoding(self):
@@ -347,6 +387,137 @@ class TestAudioFormatterFormat:
         assert result["object"] == "audio.speech"
         assert len(result["data"]) == 1
         assert result["data"][0]["b64_json"] is not None
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_streaming_shape(self):
+        import base64
+
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {"audio": np.zeros(2400, dtype=np.float32), "sr": 24000}
+        result = await f.format(mm, "req-1", request_type=RequestType.CHAT_COMPLETION)
+
+        assert result["object"] == "chat.completion.chunk"
+        assert result["modality"] == "audio"
+        delta = result["choices"][0]["delta"]
+        assert delta["role"] == "assistant"
+        assert base64.b64decode(delta["content"])[:4] == b"RIFF"
+        assert "audio" not in delta
+        assert result["nvext"]["audio"]["b64_json"] == delta["content"]
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_streaming_encodes_only_latest_audio_chunk(self):
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {
+            "audio": [
+                np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                np.array([0.4, 0.5], dtype=np.float32),
+            ],
+            "sr": 24000,
+        }
+
+        with patch.object(
+            f, "_encode_audio", return_value=(b"wav", "audio/wav")
+        ) as enc:
+            result = await f.format(
+                mm, "req-1", request_type=RequestType.CHAT_COMPLETION
+            )
+
+        _, args, _ = enc.mock_calls[0]
+        np.testing.assert_allclose(args[0], np.array([0.4, 0.5], dtype=np.float32))
+        assert result["nvext"]["audio"]["num_samples"] == 2
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_streaming_trims_cumulative_audio_prefix(self):
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        state = {}
+
+        with patch.object(
+            f, "_encode_audio", return_value=(b"wav", "audio/wav")
+        ) as enc:
+            first = await f.format(
+                {"audio": np.array([0.1, 0.2, 0.3], dtype=np.float32), "sr": 24000},
+                "req-1",
+                request_type=RequestType.CHAT_COMPLETION,
+                audio_delta_state=state,
+            )
+            second = await f.format(
+                {
+                    "audio": np.array([0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float32),
+                    "sr": 24000,
+                },
+                "req-1",
+                request_type=RequestType.CHAT_COMPLETION,
+                audio_delta_state=state,
+            )
+
+        _, first_args, _ = enc.mock_calls[0]
+        _, second_args, _ = enc.mock_calls[1]
+        np.testing.assert_allclose(
+            first_args[0], np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        )
+        np.testing.assert_allclose(
+            second_args[0], np.array([0.4, 0.5], dtype=np.float32)
+        )
+        assert first["nvext"]["audio"]["num_samples"] == 3
+        assert second["nvext"]["audio"]["num_samples"] == 2
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_streaming_keeps_non_cumulative_audio(self):
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        state = {}
+
+        with patch.object(
+            f, "_encode_audio", return_value=(b"wav", "audio/wav")
+        ) as enc:
+            await f.format(
+                {"audio": np.array([0.1, 0.2, 0.3], dtype=np.float32), "sr": 24000},
+                "req-1",
+                request_type=RequestType.CHAT_COMPLETION,
+                audio_delta_state=state,
+            )
+            result = await f.format(
+                {"audio": np.array([0.4, 0.5], dtype=np.float32), "sr": 24000},
+                "req-1",
+                request_type=RequestType.CHAT_COMPLETION,
+                audio_delta_state=state,
+            )
+
+        _, second_args, _ = enc.mock_calls[1]
+        np.testing.assert_allclose(
+            second_args[0], np.array([0.4, 0.5], dtype=np.float32)
+        )
+        assert result["nvext"]["audio"]["num_samples"] == 2
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_error_shape(self):
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        result = await f.format({}, "req-1", request_type=RequestType.CHAT_COMPLETION)
+
+        assert result["object"] == "chat.completion.chunk"
+        assert "No audio generated" in result["choices"][0]["delta"]["content"]
 
 
 # ── OutputFormatter dispatcher ─────────────────────────────

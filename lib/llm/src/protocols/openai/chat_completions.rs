@@ -134,6 +134,8 @@ pub struct NvCreateChatCompletionStreamResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub modality: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
 }
 
@@ -440,6 +442,29 @@ mod tests {
     use crate::protocols::common::{OutputOptionsProvider, StopConditionsProvider};
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    #[test]
+    fn test_stream_response_preserves_modality() {
+        let value = json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "qwen-omni",
+            "choices": [],
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": null,
+            "modality": "audio"
+        });
+
+        let response: NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(value).expect("stream response");
+
+        assert_eq!(response.modality.as_deref(), Some("audio"));
+
+        let serialized = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(serialized["modality"], "audio");
+    }
 
     #[test]
     fn test_skip_special_tokens_none() {

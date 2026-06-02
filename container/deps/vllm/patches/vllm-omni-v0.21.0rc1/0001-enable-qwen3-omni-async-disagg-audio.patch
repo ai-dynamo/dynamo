@@ -1,0 +1,229 @@
+diff -rN -u vllm_omni/core/sched/omni_generation_scheduler.py vllm_omni/core/sched/omni_generation_scheduler.py
+--- vllm_omni/core/sched/omni_generation_scheduler.py	2026-06-01 18:32:49.885335592 +0200
++++ vllm_omni/core/sched/omni_generation_scheduler.py	2026-06-01 18:32:50.564567894 +0200
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+
+ import time
++
++import torch
+ from collections import defaultdict
+ from typing import Any
+
+@@ -18,6 +20,7 @@
+     EngineCoreEventType,
+     EngineCoreOutput,
+     EngineCoreOutputs,
++    FinishReason,
+ )
+ from vllm.v1.metrics.perf import PerfStats
+ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
+@@ -173,16 +176,23 @@
+
+             # async_chunk: wait for the first upstream chunk (don't start with placeholders).
+             if self.chunk_transfer_adapter is not None and len(request.prompt_token_ids) == 0:
+-                if request.request_id in self.chunk_transfer_adapter.finished_requests:
+-                    request.prompt_token_ids.append(0)
+-                    try:
+-                        request._all_token_ids.append(0)  # type: ignore[attr-defined]
+-                    except Exception:
+-                        pass
+-                else:
+-                    self.waiting.pop_request()
+-                    skipped_waiting_requests.prepend_request(request)
+-                    continue
++                # If the producer wrote the first chunk before this generation
++                # stage was scheduled, consume it synchronously.
++                try:
++                    self.chunk_transfer_adapter._poll_single_request(request)
++                except Exception:
++                    logger.exception("Failed to poll first async chunk for %s", request.request_id)
++                if len(request.prompt_token_ids) == 0:
++                    if request.request_id in self.chunk_transfer_adapter.finished_requests:
++                        request.prompt_token_ids.append(0)
++                        try:
++                            request._all_token_ids.append(0)  # type: ignore[attr-defined]
++                        except Exception:
++                            pass
++                    else:
++                        self.waiting.pop_request()
++                        skipped_waiting_requests.prepend_request(request)
++                        continue
+
+             # Uniformly treat as diffusion. A feature flag can be added later
+             # via config or request tag.
+@@ -345,7 +355,7 @@
+             scheduler_output.scheduled_new_reqs = new_list  # type: ignore[assignment]
+
+             if self.chunk_transfer_adapter:
+-                self.chunk_transfer_adapter.postprocess_scheduler_output(scheduler_output)
++                self.chunk_transfer_adapter.postprocess_scheduler_output(scheduler_output, self.requests)
+
+         except Exception:
+             # If anything goes wrong, leave the original output unchanged
+@@ -453,20 +463,72 @@
+         # to avoid expensive operations inside the loop.
+         stopped_running_reqs: set[Request] = set()
+         stopped_preempted_reqs: set[Request] = set()
++
++        def _scheduled_chunk_finished(req_id: str) -> bool:
++            if self.chunk_transfer_adapter is None:
++                return False
++            additional_info = None
++            cached = getattr(scheduler_output, "scheduled_cached_reqs", None)
++            cached_info = getattr(cached, "additional_information", None)
++            if isinstance(cached_info, dict):
++                additional_info = cached_info.get(req_id)
++            if additional_info is None:
++                for nr in getattr(scheduler_output, "scheduled_new_reqs", []) or []:
++                    if getattr(nr, "req_id", None) == req_id:
++                        additional_info = getattr(nr, "additional_information", None)
++                        break
++            if additional_info is None:
++                request = self.requests.get(req_id)
++                additional_info = getattr(request, "additional_information", None) if request else None
++            if not isinstance(additional_info, dict):
++                return False
++            meta = additional_info.get("meta")
++            if not isinstance(meta, dict):
++                return False
++            flag = meta.get("finished")
++            if isinstance(flag, torch.Tensor):
++                return flag.numel() == 1 and bool(flag.item())
++            return bool(flag)
++
+         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+             assert num_tokens_scheduled > 0
+             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
+                 # Skip requests that were recovered from KV load failure
+                 continue
++            req_index = model_runner_output.req_id_to_index[req_id]
++            generated_token_ids = sampled_token_ids[req_index] if sampled_token_ids else []
+             request = self.requests.get(req_id)
+-            if request is None or request.is_finished():
++            if request is None:
++                # Async chunk generation stages can receive a terminal chunk
++                # after the live scheduler request has already been reclaimed.
++                # Still emit the final pooling output so the output processor
++                # can complete the request and unblock the frontend stream.
++                if self.chunk_transfer_adapter is None or not _scheduled_chunk_finished(req_id):
++                    continue
++                pooler_output = pooler_outputs[req_index] if pooler_outputs else None
++                prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
++                outputs[0].append(
++                    EngineCoreOutput(
++                        request_id=req_id,
++                        new_token_ids=generated_token_ids,
++                        finish_reason=FinishReason.STOP,
++                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
++                        pooling_output=pooler_output,
++                        num_nans_in_logits=(num_nans_in_logits or {}).get(req_id, 0),
++                    )
++                )
++                if self.finished_req_ids_dict is not None:
++                    self.finished_req_ids_dict[0].add(req_id)
++                try:
++                    self.chunk_transfer_adapter.cleanup(req_id, req_id)
++                except Exception:
++                    logger.exception("Failed to cleanup terminal async generation request %s", req_id)
++                continue
++            if request.is_finished():
+                 # Request may already be finished (e.g., aborted during
+                 # execution / pipeline parallelism / async scheduling).
+                 continue
+
+-            req_index = model_runner_output.req_id_to_index[req_id]
+-            generated_token_ids = sampled_token_ids[req_index] if sampled_token_ids else []
+-
+             scheduled_spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+             if scheduled_spec_token_ids and generated_token_ids:
+                 num_draft_tokens = len(scheduled_spec_token_ids)
+@@ -510,8 +572,7 @@
+                 or (self.chunk_transfer_adapter is None and request.num_computed_tokens >= request.num_prompt_tokens)
+                 or (
+                     self.chunk_transfer_adapter is not None
+-                    and request.request_id in self.chunk_transfer_adapter.finished_requests
+-                    and request.num_computed_tokens >= len(request.prompt_token_ids)
++                    and _scheduled_chunk_finished(request.request_id)
+                 )
+             ):
+                 request.status = RequestStatus.FINISHED_STOPPED
+diff -rN -u vllm_omni/distributed/omni_connectors/transfer_adapter/chunk_transfer_adapter.py vllm_omni/distributed/omni_connectors/transfer_adapter/chunk_transfer_adapter.py
+--- vllm_omni/distributed/omni_connectors/transfer_adapter/chunk_transfer_adapter.py	2026-06-01 18:32:53.376926853 +0200
++++ vllm_omni/distributed/omni_connectors/transfer_adapter/chunk_transfer_adapter.py	2026-06-01 18:32:54.177654520 +0200
+@@ -189,8 +189,6 @@
+                         existing_sub = info.get(key)
+                         merged_sub = dict(existing_sub) if isinstance(existing_sub, dict) else {}
+                         for sk, sv in value.items():
+-                            if key == "meta" and sk == "finished":
+-                                continue
+                             merged_sub[sk] = sv
+                         info[key] = merged_sub
+                         continue
+diff -rN -u vllm_omni/engine/stage_pool.py vllm_omni/engine/stage_pool.py
+--- vllm_omni/engine/stage_pool.py	2026-06-01 18:32:53.480503115 +0200
++++ vllm_omni/engine/stage_pool.py	2026-06-01 18:32:54.041972355 +0200
+@@ -58,6 +58,7 @@
+         self._stage_vllm_config = stage_vllm_config
+         self._next_replica_id = 0
+         self._request_bindings: dict[str, int] = {}
++        self._submitted_requests: dict[str, Any] = {}
+         self._replica_metrics: list[_ReplicaMetrics] = [_ReplicaMetrics() for _ in self.clients]
+
+     # ---- Stage-level properties ----
+@@ -113,6 +114,7 @@
+     def release_binding(self, request_id: str) -> None:
+         """Drop the route binding for *request_id* in this stage."""
+         self._request_bindings.pop(request_id, None)
++        self._submitted_requests.pop(request_id, None)
+
+     def release_bindings(self, request_ids: list[str]) -> None:
+         """Drop route bindings for the given request ids in this stage."""
+@@ -221,6 +223,7 @@
+             request_id,
+             affinity_request_id=affinity_request_id,
+         )
++        self._submitted_requests[request_id] = request
+         try:
+             self.output_processor.add_request(
+                 request=request,
+@@ -271,6 +274,7 @@
+             # Refresh the shared output-processor state before yielding to the
+             # stage client so streaming segments are merged against the latest
+             # prompt/token metadata.
++            self._submitted_requests[request_id] = request
+             self.output_processor.add_request(
+                 request=request,
+                 prompt=prompt_text,
+@@ -298,6 +302,31 @@
+         """Run the shared LLM output processor on one raw poll result."""
+         client = self._llm_client(replica_id)
+         processor = self.output_processor
++        request_states = getattr(processor, "request_states", None)
++        is_audio_output = (
++            str(getattr(processor, "engine_core_output_type", "") or "").lower()
++            == "audio"
++        )
++        if is_audio_output and isinstance(request_states, dict):
++            for engine_core_output in raw_outputs.outputs:
++                req_id = getattr(engine_core_output, "request_id", None)
++                if req_id in request_states:
++                    continue
++                request = self._submitted_requests.get(req_id)
++                if request is None or getattr(engine_core_output, "pooling_output", None) is None:
++                    continue
++                logger.debug(
++                    "[StagePool] Restoring output processor state for audio req=%s stage-%s",
++                    req_id,
++                    self.stage_id,
++                )
++                processor.add_request(
++                    request=request,
++                    prompt=None,
++                    parent_req=None,
++                    request_index=0,
++                    queue=None,
++                )
+         processed = processor.process_outputs(
+             raw_outputs.outputs,
+             raw_outputs.timestamp,

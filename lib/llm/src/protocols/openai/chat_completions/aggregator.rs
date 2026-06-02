@@ -600,6 +600,7 @@ mod tests {
                 choices: vec![choice],
                 object: "chat.completion".to_string(),
             },
+            modality: None,
             nvext: None,
         };
 
@@ -648,6 +649,7 @@ mod tests {
                 choices: vec![choice],
                 object: "chat.completion".to_string(),
             },
+            modality: None,
             nvext: None,
         };
         Annotated {
@@ -1128,6 +1130,7 @@ mod tests {
                 ],
                 object: "chat.completion".to_string(),
             },
+            modality: None,
             nvext: None,
         };
 

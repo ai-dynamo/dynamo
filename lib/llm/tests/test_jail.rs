@@ -59,6 +59,7 @@ mod tests {
                     usage: None,
                     service_tier: None,
                 },
+                modality: None,
                 nvext: None,
             };
 
@@ -101,6 +102,7 @@ mod tests {
                     usage: None,
                     service_tier: None,
                 },
+                modality: None,
                 nvext: None,
             };
 
@@ -147,6 +149,7 @@ mod tests {
                     usage: None,
                     service_tier: None,
                 },
+                modality: None,
                 nvext: None,
             };
 
@@ -194,6 +197,7 @@ mod tests {
                     usage: None,
                     service_tier: None,
                 },
+                modality: None,
                 nvext: None,
             };
 
@@ -241,6 +245,7 @@ mod tests {
                     usage: None,
                     service_tier: None,
                 },
+                modality: None,
                 nvext: None,
             };
 
@@ -2518,6 +2523,7 @@ mod parallel_jail_tests {
                 usage: None,
                 service_tier: None,
             },
+            modality: None,
             nvext: None,
         };
 

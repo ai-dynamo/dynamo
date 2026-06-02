@@ -237,6 +237,7 @@ pub fn final_response_to_one_chunk_stream(
             choices,
             usage: resp.inner.usage.clone(),
         },
+        modality: None,
         nvext: resp.nvext.clone(),
     };
 
@@ -291,6 +292,7 @@ mod tests {
                 usage: None,
                 service_tier: None,
             },
+            modality: None,
             nvext: None,
         };
 
@@ -331,6 +333,7 @@ mod tests {
                 usage: None,
                 service_tier: None,
             },
+            modality: None,
             nvext: None,
         };
 
@@ -468,6 +471,7 @@ mod tests {
                     usage: None,
                     service_tier: None,
                 },
+                modality: None,
                 nvext: None,
             }),
             id: Some("correlation-123".to_string()),

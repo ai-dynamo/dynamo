@@ -190,6 +190,7 @@ impl DeltaGenerator {
                 },
                 service_tier: self.service_tier.clone(),
             },
+            modality: None,
             nvext: None, // Will be populated by router layer if needed
         }
     }
@@ -213,6 +214,7 @@ impl DeltaGenerator {
                 usage: Some(usage),
                 service_tier: self.service_tier.clone(),
             },
+            modality: None,
             nvext: None,
         }
     }

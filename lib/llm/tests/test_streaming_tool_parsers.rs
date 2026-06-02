@@ -117,6 +117,7 @@ fn load_test_data(file_path: &str) -> TestData {
                     usage: None,
                     service_tier: None,
                 },
+                modality: None,
                 nvext: None,
             };
 
@@ -1424,6 +1425,7 @@ mod tests {
                     usage: None,
                     service_tier: None,
                 },
+                modality: None,
                 nvext: None,
             }),
             event: None,

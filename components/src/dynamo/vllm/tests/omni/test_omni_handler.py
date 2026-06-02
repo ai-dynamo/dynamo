@@ -83,6 +83,24 @@ class TestBuildEngineInputs:
         assert inputs.sampling_params_list is None
 
     @pytest.mark.asyncio
+    async def test_audio_chat_completion_preserves_speaker_metadata(self):
+        """Chat audio requests pass speaker metadata to omni talker processors."""
+        handler = _make_handler(stage_types=("llm",))
+        handler.config.output_modalities = ["text", "audio"]
+        raw = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "modalities": ["audio"],
+            "audio": {"voice": "Ryan"},
+        }
+
+        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
+
+        assert inputs.request_type == RequestType.CHAT_COMPLETION
+        assert inputs.prompt["prompt"] == "hello"
+        assert inputs.prompt["additional_information"] == {"speaker": ["ryan"]}
+        assert inputs.sampling_params_list is None
+
+    @pytest.mark.asyncio
     async def test_image_generation(self):
         """Image request parses prompt, size, and creates diffusion sampling params."""
         handler = _make_handler()
@@ -393,6 +411,59 @@ class TestParseOmniRequest:
             "height": 768,
             "width": 512,
             "guidance_scale": 1.5,
+        }
+
+    @pytest.mark.asyncio
+    async def test_audio_request_builds_stage0_prompt(self):
+        request = {
+            "input": "Read this in a calm voice.",
+            "voice": "Vivian",
+            "language": "English",
+        }
+
+        result = await parse_omni_request(request, ["audio"])
+
+        assert result["engine_inputs"]["prompt"] == "Read this in a calm voice."
+        assert result["engine_inputs"]["additional_information"] == {
+            "speaker": ["vivian"],
+            "language": ["English"],
+        }
+        assert result["original_prompt"] == result["engine_inputs"]
+        assert result["sampling_params_list"] is None
+
+    @pytest.mark.asyncio
+    async def test_audio_chat_request_preserves_speaker_metadata(self):
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Say hello."}],
+                }
+            ],
+            "modalities": ["audio"],
+            "speaker": "Ryan",
+        }
+
+        result = await parse_omni_request(request, ["text", "audio"])
+
+        assert result["engine_inputs"]["prompt"] == "Say hello."
+        assert result["original_prompt"]["additional_information"] == {
+            "speaker": ["ryan"]
+        }
+        assert result["sampling_params_list"] is None
+
+    @pytest.mark.asyncio
+    async def test_audio_chat_request_reads_openai_audio_options(self):
+        request = {
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "modalities": ["audio"],
+            "audio": {"voice": "Vivian"},
+        }
+
+        result = await parse_omni_request(request, ["text", "audio"])
+
+        assert result["engine_inputs"]["additional_information"] == {
+            "speaker": ["vivian"]
         }
 
 

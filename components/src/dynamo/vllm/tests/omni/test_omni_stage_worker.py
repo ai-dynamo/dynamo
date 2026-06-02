@@ -10,12 +10,16 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 import yaml
 
 try:
     from dynamo.vllm.omni.stage_worker import (
+        _ASYNC_PREWARM_KEY,
+        _ASYNC_PREWARM_READY_KEY,
         OmniStageWorker,
         _ensure_stage_connectors,
+        _merge_multimodal_payload,
         _normalize_single_stage_runtime_devices,
         _prepare_connector_payload,
         _Proxy,
@@ -67,6 +71,23 @@ class _ErrorEngine:
             yield  # make it an async generator
 
         return _gen()
+
+
+class _ChunkEngine:
+    engine = None
+
+    def __init__(self, outputs):
+        self._outputs = outputs
+
+    def generate(self, prompt, request_id="", *, sampling_params_list=None):
+        async def _gen():
+            for output in self._outputs:
+                yield output
+
+        return _gen()
+
+    async def get_tokenizer(self):
+        return None
 
 
 class _MockContext:
@@ -187,6 +208,68 @@ async def test_stage_connector_refs_builds_engine_core_request():
     engine.engine.output_processors[0].add_request.assert_called_once()
 
 
+def test_prepare_downstream_payload_prompt_accepts_stage_submission_message():
+    engine = _MockEngine()
+    built_prompt = SimpleNamespace(prompt_token_ids=[1, 2, 3])
+    seen = {}
+
+    def build_message(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(prompt=built_prompt)
+
+    engine.engine = SimpleNamespace(_build_add_request_message=build_message)
+    worker = _make_worker(engine=engine, stage_id=0)
+    raw_prompt = {"prompt": "hello"}
+    sampling_params = [SimpleNamespace(max_tokens=8)]
+
+    result = worker._prepare_downstream_payload_prompt(
+        raw_prompt,
+        request_id="req-stage-msg",
+        sampling_params_list=sampling_params,
+        final_stage_id=2,
+    )
+
+    assert result is built_prompt
+    assert seen["request_id"] == "req-stage-msg"
+    assert seen["prompt"] is raw_prompt
+    assert seen["sampling_params_list"] is sampling_params
+    assert seen["final_stage_id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_async_prewarm_preserves_explicit_empty_prompt_token_ids():
+    engine = _MockEngine()
+    built_prompt = SimpleNamespace(prompt_token_ids=[])
+    worker = _make_worker(
+        engine=engine,
+        stage_id=2,
+        stage_config=_make_stage_config(
+            engine_args=SimpleNamespace(async_chunk=True),
+            default_sampling_params={"temperature": 0.0, "max_tokens": 1},
+        ),
+    )
+    worker._build_engine_core_request_from_tokens = MagicMock(return_value=built_prompt)
+
+    chunks = [
+        chunk
+        async for chunk in worker.generate(
+            {
+                "request_id": "req-code2wav",
+                "prompt_token_ids": [],
+                "final_stage_id": 2,
+                "sampling_params_list": {"max_tokens": 1},
+                _ASYNC_PREWARM_KEY: True,
+            },
+            _MockContext(),
+        )
+    ]
+
+    worker._build_engine_core_request_from_tokens.assert_called_once()
+    assert worker._build_engine_core_request_from_tokens.call_args.args[0] == []
+    assert engine.received_prompt is built_prompt
+    assert any(chunk.get(_ASYNC_PREWARM_READY_KEY) for chunk in chunks)
+
+
 @pytest.mark.asyncio
 async def test_stage_connector_refs_with_processor():
     """Stage N>0 with processor: v0.20 processors receive direct source outputs."""
@@ -283,6 +366,48 @@ def test_process_stage_inputs_ignores_var_kwargs_for_dispatch():
     assert prompt == [processed_prompt]
 
 
+def test_process_stage_inputs_passes_streaming_bridge_context():
+    """Four-arg source-output processors receive connector bridge state."""
+    fetched_output = {"latents": [0.1, 0.2]}
+    bridge_states = {
+        "pd_prefill_multimodal_output_by_req": {"req-bridge": {"hidden": [1, 2]}}
+    }
+    processor_calls = []
+
+    def mock_processor(source_outputs, original_prompt, requires_mm, streaming_context):
+        processor_calls.append(
+            {
+                "source_outputs": source_outputs,
+                "original_prompt": original_prompt,
+                "requires_mm": requires_mm,
+                "streaming_context": streaming_context,
+            }
+        )
+        return [{"processed": True}]
+
+    worker = OmniStageWorker(
+        engine=_MockEngine(),
+        stage_config=_make_stage_config(
+            custom_process_input_func=None,
+            engine_input_source=[0],
+            requires_multimodal_data=False,
+        ),
+        connectors={},
+        stage_id=1,
+    )
+    worker._processor = mock_processor
+
+    prompt = worker._process_stage_inputs(
+        [_Proxy(engine_outputs=[fetched_output], bridge_states=bridge_states)],
+        {"prompt": "hi"},
+    )
+
+    assert prompt == [{"processed": True}]
+    ctx = processor_calls[0]["streaming_context"]
+    assert ctx.enabled is False
+    assert ctx.bridge_states == bridge_states
+
+
 @pytest.mark.asyncio
 async def test_stage_connector_refs_with_stage_list_processor():
     """Stage-list transition processors still receive proxies and sources."""
@@ -351,6 +476,46 @@ async def test_engine_error_yields_error_chunk():
 
     assert any("error" in c for c in chunks)
     assert any(c.get("finished") for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_final_stage_preserves_streamed_multimodal_outputs():
+    """Final async stages may emit multiple audio chunks; preserve each chunk."""
+    first = SimpleNamespace(
+        request_id="req-audio",
+        finished=False,
+        multimodal_output={"audio": torch.tensor([[1.0, 2.0]])},
+    )
+    second = SimpleNamespace(
+        request_id="req-audio",
+        finished=True,
+        multimodal_output={"audio": torch.tensor([[3.0, 4.0, 5.0]])},
+    )
+    worker = _make_worker(engine=_ChunkEngine([first, second]))
+    captured = {}
+
+    def capture_serialize(result):
+        captured["result"] = result
+        return b"serialized"
+
+    with (
+        patch.object(worker, "_resolve_final_stage_id", return_value=0),
+        patch("dynamo.vllm.omni.stage_worker.serialize_obj", capture_serialize),
+        patch(
+            "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+            return_value={"name": "req-audio", "size": 10},
+        ),
+    ):
+        chunks = [chunk async for chunk in worker.generate({}, _MockContext())]
+
+    assert chunks == [
+        {
+            "shm_meta": {"name": "req-audio", "size": 10},
+            "finished": True,
+            "final_stage_id": 0,
+        }
+    ]
+    assert captured["result"] == [first, second]
 
 
 @pytest.mark.asyncio
@@ -465,6 +630,36 @@ def test_prepare_connector_payload_preserves_dynamic_completion_attrs():
             "multimodal_output": multimodal_output,
         },
     ]
+
+
+def test_prepare_connector_payload_preserves_bridge_states_for_next_stage():
+    bridge_states = {"pd_prefill_multimodal_output_by_req": {"r1": {"hidden": [1, 2]}}}
+    output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[12])])
+
+    payload = _prepare_connector_payload(output, bridge_states=bridge_states)
+
+    assert payload["_dynamo_streaming_bridge_states"] == bridge_states
+
+    connector = MagicMock()
+    connector.get.return_value = payload
+    worker = _make_worker(
+        connectors={("0", "1"): connector},
+        stage_id=1,
+        stage_config=_make_stage_config(engine_input_source=[0]),
+    )
+
+    stage_list = worker._fetch_stage_inputs({0: {"name": "ref0"}}, "r1")
+
+    assert stage_list[0].bridge_states == bridge_states
+
+
+def test_merge_multimodal_payload_concatenates_audio_time_axis():
+    old = {"audio": torch.tensor([[1.0, 2.0]])}
+    new = {"audio": torch.tensor([[3.0, 4.0, 5.0]])}
+
+    merged = _merge_multimodal_payload(old, new)
+
+    assert merged["audio"].tolist() == [[1.0, 2.0, 3.0, 4.0, 5.0]]
 
 
 def test_prepare_connector_payload_promotes_request_multimodal_output():

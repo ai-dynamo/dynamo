@@ -735,6 +735,7 @@ mod tests {
                 object: "chat.completion.chunk".into(),
                 usage: None,
             },
+            modality: None,
             nvext: None,
         }
     }
@@ -764,6 +765,7 @@ mod tests {
                 object: "chat.completion.chunk".into(),
                 usage: None,
             },
+            modality: None,
             nvext: None,
         }
     }

@@ -62,6 +62,8 @@ def _make_router(stage_configs, stage_clients, formatter=None, output_modalities
     )
     router.stage_configs = stage_configs
     router.stage_clients = stage_clients
+    router._async_chunk = False
+    router._model_name = "test-model"
     router._formatter = formatter or AsyncMock()
     return router
 
@@ -76,10 +78,23 @@ def _patched_generate(router, request, request_id="req-1", request_type="chat"):
     )
 
 
+def _assert_chat_error_chunk(chunks, request_id, message):
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk["id"] == request_id
+    assert chunk["object"] == "chat.completion.chunk"
+    assert chunk["model"] == "test-model"
+    assert chunk["modality"] == "text"
+    choice = chunk["choices"][0]
+    assert choice["delta"]["content"] == f"Error: {message}"
+    assert choice["finish_reason"] == "stop"
+
+
 def test_router_loads_stage_configs_from_model_deploy_config():
     config = SimpleNamespace(
         model="zai-org/GLM-Image",
         served_model_name=None,
+        output_modalities=["image"],
         media_output_fs_url=None,
         media_output_http_url=None,
         default_video_fps=16,
@@ -88,20 +103,24 @@ def test_router_loads_stage_configs_from_model_deploy_config():
 
     with (
         patch(
-            "dynamo.vllm.omni.stage_router.load_and_resolve_stage_configs",
-            return_value=("/deploy/glm_image.yaml", stage_configs),
-        ) as load_and_resolve_stage_configs,
+            "dynamo.vllm.omni.stage_router.load_omni_stage_configs",
+            return_value=stage_configs,
+        ) as load_omni_stage_configs,
+        patch(
+            "dynamo.vllm.omni.stage_router.stage_configs_use_async_chunk",
+            return_value=True,
+        ) as stage_configs_use_async_chunk,
         patch("dynamo.vllm.omni.stage_router.OutputFormatter") as output_formatter,
     ):
         router = stage_router.OmniStageRouter(config, "/deploy/glm_image.yaml")
 
-    load_and_resolve_stage_configs.assert_called_once_with(
-        config.model,
-        "/deploy/glm_image.yaml",
-        kwargs={},
+    load_omni_stage_configs.assert_called_once_with(
+        config.model, "/deploy/glm_image.yaml"
     )
+    stage_configs_use_async_chunk.assert_called_once_with(stage_configs)
     output_formatter.assert_called_once()
     assert router.stage_configs == stage_configs
+    assert router._async_chunk is True
 
 
 # ── issue-004: opaque router ──────────────────────────────
@@ -229,7 +248,7 @@ async def test_generate_stage_error_stops_pipeline():
     with p1, p2:
         chunks = [c async for c in router.generate({"prompt": "x"}, None)]
 
-    assert chunks == [{"error": "thinker exploded", "finished": True}]
+    _assert_chat_error_chunk(chunks, "req-1", "thinker exploded")
     assert not stage1_called
 
 
@@ -273,6 +292,39 @@ async def test_generate_delegates_formatting_to_output_formatter():
 
 
 @pytest.mark.asyncio
+async def test_format_output_formats_each_deserialized_result():
+    """A final stage can serialize multiple streamed multimodal chunks."""
+    fake_results = [
+        SimpleNamespace(final_output_type="audio", index=0),
+        SimpleNamespace(final_output_type="audio", index=1),
+    ]
+    mock_formatter = AsyncMock()
+    mock_formatter.format.side_effect = [{"chunk": 0}, {"chunk": 1}]
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={},
+        formatter=mock_formatter,
+    )
+    stage_output = stage_router.StageOutput.model_validate(
+        {"shm_meta": {"some": "meta"}, "finished": True}
+    )
+
+    with patch.object(stage_router, "shm_deserialize", return_value=fake_results):
+        chunks = [
+            c
+            async for c in router._format_output(
+                stage_output,
+                "req-stream",
+                RequestType.CHAT_COMPLETION,
+                {},
+            )
+        ]
+
+    assert chunks == [{"chunk": 0}, {"chunk": 1}]
+    assert mock_formatter.format.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_generate_yields_error_when_no_shm_meta():
     """When final stage returns no shm_meta, generate yields an error."""
 
@@ -291,7 +343,7 @@ async def test_generate_yields_error_when_no_shm_meta():
         with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="r"):
             chunks = [c async for c in router.generate({"prompt": "x"}, context=None)]
 
-    assert chunks == [{"error": "No SHM output from final stage", "finished": True}]
+    _assert_chat_error_chunk(chunks, "r", "No SHM output from final stage")
 
 
 # ── issue-007: router forwards raw request to stage 0 ────────────

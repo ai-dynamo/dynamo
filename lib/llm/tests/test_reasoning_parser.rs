@@ -48,6 +48,7 @@ fn create_mock_response_chunk(
             usage: None,
             service_tier: None,
         },
+        modality: None,
         nvext: None,
     };
 

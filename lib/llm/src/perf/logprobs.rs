@@ -975,6 +975,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
             },
+            modality: None,
             nvext: None,
         }
     }
@@ -1016,6 +1017,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
             },
+            modality: None,
             nvext: None,
         }
     }
@@ -1360,6 +1362,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
             },
+            modality: None,
             nvext: None,
         };
 
@@ -1577,6 +1580,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
             },
+            modality: None,
             nvext: None,
         }
     }

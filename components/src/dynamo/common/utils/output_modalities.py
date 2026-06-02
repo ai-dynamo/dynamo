@@ -75,11 +75,20 @@ def parse_request_type(
     """
     Classify the endpoint based on the output modality and serialize the request if necessary.
 
-    Assumption: Right now we only consider user passes only one modality at a time.
+    When a worker registers multiple omni output modalities, infer the request
+    shape before falling back to the first configured modality.
     """
-    # Fetch the first output modality from the list.
     if not output_modalities:
         raise ValueError("output_modalities must not be empty")
+
+    modalities = [OutputModality.from_name(name) for name in output_modalities]
+
+    if "messages" in raw_request:
+        return raw_request, RequestType.CHAT_COMPLETION
+
+    if "input" in raw_request and OutputModality.AUDIO in modalities:
+        return NvCreateAudioSpeechRequest(**raw_request), RequestType.AUDIO_GENERATION
+
     output_modality = output_modalities[0]
     modality = OutputModality.from_name(output_modality)
 

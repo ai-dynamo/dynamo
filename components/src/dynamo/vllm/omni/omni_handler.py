@@ -22,12 +22,7 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.output_formatter import OutputFormatter
-from dynamo.vllm.omni.utils import (
-    build_image_generation_prompt,
-    image_generation_negative_prompt_from_request,
-    image_generation_sampling_overrides,
-    image_generation_size_from_request,
-)
+from dynamo.vllm.omni.utils import build_image_generation_prompt, parse_omni_request
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +233,7 @@ class OmniHandler(BaseOmniHandler):
         """
         if request_type == RequestType.CHAT_COMPLETION:
             assert isinstance(parsed_request, dict)
-            return self._engine_inputs_from_chat(parsed_request)
+            return await self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
             assert isinstance(parsed_request, NvCreateImageRequest)
             return self._engine_inputs_from_image(parsed_request)
@@ -251,35 +246,31 @@ class OmniHandler(BaseOmniHandler):
 
         raise ValueError(f"Unknown request type: {request_type}")
 
-    def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
+    async def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
         """Build engine inputs from a chat completions request dict."""
-
-        text_prompt = self._extract_text_prompt(request)
-        if text_prompt is None:
-            raise ValueError("No user message found in chat completion request")
-
-        output_modalities = {
-            str(modality).lower() for modality in (self.config.output_modalities or [])
-        }
-        if "image" in output_modalities:
-            width, height = image_generation_size_from_request(request)
-            prompt = build_image_generation_prompt(
-                text_prompt,
-                height,
-                width,
-                negative_prompt=image_generation_negative_prompt_from_request(request),
-                multi_modal_data=request.get("multi_modal_data"),
-            )
+        parsed = await parse_omni_request(
+            request,
+            self.config.output_modalities,
+            getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS),
+            tokenizer_getter=getattr(self.engine_client, "get_tokenizer", None),
+        )
+        prompt = parsed["engine_inputs"]
+        if isinstance(prompt, str):
+            prompt = OmniTextPrompt(prompt=prompt)
+        sampling_params = parsed["sampling_params_list"]
+        sampling_params_list = None
+        if isinstance(sampling_params, dict):
+            height = sampling_params.get("height")
+            width = sampling_params.get("width")
+            if height is None or width is None:
+                raise ValueError("Image chat sampling params must include height/width")
             sp = OmniDiffusionSamplingParams(height=height, width=width)
-            for arg, value in image_generation_sampling_overrides(
-                request, height, width
-            ).items():
+            for arg, value in sampling_params.items():
                 if hasattr(sp, arg):
                     setattr(sp, arg, value)
             sampling_params_list = self._build_sampling_params_list(sp)
-        else:
-            prompt = OmniTextPrompt(prompt=text_prompt)
-            sampling_params_list = None
+        elif sampling_params is not None:
+            sampling_params_list = sampling_params
 
         return EngineInputs(
             prompt=prompt,
