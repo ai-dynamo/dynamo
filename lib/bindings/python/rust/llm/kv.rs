@@ -25,7 +25,7 @@ use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
-use llm_rs::protocols::common::timing::RequestTracker;
+use llm_rs::protocols::common::timing::{ROUTER_TIMING_KEY, RequestTracker};
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use serde_json::json;
 
@@ -819,6 +819,30 @@ fn inject_worker_id_from_tracker(
     }
 }
 
+/// Inject this request's `TimingInfo` from the tracker into the terminal chunk's
+/// disaggregated_params. A router built on these bindings runs in its own process,
+/// so the only way its timing reaches the frontend is by riding the data payload:
+/// annotations are stripped crossing the Rust->Python->Rust boundary, data is not.
+/// Same mechanism as `inject_worker_id_from_tracker`, but done once on the final
+/// chunk (finish_reason set) where the tracker's ttft/total timing is complete.
+fn inject_timing_from_tracker(
+    data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+    tracker: &RequestTracker,
+) {
+    let timing_json = serde_json::to_value(tracker.get_timing_info())
+        .expect("TimingInfo serialization should not fail");
+
+    if let Some(obj) = data
+        .disaggregated_params
+        .as_mut()
+        .and_then(|p| p.as_object_mut())
+    {
+        obj.insert(ROUTER_TIMING_KEY.to_string(), timing_json);
+    } else {
+        data.disaggregated_params = Some(json!({ ROUTER_TIMING_KEY: timing_json }));
+    }
+}
+
 // TODO: can this reuse the stream conversion method in Client bindings?
 impl KvRouter {
     /// Helper method to process a request and create a Python async generator
@@ -858,6 +882,17 @@ impl KvRouter {
                             }
                             first_token_gauges_observed = true;
                         }
+                    }
+
+                    // Terminal chunk: ship this request's complete timing to the
+                    // frontend via the data payload. record_finish() here captures
+                    // total time as of the final chunk crossing this boundary (the
+                    // router guard's own finish() runs only after the stream ends).
+                    if let (Some(tracker), Some(data)) = (&tracker, &mut response.data)
+                        && data.finish_reason.is_some()
+                    {
+                        tracker.record_finish();
+                        inject_timing_from_tracker(data, tracker);
                     }
 
                     let py_response = Python::with_gil(|py| {

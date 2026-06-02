@@ -175,10 +175,12 @@ pub struct RequestTracker {
     external_timing: OnceLock<TimingInfo>,
 }
 
-/// Annotation event name carrying a `TimingInfo` from a standalone KV-router back to
-/// the frontend, so per-request timing is populated when routing and the frontend run
-/// in separate processes (the `timing` nvext field, Prometheus metrics, traces).
-pub const ANNOTATION_ROUTER_TIMING: &str = "router_timing";
+/// Key under which a standalone KV-router (running the `PushRouter` bindings in its
+/// own process) injects its `TimingInfo` into the terminal chunk's
+/// `disaggregated_params`, so per-request timing reaches the frontend across the
+/// process boundary (annotations are stripped crossing Rust->Python->Rust; data is
+/// not). Mirrors how `inject_worker_id_from_tracker` ships worker IDs.
+pub const ROUTER_TIMING_KEY: &str = "router_timing";
 
 impl RequestTracker {
     /// Create a new request tracker, capturing the current time as request received.

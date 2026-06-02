@@ -39,7 +39,7 @@ use crate::{
         common::{
             llm_backend::LLMEngineOutput,
             preprocessor::RoutingHints,
-            timing::{ANNOTATION_ROUTER_TIMING, RequestPhase, RequestTracker},
+            timing::{RequestPhase, RequestTracker},
         },
     },
 };
@@ -867,19 +867,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
 
             guard.finish().await;
-
-            // Forward this request's timing to the frontend as a trailing annotation so
-            // per-request timing is populated even when this KV-router runs in its own
-            // process (a standalone router on the KV-router bindings). The frontend's
-            // postprocess injects it via tracker.set_external_timing.
-            if let Some(ref tracker) = guard.tracker
-                && let Ok(ann) = Annotated::<LLMEngineOutput>::from_annotation(
-                    ANNOTATION_ROUTER_TIMING,
-                    &tracker.get_timing_info(),
-                )
-            {
-                yield ann;
-            }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }

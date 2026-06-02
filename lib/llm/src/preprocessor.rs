@@ -159,17 +159,22 @@ impl LLMMetricAnnotation {
     }
 }
 
-/// Extract a `TimingInfo` forwarded by a standalone KV-router via an
-/// `ANNOTATION_ROUTER_TIMING` annotation (routing and frontend in separate processes).
-/// Returns None for normal items.
-fn extract_llm_timing<T>(
-    item: &Annotated<T>,
+/// Extract and remove a `TimingInfo` injected by a standalone KV-router into the
+/// terminal chunk's `disaggregated_params[ROUTER_TIMING_KEY]` (routing and frontend
+/// in separate processes; see `inject_timing_from_tracker` in the kv bindings).
+/// Timing rides the data payload because annotations are stripped crossing the
+/// Rust->Python->Rust boundary. Removing the key keeps this internal routing field
+/// off the wire to clients. Returns None for normal items.
+fn take_router_timing(
+    data: &mut Option<BackendOutput>,
 ) -> Option<crate::protocols::common::timing::TimingInfo> {
-    if item.event.as_deref() != Some(crate::protocols::common::timing::ANNOTATION_ROUTER_TIMING) {
-        return None;
-    }
-    let comment = item.comment.as_ref()?.first()?;
-    serde_json::from_str(comment).ok()
+    let obj = data
+        .as_mut()?
+        .disaggregated_params
+        .as_mut()?
+        .as_object_mut()?;
+    let value = obj.remove(crate::protocols::common::timing::ROUTER_TIMING_KEY)?;
+    serde_json::from_value(value).ok()
 }
 
 // Reasoning State for reasoning parsing transformation step
@@ -1864,18 +1869,15 @@ impl OpenAIPreprocessor {
 
                 if let Some(mut response) = inner.response_stream.next().await {
                     // Split-topology timing: a standalone KV-router (running the PushRouter
-                    // bindings in its own process) forwards its TimingInfo as a trailing
-                    // annotation. Inject it into this request's tracker so the frontend's
-                    // timing surfaces (the `timing` nvext field, metrics, traces) populate
-                    // even though the local record_* timestamps were never set here. Then
-                    // consume the annotation so this internal control event is never
-                    // forwarded to clients via SSE.
-                    if let Some(timing) = extract_llm_timing(&response) {
+                    // bindings in its own process) injects its TimingInfo into the terminal
+                    // chunk's disaggregated_params. Overlay it onto this request's tracker so
+                    // the frontend's timing surfaces (the `timing` nvext field, metrics,
+                    // traces) populate even though the local record_* timestamps were never
+                    // set here. take_router_timing also strips the key from the payload.
+                    if let Some(timing) = take_router_timing(&mut response.data) {
                         if let Some(tracker) = inner.response_generator.tracker() {
                             tracker.set_external_timing(timing);
                         }
-                        response.event = None;
-                        response.comment = None;
                     }
 
                     if inner.cancelled {
