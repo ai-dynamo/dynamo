@@ -162,6 +162,8 @@ class frontend_service:
     LORA_IS_ACTIVE = "lora_is_active"
     # Estimated load (windowed request count) for a LoRA adapter
     LORA_ESTIMATED_LOAD = "lora_estimated_load"
+    # Raw arrival count (windowed rate counter) for a LoRA adapter
+    LORA_RAW_ARRIVAL_COUNT = "lora_raw_arrival_count"
     # Number of in-flight (active) requests for a LoRA adapter
     LORA_ACTIVE_REQUESTS = "lora_active_requests"
     # Total LoRA loads (new placements) this controller tick
