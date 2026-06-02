@@ -26,7 +26,7 @@ The planner supports four optimization targets that determine how scaling decisi
 - Start with **`throughput`** (the default) — it works immediately with no configuration.
 - Switch to **`latency`** if your workload has strict latency requirements and you prefer to over-provision rather than queue.
 - Use **`load`** when you want direct control through prefill queue and decode KV utilization thresholds.
-- Use **`sla`** when you have pre-deployment profiling data and want to target specific TTFT/ITL values.
+- Use **`sla`** when you want to target specific TTFT/ITL values with native AIC estimates, optional bootstrap profiling data, or live FPM warmup.
 
 ## PlannerConfig Reference
 

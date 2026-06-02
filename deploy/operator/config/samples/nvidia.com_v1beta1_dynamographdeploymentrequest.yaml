@@ -56,7 +56,8 @@ spec:
   # Optional: Features controls optional Dynamo platform features
   # features:
   #   planner:
-  #     plannerMinEndpoint: 2
+  #     optimization_target: sla
+  #     min_endpoint: 2
   #   mocker:
   #     enabled: false
 

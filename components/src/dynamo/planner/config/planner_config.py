@@ -280,9 +280,9 @@ class PlannerConfig(BaseModel):
             "load_adjustment_interval_seconds", "load_adjustment_interval"
         ),
         description=(
-            "Interval for FPM regression model updates AND load-based "
+            "Interval for perf-model tuning AND load-based "
             "scaling decisions. Even when only throughput-based scaling is enabled, "
-            "live FPM observations are fed into the regression at this interval to "
+            "live FPM observations are fed into the perf model at this interval to "
             "keep the performance model accurate. Must be shorter than "
             "throughput_adjustment_interval_seconds."
         ),

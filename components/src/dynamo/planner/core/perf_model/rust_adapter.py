@@ -13,6 +13,7 @@ the compatibility fallback when the Python extension is built without the
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass
@@ -102,10 +103,6 @@ class PlannerEnginePerfModel:
     # Construction helpers
     # ------------------------------------------------------------------
 
-    @property
-    def _uses_native_aic(self) -> bool:
-        return self._config.aic_perf_model is not None
-
     def update_capabilities(self, capabilities: Optional[EngineCapabilities]) -> None:
         self._capabilities = capabilities
         if self._rust_model is None:
@@ -132,10 +129,12 @@ class PlannerEnginePerfModel:
                 limits=limits,
                 options=options,
             )
+            diagnostics = self._rust_diagnostics()
             logger.info(
-                "Initialized Rust engine perf model for %s with native_aic=%s",
+                "Initialized Rust engine perf model for %s with source=%s readiness=%s",
                 self._worker_type,
-                self._uses_native_aic,
+                diagnostics.get("source", "unknown"),
+                diagnostics.get("readiness", "unknown"),
             )
             if self._pending_iterations:
                 self._rust_model.tune_with_fpms(self._pending_iterations)
@@ -148,6 +147,25 @@ class PlannerEnginePerfModel:
                 e,
             )
             self._rust_model = None
+
+    def _rust_diagnostics(self) -> dict[str, Any]:
+        if self._rust_model is None:
+            return {}
+        try:
+            diagnostics = self._rust_model.diagnostics()
+            if isinstance(diagnostics, str):
+                loaded = json.loads(diagnostics)
+                return loaded if isinstance(loaded, dict) else {}
+            return diagnostics if isinstance(diagnostics, dict) else {}
+        except json.JSONDecodeError as e:
+            logger.warning("Rust perf model diagnostics JSON decode failed: %s", e)
+            return {}
+        except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
+            logger.warning("Rust perf model diagnostics failed: %s", e)
+            return {}
+
+    def _rust_ready(self) -> bool:
+        return self._rust_diagnostics().get("readiness") == "ready"
 
     def _build_limits(self) -> Optional[Any]:
         caps = self._capabilities
@@ -319,7 +337,18 @@ class PlannerEnginePerfModel:
     ) -> list[list[ForwardPassMetrics]]:
         # Bootstrap FPMs loaded from profiler/AIC interpolation are flat
         # historical samples. They do not encode which records belonged to the
-        # same attention-DP iteration, so keep each sample as one iteration.
+        # same attention-DP iteration. For ADP>1, skip Rust bootstrap tuning
+        # instead of sending singleton-rank iterations to a model that requires
+        # one FPM per rank; the legacy Python model still consumes the samples.
+        dp_size = self._attention_dp_size()
+        if dp_size is not None and dp_size > 1:
+            logger.info(
+                "Skipping Rust bootstrap tuning for %s because flat bootstrap "
+                "FPMs do not preserve attention-DP rank groups",
+                self._worker_type,
+            )
+            return []
+        # For single-rank workers, each flat sample is one complete iteration.
         return [[fpm] for fpm in fpms]
 
     @staticmethod
@@ -377,10 +406,20 @@ class PlannerEnginePerfModel:
             for fpm in metrics_by_rank
         ]
         try:
-            return self._rust_model.get_queued_prefill_time(fpms)
+            result = self._rust_model.get_queued_prefill_time(fpms)
         except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning("Rust queued prefill estimate failed: %s", e)
-            return None
+            result = None
+        if result is not None:
+            return result
+        return self._legacy_queued_prefill_time(
+            metrics_by_rank,
+            max_num_batched_tokens=max_num_batched_tokens,
+            kv_hit_rate=kv_hit_rate,
+            queue_scale=queue_scale,
+            decode_scale=decode_scale,
+            include_queued_decode=include_queued_decode,
+        )
 
     def estimate_scheduled_decode_itl(
         self,
@@ -415,10 +454,18 @@ class PlannerEnginePerfModel:
             for fpm in metrics_by_rank
         ]
         try:
-            return self._rust_model.get_scheduled_decode_itl(fpms)
+            result = self._rust_model.get_scheduled_decode_itl(fpms)
         except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning("Rust scheduled decode estimate failed: %s", e)
-            return None
+            result = None
+        if result is not None:
+            return result
+        return self._legacy_scheduled_decode_itl(
+            metrics_by_rank,
+            decode_scale=decode_scale,
+            include_queued_decode=include_queued_decode,
+            include_queued_prefill_as_kv=include_queued_prefill_as_kv,
+        )
 
     def find_engine_capacity_rps(
         self,
@@ -443,12 +490,28 @@ class PlannerEnginePerfModel:
                 itl_sla_ms=itl_sla_ms,
                 kv_hit_rate=kv_hit_rate,
             )
-        if isl <= 0 or osl <= 0 or EngineCapacityRequest is None:
+        if isl <= 0 or EngineCapacityRequest is None:
             return None
+        if self._worker_type != "prefill" and osl <= 0:
+            return None
+        if (
+            self._worker_type == "aggregated"
+            and _clamp_kv_hit_rate(kv_hit_rate) > 0
+            and self._legacy_model.has_sufficient_data()
+        ):
+            legacy_result = self._legacy_capacity(
+                isl=isl,
+                osl=osl,
+                ttft_sla_ms=ttft_sla_ms,
+                itl_sla_ms=itl_sla_ms,
+                kv_hit_rate=kv_hit_rate,
+            )
+            if legacy_result is not None:
+                return legacy_result
         try:
             request = EngineCapacityRequest(
                 isl=int(math.ceil(isl)),
-                osl=int(math.ceil(osl)),
+                osl=max(1, int(math.ceil(osl))),
                 ttft_sla_ms=ttft_sla_ms,
                 itl_sla_ms=itl_sla_ms,
                 e2e_latency_sla_ms=e2e_latency_sla_ms,
@@ -457,9 +520,15 @@ class PlannerEnginePerfModel:
             result = self._rust_model.find_engine_capacity_rps(request)
         except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning("Rust capacity query failed: %s", e)
-            return None
+            result = None
         if result is None:
-            return None
+            return self._legacy_capacity(
+                isl=isl,
+                osl=osl,
+                ttft_sla_ms=ttft_sla_ms,
+                itl_sla_ms=itl_sla_ms,
+                kv_hit_rate=kv_hit_rate,
+            )
         return PlannerEngineCapacity(
             rps=result.rps,
             ttft_ms=result.ttft_ms,
@@ -473,7 +542,7 @@ class PlannerEnginePerfModel:
     # ------------------------------------------------------------------
 
     def has_sufficient_data(self) -> bool:
-        if self._rust_model is not None and self._uses_native_aic:
+        if self._rust_model is not None and self._rust_ready():
             return True
         return self._legacy_model.has_sufficient_data()
 
@@ -575,6 +644,12 @@ class PlannerEnginePerfModel:
 
         prefill_tokens = float(scheduled.sum_prefill_tokens)
         prefill_requests = float(scheduled.num_prefill_requests)
+        if self._worker_type == "aggregated":
+            # Match the old aggregated ITL path: per-iteration scheduled
+            # prefill is intentionally not used for decode load decisions.
+            # The shim falls back to its learned average prefill/decode mix.
+            prefill_tokens = 0.0
+            prefill_requests = 0.0
 
         decode_kv = float(scheduled.sum_decode_kv_tokens)
         decode_requests = float(scheduled.num_decode_requests)
@@ -700,7 +775,7 @@ class PlannerEnginePerfModel:
         itl_sla_ms: Optional[float],
         kv_hit_rate: Optional[float],
     ) -> Optional[PlannerEngineCapacity]:
-        if isl <= 0 or osl <= 0:
+        if isl <= 0:
             return None
         caps = self._capabilities
         if isinstance(self._legacy_model, PrefillRegressionModel):
@@ -712,6 +787,8 @@ class PlannerEnginePerfModel:
                 ),
             )
             return PlannerEngineCapacity(rps=rps, ttft_ms=ttft_ms)
+        if osl <= 0:
+            return None
         if isinstance(self._legacy_model, DecodeRegressionModel):
             rps, itl_ms = self._legacy_model.find_best_engine_decode_rps(
                 itl=itl_sla_ms or self._config.itl_ms,

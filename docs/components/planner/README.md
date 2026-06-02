@@ -99,7 +99,7 @@ features:
 
 ### SLA-Based Scaling (advanced)
 
-For precise SLA targeting with pre-deployment profiling, set `optimization_target: sla`:
+For precise SLA targeting with native AIC estimates, optional bootstrap profiling data, or live FPM warmup, set `optimization_target: sla`:
 
 ```yaml
 features:

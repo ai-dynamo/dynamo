@@ -145,7 +145,7 @@ Read the diagram left to right for request traffic: clients call the control `Fr
 - Secrets for model access, such as a Hugging Face token secret.
 - A storage strategy for model weights if your workers should share a model cache PVC.
 
-For throughput-based scaling, you also need profiling data for each pool. See [Profiler Guide](../profiler/profiler-guide.md).
+For SLA throughput-based scaling, each pool needs either native AIC support, optional bootstrap profiling data, or enough live FPM observations to warm the fallback model. See [Profiler Guide](../profiler/profiler-guide.md).
 
 ## Inputs You Need To Decide Up Front
 
