@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated FP8 deployment of NVIDIA-Nemotron-3-Super-120B-A12B-FP8 on
-# H200x4 (TP=4) with Expert Parallel + DeepEP high-throughput all-to-all
-# (currently identical to the chat variant — see
-# turbo_nemotron_3_super_agg_h200_chat.yaml for the rationale on dropped
-# Blackwell-specific NCCL env).
+# H200x4 (TP=4) with Expert Parallel + DeepEP high-throughput all-to-all.
+# Differs from the chat variant (turbo_nemotron_3_super_agg_h200_chat.yaml),
+# which uses the FlashInfer NVLink one-sided all-to-all backend; see that
+# file for the rationale on dropped Blackwell-specific NCCL env.
 apiVersion: v1
 kind: ConfigMap
 metadata:

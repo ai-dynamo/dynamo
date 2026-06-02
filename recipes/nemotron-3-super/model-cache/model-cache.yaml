@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Shared model cache for nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4.
-# Weights live at the PVC root (not in HF cache layout) so the worker can
-# point --model directly at the mount path.
+# Shared model cache for the Nemotron-3-Super checkpoints
+# (NVFP4 for B200, FP8 for H200).
+# Weights are stored in the default HF cache layout (HF_HOME=/model-cache);
+# workers keep --model as the HF ID and resolve weights from this cache.
 #
 # Edit storageClassName to match your cluster:
 #   kubectl get storageclass

@@ -31,7 +31,7 @@ We ship Dynamo + vLLM deployment profiles across two GPU SKUs and two serving mo
 | **Max model length**         | 131072 (128k) | 131072 (128k) | 131072 (128k) | 131072 (128k) |
 | **Max batched tokens**       | 65536 (MTP-ON default; bump to 131072 with MTP off) | 65536 (MTP-ON default; bump to 131072 with MTP off) | 16384 | 16384 |
 | **Tool / reasoning parser**  | `nemotron_nano` | `nemotron_nano` | `nemotron_nano` | `nemotron_nano` |
-| **Workload**                 | General chat / reasoning (throughput) | Agentic coding (latency) | General chat / reasoning + MTP | Agentic coding + MTP (currently identical to chat — diverge as needed) |
+| **Workload**                 | General chat / reasoning (throughput) | Agentic coding (latency) | General chat / reasoning + MTP | Agentic coding + MTP (DeepEP high-throughput all-to-all vs chat's FlashInfer NVLink one-sided) |
 
 ## Supported features
 
