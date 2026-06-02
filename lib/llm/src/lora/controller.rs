@@ -209,19 +209,50 @@ impl LoraController {
             );
         }
 
-        // Cleanup stale entries: remove routing entries only for LoRAs that are no longer known
-        // at all (neither loaded nor receiving traffic).
-        //
-        // Capacity-dropped active LoRAs (active but truncated out of this tick's budget by the
-        // R3 cap) are intentionally LEFT in place. Their existing entry already points at workers
-        // that host the adapter, so it remains a valid, warm route; the cap only bounds *new*
-        // allocations (a dropped LoRA simply keeps its last placement instead of getting a fresh
-        // one) and does not require evicting an already-placed adapter. Removing and re-adding the
-        // entry as the marginal tail crosses the budget boundary each tick would otherwise produce
-        // continuous load/unload churn for no benefit (and requests already fall back to the
-        // runtime loaded-worker path when no entry exists).
+        // Cleanup stale entries.
         let known_set: std::collections::HashSet<&str> =
             all_loras.iter().map(|s| s.as_str()).collect();
+        let live_workers: std::collections::HashSet<WorkerWithDpRank> =
+            workers.iter().copied().collect();
+
+        // Capacity-dropped active LoRAs: active (load>0) but truncated out of this tick's budget
+        // by the R3 cap, so they received no fresh allocation. We must NOT keep their full prior
+        // replica set verbatim — if the adapter has since been evicted from those workers (likely,
+        // since the worker dropped it to host higher-load LoRAs), the filter's lazy-load fallback
+        // (`replica_set ∩ available`) would reload it there, a NEW load that defeats the cap; and
+        // if no prior worker is available it widens to all workers (scatter). Instead narrow each
+        // such entry to the workers where it is STILL warm (prior set ∩ loaded ∩ live), keeping it
+        // routable on existing adapters with zero new loads. If nothing is warm, remove the entry
+        // and let the filter's runtime loaded-worker fallback handle it. Narrowing only rewrites
+        // when the warm set actually shrank, so a still-warm dropped LoRA stays churn-free.
+        let dropped_active: Vec<&str> = active_loras
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .filter(|n| !active_replica_counts.contains_key(*n))
+            .collect();
+        for name in dropped_active {
+            let Some(prior) = self.routing_table.get_config(name).map(|c| c.replica_set) else {
+                continue; // no entry to narrow; loaded-worker fallback applies
+            };
+            let loaded = self.state_tracker.get_loaded_workers(name);
+            let warm: Vec<WorkerWithDpRank> = prior
+                .iter()
+                .copied()
+                .filter(|w| loaded.contains(w) && live_workers.contains(w))
+                .collect();
+            if warm.is_empty() {
+                self.routing_table.remove_lora(name);
+                self.hysteresis.remove(name);
+                tracing::debug!(
+                    lora = name,
+                    "Capacity-dropped LoRA has no warm worker; removed entry (loaded-worker fallback applies)"
+                );
+            } else if warm.len() != prior.len() {
+                // Some prior workers lost the adapter; narrow to the warm subset (no new loads).
+                self.update_routing_entry(name, warm.len(), warm, true);
+            }
+        }
+
         let table_snapshot = self.routing_table.snapshot_configs();
 
         for (name, _) in &table_snapshot {
@@ -304,15 +335,29 @@ impl LoraController {
             let final_replicas =
                 self.apply_hysteresis(lora_name, *desired_replicas, current_replicas);
 
+            // Discount this LoRA's OWN already-loaded slots before the fullness check: a worker
+            // that currently hosts this adapter is not "full" with respect to re-placing the same
+            // adapter (retaining it consumes no new slot). Without this, a LoRA pinned to a worker
+            // that is full largely because of itself (e.g. cap=1) would be evicted and moved every
+            // tick — defeating the sticky placement. Charging (below) still uses the undiscounted
+            // shared residual so sibling LoRAs see true remaining capacity.
+            let own_loaded = self.state_tracker.get_loaded_workers(lora_name);
+            let mut eff_usage = residual_usage.clone();
+            for w in &own_loaded {
+                if let Some(usage) = eff_usage.get_mut(w) {
+                    usage.0 = usage.0.saturating_sub(1);
+                }
+            }
+
             let replica_set = self.allocator.compute_replica_set_with_slots_sticky(
                 lora_name,
                 workers,
                 final_replicas,
-                &residual_usage,
+                &eff_usage,
                 &prior,
             );
 
-            // Charge this LoRA's placements against residual capacity for later LoRAs.
+            // Charge this LoRA's placements against the shared residual capacity for later LoRAs.
             for w in &replica_set {
                 if let Some(usage) = residual_usage.get_mut(w) {
                     usage.0 += 1;
@@ -521,15 +566,29 @@ impl LoraController {
                     .cloned()
                     .collect();
                 for lora_name in unplaced {
-                    // Continuity: an existing entry is already a valid route; preserve it.
-                    if self.routing_table.get_config(&lora_name).is_some() {
+                    let is_active = active_set.contains(lora_name.as_str());
+                    // Continuity: an existing entry is already a valid (warm) route — keep its
+                    // replica set rather than re-pinning. But its `is_active` flag must still track
+                    // reality: an inactive cold-start entry that has since gone active (yet was
+                    // omitted by the solver this tick) would otherwise stay `is_active=false`,
+                    // sending the filter down the cold-start single-pin path and reporting a wrong
+                    // LORA_IS_ACTIVE gauge. So re-stamp is_active on the existing replica set when
+                    // it flipped (update_routing_entry no-ops when nothing changed).
+                    if let Some(cfg) = self.routing_table.get_config(&lora_name) {
+                        if cfg.is_active != is_active {
+                            self.update_routing_entry(
+                                &lora_name,
+                                cfg.replica_set.len(),
+                                cfg.replica_set,
+                                is_active,
+                            );
+                        }
                         continue;
                     }
                     let pin = self.allocator.compute_replica_set(&lora_name, workers, 1);
                     if pin.is_empty() {
                         continue;
                     }
-                    let is_active = active_set.contains(lora_name.as_str());
                     if self.update_routing_entry(&lora_name, 1, pin.clone(), is_active) {
                         tracing::warn!(
                             lora = %lora_name,
@@ -881,5 +940,87 @@ mod tests {
         controller.recompute_now();
 
         assert!(rt.get_config("lora-a").is_none());
+    }
+
+    #[test]
+    fn test_capacity_one_worker_sticky_no_eviction() {
+        // F1: a LoRA pinned to a cap=1 worker is "full" only because of itself. The fullness
+        // check must discount the LoRA's own loaded slot, or sticky placement would evict it and
+        // scatter it across other workers (here w2 is full with a different adapter, so without
+        // the discount the empty-result fallback would return the full HRW set [w1, w2]).
+        let (mut controller, st, le, rt) = setup_controller();
+        let w1 = make_worker(1);
+        let w2 = make_worker(2);
+        st.handle_mdc_addition(w1, &make_lora_info("lora-a", 1));
+        st.handle_mdc_addition(w2, &make_lora_info("lora-b", 1)); // w2 full with a different adapter
+        le.increment_load("lora-a");
+
+        controller.recompute_now();
+        let set1: Vec<u64> = rt
+            .get_config("lora-a")
+            .unwrap()
+            .replica_set
+            .iter()
+            .map(|w| w.worker_id)
+            .collect();
+        assert_eq!(
+            set1,
+            vec![1],
+            "lora-a must stay on its only non-full home w1, not scatter onto the full w2"
+        );
+
+        // Nothing changed → placement must be identical across ticks (no eviction/churn).
+        controller.recompute_now();
+        let set2: Vec<u64> = rt
+            .get_config("lora-a")
+            .unwrap()
+            .replica_set
+            .iter()
+            .map(|w| w.worker_id)
+            .collect();
+        assert_eq!(
+            set2, set1,
+            "stable LoRA on a cap=1 worker must not move across ticks"
+        );
+    }
+
+    #[test]
+    fn test_capacity_dropped_active_lora_without_warm_worker_is_removed() {
+        // F2: an active LoRA truncated out of the slot budget (capacity-dropped) must NOT keep a
+        // stale replica-set entry that points at workers where it is no longer loaded — the
+        // filter would lazy-load it there, a new load that defeats the cap. With no warm worker,
+        // the entry is removed so the filter's runtime loaded-worker fallback handles routing.
+        let (mut controller, st, le, rt) = setup_controller();
+        let w1 = make_worker(1);
+        let w2 = make_worker(2);
+        // Only w1 is a live worker (cap=1 → total budget = 1). lora-a is the high-load adapter.
+        st.handle_mdc_addition(w1, &make_lora_info("lora-a", 1));
+        // Seed a STALE entry for lora-b pointing at w2 (not live, lora-b not loaded anywhere).
+        rt.update_allocation(
+            "lora-b".to_string(),
+            LoraReplicaConfig {
+                lora_name: "lora-b".to_string(),
+                replica_factor: 1,
+                replica_set: vec![w2],
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+        // Both active; lora-a outranks lora-b by load, so the budget=1 cap drops lora-b.
+        for _ in 0..5 {
+            le.increment_load("lora-a");
+        }
+        le.increment_load("lora-b");
+
+        controller.recompute_now();
+
+        assert!(
+            rt.get_config("lora-a").is_some(),
+            "the in-budget LoRA keeps its allocation"
+        );
+        assert!(
+            rt.get_config("lora-b").is_none(),
+            "capacity-dropped LoRA with no warm worker must have its stale entry removed"
+        );
     }
 }
