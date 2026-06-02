@@ -50,6 +50,7 @@ type DGDRLifecycleInput struct {
 	ExpectDGDReady  bool                          // verify DGD reaches state=successful (skipped in mocker mode)
 	VerifyServices  map[string]ServiceExpectation // per-service expectations on the DGD (optional)
 	VerifyConfigMap bool                          // check dgdr-output-<name> ConfigMap exists and contains a DGD
+	VerifyInference bool                          // send v1/models and v1/chat/completions requests (skipped in mocker mode)
 }
 
 // DGDRLifecycleSpec implements a test that exercises the full DGDR lifecycle:
@@ -179,6 +180,16 @@ func DGDRLifecycleSpec(ctx context.Context, inputGetter func() DGDRLifecycleInpu
 	if len(input.VerifyServices) > 0 {
 		By("Verifying DGD service replica status")
 		verifyDGDServices(dgdrResult.Status.DGDName, input.VerifyServices)
+	}
+
+	// Step 8: Inference smoke test
+	if input.VerifyInference {
+		model := input.Model
+		if model == "" {
+			model = flagModel
+		}
+		By("Running inference smoke test against frontend")
+		verifyInference(dgdrResult.Status.DGDName, model)
 	}
 }
 

@@ -478,7 +478,43 @@ func verifyDGDServices(dgdName string, expectations map[string]ServiceExpectatio
 	}
 }
 
-// verifyDGDPodsReady independently verifies that the actual K8s pods backing a DGD
+// verifyInference runs a smoke test against the DGD's frontend service to confirm
+// the model is actually serving. It checks v1/models and sends a short
+// v1/chat/completions request.
+func verifyInference(dgdName, model string) {
+	frontendURL := fmt.Sprintf("http://%s-frontend.%s.svc.cluster.local:8000", dgdName, flagNamespace)
+
+	// v1/models — verify the model is listed
+	By("Checking v1/models endpoint")
+	modelsOut, modelsErr, err := kubectl("run", "inference-check-models-"+dgdName[:8],
+		"--rm", "-i", "--restart=Never",
+		"-n", flagNamespace,
+		"--image=curlimages/curl:latest",
+		"--", "curl", "-sf", "--max-time", "10",
+		frontendURL+"/v1/models",
+	)
+	Expect(err).NotTo(HaveOccurred(),
+		"v1/models request failed: stdout=%s stderr=%s", modelsOut, modelsErr)
+	Expect(modelsOut).To(ContainSubstring(model),
+		"v1/models response should contain model %s, got: %s", model, modelsOut)
+
+	// v1/chat/completions — verify the model can generate a response
+	By("Sending a chat completion request")
+	chatBody := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":16}`, model)
+	chatOut, chatErr, err := kubectl("run", "inference-check-chat-"+dgdName[:8],
+		"--rm", "-i", "--restart=Never",
+		"-n", flagNamespace,
+		"--image=curlimages/curl:latest",
+		"--", "curl", "-sf", "--max-time", "60",
+		"-H", "Content-Type: application/json",
+		"-d", chatBody,
+		frontendURL+"/v1/chat/completions",
+	)
+	Expect(err).NotTo(HaveOccurred(),
+		"v1/chat/completions request failed: stdout=%s stderr=%s", chatOut, chatErr)
+	Expect(chatOut).To(ContainSubstring("choices"),
+		"chat response should contain 'choices', got: %s", chatOut)
+}
 // are Running with all containers ready. This catches cases where the DGD status
 // reports Ready/Successful but the underlying pods are not actually healthy.
 func verifyDGDPodsReady(dgdName string) {

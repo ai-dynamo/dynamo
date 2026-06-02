@@ -66,6 +66,7 @@ var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "i
 					},
 					ExpectDGDReady:  true,
 					VerifyConfigMap: true,
+					VerifyInference: true,
 				}
 			}
 
