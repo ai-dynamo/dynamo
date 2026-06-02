@@ -10,13 +10,13 @@
 use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 
-use super::deepseek_common::{
+use super::common::{
     NormalizeNonText, REASONING_EFFORT_MAX, RESPONSE_FORMAT_TEMPLATE, TOOL_CALLS_BLOCK_NAME,
     TOOLS_TEMPLATE, drop_thinking_messages, encode_arguments_to_dsml, find_last_user_index,
     merge_tool_messages, normalize_message_contents, render_tools, sort_tool_results_by_call_order,
     task_token, to_json,
 };
-pub use super::deepseek_common::{ReasoningEffort, ThinkingMode, tokens};
+pub use super::common::{ReasoningEffort, ThinkingMode, tokens};
 
 /// Render a single message at the given index.
 fn render_message(
@@ -380,14 +380,14 @@ impl DeepSeekV4Formatter {
     }
 }
 
-impl super::OAIPromptFormatter for DeepSeekV4Formatter {
+impl crate::OAIPromptFormatter for DeepSeekV4Formatter {
     fn supports_add_generation_prompt(&self) -> bool {
         true
     }
 
-    fn render(&self, req: &dyn super::OAIChatLikeRequest) -> Result<String> {
+    fn render(&self, req: &dyn crate::OAIChatLikeRequest) -> Result<String> {
         let args = req.chat_template_args();
-        let thinking_mode = super::deepseek_common::resolve_thinking_mode(args, self.thinking_mode);
+        let thinking_mode = super::common::resolve_thinking_mode(args, self.thinking_mode);
         let reasoning_effort = Self::resolve_reasoning_effort(args);
         let drop_thinking = Self::resolve_drop_thinking(args);
 
@@ -402,7 +402,7 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
 
         normalize_message_contents(&mut messages_array, NormalizeNonText::LeaveUntouched);
 
-        super::deepseek_common::inject_tools_and_response_format(&mut messages_array, req)?;
+        super::common::inject_tools_and_response_format(&mut messages_array, req)?;
 
         encode_messages_with_options(
             &messages_array,
@@ -609,18 +609,12 @@ mod tests {
             serde_json::Value::Bool(false),
         );
         assert_eq!(
-            super::super::deepseek_common::resolve_thinking_mode(
-                Some(&args),
-                ThinkingMode::Thinking
-            ),
+            super::super::common::resolve_thinking_mode(Some(&args), ThinkingMode::Thinking),
             ThinkingMode::Chat
         );
         args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
         assert_eq!(
-            super::super::deepseek_common::resolve_thinking_mode(
-                Some(&args),
-                ThinkingMode::Thinking
-            ),
+            super::super::common::resolve_thinking_mode(Some(&args), ThinkingMode::Thinking),
             ThinkingMode::Thinking
         );
     }
@@ -647,7 +641,7 @@ mod tests {
         }
     }
 
-    impl super::super::OAIChatLikeRequest for MockRequest {
+    impl crate::OAIChatLikeRequest for MockRequest {
         fn model(&self) -> String {
             "deepseek-v4".to_string()
         }
@@ -669,7 +663,7 @@ mod tests {
 
     #[test]
     fn test_render_leaves_null_assistant_tool_content_empty() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
 
         let req = MockRequest::new(json!([
             {"role": "user", "content": "call tool"},
@@ -692,7 +686,7 @@ mod tests {
 
     #[test]
     fn test_render_wires_reasoning_effort_max_from_chat_template_args() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
         use std::collections::HashMap;
 
         let mut args = HashMap::new();
@@ -718,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_render_drop_thinking_override_from_chat_template_args() {
-        use super::super::OAIPromptFormatter;
+        use crate::OAIPromptFormatter;
         use std::collections::HashMap;
 
         let messages = json!([

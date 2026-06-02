@@ -35,9 +35,11 @@ cases:
     - *id001
     expected:
       dynamo:
-        reason: "Dynamo's nemotron_deci parser leaves closing </TOOLCALL> envelope plus the JSON array in normal_text when opening <TOOLCALL> marker is missing (impl-defined recovery)"
-        calls: []
-        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
@@ -50,9 +52,8 @@ cases:
     - *id001
     expected:
       dynamo:
-        reason: "Dynamo's nemotron_deci parser leaves closing </TOOLCALL> envelope plus the JSON array in normal_text when opening <TOOLCALL> marker is missing (impl-defined recovery)"
         calls: []
-        normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'
+        normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
