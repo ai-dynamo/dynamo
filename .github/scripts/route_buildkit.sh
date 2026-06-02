@@ -84,11 +84,19 @@ if [ -z "$FLAVOR_INPUT" ]; then
   exit 1
 fi
 
-# CUDA version is required for all flavors except "general"
-if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
-  echo "❌ Error: Must specify --cuda <13.0|13.1> for flavor '$FLAVOR_INPUT'."
-  exit 1
-fi
+# CUDA version no longer affects pod routing: cache groups are keyed by
+# framework (see GROUP_KEYS / flavor_to_group), so --cuda is still accepted for
+# backward compatibility but is neither required nor validated here.
+# To re-enable per-CUDA-version routing in the future: (1) uncomment the
+# requirement block below and the validation block further down, (2) add the
+# CUDA major back into GROUP_KEYS, and (3) take the cuda_version into account in
+# flavor_to_group.
+#
+# # CUDA version is required for all flavors except "general"
+# if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
+#   echo "❌ Error: Must specify --cuda <13.0|13.1> for flavor '$FLAVOR_INPUT'."
+#   exit 1
+# fi
 
 # Validate arch input
 case $ARCH_INPUT in
@@ -108,16 +116,18 @@ case $FLAVOR_INPUT in
     ;;
 esac
 
-# Validate CUDA version input (allow empty for general flavor)
-if [ -n "$CUDA_VERSION" ]; then
-  case $CUDA_VERSION in
-    13.0|13.1) ;;
-    *)
-      echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 13.0 or 13.1."
-      exit 1
-      ;;
-  esac
-fi
+# Validate CUDA version input (allow empty for general flavor) — disabled; see
+# the note above the requirement block. Re-enable alongside it if per-CUDA-version
+# routing is reintroduced.
+# if [ -n "$CUDA_VERSION" ]; then
+#   case $CUDA_VERSION in
+#     13.0|13.1) ;;
+#     *)
+#       echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 13.0 or 13.1."
+#       exit 1
+#       ;;
+#   esac
+# fi
 
 # Determine architectures to process
 if [ "$ARCH_INPUT" = "all" ]; then
