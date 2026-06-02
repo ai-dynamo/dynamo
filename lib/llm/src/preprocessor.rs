@@ -2128,6 +2128,7 @@ impl OpenAIPreprocessor {
                             total_tokens: engine_output.total_tokens,
                         },
                     },
+                    data_shm: None,
                 };
 
                 Ok(response)

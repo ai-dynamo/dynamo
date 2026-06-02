@@ -1008,6 +1008,24 @@ async fn embeddings(
             err_response
         })?;
 
+    // Same-node SHM fast path: if the worker staged the vectors in shared
+    // memory, read them straight from /dev/shm, populate `data`, and unlink
+    // the segment. Skips base64 + JSON serialization on the worker->frontend
+    // hop. read_shm_embeddings produces the client's requested encoding
+    // directly, so the base64->float block below is a no-op for this path.
+    if let Some(handle) = response.data_shm.take() {
+        match read_shm_embeddings(&handle, client_wants_float) {
+            Ok(data) => response.inner.data = data,
+            Err(e) => {
+                tracing::error!("Failed to read SHM embeddings for {}: {:?}", request_id, e);
+                let err_response =
+                    ErrorMessage::internal_server_error("Failed to read embedding shared memory");
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                return Err(err_response);
+            }
+        }
+    }
+
     // Worker always emits Base64 -- convert back to Float when the client
     // asked for float (or didn't specify, defaulting to float per spec).
     if client_wants_float {
@@ -1061,6 +1079,64 @@ fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error>
         floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Ok(floats)
+}
+
+/// Read a contiguous `[count, dim]` little-endian f32 buffer that the worker
+/// staged in POSIX shared memory (`/dev/shm/<name>` on Linux, written by
+/// Python's `multiprocessing.shared_memory`), split it into per-vector
+/// `Embedding`s, and unlink the segment. `as_float` selects the client-visible
+/// encoding (raw floats vs base64) to match the request's `encoding_format`.
+///
+/// The frontend owns cleanup: it `remove_file`s the segment once the bytes are
+/// copied into owned `Vec`s, so the worker must create the segment without
+/// registering it for its own resource-tracker cleanup.
+fn read_shm_embeddings(
+    handle: &crate::protocols::openai::embeddings::EmbeddingShmHandle,
+    as_float: bool,
+) -> Result<Vec<dynamo_protocols::types::Embedding>, anyhow::Error> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use dynamo_protocols::types::{Embedding, EmbeddingVector};
+
+    let path = format!("/dev/shm/{}", handle.name);
+    let bytes = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read shm {}: {}", path, e))?;
+
+    let vec_bytes_len = handle.dim * std::mem::size_of::<f32>();
+    let expected = handle.count * vec_bytes_len;
+    if bytes.len() < expected {
+        let _ = std::fs::remove_file(&path);
+        anyhow::bail!(
+            "shm segment {} too small: {} bytes < expected {} ({} x {} f32)",
+            path,
+            bytes.len(),
+            expected,
+            handle.count,
+            handle.dim
+        );
+    }
+
+    let mut data = Vec::with_capacity(handle.count);
+    for i in 0..handle.count {
+        let start = i * vec_bytes_len;
+        let vec_bytes = &bytes[start..start + vec_bytes_len];
+        let embedding = if as_float {
+            let mut floats = Vec::with_capacity(handle.dim);
+            for chunk in vec_bytes.chunks_exact(std::mem::size_of::<f32>()) {
+                floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+            EmbeddingVector::Float(floats)
+        } else {
+            EmbeddingVector::Base64(STANDARD.encode(vec_bytes))
+        };
+        data.push(Embedding {
+            index: i as u32,
+            object: "embedding".to_string(),
+            embedding,
+        });
+    }
+
+    // Unlink now that the bytes are copied into owned Vecs.
+    let _ = std::fs::remove_file(&path);
+    Ok(data)
 }
 
 async fn handler_chat_completions(

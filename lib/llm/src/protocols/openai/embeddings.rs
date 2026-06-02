@@ -32,6 +32,32 @@ pub struct NvCreateEmbeddingResponse {
     #[serde(flatten)]
     #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateEmbeddingResponse,
+
+    /// Internal-only handle for an embedding response delivered via POSIX
+    /// shared memory (same-node fast path). When present, `inner.data` is
+    /// empty and the vectors live in `/dev/shm/<name>`; the HTTP handler reads
+    /// them directly, populates `inner.data`, and unlinks the segment. Always
+    /// `None` in the client-facing response (skipped when serializing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_shm: Option<EmbeddingShmHandle>,
+}
+
+/// Handle describing an embedding response staged in POSIX shared memory.
+///
+/// The worker writes a contiguous `[count, dim]` little-endian `f32` buffer to
+/// the shared-memory object `name` (a tmpfs file at `/dev/shm/<name>` on Linux)
+/// and sends only this small handle over the request plane. The frontend reads
+/// the `count * dim * 4` bytes directly and unlinks the segment. This avoids
+/// base64-encoding + JSON-serializing the vectors across the worker->frontend
+/// hop on a co-located deployment.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
+pub struct EmbeddingShmHandle {
+    /// POSIX shared-memory object name (tmpfs file `/dev/shm/<name>` on Linux).
+    pub name: String,
+    /// Number of embedding vectors stored in the buffer.
+    pub count: usize,
+    /// Dimensionality (number of `f32` elements) of each vector.
+    pub dim: usize,
 }
 
 impl NvCreateEmbeddingResponse {
@@ -46,6 +72,7 @@ impl NvCreateEmbeddingResponse {
                     total_tokens: 0,
                 },
             },
+            data_shm: None,
         }
     }
 }

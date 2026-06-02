@@ -21,6 +21,11 @@ impl StreamAggregable for NvCreateEmbeddingResponse {
         self.inner.data.extend(next.inner.data);
         self.inner.usage.prompt_tokens += next.inner.usage.prompt_tokens;
         self.inner.usage.total_tokens += next.inner.usage.total_tokens;
+        // Carry the SHM handle through aggregation; the empty() base starts
+        // with None, so a single chunk's handle would otherwise be dropped.
+        if next.data_shm.is_some() {
+            self.data_shm = next.data_shm;
+        }
     }
 }
 
@@ -61,6 +66,7 @@ mod tests {
                     total_tokens,
                 },
             },
+            data_shm: None,
         };
 
         Annotated::from_data(response)

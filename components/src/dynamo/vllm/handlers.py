@@ -13,7 +13,9 @@ import struct
 import tempfile
 import threading
 import time
+import uuid
 from abc import ABC, abstractmethod
+from multiprocessing import resource_tracker, shared_memory
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
@@ -2986,8 +2988,34 @@ class EmbeddingWorkerHandler:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
-        embedding_objects: list[Dict[str, Any]] = []
         prompt_tokens = 0
+        for final_output in outputs:
+            token_ids = getattr(final_output, "prompt_token_ids", None) or []
+            prompt_tokens += len(token_ids)
+        usage = {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens}
+
+        # Same-node SHM fast path (opt-in via DYN_EMBEDDING_SHM=1): stage all
+        # vectors as one contiguous [count, dim] f32 buffer in POSIX shared
+        # memory and send only a small handle. The Rust frontend reads
+        # /dev/shm/<name> directly and unlinks it, skipping base64 + JSON on the
+        # worker->frontend hop entirely.
+        if os.environ.get("DYN_EMBEDDING_SHM", "0").lower() in ("1", "true", "yes"):
+            yield {
+                "object": "list",
+                "data": [],
+                "data_shm": _write_embeddings_to_shm(outputs, dimensions),
+                "model": model_name,
+                "usage": usage,
+            }
+            return
+
+        # Default wire format: always base64 (the Rust frontend decodes back to
+        # float when the client's ``encoding_format`` is float or unset).
+        # 15x1024-float JSON arrays cost ~110 ms in Python json.dumps + Rust
+        # serde parse; base64 bytes are ~3x smaller and ~10x faster to
+        # (de)serialize. Client-visible wire format is preserved because Rust
+        # converts at the HTTP boundary.
+        embedding_objects: list[Dict[str, Any]] = []
         for idx, final_output in enumerate(outputs):
             embedding = _pooling_output_to_list(final_output.outputs.data)
             if dimensions is not None:
@@ -2997,14 +3025,6 @@ class EmbeddingWorkerHandler:
                         f"dimension {len(embedding)}"
                     )
                 embedding = embedding[:dimensions]
-
-            # Always emit base64 over the worker->frontend wire format. The
-            # Rust frontend decodes back to float when the client's
-            # ``encoding_format`` is float (or unset). 15x1024-float responses
-            # serialized as JSON arrays cost ~110 ms in Python json.dumps +
-            # Rust serde parse; base64 bytes are ~3x smaller and ~10x faster
-            # to (de)serialize. Client-visible wire format is preserved
-            # because Rust converts at the HTTP boundary.
             embedding_objects.append(
                 {
                     "object": "embedding",
@@ -3012,17 +3032,12 @@ class EmbeddingWorkerHandler:
                     "index": idx,
                 }
             )
-            token_ids = getattr(final_output, "prompt_token_ids", None) or []
-            prompt_tokens += len(token_ids)
 
         yield {
             "object": "list",
             "data": embedding_objects,
             "model": model_name,
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "total_tokens": prompt_tokens,
-            },
+            "usage": usage,
         }
 
 
@@ -3133,3 +3148,41 @@ def _encode_floats_to_base64(floats: list[float]) -> str:
     """
     packed = struct.pack(f"<{len(floats)}f", *floats)
     return base64.b64encode(packed).decode("ascii")
+
+
+def _write_embeddings_to_shm(outputs: list[Any], dimensions: int | None) -> dict[str, Any]:
+    """Stage all embedding vectors as one contiguous ``[count, dim]``
+    little-endian f32 buffer in a POSIX shared-memory segment; return the
+    ``{name, count, dim}`` handle.
+
+    Same-node fast path: the Rust frontend opens ``/dev/shm/<name>`` directly,
+    copies the bytes out, and unlinks the segment. The worker creates the
+    segment but unregisters it from multiprocessing's ``resource_tracker`` so
+    the worker and frontend don't both try to unlink it (the frontend owns
+    cleanup). ``torch -> numpy.tobytes`` keeps the heavy copy in C; bytes are
+    little-endian f32, matching the frontend's ``f32::from_le_bytes`` read.
+    """
+    vecs = []
+    for final_output in outputs:
+        vec = final_output.outputs.data.detach().cpu().flatten().to(torch.float32)
+        if dimensions is not None:
+            if dimensions > vec.numel():
+                raise ValueError(
+                    f"dimensions={dimensions} exceeds model embedding "
+                    f"dimension {vec.numel()}"
+                )
+            vec = vec[:dimensions]
+        vecs.append(vec)
+
+    matrix = torch.stack(vecs).contiguous()  # [count, dim], float32
+    count, dim = int(matrix.shape[0]), int(matrix.shape[1])
+    data_bytes = matrix.numpy().tobytes()
+
+    name = f"emb_{os.getpid()}_{uuid.uuid4().hex[:12]}"
+    sm = shared_memory.SharedMemory(name=name, create=True, size=len(data_bytes))
+    sm.buf[: len(data_bytes)] = data_bytes
+    sm.close()
+    # Frontend reads + unlinks; detach from this process's resource_tracker so
+    # the two don't race to unlink at worker exit.
+    resource_tracker.unregister(sm._name, "shared_memory")
+    return {"name": name, "count": count, "dim": dim}
