@@ -158,14 +158,17 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
-# vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
-# jq for readable curl output just like the upstream omni image does.
+# The launch script examples use jq for readable curl output just like the
+# upstream omni image does.
+#
+# NOTE: vLLM-Omni no longer shells out to the GPL SoX binary — its audio
+# normalization is a pure-numpy peak_normalize() (vllm_omni/utils/audio.py), so
+# sox / libsox-fmt-all (and their GPL/UNKNOWN codec deps) are intentionally not
+# installed here.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq \
-        sox \
-        libsox-fmt-all; \
+        jq; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
@@ -204,15 +207,58 @@ RUN uv pip uninstall triton && \
 {% endif %}
 {% endif %}
 
-{% if context.vllm.enable_media_ffmpeg == "true" %}
-# Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
+# The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
+# against libx264/libx265/libmp3lame. Purge that entire apt codec stack and
+# replace it with the LGPL-only in-tree ffmpeg built in wheel_builder
+# (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via libvpx). PyAV,
+# torchaudio, torchvision, soundfile and Pillow all bundle their own libraries
+# and do not link the system ffmpeg/codecs, so removing them is safe. dpkg-query
+# keeps the purge robust across base-image/arch version suffixes (e.g.
+# libavcodec58 vs 60), and autoremove then sweeps the now-orphaned media deps.
+#
+# CRITICAL: the base image marks the CUDA math libs (libcublas/libcusolver/
+# libcusparse) auto-installed, and the torch wheels here ship NO bundled cublas
+# — torch loads the system copies. A bare autoremove would delete them and break
+# GPU inference, so pin every CUDA/NVIDIA lib as manually-installed first.
+RUN set -eux; \
+    keep=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
+        | grep -E '^(libcu|libnv|libnccl|cuda)' || true); \
+    if [ -n "$keep" ]; then apt-mark manual $keep >/dev/null; fi; \
+    purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr)' \
+        || true); \
+    if [ -n "$purge" ]; then \
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
+    fi; \
+    DEBIAN_FRONTEND=noninteractive apt-get autoremove -y --purge; \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
+# libsw*.so*) plus the LGPL CLI binary that imageio/diffusers target via
+# IMAGEIO_FFMPEG_EXE for video encoding. Ungated by enable_media_ffmpeg because
+# the base GPL ffmpeg was just purged, so the LGPL CLI must always be present
+# for the omni video-export path to have something to encode with.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
-{% endif %}
+    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
+ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
+
+# Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
+# GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)
+# with a source install that leaves no binary on disk. IMAGEIO_FFMPEG_EXE (set
+# above) points imageio at the LGPL CLI copied from wheel_builder. The
+# --no-binary directive lives in the requirements file itself.
+RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
+        --requirement /tmp/requirements.vllm.txt
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
