@@ -28,6 +28,7 @@ from dynamo.vllm.omni.stage_worker import (
     _ASYNC_PREWARM_KEY,
     _ASYNC_PREWARM_READY_KEY,
     _resolve_model_type,
+    _stage_config_uses_async_chunk,
 )
 from dynamo.vllm.omni.types import StageOutput
 from dynamo.vllm.omni.utils import shm_deserialize
@@ -49,7 +50,9 @@ class OmniStageRouter:
             stage_configs_path,
             kwargs={},
         )
-        self._async_chunk = _stage_configs_use_async_chunk(self.stage_configs)
+        self._async_chunk = any(
+            _stage_config_uses_async_chunk(cfg) for cfg in self.stage_configs
+        )
         self._model_name = config.served_model_name or config.model
         self.stage_clients: Dict[str, Any] = {}
 
@@ -176,7 +179,7 @@ class OmniStageRouter:
             "final_stage_id": target_stage,
             _ASYNC_PREWARM_KEY: True,
         }
-        prewarm_prompt_token_ids = prompt_token_ids or [0]
+        prewarm_prompt_token_ids = prompt_token_ids
 
         downstream_tasks: dict[int, asyncio.Task[StageOutput]] = {}
         ready_futures: list[asyncio.Future[str | None]] = []
@@ -225,15 +228,11 @@ class OmniStageRouter:
                 yield {"error": stage0.error, "finished": True}
                 return
 
-            downstream_outputs: dict[int, StageOutput] = {}
             for stage_idx in range(1, target_stage + 1):
-                output = await downstream_tasks[stage_idx]
-                if output.error:
-                    yield {"error": output.error, "finished": True}
+                final = await downstream_tasks[stage_idx]
+                if final.error:
+                    yield {"error": final.error, "finished": True}
                     return
-                downstream_outputs[stage_idx] = output
-
-            final = downstream_outputs[target_stage]
 
             async for chunk in self._format_final_output(
                 final, request, request_id, request_type
@@ -402,13 +401,6 @@ async def init_omni_stage_router(
 def _model_stage_name(stage_cfg: Any, stage_idx: int) -> str:
     engine_args = getattr(stage_cfg, "engine_args", None)
     return getattr(engine_args, "model_stage", f"stage{stage_idx}")
-
-
-def _stage_configs_use_async_chunk(stage_configs: list[Any]) -> bool:
-    return any(
-        bool(getattr(getattr(stage_cfg, "engine_args", None), "async_chunk", False))
-        for stage_cfg in stage_configs
-    )
 
 
 def _format_context(request: dict, request_type: RequestType) -> Dict[str, Any]:

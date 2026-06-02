@@ -348,6 +348,29 @@ class TestAudioFormatterFormat:
         assert len(result["data"]) == 1
         assert result["data"][0]["b64_json"] is not None
 
+    @pytest.mark.asyncio
+    async def test_chat_completion_returns_chat_chunk(self):
+        import base64
+
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {"audio": np.zeros(100, dtype=np.float32), "sr": 24000}
+
+        result = await f.format(mm, "req-1", request_type=RequestType.CHAT_COMPLETION)
+
+        assert result["object"] == "chat.completion.chunk"
+        choice = result["choices"][0]
+        assert choice["delta"]["role"] == "assistant"
+        assert choice["finish_reason"] == "stop"
+        assert choice["delta"]["content"] == result["nvext"]["audio"]["b64_json"]
+        assert result["nvext"]["audio"]["output_format"] == "wav"
+        assert result["nvext"]["audio"]["sample_rate"] == 24000
+        base64.b64decode(choice["delta"]["content"])
+
 
 # ── OutputFormatter dispatcher ─────────────────────────────
 

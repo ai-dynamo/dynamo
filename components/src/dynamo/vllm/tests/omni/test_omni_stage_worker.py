@@ -100,6 +100,20 @@ class _TokenizerEngine(_MockEngine):
         return self._tokenizer
 
 
+class _FakeRenderer:
+    def __init__(self, engine_prompt):
+        self.engine_prompt = engine_prompt
+        self.messages_batch = None
+        self.prompt_extras = None
+
+    async def render_chat_async(
+        self, messages_batch, chat_params, tok_params, *, prompt_extras=None
+    ):
+        self.messages_batch = messages_batch
+        self.prompt_extras = prompt_extras
+        return ([{"role": "user", "content": "hello"}],), (self.engine_prompt,)
+
+
 def _make_stage_config(**overrides):
     defaults = dict(
         stage_type="llm",
@@ -148,6 +162,43 @@ async def test_prepare_router_request_prefers_chat_template_token_ids():
     assert prepared["prompt_token_ids"] == tokenizer.chat_token_ids
     assert prepared["original_prompt"] == {"prompt": tokenizer.rendered_prompt}
     assert prepared["final_stage_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_router_request_prefers_native_renderer_prompt_token_ids():
+    tokenizer = _ChatTemplateTokenizer()
+    engine = _TokenizerEngine(tokenizer)
+    renderer = _FakeRenderer({"prompt": tokenizer.rendered_prompt})
+    engine.renderer = renderer
+    engine.engine = SimpleNamespace(
+        input_processor=SimpleNamespace(
+            model_config=SimpleNamespace(max_model_len=1024)
+        )
+    )
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(stage_id=0),
+        connectors={},
+        stage_id=0,
+        output_modalities=["text"],
+        pipeline_stage_configs=[
+            _make_stage_config(stage_id=0, final_output_type="text"),
+            _make_stage_config(stage_id=1, final_output_type="audio"),
+        ],
+    )
+
+    prepared = await worker._prepare_router_request(
+        {
+            "request_id": "req-chat",
+            "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hello"}],
+            "modalities": ["audio"],
+        }
+    )
+
+    assert prepared["prompt_token_ids"] == [999, 998]
+    assert renderer.messages_batch == [[{"role": "user", "content": "hello"}]]
+    assert renderer.prompt_extras == {}
 
 
 @pytest.mark.asyncio
@@ -436,6 +487,29 @@ async def test_async_prewarm_uses_native_placeholder_prompt_shape():
     assert captured["prompt"]["mm_processor_kwargs"] is None
     assert engine.received_prompt.prompt_token_ids == [0, 0, 0, 0]
     assert any(chunk.get(_ASYNC_PREWARM_READY_KEY) for chunk in chunks)
+
+
+def test_async_prewarm_generation_worker_waits_for_chunk():
+    worker = _make_worker(
+        stage_id=2,
+        stage_config=_make_stage_config(
+            engine_args=SimpleNamespace(async_chunk=True, worker_type="generation"),
+        ),
+    )
+
+    assert worker._async_prewarm_prompt_token_ids([10, 11, 12]) == []
+
+
+def test_async_prewarm_ar_requires_prompt_token_ids():
+    worker = _make_worker(
+        stage_id=1,
+        stage_config=_make_stage_config(
+            engine_args=SimpleNamespace(async_chunk=True, worker_type="ar"),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="without prompt_token_ids"):
+        worker._async_prewarm_prompt_token_ids([])
 
 
 def test_stage_config_to_dict_can_preserve_async_stage_topology():

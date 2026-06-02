@@ -319,11 +319,13 @@ class OmniStageWorker:
             self._default_video_fps,
             tokenizer_getter=self.engine.get_tokenizer,
         )
+        final_stage_id = self._resolve_final_stage_id(frontend_request, None)
         prompt_token_ids: list[int] = []
-        if isinstance(frontend_request.get("messages"), list):
-            prompt_token_ids = await _extract_chat_prompt_token_ids(
+        messages = frontend_request.get("messages")
+        if isinstance(messages, list):
+            prompt_token_ids = await _render_chat_prompt_token_ids(
                 frontend_request, self.engine
-            )
+            ) or await _extract_chat_prompt_token_ids(frontend_request, self.engine)
         if not prompt_token_ids:
             prompt_token_ids = await _extract_prompt_token_ids(
                 parsed["engine_inputs"], self.engine
@@ -332,7 +334,7 @@ class OmniStageWorker:
             "original_prompt": parsed["original_prompt"],
             "sampling_params_list": parsed["sampling_params_list"],
             "prompt_token_ids": prompt_token_ids,
-            "final_stage_id": self._resolve_final_stage_id(frontend_request, None),
+            "final_stage_id": final_stage_id,
         }
 
     async def _drain_async_request(
@@ -405,21 +407,33 @@ class OmniStageWorker:
         request_id: str,
         sampling_params_list_override: dict | None,
     ):
-        try:
-            prompt_len = max(1, compute_talker_prompt_ids_length(prompt_token_ids))
-        except Exception:
-            logger.debug("Failed to compute async prewarm prompt length", exc_info=True)
-            prompt_len = max(1, len(prompt_token_ids))
-
         prompt = (
             copy.deepcopy(original_prompt) if isinstance(original_prompt, dict) else {}
         )
-        prompt["prompt_token_ids"] = [0] * prompt_len
+        prompt["prompt_token_ids"] = self._async_prewarm_prompt_token_ids(
+            prompt_token_ids
+        )
         prompt["multi_modal_data"] = None
         prompt["mm_processor_kwargs"] = None
         return self._build_engine_core_request_from_prompt(
             prompt, request_id, sampling_params_list_override
         )
+
+    def _async_prewarm_prompt_token_ids(self, prompt_token_ids: list[int]) -> list[int]:
+        if _stage_config_uses_generation_worker(self.stage_config):
+            return []
+
+        if not prompt_token_ids:
+            raise RuntimeError(
+                f"Stage {self.stage_id}: cannot async prewarm AR stage without prompt_token_ids"
+            )
+
+        try:
+            prompt_len = max(1, compute_talker_prompt_ids_length(prompt_token_ids))
+        except Exception:
+            logger.debug("Failed to compute async prewarm prompt length", exc_info=True)
+            prompt_len = max(1, len(prompt_token_ids))
+        return [0] * prompt_len
 
     def _build_engine_core_request_from_prompt(
         self,
@@ -849,15 +863,57 @@ async def _extract_chat_prompt_token_ids(
     if tokenizer is None:
         return []
     apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
-    if callable(apply_chat_template):
-        try:
-            return list(
-                apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
-                or []
-            )
-        except Exception:
-            logger.debug("Tokenizer chat template unavailable", exc_info=True)
-    return _encode_text(tokenizer, _render_chat_prompt(messages))
+    if not callable(apply_chat_template):
+        return []
+    try:
+        return list(
+            apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+            or []
+        )
+    except Exception:
+        logger.debug("Tokenizer chat template unavailable", exc_info=True)
+        return []
+
+
+async def _render_chat_prompt_token_ids(
+    request: dict, engine: StageEngine
+) -> list[int]:
+    renderer = getattr(engine, "renderer", None)
+    engine_impl = getattr(engine, "engine", None)
+    input_processor = getattr(engine_impl, "input_processor", None)
+    model_config = getattr(input_processor, "model_config", None)
+    if renderer is None or model_config is None:
+        return []
+
+    try:
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionRequest,
+        )
+    except ImportError:
+        return []
+
+    try:
+        chat_request = ChatCompletionRequest.model_validate(request)
+        tok_params = chat_request.build_tok_params(model_config)
+        chat_params = chat_request.build_chat_params(
+            getattr(chat_request, "chat_template", None),
+            "auto",
+        )
+        (_,), (engine_prompt,) = await renderer.render_chat_async(
+            [chat_request.messages],
+            chat_params,
+            tok_params,
+            prompt_extras={
+                key: value
+                for key in ("mm_processor_kwargs", "cache_salt")
+                if (value := getattr(chat_request, key, None)) is not None
+            },
+        )
+    except Exception:
+        logger.debug("Native chat rendering unavailable", exc_info=True)
+        return []
+
+    return await _extract_prompt_token_ids(engine_prompt, engine)
 
 
 async def _get_tokenizer(engine: StageEngine) -> Any:
@@ -877,24 +933,6 @@ def _encode_text(tokenizer: Any, text: str) -> list[int]:
     if input_ids is None and isinstance(result, dict):
         input_ids = result.get("input_ids")
     return list(input_ids or [])
-
-
-def _render_chat_prompt(messages: list[Any]) -> str:
-    parts: list[str] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "user")
-        content = message.get("content")
-        if isinstance(content, list):
-            content = "\n".join(
-                item.get("text", "")
-                for item in content
-                if isinstance(item, dict) and isinstance(item.get("text"), str)
-            )
-        parts.append(f"<|im_start|>{role}\n{content or ''}<|im_end|>")
-    parts.append("<|im_start|>assistant\n")
-    return "\n".join(parts)
 
 
 def _get_prompt_token_ids(prompt: Any) -> list[int] | None:
@@ -1006,6 +1044,13 @@ def _stage_config_uses_async_chunk(stage_config: Any) -> bool:
     return bool(getattr(engine_args, "async_chunk", False))
 
 
+def _stage_config_uses_generation_worker(stage_config: Any) -> bool:
+    engine_args = getattr(stage_config, "engine_args", None)
+    worker_type = str(getattr(engine_args, "worker_type", "") or "").lower()
+    stage_type = str(getattr(stage_config, "stage_type", "") or "").lower()
+    return worker_type == "generation" or stage_type == "diffusion"
+
+
 def _create_engine(
     model: str,
     stage_config: Any,
@@ -1027,15 +1072,14 @@ def _create_engine(
         preserve_stage_id=use_async_chunk,
     )
     _normalize_single_stage_runtime_devices(stage_arg)
+    source_config = _load_stage_config(source_config_path) if use_async_chunk else {}
     if use_async_chunk:
-        _inject_output_connectors_from_source(
-            stage_arg, source_config_path, source_stage_id
-        )
+        _inject_output_connectors_from_source(stage_arg, source_config, source_stage_id)
     single_stage_config = {
         "async_chunk": use_async_chunk,
         "stage_args": [stage_arg],
         "runtime": _runtime_config_for_single_stage(
-            source_config_path, preserve_edges=use_async_chunk
+            source_config, preserve_edges=use_async_chunk
         ),
     }
 
@@ -1115,45 +1159,45 @@ def _is_omegaconf_config(obj: Any) -> bool:
     return bool(OmegaConf.is_config(obj))
 
 
-def _runtime_config_for_single_stage(
-    source_config_path: str | None,
-    *,
-    preserve_edges: bool,
-) -> dict:
-    if not preserve_edges or not source_config_path:
-        return {"edges": []}
+def _load_stage_config(path: str | None) -> dict:
+    if not path:
+        return {}
     try:
-        with open(source_config_path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             source = yaml.safe_load(f) or {}
     except Exception:
         logger.debug("Failed to read source omni stage config", exc_info=True)
+        return {}
+    return source if isinstance(source, dict) else {}
+
+
+def _runtime_config_for_single_stage(
+    source_config: dict, *, preserve_edges: bool
+) -> dict:
+    if not preserve_edges or not source_config:
         return {"edges": []}
 
-    runtime = copy.deepcopy(source.get("runtime") or {})
-    if "connectors" in source and "connectors" not in runtime:
-        runtime["connectors"] = copy.deepcopy(source["connectors"])
-    if "edges" in source and "edges" not in runtime:
-        runtime["edges"] = copy.deepcopy(source["edges"])
+    runtime = copy.deepcopy(source_config.get("runtime") or {})
+    if "connectors" in source_config and "connectors" not in runtime:
+        runtime["connectors"] = copy.deepcopy(source_config["connectors"])
+    if "edges" in source_config and "edges" not in runtime:
+        runtime["edges"] = copy.deepcopy(source_config["edges"])
     runtime.setdefault("edges", [])
     return runtime
 
 
 def _inject_output_connectors_from_source(
     stage_dict: dict,
-    source_config_path: str | None,
+    source_config: dict,
     source_stage_id: int,
 ) -> None:
-    if not source_config_path:
-        return
-    try:
-        with open(source_config_path, encoding="utf-8") as f:
-            source = yaml.safe_load(f) or {}
-    except Exception:
-        logger.debug("Failed to read source omni stage config", exc_info=True)
+    if not source_config:
         return
 
     output_connectors = dict(stage_dict.get("output_connectors") or {})
-    for downstream in source.get("stage_args") or source.get("stages") or []:
+    for downstream in (
+        source_config.get("stage_args") or source_config.get("stages") or []
+    ):
         if not isinstance(downstream, dict):
             continue
         to_stage = downstream.get("stage_id")
