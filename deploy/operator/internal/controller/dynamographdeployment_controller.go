@@ -1902,8 +1902,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 
 		// checkpointRef is authoritative. Auto mode creates a DGD-scoped checkpoint
 		// for this component generation without looking for reusable checkpoints.
-		if isAutoCheckpoint && !hasCheckpointRef && !info.Exists {
-			logger.Info("Creating DynamoCheckpoint CR in Auto mode", "component", componentName)
+		if isAutoCheckpoint && !hasCheckpointRef {
+			if !info.Exists {
+				logger.Info("Creating DynamoCheckpoint CR in Auto mode", "component", componentName)
+			}
 
 			ckpt, err := r.createCheckpointCR(ctx, dynamoDeployment, componentName, component)
 			if err != nil {
@@ -1916,7 +1918,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to resolve checkpoint ID for component %s: %w", componentName, err)
 			}
-			info.Ready = false
+			if info.GPUMemoryService == nil {
+				info.GPUMemoryService = ckpt.Spec.GPUMemoryService
+			}
+			info.Ready = ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady
 		}
 
 		checkpointStatuses[componentName] = nvidiacomv1beta1.ComponentCheckpointStatus{

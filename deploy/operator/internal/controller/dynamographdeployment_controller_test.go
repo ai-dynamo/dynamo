@@ -1341,6 +1341,115 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoPreservesPodTem
 	assert.Equal(t, "worker", jobMeta.Labels[commonconsts.KubeLabelDynamoComponent])
 }
 
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsSyncsExistingAutoLifecycle(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  commonconsts.MainContainerName,
+							Image: "main:latest",
+						}},
+					},
+				},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Mode:           v1beta1.CheckpointModeAuto,
+						DeletionPolicy: v1beta1.CheckpointDeletionPolicyRetain,
+					},
+				},
+			}},
+		},
+	}
+	workerHash, err := reconciler.checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	checkpointID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	)
+	existing := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("checkpoint-%s", checkpointID),
+			Namespace: "default",
+			Labels: map[string]string{
+				snapshotprotocol.CheckpointIDLabel:              checkpointID,
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				commonconsts.KubeLabelDynamoComponent:           "worker",
+				commonconsts.KubeLabelDynamoWorkerHash:          workerHash,
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyDelete),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1beta1.GroupVersion.String(),
+				Kind:       "DynamoGraphDeployment",
+				Name:       dgd.Name,
+				UID:        dgd.UID,
+				Controller: ptr.To(true),
+			}},
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: v1alpha1.DynamoCheckpointIdentity{
+				Model:            "default/test-dgd",
+				BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			},
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  commonconsts.MainContainerName,
+							Image: "existing:latest",
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			CheckpointID: checkpointID,
+			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
+		},
+	}
+	reconciler.Client = fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(existing).
+		WithStatusSubresource(existing).
+		Build()
+
+	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	require.NoError(t, err)
+	assert.Equal(t, existing.Name, checkpointStatuses["worker"].CheckpointName)
+	assert.Equal(t, checkpointID, checkpointStatuses["worker"].CheckpointID)
+	require.NotNil(t, checkpointInfos["worker"])
+	assert.True(t, checkpointInfos["worker"].Exists)
+
+	updated := &v1alpha1.DynamoCheckpoint{}
+	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: existing.Name, Namespace: "default"}, updated))
+	assert.Equal(t, string(v1alpha1.CheckpointDeletionPolicyRetain),
+		updated.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation])
+	assert.Empty(t, updated.OwnerReferences)
+	assert.True(t, controller_common.ContainsFinalizer(updated))
+	assert.Equal(t, "test-dgd", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "worker", updated.Labels[commonconsts.KubeLabelDynamoComponent])
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
