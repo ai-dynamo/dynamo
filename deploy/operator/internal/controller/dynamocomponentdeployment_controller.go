@@ -1008,13 +1008,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
 	if r.Config.Checkpoint.Enabled {
-		if checkpointInfo != nil &&
-			(checkpointInfo.StartupPolicy == "" ||
-				string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyImmediate)) {
-			// Immediate mode keeps owner pod templates stable when checkpoint
-			// readiness changes. The pod-create webhook performs restore shaping
-			// only for newly-created Pods after the checkpoint is Ready.
-		} else {
+		if checkpointInfo == nil ||
+			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint) {
 			if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 				ctx,
 				r.Client,
@@ -1027,6 +1022,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				return nil, errors.Wrap(err, "failed to inject checkpoint config")
 			}
 		}
+		// Immediate mode keeps owner pod templates stable when checkpoint
+		// readiness changes. The pod-create webhook performs restore shaping
+		// only for newly-created Pods after the checkpoint is Ready.
 	}
 
 	// Ensure we have at least one container (the main container should be there from GenerateBasePodSpec)

@@ -168,6 +168,7 @@ func InjectCheckpointIntoPodSpecWithStorageConfig(
 	)
 }
 
+//nolint:gocyclo
 func injectCheckpointIntoPodSpec(
 	ctx context.Context,
 	reader ctrlclient.Reader,
@@ -184,6 +185,9 @@ func injectCheckpointIntoPodSpec(
 	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Ready {
 		return nil
 	}
+	if reader == nil {
+		return fmt.Errorf("checkpoint client is required")
+	}
 
 	info := *checkpointInfo
 	if info.Hash == "" {
@@ -197,7 +201,7 @@ func injectCheckpointIntoPodSpec(
 				return fmt.Errorf("failed to compute identity hash: %w", err)
 			}
 			info.Hash = hash
-		} else if reader != nil {
+		} else {
 			ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
 			if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: info.CheckpointName}, ckpt); err != nil {
 				return fmt.Errorf("failed to get checkpoint %s/%s: %w", namespace, info.CheckpointName, err)
@@ -213,15 +217,6 @@ func injectCheckpointIntoPodSpec(
 			if info.GPUMemoryService == nil {
 				info.GPUMemoryService = ckpt.Spec.GPUMemoryService
 			}
-		} else {
-			if info.Identity == nil {
-				return fmt.Errorf("checkpoint enabled but identity is nil and hash is not set")
-			}
-			hash, err := ComputeIdentityHash(*info.Identity)
-			if err != nil {
-				return fmt.Errorf("failed to compute identity hash: %w", err)
-			}
-			info.Hash = hash
 		}
 	}
 
@@ -230,19 +225,9 @@ func injectCheckpointIntoPodSpec(
 	}
 
 	if info.Hash == "" {
-		if info.Identity == nil {
-			return fmt.Errorf("checkpoint enabled but identity is nil and hash is not set")
-		}
-		hash, err := ComputeIdentityHash(*info.Identity)
-		if err != nil {
-			return fmt.Errorf("failed to compute identity hash: %w", err)
-		}
-		info.Hash = hash
+		return fmt.Errorf("checkpoint enabled but hash is not set")
 	}
 
-	if reader == nil {
-		return fmt.Errorf("checkpoint client is required")
-	}
 	targets := info.RestoreTargetContainers
 	if len(targets) == 0 {
 		targets = []string{commonconsts.MainContainerName}
