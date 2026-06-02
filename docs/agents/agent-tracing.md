@@ -36,6 +36,16 @@ Inject `agent_context` into each LLM request
 | `session_id`           |   Yes    | Whole agent run.                         |
 | `trajectory_id`        |   Yes    | One reasoning/tool chain inside the run. |
 | `parent_trajectory_id` |    No    | Parent trajectory when using subagents.  |
+| `trajectory_final`     |    No    | `true` marks the trajectory's last request — a cleanup hint. |
+
+`trajectory_final` is an optional terminal marker: set it to `true` on the final
+request of a trajectory to signal that the run is over. Lifecycle-aware backends
+use it to release whatever per-trajectory state they hold (scheduling bookkeeping,
+routing affinity, cached identity) right away instead of waiting for an idle
+timeout; backends that don't track per-trajectory lifecycle simply ignore it.
+Producers usually send it on a dedicated final request rather than on a real turn,
+since a run's end is often only known *after* its last content turn has completed.
+It's purely a cleanup signal and carries no conversational payload.
 
 **OpenAI client:** merge into `extra_body` / `extra_headers`:
 
