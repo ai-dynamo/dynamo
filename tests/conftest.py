@@ -613,11 +613,36 @@ def _item_has_marker(item, marker_name):
     return False
 
 
+def _maybe_apply_sglang_mm_hashes_patch(items) -> None:
+    """Apply sgl-project/sglang#25300 to the installed sglang when sglang
+    MM-routing tests will run. Idempotent; mirrors the manual recipe in
+    docs/features/multimodal/multimodal-kv-routing.md."""
+    import subprocess
+
+    if not any("test_sglang" in i.nodeid and "mm_" in i.nodeid for i in items):
+        return
+    script = """
+        set -e
+        ROOT="$(python3 -c 'import pathlib, sglang; print(pathlib.Path(sglang.__file__).resolve().parent.parent)')"
+        grep -q '^    mm_hashes:' "$ROOT/sglang/srt/managers/io_struct.py" && exit 0
+        D="$(mktemp --suffix=.diff)"; trap 'rm -f "$D"' EXIT
+        curl -fsSL https://github.com/sgl-project/sglang/pull/25300.diff | python3 -c 'import sys; c=sys.stdin.read().split("diff --git "); sys.stdout.write("".join("diff --git "+x for x in c if x.startswith("a/python/sglang/")))' > "$D"
+        cd "$ROOT" && patch --dry-run -p2 < "$D" >/dev/null && patch -p2 < "$D" >/dev/null
+    """
+    res = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    _logger.info(
+        "sglang mm_hashes auto-patch: %s",
+        "applied" if res.returncode == 0
+        else f"skipped ({(res.stderr or res.stdout).strip()})",
+    )
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    _maybe_apply_sglang_mm_hashes_patch(items)
     # Auto-skip tests marked with a framework marker when the framework is not installed
     framework_markers = {
         "trtllm": "tensorrt_llm",

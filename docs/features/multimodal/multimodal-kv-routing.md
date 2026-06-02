@@ -231,7 +231,29 @@ Key environment variables:
 Requirements:
 
 - Dynamo built with `--features lightseek-mm` (Rust frontend's image-token counter + the SGLang glue).
-- SGLang fork with `GenerateReqInput.mm_hashes` ([upstream PR](https://github.com/sgl-project/sglang/pull/25300)). The dev container `dynamo:sglang-dev-*` ships this baked in; otherwise install the fork's `python/` over the upstream sglang install (`pip install --no-deps -e /path/to/sglang/python`).
+- SGLang with `GenerateReqInput.mm_hashes` ([upstream PR sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)). Apply the PR to the installed sglang in place (in the container or on the host):
+
+  ```bash
+  SITE_PACKAGES_ROOT="$(python3 -c 'import pathlib, sglang; print(pathlib.Path(sglang.__file__).resolve().parent.parent)')"
+  cd "$SITE_PACKAGES_ROOT"
+  curl -sL https://github.com/sgl-project/sglang/pull/25300.diff | python3 -c '
+  import sys
+  chunks = sys.stdin.read().split("diff --git ")
+  filtered = [c for c in chunks if c.startswith("a/python/sglang/")]
+  print("".join("diff --git " + c for c in filtered), end="")
+  ' > /tmp/sglang_pr25300_python_only.diff
+  patch --dry-run -p2 < /tmp/sglang_pr25300_python_only.diff
+  patch -p2 < /tmp/sglang_pr25300_python_only.diff
+  cd -
+  ```
+
+  The `-p2` strip drops the leading `a/python/` so the diff paths match
+  `sglang/srt/...` at site-packages root. The PR's `test/...` hunk is
+  filtered out because it lives outside the installed package.
+
+  Without the patch, the worker's `_resolve_mm_hashes_supported` probe
+  falls through to text-prefix-only routing (no crash, but no MM-aware
+  cache reuse either).
 
 Verification (visible at `DYN_LOG=info,mm_routing=debug`):
 
