@@ -19,9 +19,6 @@ spec:
           value: /shared-models
       extraPodSpec:
         mainContainer:
-          # The vllm-runtime:1.1.1 image has a built-in ENTRYPOINT for the frontend
-          # role. Explicit `python -m dynamo.frontend` makes the Rust binary parse
-          # those as args and crash with "Unknown arguments specified".
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
       replicas: 1
@@ -87,17 +84,7 @@ spec:
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
           # --- UCX IB: explicit NIC list is LOAD-BEARING on Nscale ---
-          # ib-probe (2026-05-28) showed 12 raw mlx5 NICs in two IB fabrics + a bond:
-          #   mlx5_0..5 + mlx5_10..11 = compute IB (MTU 4096, GUID prefix 605e6503)
-          #   mlx5_6..9              = SIDE fabric (MTU 512, vendor 8c913a03)
-          #   mlx5_bond_0            = RoCE bond aggregator (broken in containers)
-          # Verified 2026-05-29: deploy with NO UCX_NET_DEVICES (auto-probe) →
-          # UCX selected mlx5_bond_0 → ibv_create_ah "No such device" on all 4 ranks
-          # → RuntimeError: Engine core initialization failed. Auto-probe is unsafe
-          # on Nscale. Nscale is the ONLY cluster in this family where the explicit
-          # list is required (verified by smoke tests across AKS / GKE / Nebius —
-          # see 2026-05-29-recipe-claims-audit.md).
-          # Side fabric (mlx5_6..9) must also be excluded: mixing fabrics caused
+          # Side fabric (mlx5_6..9) must be excluded: mixing fabrics caused
           # NIXL_ERR_REMOTE_DISCONNECT at first transfer in earlier experiments.
           - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1" }
           - { name: MX_RDMA_NIC_PIN,    value: "auto" }
@@ -187,11 +174,6 @@ spec:
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
           # --- UCX IB minimal symmetric (see prefill block) ---
-          # exp10 2026-05-28: ib-probe showed 12 raw mlx5 NICs on Nscale, in two
-          # fabrics: mlx5_0..5 + mlx5_10..11 are compute IB (MTU 4096); mlx5_6..9
-          # are a SIDE fabric (MTU 512, different vendor GUID prefix). Previous
-          # recipe wrongly included mlx5_6 + mlx5_7 — cross-rank handshake via
-          # those side-fabric NICs is likely what triggered the disconnects.
           - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1" }
           - { name: MX_RDMA_NIC_PIN,        value: "auto" }
           - { name: NIXL_LOG_LEVEL,         value: "INFO" }

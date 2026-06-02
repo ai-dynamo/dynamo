@@ -55,10 +55,10 @@ All `perf.yaml` files run the same aiperf profile against the [Mooncake conversa
 
 | Variant | KV BW | Per-rank | Mean ITL | Mean TTFT | Completion | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| GKE A4X (GB200) | **10.71 GB/s** | 2.68 GB/s | 10.28 ms | 3.85 s | 100% | RoCE on CX-7; best aggregate + TTFT |
+| GKE A4X (GB200) | **10.71 GB/s** | 2.68 GB/s | 11.38 ms | 3.73 s | 100% | RoCE on CX-7; best aggregate + TTFT |
 | Nscale (B200) | **10.71 GB/s** | 2.68 GB/s | ~16 ms | 8.35 s | 100% | NDR-IB on raw HCAs (compute fabric only)|
 | Nebius (H200) | 5.96 GB/s | 1.49 GB/s | **9.14 ms** | 1510 s (queue) | 100% | fastest ITL of family |
 | AWS p5 (H100) | 5.64 GB/s | 1.41 GB/s | 13.62 ms | 1703 s (queue) | 100% | LIBFABRIC over EFA |
-| AKS (A100) | 1.88 GB/s | 0.47 GB/s | n/a | n/a | 58% (queue) | A100/CX-6; queue-bound by GPU class |
+| AKS (A100) | ~1.7 GB/s | ~0.42 GB/s | ~22 ms | 902 s (queue) | did not drain (queue-bound) | A100/CX-6; queue-bound by GPU class |
 
-Per-rank ordering follows GPU generation: GB200 (2.68) > H200 (1.49) > H100 (1.41) > A100 (0.47). Aggregate is per-rank × TP, so it tracks the same order except where wall-time differs across clusters. KV traffic was NOT fabric-bound on any cluster — utilization was <1% of NIC headroom; the bottleneck is GPU/HBM/PCIe.
+Per-rank ordering follows GPU generation: GB200 (2.68) > H200 (1.49) > H100 (1.41) > A100 (0.42). Aggregate is per-rank × TP, so it tracks the same order except where wall-time differs across clusters. KV traffic was NOT fabric-bound on any cluster — utilization was <1% of NIC headroom; the bottleneck is GPU/HBM/PCIe.

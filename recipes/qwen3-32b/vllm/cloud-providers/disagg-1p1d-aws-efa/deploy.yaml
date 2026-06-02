@@ -85,12 +85,6 @@ spec:
           - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
           # --- libfabric EFA provider ---
-          # FI_EFA_ENABLE_SHM_TRANSFER=0 is a conservative default. The legacy
-          # claim "SHM=1 causes silent GPU corruption under load" was unsubstantiated.
-          # Verified 2026-05-29 that SHM=1 produces byte-identical deterministic
-          # outputs and clean libfabric KV transfer in this cross-node 1P+1D
-          # pattern. Keep =0 for safety (matches AWS doc + has no downside
-          # in our pattern, which has no intra-node libfabric traffic anyway).
           - { name: FI_PROVIDER,               value: "efa" }
           - { name: FI_EFA_USE_DEVICE_RDMA,    value: "1" }
           - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
