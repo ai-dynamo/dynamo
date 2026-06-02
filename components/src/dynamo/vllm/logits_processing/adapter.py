@@ -104,7 +104,6 @@ class DynamoVllmLogitsProcessor(AdapterLogitsProcessor):
         extra_args = getattr(params, "extra_args", None) or {}
         payload = extra_args.get(_DYNAMO_LOGITS_KEY)
         if not payload:
-            # No activation for this request — vLLM skips it entirely.
             return None
         entries = deserialize_logits_processor_entries(payload)
         processors = [_realize_entry(entry) for entry in entries]

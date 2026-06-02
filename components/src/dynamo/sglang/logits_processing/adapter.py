@@ -111,7 +111,6 @@ class DynamoSglangLogitProcessor(CustomLogitProcessor):
             params = params or {}
             payload = params.get(_ENTRIES_KEY)
             if not payload:
-                # This request didn't activate a Dynamo processor.
                 continue
             uid = params.get(_UID_KEY)
             processors = self._per_request.get(uid)

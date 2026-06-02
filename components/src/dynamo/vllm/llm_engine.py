@@ -138,9 +138,8 @@ class _UnifiedStatLoggerFactory:
 
 
 class VllmLLMEngine(LLMEngine):
-    # Class-level default so instances built via ``__new__`` (tests that skip
-    # ``__init__`` and call ``generate()`` directly) still expose the attribute
-    # ``generate()`` reads. ``start()`` overwrites it on the real path.
+    # Class-level default so ``__new__``-built instances (tests skipping
+    # ``__init__``) still expose what ``generate()`` reads; ``start()`` sets it.
     _logits_processor_spec: "LogitsProcessorSpec | None" = None
 
     def __init__(
@@ -164,8 +163,6 @@ class VllmLLMEngine(LLMEngine):
         # factory call sees a valid object. `num_gpu_blocks` is patched
         # after KV profiling finishes.
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
-        # Resolved once in start() after AsyncLLM init; None when the smoke
-        # hook is off or this is a non-generation worker.
         self._logits_processor_spec: LogitsProcessorSpec | None = None
 
     @classmethod
@@ -209,12 +206,9 @@ class VllmLLMEngine(LLMEngine):
         os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-        # Register the engine-loaded logits-processor adapter before the
-        # engine config is built so vLLM instantiates it. Only for the smoke
-        # hook on a generation worker — PREFILL never attaches (gated again
-        # per request in generate()), and production paths are untouched.
-        # vLLM already initializes the tokenizer by default in Dynamo, so
-        # (unlike TRT-LLM/SGLang) there is no skip_tokenizer_init flag to flip.
+        # Register the engine-loaded adapter before the engine config is built
+        # so vLLM instantiates it. vLLM defaults to tokenizer init, so there is
+        # no skip_tokenizer_init flag to flip here (unlike TRT-LLM/SGLang).
         if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
             self.disaggregation_mode
         ):
@@ -239,8 +233,7 @@ class VllmLLMEngine(LLMEngine):
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
         )
-        # Resolve the engine-declared spec now the tokenizer is available;
-        # see logits_processor_spec(). None when the hook is off / non-gen role.
+        # Resolve once the tokenizer is available (see logits_processor_spec()).
         self._logits_processor_spec = await self.logits_processor_spec()
 
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
@@ -329,10 +322,8 @@ class VllmLLMEngine(LLMEngine):
                 sampling_params.extra_args = {}
             sampling_params.extra_args["kv_transfer_params"] = kv_params
 
-        # Activate engine-declared logits processors for this request. The
-        # shared gating returns [] for PREFILL / hook-off, so this is a no-op
-        # unless the smoke hook is on and this is a generation worker. The
-        # engine-loaded DynamoVllmLogitsProcessor reads these back per request.
+        # Shared gating returns [] for PREFILL / hook-off, so this is a no-op
+        # unless the hook is on and this is a generation worker.
         entries = logits_processors_for_request(
             self._logits_processor_spec,
             disaggregation_mode=self.disaggregation_mode,

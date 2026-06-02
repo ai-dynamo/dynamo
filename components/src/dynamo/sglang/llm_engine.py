@@ -101,9 +101,8 @@ def _local_dp_rank_range(server_args) -> tuple[int, int]:
 
 
 class SglangLLMEngine(LLMEngine):
-    # Class-level default so instances built via ``__new__`` (tests that skip
-    # ``__init__`` and call ``generate()`` directly) still expose the attribute
-    # ``generate()`` reads. ``start()`` overwrites it on the real path.
+    # Class-level default so ``__new__``-built instances (tests skipping
+    # ``__init__``) still expose what ``generate()`` reads; ``start()`` sets it.
     _logits_processor_spec: "LogitsProcessorSpec | None" = None
 
     def __init__(self, server_args, dynamo_args, serving_mode: DisaggregationMode):
@@ -133,8 +132,6 @@ class SglangLLMEngine(LLMEngine):
         # `dp_rank` against this node's range before forwarding to SGLang.
         self._dp_start: int = 0
         self._dp_size: int = 1
-        # Resolved once in start() after engine init; None when the smoke
-        # hook is off or this is a non-generation worker.
         self._logits_processor_spec: LogitsProcessorSpec | None = None
 
     @classmethod
@@ -145,13 +142,9 @@ class SglangLLMEngine(LLMEngine):
         server_args = config.server_args
         dynamo_args = config.dynamo_args
 
-        # Smoke hook on a generation worker: enable SGLang's custom-processor
-        # path and force tokenizer init (needed to resolve the forced "Hello
-        # world!" token IDs once at startup). Set after parse_args so an
-        # explicit user skip_tokenizer_init can't starve the hook. PREFILL
-        # never attaches (gated again per request in generate()), so it keeps
-        # its configured flags. These flags are SGLang-shaped; each backend
-        # sets its own.
+        # Enable SGLang's custom-processor path and force tokenizer init (to
+        # resolve the forced token IDs at startup). After parse_args so a user
+        # skip_tokenizer_init can't starve the hook.
         if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
             config.serving_mode
         ):
@@ -184,8 +177,7 @@ class SglangLLMEngine(LLMEngine):
         )
         self._input_param_manager = InputParamManager(tokenizer)
 
-        # Resolve the engine-declared spec now the tokenizer is available;
-        # see logits_processor_spec(). None when the hook is off / non-gen role.
+        # Resolve once the tokenizer is available (see logits_processor_spec()).
         self._logits_processor_spec = await self.logits_processor_spec()
 
         logger.info(
@@ -329,20 +321,21 @@ class SglangLLMEngine(LLMEngine):
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
-        # Activate engine-declared logits processors for this request. The
-        # shared gating returns [] for PREFILL / hook-off, so this is a no-op
-        # (empty kwargs, sampling_params untouched) unless the smoke hook is
-        # on and this is a generation worker. Keyed on context.id() — the
-        # guaranteed unique, stable-per-request id — so the scheduler-cached
-        # processor tracks per-request state. (Not trace_id: that is optional
-        # and trace-scoped, so it can be None or shared across requests, which
-        # would collide the per-request state map.)
+        # Shared gating returns [] for PREFILL / hook-off (a no-op). Key state
+        # on context.id(), not trace_id: trace_id is optional and trace-scoped,
+        # so it can be None or shared across requests and collide the state map.
         logits_entries = logits_processors_for_request(
             self._logits_processor_spec,
             disaggregation_mode=self.serving_mode,
         )
-        logits_kwargs = activate_logits_processors(
-            sampling_params, logits_entries, request_uid=context.id()
+        # Resolve the uid only when there's something to activate, so the
+        # no-activation path never calls context.id().
+        logits_kwargs = (
+            activate_logits_processors(
+                sampling_params, logits_entries, request_uid=context.id()
+            )
+            if logits_entries
+            else {}
         )
 
         # SGLang disagg keys NIXL transport on a (host, port, room) triple
