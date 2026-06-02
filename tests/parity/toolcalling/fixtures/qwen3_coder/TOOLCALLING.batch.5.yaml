@@ -178,3 +178,58 @@ cases:
           requires the closing sentinel, so the trailing call truncated mid-arg
           value is dropped. Dynamo/vLLM recover the partial value
           (location='New York') and emit the call.
+  TOOLCALLING.batch.5.f:
+    description: Bare valid function before a complete wrapped call
+    ref: dynamo
+    model_text: |-
+      <function=get_weather>
+      <parameter=location>
+      NYC
+      </parameter>
+      </function>
+      </tool_call>
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      Boston
+      </parameter>
+      </function>
+      </tool_call>
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          <function=get_weather>
+          <parameter=location>
+          NYC
+          </parameter>
+          </function>
+          </tool_call>
+        reason: vLLM preserves the bare Qwen function before the first <tool_call> as content, including the trailing newline; Dynamo recovers it as the first structured call before parsing the wrapped call.
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          <function=get_weather>
+          <parameter=location>
+          NYC
+          </parameter>
+          </function>
+          </tool_call>
+        reason: SGLang preserves the bare Qwen function before the first <tool_call> as content, including the trailing newline; Dynamo recovers it as the first structured call before parsing the wrapped call.

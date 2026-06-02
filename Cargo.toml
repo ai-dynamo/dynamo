@@ -71,6 +71,7 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.3.0" }
 velo = { version = "0.1.0" }
 
 # External dependencies
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "69b3cff352303b95e5196a28966ae1ee4a3a3955", package = "aiconfigurator-core" }
 anyhow = { version = "1" }
 lru = { version = "0.12" }
 async-nats = { version = "0.45.0", features = ["service"] }
