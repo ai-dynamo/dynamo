@@ -13,18 +13,24 @@ NS="${NS:-prompt-enhance}"
 PYTHON="${PYTHON:-python}"
 MODE="${MODE:-video}"
 
+# Default ports to a free OS-assigned port so two example stacks can share a
+# host without colliding; explicit *_PORT env vars still take precedence.
+free_port() {
+  "${PYTHON}" -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'
+}
+
 LLM_MODEL="${LLM_MODEL:-Qwen/Qwen3-0.6B}"
 
-FE_LLM_PORT="${FE_LLM_PORT:-8000}"
+FE_LLM_PORT="${FE_LLM_PORT:-$(free_port)}"
 
 ENHANCER_GPU="${ENHANCER_GPU:-0}"
 
 case "${MODE}" in
   video)
     BACKEND_MODEL="${BACKEND_MODEL:-${T2V_MODEL:-Wan-AI/Wan2.1-T2V-1.3B-Diffusers}}"
-    FE_BACKEND_PORT="${FE_BACKEND_PORT:-${FE_T2V_PORT:-8001}}"
+    FE_BACKEND_PORT="${FE_BACKEND_PORT:-${FE_T2V_PORT:-$(free_port)}}"
     BACKEND_GPUS="${BACKEND_GPUS:-${T2V_GPUS:-1,2,3}}"
-    BACKEND_MASTER_PORT_BASE="${BACKEND_MASTER_PORT_BASE:-${T2V_MASTER_PORT_BASE:-30110}}"
+    BACKEND_MASTER_PORT_BASE="${BACKEND_MASTER_PORT_BASE:-${T2V_MASTER_PORT_BASE:-$(free_port)}}"
     BACKEND_MASTER_PORT_STRIDE="${BACKEND_MASTER_PORT_STRIDE:-${T2V_MASTER_PORT_STRIDE:-10}}"
     BACKEND_NAMESPACE="${NS}-t2v"
     BACKEND_LABEL="T2V"
@@ -35,9 +41,9 @@ case "${MODE}" in
     ;;
   image)
     BACKEND_MODEL="${BACKEND_MODEL:-${T2I_MODEL:-black-forest-labs/FLUX.1-dev}}"
-    FE_BACKEND_PORT="${FE_BACKEND_PORT:-${FE_T2I_PORT:-8001}}"
+    FE_BACKEND_PORT="${FE_BACKEND_PORT:-${FE_T2I_PORT:-$(free_port)}}"
     BACKEND_GPUS="${BACKEND_GPUS:-${T2I_GPUS:-1}}"
-    BACKEND_MASTER_PORT_BASE="${BACKEND_MASTER_PORT_BASE:-${T2I_MASTER_PORT_BASE:-30110}}"
+    BACKEND_MASTER_PORT_BASE="${BACKEND_MASTER_PORT_BASE:-${T2I_MASTER_PORT_BASE:-$(free_port)}}"
     BACKEND_MASTER_PORT_STRIDE="${BACKEND_MASTER_PORT_STRIDE:-${T2I_MASTER_PORT_STRIDE:-10}}"
     BACKEND_NAMESPACE="${NS}-t2i"
     BACKEND_LABEL="T2I"

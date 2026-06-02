@@ -281,7 +281,12 @@ class PromptEnhancedClient(Generic[_ResultT]):
                 raise PromptEnhancedClientError(
                     f"LLM enhancer returned HTTP {resp.status}: {body!r}"
                 )
-            data = await resp.json()
+            try:
+                data = await resp.json()
+            except (aiohttp.ContentTypeError, ValueError) as exc:
+                raise PromptEnhancedClientError(
+                    f"LLM enhancer returned a non-JSON response: {exc}"
+                ) from exc
         try:
             return data["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, AttributeError) as exc:
@@ -304,7 +309,12 @@ class PromptEnhancedClient(Generic[_ResultT]):
                 raise PromptEnhancedClientError(
                     f"{self._backend_name} returned HTTP {resp.status}: {body!r}"
                 )
-            return await resp.json()
+            try:
+                return await resp.json()
+            except (aiohttp.ContentTypeError, ValueError) as exc:
+                raise PromptEnhancedClientError(
+                    f"{self._backend_name} returned a non-JSON response: {exc}"
+                ) from exc
 
     def _extract_generation_media(
         self, raw: Mapping[str, Any]
