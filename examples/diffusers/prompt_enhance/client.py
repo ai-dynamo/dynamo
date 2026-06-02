@@ -10,9 +10,9 @@ default; use ``--mode image`` against an image diffusion frontend.
 
 Usage::
 
-    python client_example.py "a bear by a campfire under starlight"
-    python client_example.py --enhancer off "an astronaut on a black sand beach"
-    python client_example.py --mode image --t2i-url http://127.0.0.1:8001 "a glass teapot"
+    python client.py "a bear by a campfire under starlight"
+    python client.py --enhancer off "an astronaut on a black sand beach"
+    python client.py --mode image --t2i-url http://127.0.0.1:8001 "a glass teapot"
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import argparse
 import asyncio
 import sys
 
-from dynamo.common.clients import EnhancerMode, T2IEnhancedClient, T2VEnhancedClient
+from dynamo.common.multimodal import EnhancerMode, T2IEnhancedClient, T2VEnhancedClient
 
 
 def _parse_args() -> argparse.Namespace:

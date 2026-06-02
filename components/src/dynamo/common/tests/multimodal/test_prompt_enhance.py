@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from aiohttp import web
 
-from dynamo.common.clients import (
+from dynamo.common.multimodal import (
     EnhancerMode,
     T2IEnhancedClient,
     T2VEnhancedClient,

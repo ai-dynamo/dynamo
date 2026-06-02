@@ -20,6 +20,22 @@ from dynamo.common.multimodal.embedding_transfer import (
     TransferRequest,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.prompt_enhance import (
+    EnhancerMode,
+    OutputModality,
+    PromptEnhancedClient,
+    PromptEnhancedClientError,
+    PromptEnhancedResult,
+    PromptEnhanceTimings,
+    T2IEnhancedClient,
+    T2IEnhancedClientError,
+    T2IResult,
+    T2ITimings,
+    T2VEnhancedClient,
+    T2VEnhancedClientError,
+    T2VResult,
+    T2VTimings,
+)
 from dynamo.common.multimodal.video_loader import VideoLoader
 
 EMBEDDING_SENDER_FACTORIES: dict[
@@ -54,4 +70,18 @@ __all__ = [
     "TransferRequest",
     "LocalEmbeddingReceiver",
     "LocalEmbeddingSender",
+    "EnhancerMode",
+    "OutputModality",
+    "PromptEnhancedClient",
+    "PromptEnhancedClientError",
+    "PromptEnhancedResult",
+    "PromptEnhanceTimings",
+    "T2IEnhancedClient",
+    "T2IEnhancedClientError",
+    "T2IResult",
+    "T2ITimings",
+    "T2VEnhancedClient",
+    "T2VEnhancedClientError",
+    "T2VResult",
+    "T2VTimings",
 ]
