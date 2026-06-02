@@ -154,11 +154,16 @@ class OmniStageWorker:
 
         sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
         last_result = None
+        final_audio_results: list[Any] = []
 
         try:
             async for chunk in self.engine.generate(
                 prompt, request_id=request_id, sampling_params_list=sp
             ):
+                if getattr(chunk, "final_output_type", None) == "audio":
+                    multimodal_output = _chunk_multimodal_output(chunk)
+                    if multimodal_output is not None:
+                        final_audio_results.append(chunk)
                 last_result = chunk
         except Exception as e:
             logger.error(
@@ -222,7 +227,10 @@ class OmniStageWorker:
         # worker and the router to reside on the same machine. A proper multi-node
         # solution would use a connector edge (like inter-stage connectors) instead.
         # Tracked in TODO: shm_meta should be replaced by a YAML-configured connector edge.
-        shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
+        serializable_result = (
+            final_audio_results if len(final_audio_results) > 1 else last_result
+        )
+        shm_meta = shm_write_bytes(serialize_obj(serializable_result), name=request_id)
         yield {"shm_meta": shm_meta, "finished": True}
 
     def _build_engine_core_request_from_upstream(
@@ -573,6 +581,21 @@ def _cleanup_temp_stage_config(path: str) -> None:
             os.unlink(path)
     except OSError:
         pass
+
+
+def _chunk_multimodal_output(chunk: Any) -> Any | None:
+    multimodal_output = getattr(chunk, "multimodal_output", None)
+    if multimodal_output is not None:
+        return multimodal_output
+    request_output = getattr(chunk, "request_output", None)
+    if request_output is not None:
+        multimodal_output = getattr(request_output, "multimodal_output", None)
+        if multimodal_output is not None:
+            return multimodal_output
+    outputs = _iter_completion_outputs(chunk)
+    if len(outputs) == 1:
+        return getattr(outputs[0], "multimodal_output", None)
+    return None
 
 
 def _prepare_connector_payload(engine_inputs: Any) -> Any:

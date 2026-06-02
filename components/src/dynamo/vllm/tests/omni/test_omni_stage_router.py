@@ -273,6 +273,46 @@ async def test_generate_delegates_formatting_to_output_formatter():
 
 
 @pytest.mark.asyncio
+async def test_format_output_formats_audio_list_with_shared_delta_state():
+    fake_results = [
+        SimpleNamespace(final_output_type="audio", index=0),
+        SimpleNamespace(final_output_type="audio", index=1),
+    ]
+    seen_states = []
+
+    async def format_item(item, request_id, **ctx):
+        seen_states.append(ctx.get("audio_delta_state"))
+        return {"chunk": item.index}
+
+    mock_formatter = AsyncMock()
+    mock_formatter.format.side_effect = format_item
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={},
+        formatter=mock_formatter,
+    )
+    stage_output = stage_router.StageOutput.model_validate(
+        {"shm_meta": {"some": "meta"}, "finished": True}
+    )
+
+    with patch.object(stage_router, "shm_deserialize", return_value=fake_results):
+        chunks = [
+            c
+            async for c in router._format_output(
+                stage_output,
+                "req-stream",
+                RequestType.CHAT_COMPLETION,
+                {},
+            )
+        ]
+
+    assert chunks == [{"chunk": 0}, {"chunk": 1}]
+    assert mock_formatter.format.await_count == 2
+    assert seen_states[0] is seen_states[1]
+    assert isinstance(seen_states[0], dict)
+
+
+@pytest.mark.asyncio
 async def test_generate_yields_error_when_no_shm_meta():
     """When final stage returns no shm_meta, generate yields an error."""
 

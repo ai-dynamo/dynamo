@@ -153,13 +153,29 @@ class OmniStageRouter:
             return
 
         result = shm_deserialize(shm_meta)
-        chunk = await self._formatter.format(
-            result, request_id, request_type=request_type, **ctx
+        results = result if isinstance(result, list) else [result]
+        emitted = False
+        final_output_type = "unknown"
+        audio_delta_state: dict[str, Any] | None = (
+            {} if request_type == RequestType.CHAT_COMPLETION else None
         )
-        if chunk:
-            yield chunk
-        else:
-            final_output_type = getattr(result, "final_output_type", "unknown")
+
+        for item in results:
+            final_output_type = getattr(item, "final_output_type", final_output_type)
+            item_ctx = ctx
+            if (
+                audio_delta_state is not None
+                and getattr(item, "final_output_type", None) == "audio"
+            ):
+                item_ctx = {**ctx, "audio_delta_state": audio_delta_state}
+            chunk = await self._formatter.format(
+                item, request_id, request_type=request_type, **item_ctx
+            )
+            if chunk:
+                emitted = True
+                yield chunk
+
+        if not emitted:
             logger.warning(
                 "Router: formatter returned None, final_output_type=%s",
                 final_output_type,

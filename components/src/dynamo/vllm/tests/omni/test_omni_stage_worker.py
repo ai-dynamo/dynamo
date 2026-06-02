@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 try:
+    from dynamo.vllm.omni import stage_worker
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
         _ensure_stage_connectors,
@@ -67,6 +68,23 @@ class _ErrorEngine:
             yield  # make it an async generator
 
         return _gen()
+
+
+class _ChunkEngine:
+    engine = None
+
+    def __init__(self, outputs):
+        self._outputs = outputs
+
+    def generate(self, prompt, request_id="", *, sampling_params_list=None):
+        async def _gen():
+            for output in self._outputs:
+                yield output
+
+        return _gen()
+
+    async def get_tokenizer(self):
+        return None
 
 
 class _MockContext:
@@ -339,6 +357,44 @@ async def test_stage_connector_refs_with_stage_list_processor():
     assert processor_calls[0]["requires_mm"] is True
     assert engine.received_prompt == processed_prompt
     assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1"}
+
+
+@pytest.mark.asyncio
+async def test_final_audio_stage_serializes_streamed_audio_outputs():
+    outputs = [
+        SimpleNamespace(
+            final_output_type="audio",
+            multimodal_output={"audio": [1, 2, 3], "sr": 24000},
+        ),
+        SimpleNamespace(
+            final_output_type="audio",
+            multimodal_output={"audio": [1, 2, 3, 4, 5], "sr": 24000},
+        ),
+    ]
+    worker = _make_worker(engine=_ChunkEngine(outputs))
+    serialized = []
+
+    def fake_serialize(value):
+        serialized.append(value)
+        return b"serialized"
+
+    with (
+        patch.object(stage_worker, "serialize_obj", side_effect=fake_serialize),
+        patch.object(
+            stage_worker,
+            "shm_write_bytes",
+            return_value={"name": "req-audio", "size": 1},
+        ),
+    ):
+        chunks = [
+            chunk
+            async for chunk in worker.generate(
+                {"engine_inputs": {"prompt": "hello"}}, _MockContext()
+            )
+        ]
+
+    assert chunks == [{"shm_meta": {"name": "req-audio", "size": 1}, "finished": True}]
+    assert serialized == [outputs]
 
 
 @pytest.mark.asyncio

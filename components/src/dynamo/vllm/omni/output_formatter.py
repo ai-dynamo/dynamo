@@ -284,13 +284,27 @@ class AudioFormatter:
         if not mm_output:
             return self._error_response(request_id, "No audio generated")
 
+        request_type = ctx.get("request_type")
         response_format = ctx.get("response_format")
         output_format = ctx.get("output_format")
         speed = ctx.get("speed", 1.0)
 
         try:
             start_time = time.time()
-            audio_np, sample_rate = self._extract_audio_tensor(mm_output)
+            stream_delta = request_type == RequestType.CHAT_COMPLETION
+            audio_np, sample_rate = self._extract_audio_tensor(
+                mm_output, stream_delta=stream_delta
+            )
+            if stream_delta:
+                audio_np = _trim_cumulative_audio_delta(
+                    audio_np, ctx.get("audio_delta_state")
+                )
+                if audio_np is None or len(audio_np) == 0:
+                    logger.debug(
+                        "Skipping duplicate cumulative audio chunk for request %s",
+                        request_id,
+                    )
+                    return None
 
             encode_fmt = "wav" if output_format is None else output_format
             assert encode_fmt is not None
@@ -337,7 +351,9 @@ class AudioFormatter:
             logger.error("Failed to process audio for request %s: %s", request_id, e)
             return self._error_response(request_id, str(e))
 
-    def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
+    def _extract_audio_tensor(
+        self, mm_output: Dict[str, Any], *, stream_delta: bool = False
+    ) -> tuple:
         audio_key = "audio" if "audio" in mm_output else "model_outputs"
         audio_val = mm_output.get(audio_key)
         if audio_val is None:
@@ -346,7 +362,11 @@ class AudioFormatter:
             )
 
         if isinstance(audio_val, list):
-            audio_val = torch.cat(audio_val, dim=-1)
+            audio_val = (
+                _last_audio_chunk(audio_val)
+                if stream_delta
+                else _concat_audio_chunks(audio_val)
+            )
 
         if hasattr(audio_val, "float"):
             audio_np = audio_val.float().detach().cpu().numpy()
@@ -404,6 +424,43 @@ class AudioFormatter:
             created=int(time.time()),
             error=error,
         ).model_dump()
+
+
+def _last_audio_chunk(chunks: list[Any]) -> Any:
+    for chunk in reversed(chunks):
+        if chunk is not None:
+            return chunk
+    raise ValueError("No audio data in multimodal_output audio list")
+
+
+def _concat_audio_chunks(chunks: list[Any]) -> torch.Tensor:
+    tensors = [torch.as_tensor(chunk) for chunk in chunks if chunk is not None]
+    if not tensors:
+        raise ValueError("No audio data in multimodal_output audio list")
+    try:
+        return torch.cat(tensors, dim=-1)
+    except RuntimeError:
+        return torch.cat([tensor.reshape(-1) for tensor in tensors], dim=0)
+
+
+def _trim_cumulative_audio_delta(
+    audio_np: np.ndarray,
+    state: dict[str, Any] | None,
+) -> np.ndarray | None:
+    if state is None:
+        return audio_np
+
+    previous = state.get("audio_np")
+    state["audio_np"] = audio_np
+    if not isinstance(previous, np.ndarray) or previous.size == 0:
+        return audio_np
+    if audio_np.size < previous.size:
+        return audio_np
+
+    prefix = audio_np[: previous.size]
+    if np.allclose(prefix, previous, rtol=1e-3, atol=1e-4):
+        return audio_np[previous.size :]
+    return audio_np
 
 
 def _error_chunk(

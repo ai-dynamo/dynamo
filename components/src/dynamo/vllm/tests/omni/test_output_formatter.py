@@ -291,6 +291,25 @@ class TestAudioFormatterExtractTensor:
         audio_np, _ = f._extract_audio_tensor(mm)
         assert audio_np.ndim == 1
 
+    def test_chat_stream_delta_uses_last_audio_list_item(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {
+            "audio": [
+                np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                np.array([0.4, 0.5], dtype=np.float32),
+            ],
+            "sr": 24000,
+        }
+
+        audio_np, sr = f._extract_audio_tensor(mm, stream_delta=True)
+
+        assert sr == 24000
+        np.testing.assert_allclose(audio_np, np.array([0.4, 0.5], dtype=np.float32))
+
 
 class TestAudioFormatterEncode:
     def test_wav_encoding(self):
@@ -347,6 +366,45 @@ class TestAudioFormatterFormat:
         assert result["object"] == "audio.speech"
         assert len(result["data"]) == 1
         assert result["data"][0]["b64_json"] is not None
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_streaming_trims_cumulative_audio_prefix(self):
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        state = {}
+
+        with patch.object(
+            f, "_encode_audio", return_value=(b"wav", "audio/wav")
+        ) as enc:
+            await f.format(
+                {"audio": np.array([0.1, 0.2, 0.3], dtype=np.float32), "sr": 24000},
+                "req-1",
+                request_type=RequestType.CHAT_COMPLETION,
+                audio_delta_state=state,
+            )
+            result = await f.format(
+                {
+                    "audio": np.array([0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float32),
+                    "sr": 24000,
+                },
+                "req-1",
+                request_type=RequestType.CHAT_COMPLETION,
+                audio_delta_state=state,
+            )
+
+        _, first_args, _ = enc.mock_calls[0]
+        _, second_args, _ = enc.mock_calls[1]
+        np.testing.assert_allclose(
+            first_args[0], np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        )
+        np.testing.assert_allclose(
+            second_args[0], np.array([0.4, 0.5], dtype=np.float32)
+        )
+        assert result["status"] == "completed"
 
 
 # ── OutputFormatter dispatcher ─────────────────────────────
