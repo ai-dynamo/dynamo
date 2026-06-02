@@ -32,9 +32,9 @@ spec:
         # ephemeral-storage request: the vllm-runtime:1.1.1 image is ~15 GB
         # registry, ~30 GB extracted. 30Gi here excludes nodes that don't have
         # enough disk to extract+hold the image cleanly (avoids the kubelet
-        # image-GC eviction loop seen on AKS-dev system-pool 123-GiB nodes).
+        # image-GC eviction loop seen on small-disk CPU-pool nodes).
         # Tune up if your cluster's GPU pool nodes have <60 GiB allocatable.
-        requests: { cpu: "4", ephemeral-storage: "30Gi" }
+        requests: { cpu: "4", custom: { ephemeral-storage: "30Gi" } }
         limits:   { cpu: "8" }
       subComponentType: null
       volumeMounts:
@@ -62,15 +62,17 @@ spec:
           # SEPARATE IB partitions (different pkeys → cross-pool RDMA handshake
           # may fail), add a nodeAffinity selecting one specific pool. Whether
           # cross-pool actually fails is cluster-specific — verify on your
-          # cluster before adding pinning (we have not verified it on dynamo-aks-dev
-          # but documented it as a hypothesis).
+          # cluster before adding pinning.
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchExpressions:
+                # Both workers are componentType: worker (the operator puts
+                # prefill/decode on the sub-component-type label, not here), so match
+                # "worker" to repel the two onto separate nodes for cross-node KV.
                 - key: nvidia.com/dynamo-component-type
                   operator: In
-                  values: [prefill, decode]
+                  values: [worker]
               topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
@@ -109,32 +111,17 @@ spec:
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
           # NIXL backend: runtime defaults to UCX when DYN_KVBM_NIXL_BACKEND_LIBFABRIC
           # is unset, so no explicit selector env is needed here.
-          # --- UCX over InfiniBand (8 ConnectX-6/CX-7 rails: mlx5_0..mlx5_7) ---
-          # NOTE: don't set UCX_TLS. UCX needs internal transports (notably ud_mlx5
-          # for active-messages wireup) that an explicit allowlist almost always
-          # omits, breaking transport selection. Let UCX auto-probe.
-          # NOTE: no UCX_NET_DEVICES. Verified at both TP=4 and TP=8 via smoke tests:
-          #   - 2026-05-28 (TP=4): all 4 ranks "Backend UCX was instantiated"; single
-          #     inference agent_rx 0 → 4 MiB.
-          #   - 2026-05-29 (TP=8): all 8 ranks "Backend UCX was instantiated"; KV cache
-          #     registered (62.51 GiB/rank, 2,048,384 tokens). No DMA-BUF kernel timeout.
-          # The 8-ranks × 8-NICs = 64-registrations DMA-BUF kernel timeout is specific
-          # to an EXPLICIT 8-NIC UCX_NET_DEVICES list. UCX auto-probe is smarter — it
-          # appears to do per-rank-preferred registration that stays under the kernel
-          # threshold. The 1.88 GB/s Mooncake number in the README was collected with
-          # the prior 4-NIC explicit list (2026-05-27); the recipe now ships without
-          # UCX_NET_DEVICES at any TP — see README "Test trail" block.
+          # --- UCX over InfiniBand ---
+          # Do not set UCX_TLS: an explicit transport allowlist can omit the internal
+          # transports UCX needs for connection wireup. Let UCX choose transports.
+          # UCX_NET_DEVICES is required: it restricts KV transfer to the compute-fabric
+          # NICs (mlx5_0..3). Without it, UCX auto-probe may bind a non-compute
+          # (side-fabric) NIC, which sharply degrades KV-transfer performance and leaves
+          # the NIXL KV-bandwidth telemetry counter reading zero.
+          - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
           - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
-          # NOTE: no UCX_RNDV_THRESH. The "=8192" value was cargo-culted with no
-          # test record; removing it produced no behavioral change (smoke verified
-          # 2026-05-29). UCX defaults are fine here.
-          # --- NCCL: env loaded but IB transport never exercised in 1P1D ---
-          # Intra-pod TP collectives = NVLink/P2P (single-node ring; verified
-          # 2026-05-29 with NCCL_DEBUG=INFO: 24 P2P channels, 0 IB channels).
-          # Cross-pod KV transfer = NIXL/UCX, not NCCL. So NCCL_IB_GID_INDEX is
-          # *moot* in this pattern — was previously set to 3 on RoCEv2 convention
-          # but link bring-up doesn't happen and the value isn't read by any
-          # active code path. Dropped 2026-05-29.
+          # --- NCCL: IB transport is not exercised in 1P1D. Intra-pod TP collectives
+          # use NVLink/P2P; cross-pod KV transfer uses NIXL/UCX, not NCCL. ---
           - { name: NCCL_IB_HCA,            value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
           - { name: NCCL_IB_DISABLE,        value: "0" }
           - { name: NCCL_SOCKET_IFNAME,     value: "eth0" }
@@ -186,15 +173,17 @@ spec:
           # SEPARATE IB partitions (different pkeys → cross-pool RDMA handshake
           # may fail), add a nodeAffinity selecting one specific pool. Whether
           # cross-pool actually fails is cluster-specific — verify on your
-          # cluster before adding pinning (we have not verified it on dynamo-aks-dev
-          # but documented it as a hypothesis).
+          # cluster before adding pinning.
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchExpressions:
+                # Both workers are componentType: worker (the operator puts
+                # prefill/decode on the sub-component-type label, not here), so match
+                # "worker" to repel the two onto separate nodes for cross-node KV.
                 - key: nvidia.com/dynamo-component-type
                   operator: In
-                  values: [prefill, decode]
+                  values: [worker]
               topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
@@ -231,13 +220,12 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
-          # NOTE: no UCX_TLS — see prefill block; let UCX auto-probe.
-          # NOTE: no UCX_NET_DEVICES — see prefill block. Auto-probe verified at
-          # both TP=4 (2026-05-28) and TP=8 (2026-05-29) on AKS-dev a100a.
+          # UCX over InfiniBand — see prefill block. UCX_NET_DEVICES is required:
+          # it pins KV transfer to the compute-fabric NICs (mlx5_0..3); without it,
+          # auto-probe may bind a non-compute NIC, degrading performance and zeroing
+          # the NIXL KV-bandwidth telemetry counter. Do not set UCX_TLS.
+          - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
           - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
-          # NOTE: no UCX_RNDV_THRESH. The "=8192" value was cargo-culted with no
-          # test record; removing it produced no behavioral change (smoke verified
-          # 2026-05-29). UCX defaults are fine here.
           - { name: NCCL_IB_HCA,            value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
           - { name: NCCL_IB_DISABLE,        value: "0" }
           - { name: NCCL_IB_GID_INDEX,      value: "3" }

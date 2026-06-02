@@ -2,18 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Qwen3-32B BF16 disagg, 1 prefill + 1 decode, cross-node over GCP A4X (GB200 NVL72) RoCEv2.
-# Purpose: measure NIXL KV-transfer bandwidth over UCX/RoCE backend on GKE.
-# Topology: TP=4 prefill on node A, TP=4 decode on node B (pod anti-affinity).
-# A4X nodes expose 4 GPUs and 4 ConnectX-7 RDMA NICs per node (not 8 like A3 Ultra / A4).
-#
-# Critical GKE-A4X specifics (vs. AWS EFA template):
-#   - RDMA NICs are attached via pod-level Multus annotation
-#     `networking.gke.io/interfaces`, NOT a `resources.limits.custom` key.
-#   - NCCL/RDMA libs come from host hostPaths (`/home/kubernetes/bin/gib`,
-#     `/home/kubernetes/bin/nvidia`) mounted into the pod and pulled in via
-#     LD_LIBRARY_PATH. GIB DaemonSet must be installed cluster-side.
-#   - UCX is the NIXL backend (no libfabric/EFA env). UCX_NET_DEVICES lists
-#     mlx5_0..mlx5_3 (4 NICs).
+
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -108,7 +97,7 @@ spec:
           args:
           # Local snapshot path bypasses ModelExpress + HF rate-limit (model is on lustre).
           - --model
-          - /shared-models/hub/models--Qwen--Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
+          - Qwen/Qwen3-32B
           - --served-model-name
           - Qwen/Qwen3-32B
           - --disaggregation-mode
@@ -138,16 +127,12 @@ spec:
           - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
           # --- UCX backend over RoCE (NIXL default; no DYN_KVBM_NIXL_BACKEND_* needed) ---
-          # NOTE: don't set UCX_TLS. UCX needs internal transports (notably ud_mlx5
-          # for active-messages wireup) that an explicit allowlist almost always
-          # omits. Let UCX auto-probe.
-          # NOTE: no UCX_NET_DEVICES. Verified 2026-05-29 via smoke test that UCX
-          # auto-probe picks the 4 RoCE NICs cleanly on GKE A4X; all 4 ranks
-          # "Backend UCX was instantiated", 4/4 KV_Caches registered.
-          # NOTE: no NCCL_CROSS_NIC. NCCL doesn't exercise its IB transport in 1P1D
-          # (intra-pod TP=4 uses NVLink/P2P, cross-pod KV uses NIXL/UCX) — verified
-          # 2026-05-29. See [[nccl-ib-unused-in-disagg]] memory.
+          # NOTE: don't set UCX_TLS — an explicit transport allowlist can omit the
+          # internal transports UCX needs for wireup. Restrict the NIC set with
+          # UCX_NET_DEVICES instead (pins KV transfer to the 4 RoCE NICs).
+          - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
+          - { name: NCCL_CROSS_NIC,     value: "0" }
           # --- GKE NCCL/GIB plugin + driver libs (mounted from host) ---
           # /opt/nvidia/nvda_nixl/lib64 must come FIRST so NIXL_TELEMETRY_ENABLE=y can
           # load libcore.so.1.3 (otherwise libtelemetry_exporter_prometheus.so fails
@@ -256,7 +241,7 @@ spec:
           args:
           # Local snapshot path bypasses ModelExpress + HF rate-limit (model is on lustre).
           - --model
-          - /shared-models/hub/models--Qwen--Qwen3-32B/snapshots/9216db5781bf21249d130ec9da846c4624c16137
+          - Qwen/Qwen3-32B
           - --served-model-name
           - Qwen/Qwen3-32B
           - --disaggregation-mode
