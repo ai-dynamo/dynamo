@@ -9,6 +9,7 @@ use crate::ReasoningParser;
 use openai_harmony::StreamableParser;
 use openai_harmony::chat::{Content, Message, TextContent};
 use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, chat::Role, load_harmony_encoding};
+use regex::Regex;
 
 ///// Static initialization of harmony encoder to not affect performance every time a parser is created
 /// This is because load_harmony_encoding downloads some tiktoken files into a directory and we don't want to do this every time we create a parser.
@@ -17,6 +18,7 @@ use std::sync::OnceLock;
 static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::Error>> =
     OnceLock::new();
 static HARMONY_CALL_TOKEN_IDS: OnceLock<Vec<u32>> = OnceLock::new();
+static HARMONY_ANALYSIS_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
 const HARMONY_CALL_MARKER: &str = "<|call|>";
 const HARMONY_SPECIAL_TOKENS: &[&str] = &[
     "<|start|>",
@@ -115,12 +117,35 @@ fn harmony_call_token_ids() -> Option<&'static [u32]> {
     }
 }
 
+/// Token id(s) for the harmony `<|call|>` terminator.
+///
+/// `<|call|>` is simultaneously the harmony tool-call terminator the parser
+/// requires AND a gpt-oss EOS token. Pipelines that hide EOS tokens from the
+/// decoded output (e.g. the preprocessor's stop-condition handling) must keep
+/// these ids visible when the harmony tool-call parser is active — otherwise the
+/// terminator is stripped before the parser sees it and tool calls are silently
+/// dropped. Empty if the harmony encoding is unavailable.
+pub fn harmony_terminator_token_ids() -> Vec<u32> {
+    harmony_call_token_ids()
+        .map(|ids| ids.to_vec())
+        .unwrap_or_default()
+}
+
 fn token_ids_contain_sequence(token_ids: &[u32], marker_ids: &[u32]) -> bool {
     !marker_ids.is_empty()
         && marker_ids.len() <= token_ids.len()
         && token_ids
             .windows(marker_ids.len())
             .any(|window| window == marker_ids)
+}
+
+fn harmony_analysis_block_regex() -> &'static Regex {
+    HARMONY_ANALYSIS_BLOCK_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis.*?<\|message\|>.*?(?:<\|call\|>|<\|end\|>|\z)",
+        )
+            .expect("harmony analysis block regex")
+    })
 }
 
 fn input_contains_call_marker(
@@ -159,6 +184,16 @@ fn split_incomplete_harmony_suffix(text: &str) -> (&str, &str) {
         .unwrap_or(0);
 
     text.split_at(text.len() - hold_len)
+}
+
+fn contains_directed_harmony_function_call(text: &str) -> bool {
+    text.contains("<|channel|>commentary to=functions.") && text.contains(HARMONY_CALL_MARKER)
+}
+
+fn strip_analysis_blocks_for_tool_handoff(text: &str) -> String {
+    harmony_analysis_block_regex()
+        .replace_all(text, "")
+        .into_owned()
 }
 
 fn append_separated(target: &mut String, text: &str) {
@@ -235,6 +270,7 @@ impl ReasoningParser for GptOssReasoningParser {
     }
 
     fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult {
+        let caller_supplied_token_ids = !token_ids.is_empty();
         let encoded_tokens;
         let token_ids = if token_ids.is_empty() {
             // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
@@ -284,6 +320,15 @@ impl ReasoningParser for GptOssReasoningParser {
                 current_channel,
                 current,
             );
+        }
+
+        let raw_input_text =
+            raw_input_text_for_tool_parser(text, token_ids, caller_supplied_token_ids);
+        if contains_directed_harmony_function_call(&raw_input_text) {
+            // The serving pipeline feeds reasoning normal_text into the Harmony
+            // tool parser. Keep directed commentary envelopes intact so tool
+            // calls are not silently dropped.
+            normal_text = strip_analysis_blocks_for_tool_handoff(&raw_input_text);
         }
 
         tracing::debug!(
@@ -429,8 +474,7 @@ impl ReasoningParser for GptOssReasoningParser {
             // Streaming currently feeds the downstream Harmony tool parser through
             // `normal_text`. This is an internal handoff, not visible-content
             // semantics: directed commentary tool payloads must become tool calls,
-            // not assistant `content`. Batch parsing does not use this handoff and
-            // keeps directed commentary out of `normal_text`.
+            // not assistant `content`.
             if !self.pending_tool_call_text.is_empty() {
                 self.pending_tool_call_text.push_str(&raw_input_text);
                 if has_call_marker {
@@ -553,12 +597,27 @@ mod tests {
     }
 
     #[test]
-    fn test_gpt_oss_recipient_commentary_is_not_normal_text() {
+    fn test_gpt_oss_directed_commentary_is_tool_parser_handoff() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let text = "<|channel|>analysis<|message|>think<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny.";
         let result = parser.detect_and_parse_reasoning(text, &[]);
         assert_eq!(result.reasoning_text, "think");
-        assert_eq!(result.normal_text, "It is sunny.");
+        assert_eq!(
+            result.normal_text,
+            "<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny."
+        );
+    }
+
+    #[test]
+    fn test_gpt_oss_analysis_call_does_not_swallow_commentary_handoff() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let text = "<|channel|>analysis to=functions.search <|constrain|>json<|message|>{\"q\":\"x\"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny.";
+        let result = parser.detect_and_parse_reasoning(text, &[]);
+        assert_eq!(result.reasoning_text, "{\"q\":\"x\"}");
+        assert_eq!(
+            result.normal_text,
+            "<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny."
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
 VLLM_SYSTEM_PORT_BASE="${VLLM_SYSTEM_PORT_BASE:-18081}"
 KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-5557}"
-DYN_LOG_VAL="${DYN_LOG:-info,lightseek_mm=debug,dynamo_kv_router::scheduling=debug}"
+DYN_LOG_VAL="${DYN_LOG:-info,lightseek_mm=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug}"
 
 # Pass-through extra args for `python -m dynamo.vllm`.
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
@@ -131,6 +131,9 @@ COMMON_ENV=(
 
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
+# Phase 1: launch all workers in parallel.
+# Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
+# requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
@@ -150,6 +153,11 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --max-model-len "${MAX_MODEL_LEN}" \
         --kv-events-config "${KV_EVENTS_CONFIG}" \
         ${GPU_MEM_ARGS} ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
+done
+
+# Phase 2: wait for all workers to be ready.
+for i in $(seq 1 "${NUM_WORKERS}"); do
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 

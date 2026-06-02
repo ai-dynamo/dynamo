@@ -35,7 +35,12 @@ from .handlers import (
     PrefillWorkerHandler,
     get_dp_range_for_worker,
 )
-from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .health_check import (
+    VllmEmbeddingHealthCheckPayload,
+    VllmHealthCheckPayload,
+    VllmPrefillHealthCheckPayload,
+)
+from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
 
@@ -50,7 +55,9 @@ EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMet
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
     """Wait for benchmark result files and aggregate across DP ranks."""
-    base_path = Path(bench_cfg["output_path"])
+    base_path = Path(
+        os.environ.get(ENV_FPM_BENCHMARK_OUTPUT_PATH, bench_cfg["output_path"])
+    )
     timeout = int(bench_cfg.get("timeout", 300))
 
     try:
@@ -282,12 +289,17 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
         )
 
+        embedding_health_check_payload = VllmEmbeddingHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=[("model", config.model)],
+                    health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
                     ModelInput.Text,
@@ -393,7 +405,7 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = snapshot_engine
-            vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
             # Factory is created after unpack so component_gauges is available
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
@@ -639,7 +651,7 @@ class WorkerFactory:
             # because the engine was forked before the runtime existed.
             # Propagating the new ID to the child requires shared memory or
             # a restart of the EngineCore process.
-            vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
         else:
             (
                 engine_client,
