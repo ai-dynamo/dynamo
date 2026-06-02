@@ -720,8 +720,7 @@ mod tests {
             let turns_c = turns.clone();
             handles.push(thread::spawn(move || {
                 for t in &turns_c[1..] {
-                    if let Some((prefix_tokens, offset)) =
-                        cache_c.longest_prefix_match(t, SPECIALS)
+                    if let Some((prefix_tokens, offset)) = cache_c.longest_prefix_match(t, SPECIALS)
                     {
                         let merged = cache_c
                             .extend_after_match(t, prefix_tokens, offset, tok_c.as_ref(), SPECIALS)
