@@ -303,8 +303,8 @@ class TestValidateDgdrDynamoFeatures:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_throughput_scaling_aic_unsupported_rapid_sweep_raises(self):
-        """Throughput scaling + rapid sweep + AIC unsupported is rejected."""
+    def test_planner_throughput_scaling_aic_unsupported_rapid_sweep_passes(self):
+        """Throughput scaling + rapid sweep + AIC unsupported falls back."""
         dgdr = _make_dgdr(
             features=FeaturesSpec(
                 planner=_make_planner(
@@ -314,8 +314,7 @@ class TestValidateDgdrDynamoFeatures:
                 )
             )
         )
-        with pytest.raises(ValueError, match="AIC does not support"):
-            validate_dgdr_dynamo_features(dgdr, aic_supported=False)
+        validate_dgdr_dynamo_features(dgdr, aic_supported=False)
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0

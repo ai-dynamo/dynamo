@@ -36,9 +36,10 @@ class PrefillPlanner(NativePlannerBase):
             )
             self.state_machine.load_benchmark_fpms(prefill_fpms=fpms)
         except Exception as e:
-            if self.config.enable_throughput_scaling:
-                raise
-            logger.warning(f"No pre-deployment data for prefill: {e}")
+            logger.warning(
+                "No pre-deployment data for prefill; perf model will rely on "
+                f"native AIC or live FPM tuning when available: {e}"
+            )
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_prefill is None:
@@ -75,9 +76,10 @@ class DecodePlanner(NativePlannerBase):
             )
             self.state_machine.load_benchmark_fpms(decode_fpms=fpms)
         except Exception as e:
-            if self.config.enable_throughput_scaling:
-                raise
-            logger.warning(f"No pre-deployment data for decode: {e}")
+            logger.warning(
+                "No pre-deployment data for decode; perf model will rely on "
+                f"native AIC or live FPM tuning when available: {e}"
+            )
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:
@@ -114,9 +116,10 @@ class AggPlanner(NativePlannerBase):
             )
             self.state_machine.load_benchmark_fpms(agg_fpms=fpms)
         except Exception as e:
-            if self.config.enable_throughput_scaling:
-                raise
-            logger.warning(f"No pre-deployment data for agg: {e}")
+            logger.warning(
+                "No pre-deployment data for agg; perf model will rely on "
+                f"native AIC or live FPM tuning when available: {e}"
+            )
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:
@@ -162,9 +165,11 @@ class DisaggPlanner(NativePlannerBase):
                 )
                 self.state_machine.load_benchmark_fpms(**{kwarg: fpms})
             except Exception as e:
-                if self.config.enable_throughput_scaling:
-                    raise
-                logger.warning(f"No pre-deployment data for {component.value}: {e}")
+                logger.warning(
+                    f"No pre-deployment data for {component.value}; perf model "
+                    "will rely on native AIC or live FPM tuning when available: "
+                    f"{e}"
+                )
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None:

@@ -201,14 +201,13 @@ class TestRapidUnsupported:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_throughput_scaling_raises(self, tmp_path):
-        """Case 5b: planner with throughput scaling on unsupported combo should fail."""
+    def test_planner_throughput_scaling_fallback(self, tmp_path):
+        """Case 5b: planner throughput on unsupported combo uses fallback."""
         dgdr = _load_dgdr(
             CONFIGS_DIR / "5b_rapid_unsupported_planner_throughput_error.yaml"
         )
         ops = _make_ops(tmp_path)
-        with pytest.raises(ValueError, match="AIC does not support"):
-            asyncio.run(run_profile(dgdr, ops))
+        asyncio.run(run_profile(dgdr, ops))
 
 
 class TestThoroughDryRun:
