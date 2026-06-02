@@ -197,6 +197,13 @@ class OrchestratorEngineAdapter:
             auth=auth,
             circuit_breaker=cb,
             transport_factory=_factory,
+            # Phase-align ``registered_at`` to scale_interval boundary so
+            # plugins with identical execution intervals fire on the same
+            # pipeline tick irrespective of registration-time skew (see
+            # design doc §4.3).  ``SchedulingConfig.scale_interval_seconds``
+            # defaults to 5.0 — passes through unchanged on configs that
+            # don't override it.
+            scale_interval_seconds=config.scheduling.scale_interval_seconds,
         )
         scheduler = PluginScheduler(
             server, cb, self._clock, metrics=self._plugin_framework_metrics

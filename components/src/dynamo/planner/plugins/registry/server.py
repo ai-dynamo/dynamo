@@ -30,6 +30,7 @@ loop main task; the internal dict is unlocked.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Callable, Optional
 
 from packaging.version import InvalidVersion, Version
@@ -70,18 +71,46 @@ class PluginRegistryServer:
         circuit_breaker: CircuitBreaker,
         transport_factory: TransportFactory,
         protocol_versions: tuple[str, str] = ("1.0", "1.0"),
+        scale_interval_seconds: float = 0.0,
     ) -> None:
         self._clock = clock
         self._auth = auth
         self._circuit_breaker = circuit_breaker
         self._transport_factory = transport_factory
         self._protocol_min, self._protocol_max = protocol_versions
+        # ``scale_interval_seconds`` enables phase alignment of
+        # ``RegisteredPlugin.registered_at`` to the nearest tick boundary
+        # (``floor(now / scale_interval) * scale_interval``).  This makes
+        # plugins with the same ``execution_interval_seconds`` fire on
+        # the same pipeline tick irrespective of small registration-time
+        # skew between bootstrapped builtins (a few ms apart from
+        # ``register_internal`` ordering in the orchestrator startup
+        # sequence).  Without alignment, plugin A registered at T=0 and
+        # plugin B at T=0.003 would forever fire on different ticks if
+        # both declare the same interval, and any future
+        # ``requires_produced_fields`` dependency between them would
+        # silently deadlock.
+        #
+        # ``scale_interval_seconds == 0.0`` (the default) disables phase
+        # alignment — preserves the legacy behaviour for tests and the
+        # PSM path that constructs the server without a scale_interval.
+        self._scale_interval_seconds = scale_interval_seconds
         self._plugins: dict[str, RegisteredPlugin] = {}
         self._unregister_callbacks: list[UnregisterCallback] = []
         # Scheduler reference lazy-attached so ``list_plugins`` can report
         # ``cache_age_seconds`` without making server construction depend
         # on the scheduler (which in turn already depends on the server).
         self._cache_age_lookup: Optional[Callable[[str], float]] = None
+
+    def _aligned_anchor(self, raw_now: float) -> float:
+        """Compute the registered_at anchor for a plugin registering at
+        ``raw_now`` (monotonic clock).  When ``scale_interval_seconds``
+        > 0, snaps to the nearest tick boundary below ``raw_now``.
+        Otherwise returns ``raw_now`` unchanged (legacy / PSM path).
+        """
+        if self._scale_interval_seconds <= 0.0:
+            return raw_now
+        return math.floor(raw_now / self._scale_interval_seconds) * self._scale_interval_seconds
 
     # ------------------------------------------------------------------
     # Public RPC-shaped API
@@ -172,7 +201,7 @@ class PluginRegistryServer:
             is_builtin=False,
             transport=transport,
             transport_type=transport_type,
-            registered_at=self._clock.monotonic(),
+            registered_at=self._aligned_anchor(self._clock.monotonic()),
             auth_subject=identity.subject,
         )
         self._plugins[req.plugin_id] = plugin
@@ -392,7 +421,7 @@ class PluginRegistryServer:
             is_builtin=is_builtin,
             transport=transport,
             transport_type="in_process",
-            registered_at=self._clock.monotonic(),
+            registered_at=self._aligned_anchor(self._clock.monotonic()),
         )
         self._plugins[plugin_id] = plugin
         self._circuit_breaker.reset(plugin_id)
