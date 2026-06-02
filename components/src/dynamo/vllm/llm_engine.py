@@ -54,7 +54,7 @@ from dynamo.vllm.cache_info import (
 from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import (
-    VllmEngineQuiesceController,
+    VllmEnginePauseController,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -155,8 +155,8 @@ class VllmLLMEngine(LLMEngine):
         # factory call sees a valid object. `num_gpu_blocks` is patched
         # after KV profiling finishes.
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
-        self._quiesce_controller: VllmEngineQuiesceController | None = None
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_controller: VllmEnginePauseController | None = None
+        self._pause_lock = asyncio.Lock()
         self._scale_ep_lock = asyncio.Lock()
         self._scale_ep_in_progress = False
 
@@ -220,7 +220,7 @@ class VllmLLMEngine(LLMEngine):
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
         )
-        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
+        self._pause_controller = VllmEnginePauseController(self.engine_client)
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
         per_rank_num_gpu_blocks = per_rank_kv_blocks(num_gpu_blocks, self._dp_range[1])
         if per_rank_num_gpu_blocks is None:
@@ -465,12 +465,12 @@ class VllmLLMEngine(LLMEngine):
     async def sleep(self, body: dict) -> dict:
         body = body or {}
         level = body.get("level", 1)
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {"status": "error", "message": "engine is not initialized"}
 
-        async with self._quiesce_lock:
-            if controller.is_quiesced:
+        async with self._pause_lock:
+            if controller.is_paused:
                 return {"status": "ok", "message": "Engine already sleeping"}
             if controller.needs_resume_recovery:
                 return {
@@ -478,7 +478,7 @@ class VllmLLMEngine(LLMEngine):
                     "message": "wake_up required before retrying sleep",
                 }
             try:
-                if not await controller.quiesce(level):
+                if not await controller.pause(level):
                     return {"status": "ok", "message": "Engine already sleeping"}
                 return {"status": "ok", "message": f"Engine slept (level={level})"}
             except Exception as e:
@@ -488,13 +488,13 @@ class VllmLLMEngine(LLMEngine):
     async def wake_up(self, body: dict) -> dict:
         body = body or {}
         tags = body.get("tags")
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {"status": "error", "message": "engine is not initialized"}
 
-        async with self._quiesce_lock:
+        async with self._pause_lock:
             needs_recovery = controller.needs_resume_recovery
-            if not controller.is_quiesced and not needs_recovery:
+            if not controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Engine already awake"}
             try:
                 await controller.resume(tags)
@@ -614,7 +614,7 @@ class VllmLLMEngine(LLMEngine):
                 self.engine_client.shutdown()
         finally:
             self.engine_client = None
-            self._quiesce_controller = None
+            self._pause_controller = None
             if self._prometheus_temp_dir is not None:
                 if (
                     os.environ.get("PROMETHEUS_MULTIPROC_DIR")

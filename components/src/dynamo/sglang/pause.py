@@ -16,22 +16,22 @@ from sglang.srt.managers.io_struct import (
 logger = logging.getLogger(__name__)
 
 
-class SGLangEngineQuiesceController:
+class SGLangEnginePauseController:
     def __init__(self, engine: Any):
         self._engine = engine
-        self._is_quiesced = False
+        self._is_paused = False
         self._generation_paused = False
 
     @property
-    def is_quiesced(self) -> bool:
-        return self._is_quiesced
+    def is_paused(self) -> bool:
+        return self._is_paused
 
     @property
     def needs_resume_recovery(self) -> bool:
         return self._generation_paused
 
-    async def quiesce(self, tags: list[str] | None = None) -> bool:
-        if self._is_quiesced or self._generation_paused:
+    async def pause(self, tags: list[str] | None = None) -> bool:
+        if self._is_paused or self._generation_paused:
             return False
 
         await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
@@ -53,14 +53,14 @@ class SGLangEngineQuiesceController:
                 )
             raise
 
-        self._is_quiesced = True
+        self._is_paused = True
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
-        if not self._is_quiesced and not self._generation_paused:
+        if not self._is_paused and not self._generation_paused:
             return False
 
-        if self._is_quiesced:
+        if self._is_paused:
             await self._engine.tokenizer_manager.resume_memory_occupation(
                 ResumeMemoryOccupationReqInput(tags=tags),
                 None,
@@ -73,5 +73,5 @@ class SGLangEngineQuiesceController:
         return True
 
     def mark_resumed(self) -> None:
-        self._is_quiesced = False
+        self._is_paused = False
         self._generation_paused = False
