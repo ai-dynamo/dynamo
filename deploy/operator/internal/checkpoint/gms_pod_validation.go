@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
@@ -36,22 +37,22 @@ func ValidatePreparedGPUMemoryServicePodTemplate(ckpt *nvidiacomv1alpha1.DynamoC
 	if targetContainerName == "" {
 		targetContainerName = consts.MainContainerName
 	}
-	targetContainer := findContainerByName(podSpec.Containers, targetContainerName)
+	targetContainer := common.FindContainerByName(podSpec.Containers, targetContainerName)
 	if targetContainer == nil {
 		return fmt.Errorf("gpuMemoryService checkpoint pod template has no target container %q", targetContainerName)
 	}
 
-	if !hasPodResourceClaim(podSpec, dra.ClaimName) {
+	if !common.HasPodResourceClaim(podSpec, dra.ClaimName) {
 		return fmt.Errorf("gpuMemoryService checkpoint pod template is missing pod resource claim %q", dra.ClaimName)
 	}
-	if !hasVolume(podSpec.Volumes, gms.SharedVolumeName) {
+	if !common.HasVolume(podSpec.Volumes, gms.SharedVolumeName) {
 		return fmt.Errorf("gpuMemoryService checkpoint pod template is missing shared volume %q", gms.SharedVolumeName)
 	}
 	if err := validateGMSClientContainer(targetContainerName, targetContainer); err != nil {
 		return err
 	}
 
-	server := findContainerByName(podSpec.InitContainers, gms.ServerContainerName)
+	server := common.FindContainerByName(podSpec.InitContainers, gms.ServerContainerName)
 	if server == nil {
 		return fmt.Errorf("gpuMemoryService checkpoint pod template is missing init sidecar %q", gms.ServerContainerName)
 	}
@@ -60,7 +61,7 @@ func ValidatePreparedGPUMemoryServicePodTemplate(ckpt *nvidiacomv1alpha1.DynamoC
 	}
 
 	for _, name := range ckpt.Spec.GPUMemoryService.ExtraClientContainers {
-		container := findContainerByName(podSpec.Containers, name)
+		container := common.FindContainerByName(podSpec.Containers, name)
 		if container == nil {
 			return fmt.Errorf("gpuMemoryService checkpoint pod template is missing extra client container %q", name)
 		}
@@ -72,68 +73,14 @@ func ValidatePreparedGPUMemoryServicePodTemplate(ckpt *nvidiacomv1alpha1.DynamoC
 }
 
 func validateGMSClientContainer(name string, container *corev1.Container) error {
-	if !hasContainerResourceClaim(container, dra.ClaimName) {
+	if !common.HasContainerResourceClaim(container, dra.ClaimName) {
 		return fmt.Errorf("gpuMemoryService checkpoint container %q is missing resource claim %q", name, dra.ClaimName)
 	}
-	if !hasVolumeMount(container.VolumeMounts, gms.SharedVolumeName, gms.SharedMountPath) {
+	if !common.HasVolumeMount(container.VolumeMounts, gms.SharedVolumeName, gms.SharedMountPath) {
 		return fmt.Errorf("gpuMemoryService checkpoint container %q is missing %s mount at %s", name, gms.SharedVolumeName, gms.SharedMountPath)
 	}
-	if !hasEnv(container.Env, gms.EnvSocketDir, gms.SharedMountPath) {
+	if !common.HasEnvValue(container.Env, gms.EnvSocketDir, gms.SharedMountPath) {
 		return fmt.Errorf("gpuMemoryService checkpoint container %q is missing %s=%s", name, gms.EnvSocketDir, gms.SharedMountPath)
 	}
 	return nil
-}
-
-func findContainerByName(containers []corev1.Container, name string) *corev1.Container {
-	for i := range containers {
-		if containers[i].Name == name {
-			return &containers[i]
-		}
-	}
-	return nil
-}
-
-func hasPodResourceClaim(podSpec *corev1.PodSpec, name string) bool {
-	for i := range podSpec.ResourceClaims {
-		if podSpec.ResourceClaims[i].Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func hasContainerResourceClaim(container *corev1.Container, name string) bool {
-	for i := range container.Resources.Claims {
-		if container.Resources.Claims[i].Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func hasVolume(volumes []corev1.Volume, name string) bool {
-	for i := range volumes {
-		if volumes[i].Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func hasVolumeMount(mounts []corev1.VolumeMount, name, mountPath string) bool {
-	for i := range mounts {
-		if mounts[i].Name == name && mounts[i].MountPath == mountPath {
-			return true
-		}
-	}
-	return false
-}
-
-func hasEnv(env []corev1.EnvVar, name, value string) bool {
-	for i := range env {
-		if env[i].Name == name && env[i].Value == value {
-			return true
-		}
-	}
-	return false
 }
