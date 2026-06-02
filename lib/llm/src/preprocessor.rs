@@ -1874,10 +1874,10 @@ impl OpenAIPreprocessor {
                     // the frontend's timing surfaces (the `timing` nvext field, metrics,
                     // traces) populate even though the local record_* timestamps were never
                     // set here. take_router_timing also strips the key from the payload.
-                    if let Some(timing) = take_router_timing(&mut response.data) {
-                        if let Some(tracker) = inner.response_generator.tracker() {
-                            tracker.set_external_timing(timing);
-                        }
+                    if let Some(timing) = take_router_timing(&mut response.data)
+                        && let Some(tracker) = inner.response_generator.tracker()
+                    {
+                        tracker.set_external_timing(timing);
                     }
 
                     if inner.cancelled {
