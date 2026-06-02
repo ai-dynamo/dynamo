@@ -49,10 +49,7 @@ from .cache_info import get_configured_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
-from .instrumented_scheduler import (
-    ENV_FPM_BENCHMARK_OUTPUT_PATH,
-    ENV_FPM_WORKER_ID,
-)
+from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 

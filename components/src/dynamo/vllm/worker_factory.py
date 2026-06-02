@@ -40,10 +40,7 @@ from .health_check import (
     VllmHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
 )
-from .instrumented_scheduler import (
-    ENV_FPM_BENCHMARK_OUTPUT_PATH,
-    ENV_FPM_WORKER_ID,
-)
+from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
 
