@@ -136,18 +136,24 @@ workers (`--router-mode kv`).
 
 ### 2. Run mini-SWE-agent
 
-mini-SWE-agent talks to the Dynamo frontend directly (no proxy) through its
-`MSWEA_BACKEND=dynamo` path, which injects `nvext.agent_context` so each
-SWE-bench instance maps to one ThunderAgent program. Point it at `:8100` and
-drive SWE-bench-Lite at 128 concurrent workers:
+The mini-SWE-agent variant we reference is bundled in the ThunderAgent fork on
+the `feat/mini-swe-direct-dynamo` branch: it patches mini-SWE-agent so that with
+`MSWEA_BACKEND=dynamo` it injects `nvext.agent_context` natively (no proxy in the
+loop), mapping each SWE-bench instance to one ThunderAgent program. Clone it,
+point it at the frontend on `:8100`, and drive SWE-bench-Lite at 128 concurrent
+workers:
 
 ```bash
-export OPENAI_BASE_URL="http://localhost:8100/v1"
+git clone -b feat/mini-swe-direct-dynamo https://github.com/ishandhanani/ThunderAgent
+cd ThunderAgent/examples/inference/mini-swe-agent
+uv venv && source .venv/bin/activate && uv pip install -e .
+
+export OPENAI_BASE_URL="http://localhost:8100/v1"   # the Dynamo frontend
 export OPENAI_API_KEY="DUMMY"
 export MSWEA_BACKEND="dynamo"
 export MSWEA_SESSION_TYPE_ID="swebench-lite"
 
-# mini-SWE-agent's bundled SWE-bench config, with its base_url pointed at :8100.
+# The bundled config carries the base_url; it already points at the frontend.
 mini-extra swebench \
   --config src/minisweagent/config/extra/swebench.yaml \
   --subset lite --split test --workers 128 \
