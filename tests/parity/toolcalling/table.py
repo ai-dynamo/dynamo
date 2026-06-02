@@ -87,6 +87,8 @@ RUST_TOOL_CALLING_DIR = REPO_ROOT / "lib/parsers/src/tool_calling"
 _TOOL_CALLING_LABEL_OVERRIDES = {
     "qwen3_coder": "Qwen 3 Coder / Nemotron V3‡",
 }
+# nemotron_nano: an alias for qwen3_coder, hide to avoid duplicate row
+# nemotron_deci: for older v2 nemotron models, hide to avoid confusion with nemotron v3 models
 _HIDDEN_TOOL_CALLING_FAMILIES = {"nemotron_deci", "nemotron_nano"}
 
 
