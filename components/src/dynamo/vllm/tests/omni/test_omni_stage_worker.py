@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 try:
+    from dynamo.vllm.omni import stage_worker
     from dynamo.vllm.omni.stage_worker import (
         _ASYNC_PREWARM_KEY,
         _ASYNC_PREWARM_READY_KEY,
@@ -76,6 +77,29 @@ class _MockContext:
         return "test-req-id"
 
 
+class _ChatTemplateTokenizer:
+    chat_token_ids = [151644, 872, 100, 101, 151644, 77091]
+    rendered_prompt = "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n"
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+        assert messages == [{"role": "user", "content": "hello"}]
+        assert add_generation_prompt is True
+        return list(self.chat_token_ids) if tokenize else self.rendered_prompt
+
+    def encode(self, text, add_special_tokens=False):
+        assert text == self.rendered_prompt
+        return [999, 998]
+
+
+class _TokenizerEngine(_MockEngine):
+    def __init__(self, tokenizer):
+        super().__init__()
+        self._tokenizer = tokenizer
+
+    async def get_tokenizer(self):
+        return self._tokenizer
+
+
 def _make_stage_config(**overrides):
     defaults = dict(
         stage_type="llm",
@@ -95,6 +119,66 @@ def _make_worker(engine=None, stage_config=None, connectors=None, stage_id=0):
         connectors=connectors or {},
         stage_id=stage_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_prepare_router_request_prefers_chat_template_token_ids():
+    tokenizer = _ChatTemplateTokenizer()
+    worker = OmniStageWorker(
+        engine=_TokenizerEngine(tokenizer),
+        stage_config=_make_stage_config(stage_id=0),
+        connectors={},
+        stage_id=0,
+        output_modalities=["text"],
+        pipeline_stage_configs=[
+            _make_stage_config(stage_id=0, final_output_type="text"),
+            _make_stage_config(stage_id=1, final_output_type="audio"),
+        ],
+    )
+
+    prepared = await worker._prepare_router_request(
+        {
+            "request_id": "req-chat",
+            "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hello"}],
+            "modalities": ["audio"],
+        }
+    )
+
+    assert prepared["prompt_token_ids"] == tokenizer.chat_token_ids
+    assert prepared["original_prompt"] == {"prompt": tokenizer.rendered_prompt}
+    assert prepared["final_stage_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stage0_request_uses_internal_prompt_token_ids():
+    tokenizer = _ChatTemplateTokenizer()
+    engine = _TokenizerEngine(tokenizer)
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(stage_id=0),
+        connectors={},
+        stage_id=0,
+        output_modalities=["text"],
+    )
+
+    _ = [
+        chunk
+        async for chunk in worker.generate(
+            {
+                "request_id": "req-chat",
+                "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+                "messages": [{"role": "user", "content": "hello"}],
+                "prompt_token_ids": [1, 2, 3],
+            },
+            _MockContext(),
+        )
+    ]
+
+    assert engine.received_prompt == {
+        "prompt": tokenizer.rendered_prompt,
+        "prompt_token_ids": [1, 2, 3],
+    }
 
 
 @pytest.mark.asyncio
@@ -186,8 +270,8 @@ async def test_stage_connector_refs_builds_engine_core_request():
     # The engine should receive an OmniEngineCoreRequest (not the raw dict)
     assert hasattr(engine.received_prompt, "prompt_token_ids")
     assert engine.received_prompt.prompt_token_ids == [100, 200, 300]
-    # Output processor should have been registered
-    engine.engine.output_processors[0].add_request.assert_called_once()
+    # AsyncOmni's native StagePool admission registers prebuilt EngineCoreRequests.
+    engine.engine.output_processors[0].add_request.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -290,28 +374,54 @@ def test_process_stage_inputs_accepts_prompt_alias_processor():
 
 
 @pytest.mark.asyncio
-async def test_async_prewarm_preserves_explicit_empty_prompt_token_ids():
-    """Final async generation stages must be allowed to wait on upstream chunks."""
+async def test_async_prewarm_uses_native_placeholder_prompt_shape():
+    """Async-chunk prewarm uses zero placeholders sized for the downstream stage."""
     engine = _MockEngine()
+    engine.engine = MagicMock()
     worker = _make_worker(
         engine=engine,
-        stage_id=2,
+        stage_id=1,
         stage_config=_make_stage_config(
             engine_args=SimpleNamespace(async_chunk=True),
             default_sampling_params={"temperature": 0.0, "max_tokens": 1},
         ),
     )
-    built_prompt = SimpleNamespace(prompt_token_ids=[])
+    captured = {}
 
-    with patch.object(
-        worker, "_build_engine_core_request_from_tokens", return_value=built_prompt
-    ) as build_request:
+    def fake_build_engine_core_request_from_tokens(**kwargs):
+        prompt = kwargs["prompt"]
+        captured["prompt"] = prompt
+        return SimpleNamespace(
+            request_id=kwargs["request_id"],
+            external_req_id=None,
+            prompt_token_ids=list(prompt["prompt_token_ids"]),
+            additional_information=None,
+        )
+
+    with (
+        patch.object(stage_worker, "compute_talker_prompt_ids_length", return_value=4),
+        patch.object(
+            stage_worker,
+            "build_engine_core_request_from_tokens",
+            side_effect=fake_build_engine_core_request_from_tokens,
+        ),
+        patch.object(
+            stage_worker,
+            "_apply_omni_final_stage_metadata",
+            side_effect=lambda prompt, _final_stage_id: prompt,
+        ),
+    ):
         chunks = [
             chunk
             async for chunk in worker.generate(
                 {
-                    "request_id": "req-code2wav",
-                    "prompt_token_ids": [],
+                    "request_id": "req-talker",
+                    "original_prompt": {
+                        "prompt": "hello",
+                        "multi_modal_data": {"audio": "raw"},
+                        "mm_processor_kwargs": {"fps": 16},
+                    },
+                    "prompt_token_ids": [10, 11, 12],
                     "final_stage_id": 2,
                     "sampling_params_list": {"max_tokens": 1},
                     _ASYNC_PREWARM_KEY: True,
@@ -320,7 +430,11 @@ async def test_async_prewarm_preserves_explicit_empty_prompt_token_ids():
             )
         ]
 
-    assert build_request.call_args.args[0] == []
+    assert captured["prompt"]["prompt_token_ids"] == [0, 0, 0, 0]
+    assert captured["prompt"]["prompt"] == "hello"
+    assert captured["prompt"]["multi_modal_data"] is None
+    assert captured["prompt"]["mm_processor_kwargs"] is None
+    assert engine.received_prompt.prompt_token_ids == [0, 0, 0, 0]
     assert any(chunk.get(_ASYNC_PREWARM_READY_KEY) for chunk in chunks)
 
 

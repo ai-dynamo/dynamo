@@ -150,6 +150,25 @@ class OmniStageRouter:
             int(prepare.get("final_stage_id", len(self.stage_configs) - 1)),
             len(self.stage_configs) - 1,
         )
+        prompt_token_ids = list(prepare.get("prompt_token_ids") or [])
+
+        if target_stage <= 0:
+            stage0_request = {"request_id": request_id, **request}
+            if prompt_token_ids:
+                stage0_request["prompt_token_ids"] = prompt_token_ids
+            stage0 = await self._call_stage(
+                stage0_client,
+                stage0_request,
+            )
+            if stage0.error:
+                yield {"error": stage0.error, "finished": True}
+                return
+            async for chunk in self._format_final_output(
+                stage0, request, request_id, request_type
+            ):
+                yield chunk
+            return
+
         base_request = {
             "request_id": request_id,
             "original_prompt": prepare.get("original_prompt"),
@@ -157,12 +176,12 @@ class OmniStageRouter:
             "final_stage_id": target_stage,
             _ASYNC_PREWARM_KEY: True,
         }
-        prompt_token_ids = list(prepare.get("prompt_token_ids") or [0])
+        prewarm_prompt_token_ids = prompt_token_ids or [0]
 
         downstream_tasks: dict[int, asyncio.Task[StageOutput]] = {}
         ready_futures: list[asyncio.Future[str | None]] = []
         try:
-            for stage_idx in range(1, target_stage):
+            for stage_idx in range(1, target_stage + 1):
                 stage_cfg = self.stage_configs[stage_idx]
                 client = self.stage_clients.get(_model_stage_name(stage_cfg, stage_idx))
                 if client is None:
@@ -176,7 +195,10 @@ class OmniStageRouter:
                 downstream_tasks[stage_idx] = asyncio.create_task(
                     self._call_stage(
                         client,
-                        {**base_request, "prompt_token_ids": prompt_token_ids},
+                        {
+                            **base_request,
+                            "prompt_token_ids": prewarm_prompt_token_ids,
+                        },
                         prewarm_ready=ready,
                     )
                 )
@@ -189,35 +211,29 @@ class OmniStageRouter:
 
             stage0 = await self._call_stage(
                 stage0_client,
-                {"request_id": request_id, **request},
+                {
+                    "request_id": request_id,
+                    **request,
+                    **(
+                        {"prompt_token_ids": prompt_token_ids}
+                        if prompt_token_ids
+                        else {}
+                    ),
+                },
             )
             if stage0.error:
                 yield {"error": stage0.error, "finished": True}
                 return
 
-            for stage_idx in range(1, target_stage):
+            downstream_outputs: dict[int, StageOutput] = {}
+            for stage_idx in range(1, target_stage + 1):
                 output = await downstream_tasks[stage_idx]
                 if output.error:
                     yield {"error": output.error, "finished": True}
                     return
+                downstream_outputs[stage_idx] = output
 
-            final_cfg = self.stage_configs[target_stage]
-            final_client = self.stage_clients.get(
-                _model_stage_name(final_cfg, target_stage)
-            )
-            if final_client is None:
-                yield {
-                    "error": f"No client for stage '{_model_stage_name(final_cfg, target_stage)}'",
-                    "finished": True,
-                }
-                return
-            final = await self._call_stage(
-                final_client,
-                {**base_request, "prompt_token_ids": []},
-            )
-            if final.error:
-                yield {"error": final.error, "finished": True}
-                return
+            final = downstream_outputs[target_stage]
 
             async for chunk in self._format_final_output(
                 final, request, request_id, request_type

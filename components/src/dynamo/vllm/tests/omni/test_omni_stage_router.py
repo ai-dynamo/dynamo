@@ -89,6 +89,7 @@ def _patched_generate(router, request, request_id="req-1", request_type="chat"):
 async def test_async_chunk_router_prewarm_order():
     events: list[str] = []
     stage1_ready = asyncio.Event()
+    stage2_ready = asyncio.Event()
 
     async def stage0_handler(request):
         if request.get(_ASYNC_PREPARE_KEY):
@@ -101,21 +102,30 @@ async def test_async_chunk_router_prewarm_order():
                 "finished": True,
             }
         assert stage1_ready.is_set()
+        assert stage2_ready.is_set()
+        assert request["prompt_token_ids"] == [1, 2, 3]
         events.append("stage0")
         return {"shm_meta": {"text": True}, "finished": True}
 
     async def stage1_handler(request):
         assert request.get(_ASYNC_PREWARM_KEY) is True
         assert request["final_stage_id"] == 2
+        assert request["prompt_token_ids"] == [1, 2, 3]
         events.append("stage1-prewarm")
         stage1_ready.set()
         return {_ASYNC_PREWARM_READY_KEY: True, "finished": True}
 
     async def stage2_handler(request):
         assert request.get(_ASYNC_PREWARM_KEY) is True
-        assert request["prompt_token_ids"] == []
-        events.append("stage2-final")
-        return {"shm_meta": {"audio": True}, "finished": True}
+        assert request["final_stage_id"] == 2
+        assert request["prompt_token_ids"] == [1, 2, 3]
+        events.append("stage2-prewarm")
+        stage2_ready.set()
+        return {
+            _ASYNC_PREWARM_READY_KEY: True,
+            "shm_meta": {"audio": True},
+            "finished": True,
+        }
 
     mock_formatter = AsyncMock()
     mock_formatter.format.return_value = {"finished": True}
@@ -141,7 +151,7 @@ async def test_async_chunk_router_prewarm_order():
         with p1, p2:
             chunks = [c async for c in router.generate({"prompt": "hi"}, None)]
 
-    assert events == ["prepare", "stage1-prewarm", "stage0", "stage2-final"]
+    assert events == ["prepare", "stage1-prewarm", "stage2-prewarm", "stage0"]
     assert chunks == [{"finished": True}]
 
 

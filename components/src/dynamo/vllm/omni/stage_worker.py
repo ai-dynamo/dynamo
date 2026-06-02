@@ -19,6 +19,16 @@ import yaml
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 
 try:
+    from vllm_omni.distributed.omni_connectors.adapter import (
+        compute_talker_prompt_ids_length,
+    )
+except ImportError:  # pragma: no cover - adapter is absent in lightweight stubs
+
+    def compute_talker_prompt_ids_length(prompt_ids: list[int]) -> int:
+        return len(prompt_ids)
+
+
+try:
     from vllm_omni.engine.async_omni_engine import _apply_omni_final_stage_metadata
 except ImportError:  # pragma: no cover - only used by lightweight unit-test stubs
 
@@ -127,12 +137,13 @@ class OmniStageWorker:
 
         if async_prewarm:
             sampling_params_list_override = req.sampling_params_list
-            prompt_token_ids = request.get("prompt_token_ids", [0])
+            prompt_token_ids = request.get("prompt_token_ids", [])
             if prompt_token_ids is None:
-                prompt_token_ids = [0]
+                prompt_token_ids = []
             try:
-                prompt = self._build_engine_core_request_from_tokens(
+                prompt = self._build_async_prewarm_request(
                     list(prompt_token_ids),
+                    original_prompt,
                     request_id,
                     sampling_params_list_override,
                 )
@@ -183,6 +194,12 @@ class OmniStageWorker:
             )
             prompt = parsed["engine_inputs"]
             original_prompt = parsed["original_prompt"]
+            prompt_token_ids = request.get("prompt_token_ids")
+            if prompt_token_ids:
+                prompt = _with_prompt_token_ids(prompt, list(prompt_token_ids))
+                original_prompt = _with_prompt_token_ids(
+                    original_prompt, list(prompt_token_ids)
+                )
             sampling_params_list_override = parsed["sampling_params_list"]
         else:
             final_stage_id = self._resolve_final_stage_id(request, final_stage_id)
@@ -302,12 +319,14 @@ class OmniStageWorker:
             self._default_video_fps,
             tokenizer_getter=self.engine.get_tokenizer,
         )
-        prompt_token_ids = await _extract_prompt_token_ids(
-            parsed["engine_inputs"], self.engine
-        )
-        if not prompt_token_ids and isinstance(frontend_request.get("messages"), list):
+        prompt_token_ids: list[int] = []
+        if isinstance(frontend_request.get("messages"), list):
             prompt_token_ids = await _extract_chat_prompt_token_ids(
                 frontend_request, self.engine
+            )
+        if not prompt_token_ids:
+            prompt_token_ids = await _extract_prompt_token_ids(
+                parsed["engine_inputs"], self.engine
             )
         return {
             "original_prompt": parsed["original_prompt"],
@@ -375,6 +394,39 @@ class OmniStageWorker:
         sampling_params_list_override: dict | None,
     ):
         tokens_prompt = OmniTokensPrompt(prompt_token_ids=list(token_ids))
+        return self._build_engine_core_request_from_prompt(
+            tokens_prompt, request_id, sampling_params_list_override
+        )
+
+    def _build_async_prewarm_request(
+        self,
+        prompt_token_ids: list[int],
+        original_prompt: Any,
+        request_id: str,
+        sampling_params_list_override: dict | None,
+    ):
+        try:
+            prompt_len = max(1, compute_talker_prompt_ids_length(prompt_token_ids))
+        except Exception:
+            logger.debug("Failed to compute async prewarm prompt length", exc_info=True)
+            prompt_len = max(1, len(prompt_token_ids))
+
+        prompt = (
+            copy.deepcopy(original_prompt) if isinstance(original_prompt, dict) else {}
+        )
+        prompt["prompt_token_ids"] = [0] * prompt_len
+        prompt["multi_modal_data"] = None
+        prompt["mm_processor_kwargs"] = None
+        return self._build_engine_core_request_from_prompt(
+            prompt, request_id, sampling_params_list_override
+        )
+
+    def _build_engine_core_request_from_prompt(
+        self,
+        prompt_input: Any,
+        request_id: str,
+        sampling_params_list_override: dict | None,
+    ):
         sp_list = _build_sampling_params(
             self.stage_config, sampling_params_list_override
         )
@@ -386,7 +438,7 @@ class OmniStageWorker:
 
         kwargs = {
             "request_id": request_id,
-            "prompt": tokens_prompt,
+            "prompt": prompt_input,
             "params": params,
         }
         if (
@@ -397,19 +449,9 @@ class OmniStageWorker:
             if model_config is not None:
                 kwargs["model_config"] = model_config
         prompt = build_engine_core_request_from_tokens(**kwargs)
-        self._register_engine_core_request(prompt)
-        return prompt
-
-    def _register_engine_core_request(self, prompt: Any) -> None:
         if getattr(prompt, "external_req_id", None) is None:
             prompt.external_req_id = prompt.request_id
-        self.engine.engine.output_processors[0].add_request(
-            request=prompt,
-            prompt=None,
-            parent_req=None,
-            request_index=0,
-            queue=None,
-        )
+        return prompt
 
     def _resolve_final_stage_id(self, request: dict, existing: int | None) -> int:
         if existing is not None:
@@ -440,9 +482,7 @@ class OmniStageWorker:
             return prompt
 
         if hasattr(prompt, "request_id") and hasattr(prompt, "prompt_token_ids"):
-            prompt = _apply_omni_final_stage_metadata(prompt, final_stage_id)
-            self._register_engine_core_request(prompt)
-            return prompt
+            return _apply_omni_final_stage_metadata(prompt, final_stage_id)
 
         build_message = getattr(
             getattr(self.engine, "engine", None), "_build_add_request_message", None
@@ -770,6 +810,16 @@ def _strip_internal_fields(request: dict) -> dict:
         for key, value in request.items()
         if not key.startswith("__dynamo_omni_")
     }
+
+
+def _with_prompt_token_ids(prompt: Any, prompt_token_ids: list[int]) -> Any:
+    if isinstance(prompt, dict):
+        updated = dict(prompt)
+        updated["prompt_token_ids"] = list(prompt_token_ids)
+        return updated
+    if isinstance(prompt, str):
+        return {"prompt": prompt, "prompt_token_ids": list(prompt_token_ids)}
+    return prompt
 
 
 async def _extract_prompt_token_ids(prompt: Any, engine: StageEngine) -> list[int]:
