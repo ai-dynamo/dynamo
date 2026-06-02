@@ -90,7 +90,7 @@ def detect_force_reasoning_from_template(chat_template: str | None) -> bool:
 # explicitly opts out via chat_template_kwargs. Mirrors sglang's
 # serving_chat._get_reasoning_from_request table.
 _THINKING_BY_DEFAULT = {"qwen3", "glm45", "nemotron_3", "interns1", "kimi_k2"}
-_THINKING_OPT_IN = {"deepseek-v3", "gemma4"}
+_THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
 
 
 def resolve_request_force_reasoning(
@@ -125,7 +125,9 @@ def resolve_request_force_reasoning(
 
     if reasoning_parser_name in _THINKING_OPT_IN:
         flag_key = (
-            "thinking" if reasoning_parser_name == "deepseek-v3" else "enable_thinking"
+            "thinking"
+            if reasoning_parser_name in {"deepseek-v3", "deepseek-v4"}
+            else "enable_thinking"
         )
         return kwargs.get(flag_key) is True
 
