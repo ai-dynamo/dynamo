@@ -5,6 +5,7 @@ import importlib.util
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Generator, Optional
@@ -617,8 +618,6 @@ def _maybe_apply_sglang_mm_hashes_patch(items) -> None:
     """Apply sgl-project/sglang#25300 to the installed sglang when sglang
     MM-routing tests will run. Idempotent; mirrors the manual recipe in
     docs/features/multimodal/multimodal-kv-routing.md."""
-    import subprocess
-
     if not any("test_sglang" in i.nodeid and "mm_" in i.nodeid for i in items):
         return
     script = """

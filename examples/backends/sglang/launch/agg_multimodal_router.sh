@@ -120,6 +120,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --model-path "${MODEL}" \
         --served-model-name "${MODEL}" \
         --page-size "${BLOCK_SIZE}" \
+        --context-length "${MAX_MODEL_LEN}" \
         --tp 1 \
         --trust-remote-code \
         --kv-events-config "${KV_EVENTS_CONFIG}" \
