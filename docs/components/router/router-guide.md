@@ -174,6 +174,7 @@ Disaggregated mode is activated automatically when prefill workers register alon
 - **[Routing Concepts](router-concepts.md)**: Cost model, worker selection, and routing primitives
 - **[Configuration and Tuning](router-configuration.md)**: Router flags, transport modes, load tracking, and metrics
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
+- **[Topology-Aware KV Transfer](topology-aware-kv-transfer.md)**: Runtime metadata and decode routing constraints for topology-aware prefill/decode handoff
 - **[Router Operations](router-operations.md)**: Replicas, remote indexers, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Router Testing](router-testing.md)**: Recommended test layers for non-trivial router changes
