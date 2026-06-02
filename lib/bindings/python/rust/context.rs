@@ -11,9 +11,9 @@
 // `set_status` operations mirror the OTel `Span` API.
 
 use dynamo_runtime::logging::DistributedTraceContext;
-use dynamo_runtime::pipeline::network::ConnectionInfo;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
+use dynamo_runtime::pipeline::network::ConnectionInfo;
 use opentelemetry::global::BoxedSpan;
 use opentelemetry::trace::{Span as OtelSpan, Status, TraceContextExt, Tracer};
 use opentelemetry::{KeyValue, global};

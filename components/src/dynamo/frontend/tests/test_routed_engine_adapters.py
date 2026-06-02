@@ -13,6 +13,8 @@ from dynamo.common.global_router_protocol import (
 )
 from dynamo.frontend.routed_engine_adapters import GlobalRouterRoutedEngineAdapter
 
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
 
 class FakeRoutedItem:
     def __init__(self, data: dict[str, Any]):

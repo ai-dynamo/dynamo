@@ -121,7 +121,9 @@ class GlobalRouterHandler:
                     yield output
                 return
 
-        should_delegate_response = response_connection_info is not None and len(pool_order) == 1
+        should_delegate_response = (
+            response_connection_info is not None and len(pool_order) == 1
+        )
         if response_connection_info is not None and not should_delegate_response:
             logger.info(
                 f"Priority retry enabled for {request_type}; relaying response stream "
@@ -240,11 +242,12 @@ class GlobalRouterHandler:
             return
         except Exception as e:
             if retry_attempt == len(pool_order) - 1:
-                logger.error(
+                message = (
                     f"Error forwarding delegated {request_type} request to "
                     f"{namespace}; no priority retry pools remain: {e}"
                 )
-                raise
+                logger.error(message)
+                raise RuntimeError(message) from e
 
             next_retry_attempt = retry_attempt + 1
             next_pool_idx = pool_order[next_retry_attempt]
