@@ -285,12 +285,12 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 #### How it works
 
 1. The trace is synthesized (same parameters as `real_data_benchmark.py`) and split into low / medium / high tiers according to `--priority-distribution`.
-2. Each tier is sent to aiperf as a concurrent stream. In the priority-tagged run, every request carries an OpenAI-compatible extension header:
+2. Each tier is sent to aiperf as a concurrent stream. In the priority-tagged run, every trace row carries an OpenAI-compatible extension field:
    ```json
    {"nvext": {"agent_hints": {"priority": <value>}}}
    ```
    The `priority` value raises the request's router queue priority -- a higher value shifts the request's effective arrival time earlier, giving it priority over lower-valued requests.
-3. Two separate aiperf seeds are used for baseline vs. priority runs to ensure different generated prompt content and prevent mocker KV cache cross-contamination.
+3. The baseline and priority runs use the same aiperf seed and split so prompt content matches. The priority run offsets `hash_ids` to keep its KV cache cold relative to the baseline and prevent mocker KV cache cross-contamination.
 
 #### Prerequisites: tune the priority queue
 
