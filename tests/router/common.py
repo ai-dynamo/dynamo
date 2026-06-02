@@ -2417,6 +2417,20 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                     "prefill_worker_id": prefill_zone_a_id,
                 },
             }
+            topology_ready_payload = {
+                **zone_a_payload,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            logger.info("Waiting for topology-valid frontend readiness...")
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+                test_payload=topology_ready_payload,
+            )
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(chat_url, json=zone_a_payload) as response:
                     response_body = await response.text()

@@ -103,7 +103,7 @@ sglang_configs = {
             # SGLang 0.5.11 silently hangs (no scheduler activity, no error)
             # when prompt+max_tokens nears max_total_tokens. Bisected hang
             # threshold ~1040 for these payloads; 2048 leaves headroom.
-            pytest.mark.timeout(195),  # profiled 33s on RTX 6000 Ada
+            pytest.mark.timeout(360),  # 3x ~119s (sglang gpu_1 log)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -136,7 +136,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.7),
             pytest.mark.requested_sglang_kv_tokens(2048),  # see "aggregated" above
-            pytest.mark.timeout(195),
+            pytest.mark.timeout(340),  # 3x ~111s (sglang gpu_1 log)
             pytest.mark.pre_merge,
             pytest.mark.unified,
         ],
@@ -184,7 +184,7 @@ sglang_configs = {
             ),  # KV cache cap (2x safety over min=18736)
             # Local repro took ~289s wall time with worker readiness reaching
             # "ready" at ~176s on a warm-cache RTX 6000 Ada.
-            pytest.mark.timeout(420),
+            pytest.mark.timeout(470),  # 3x ~155s (sglang gpu_1 log)
             pytest.mark.pre_merge,
             pytest.mark.skipif(
                 _is_cuda13(),
@@ -225,7 +225,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(13.0),
             pytest.mark.requested_sglang_kv_tokens(37472),
-            pytest.mark.timeout(420),
+            pytest.mark.timeout(470),  # 3x ~156s (sglang gpu_1 log)
             pytest.mark.post_merge,
             pytest.mark.skipif(
                 _is_cuda13(),
@@ -252,7 +252,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(13.0),
             pytest.mark.requested_sglang_kv_tokens(37472),
-            pytest.mark.timeout(420),
+            pytest.mark.timeout(470),  # 3x ~151s (sglang gpu_1 log)
             pytest.mark.post_merge,
             pytest.mark.skipif(
                 _is_cuda13(),
@@ -375,7 +375,7 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(
                 1024
             ),  # KV cache cap (2x safety over min=512)
-            pytest.mark.timeout(222),  # profiled 37s on RTX 6000 Ada
+            pytest.mark.timeout(280),  # 3x ~92s (sglang gpu_1 log)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
@@ -420,7 +420,7 @@ sglang_configs = {
             # processor) + 100-token max response + headroom.
             # TODO: bisect via tests/utils/profile_pytest.py for a tighter bound.
             pytest.mark.requested_sglang_kv_tokens(4096),
-            pytest.mark.timeout(300),
+            pytest.mark.timeout(320),  # 3x ~104s (sglang gpu_1 log)
             # post_merge: NIXL stubs outside docker can lack the Decoded
             # transport path. Same gating as vLLM's FD case
             # (tests/serve/multimodal_profiles/vllm.py:67-70).
@@ -517,7 +517,7 @@ sglang_configs = {
             # and peaks at ~35 GiB (won't fit L4).
             pytest.mark.profiled_vram_gib(20.5),
             pytest.mark.requested_sglang_kv_tokens(8736),
-            pytest.mark.timeout(360),
+            pytest.mark.timeout(390),  # 3x ~127s (sglang gpu_1 log)
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2-VL-7B-Instruct",
@@ -671,7 +671,7 @@ sglang_configs = {
             # SGLang 0.5.11 silently hangs when prompt+max_tokens nears
             # max_total_tokens (bisected ~1040 for these payloads). Matches
             # the "aggregated" config above.
-            pytest.mark.timeout(341),  # profiled 57s on RTX 6000 Ada
+            pytest.mark.timeout(750),  # 3x ~249s (sglang gpu_1 log)
             pytest.mark.post_merge,
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
@@ -876,7 +876,7 @@ def lora_chat_payload(
 @pytest.mark.model(DEFAULT_LORA_REPO)
 @pytest.mark.profiled_vram_gib(4.7)
 @pytest.mark.requested_sglang_kv_tokens(2848)
-@pytest.mark.timeout(158)
+@pytest.mark.timeout(240)  # 3x ~79s (sglang gpu_1 log)
 @pytest.mark.pre_merge
 def test_sglang_lora_aggregated(
     request,

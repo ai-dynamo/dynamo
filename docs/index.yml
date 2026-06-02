@@ -52,6 +52,9 @@ navigation:
     path: digest/index.mdx
     slug: digest
     contents:
+      - page: "DynoSim: Simulating the Pareto Frontier"
+        path: digest/dynosim/dynosim-pareto-frontier.md
+        slug: dynosim-pareto-frontier
       - page: "Dynamo Day 0 support for TokenSpeed"
         path: digest/tokenspeed/tokenspeed-day-0.md
         slug: tokenspeed-day-0
@@ -104,6 +107,8 @@ navigation:
             path: kubernetes/shadow-engine-failover.md
           - page: Disagg Communication
             path: kubernetes/disagg-communication-guide.md
+          - page: Topology-Aware KV Transfer
+            path: kubernetes/topology-aware-kv-transfer.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -148,6 +153,8 @@ navigation:
             contents:
               - page: GKE Setup
                 path: kubernetes/cloud-providers/gke/gke.md
+      - page: API Reference
+        path: kubernetes/api-reference.md
 
   # ==================== User Guides ====================
   - section: User Guides
@@ -184,6 +191,8 @@ navigation:
             path: agents/agent-tracing.md
           - page: Agent Hints
             path: agents/agent-hints.md
+          - page: Priority Scheduling
+            path: agents/priority-scheduling.md
           - page: Use Pi-Mono with Dynamo
             path: agents/pi-mono.md
       - section: Multimodal
@@ -242,12 +251,24 @@ navigation:
             path: fault-tolerance/testing.md
       - page: Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Simulation with Mocker
+      - section: DynoSim
+        slug: dynosim
         contents:
-          - page: Testing with Mocker
-            path: mocker/mocker.md
-          - page: Mocker Offline Trace Replay
-            path: benchmarks/mocker-trace-replay.md
+          - page: DynoSim Overview
+            path: dynosim/README.md
+            slug: overview
+          - page: Live Simulation with Mocker
+            path: dynosim/mocker.md
+            slug: mocker
+          - page: DynoSim Runs
+            path: dynosim/runs.md
+            slug: runs
+          - page: DynoSim Sweeps
+            path: dynosim/sweeps.md
+            slug: sweeps
+          - page: Planner DynoSim Benchmarking
+            path: dynosim/planner-benchmarking.md
+            slug: planner-benchmarking
       - page: Writing Python Workers (lower-level)
         path: development/backend-guide.md
       - page: Writing Python Unified Backends
@@ -330,6 +351,8 @@ navigation:
             path: components/router/router-configuration.md
           - page: Disaggregated Serving
             path: components/router/router-disaggregated-serving.md
+          - page: Topology-Aware KV Transfer
+            path: components/router/topology-aware-kv-transfer.md
           - page: Router Operations
             path: components/router/router-operations.md
           - page: Router Examples
@@ -441,8 +464,6 @@ navigation:
           - page: RDMA Metadata
             path: api/nixl-connect/rdma-metadata.md
       # -- Kubernetes (hidden sub-pages) --
-      - page: API Reference (K8s)
-        path: kubernetes/api-reference.md
       - page: Creating Deployments
         path: kubernetes/deployment/create-deployment.md
       - page: FluxCD
@@ -483,9 +504,6 @@ navigation:
       # -- Benchmarks --
       - page: KV Router A/B Testing
         path: benchmarks/kv-router-ab-testing.md
-      # -- Simulation with Mocker --
-      - page: Simulation with Mocker
-        path: mocker/mocker.md
       # -- Templates --
       - section: Templates
         path: templates/README.md
