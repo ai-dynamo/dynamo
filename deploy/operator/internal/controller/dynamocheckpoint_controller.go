@@ -65,6 +65,7 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
+//nolint:gocyclo
 func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -379,6 +380,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 	}
 }
 
+//nolint:gocyclo
 func (r *CheckpointReconciler) FinalizeResource(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
 	logger := log.FromContext(ctx)
 	if ckpt == nil || ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
