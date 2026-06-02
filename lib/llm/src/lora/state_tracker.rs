@@ -152,6 +152,17 @@ impl LoraStateTracker {
         );
     }
 
+    /// Set a worker's LoRA slot capacity directly, without registering any adapter on it.
+    ///
+    /// Capacity-only counterpart to [`handle_mdc_addition`] (which records a loaded adapter AND
+    /// sets capacity). Makes the worker appear in [`list_workers`] with the given capacity and no
+    /// loaded LoRAs, so callers can establish cluster topology / per-worker `max_gpu_lora_count`
+    /// without consuming a slot with a phantom adapter.
+    pub fn set_worker_capacity(&self, worker: WorkerWithDpRank, capacity: u32) {
+        let _guard = self.lock_writes();
+        self.worker_capacity.insert(worker, capacity);
+    }
+
     /// Handle an MDC removal event: a worker unregistered a LoRA adapter.
     pub fn handle_mdc_removal(&self, worker: WorkerWithDpRank, lora_name: &str) {
         let _guard = self.lock_writes();
