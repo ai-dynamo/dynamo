@@ -24,7 +24,9 @@ pytestmark = [
 
 
 def test_construction_emits_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="dynamo.planner.plugins.registry.auth.base"):
+    with caplog.at_level(
+        logging.WARNING, logger="dynamo.planner.plugins.registry.auth.base"
+    ):
         AllowUnauthenticatedAuth()
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("DEV ONLY" in r.message for r in warnings)

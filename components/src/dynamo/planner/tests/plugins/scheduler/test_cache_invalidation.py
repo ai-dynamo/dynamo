@@ -55,30 +55,38 @@ def _make_ctx():
         return _StubTransport(plugin_id, endpoint)
 
     server = PluginRegistryServer(
-        clock=clock, auth=AllowUnauthenticatedAuth(),
-        circuit_breaker=cb, transport_factory=factory,
+        clock=clock,
+        auth=AllowUnauthenticatedAuth(),
+        circuit_breaker=cb,
+        transport_factory=factory,
     )
     scheduler = PluginScheduler(server, cb, clock)
     return server, scheduler, cb, clock
 
 
 async def _register_hold_last(server, plugin_id="p1"):
-    resp = await server.register(RegisterRequest(
-        plugin_id=plugin_id,
-        plugin_type="propose",
-        priority=10,
-        endpoint=f"grpc://127.0.0.1:9000",
-        protocol_version="1.0",
-        execution_interval_seconds=10.0,
-        hold_policy=HoldPolicy.HOLD_LAST,
-    ))
+    resp = await server.register(
+        RegisterRequest(
+            plugin_id=plugin_id,
+            plugin_type="propose",
+            priority=10,
+            endpoint="grpc://127.0.0.1:9000",
+            protocol_version="1.0",
+            execution_interval_seconds=10.0,
+            hold_policy=HoldPolicy.HOLD_LAST,
+        )
+    )
     assert resp.accepted, resp.reject_reason
 
 
 def _ovr(replicas):
-    return OverrideResult(targets=[
-        ComponentTarget(sub_component_type="prefill", replicas=replicas, type=OverrideType.SET)
-    ])
+    return OverrideResult(
+        targets=[
+            ComponentTarget(
+                sub_component_type="prefill", replicas=replicas, type=OverrideType.SET
+            )
+        ]
+    )
 
 
 async def _seed_cache(server, scheduler, plugin_id="p1"):

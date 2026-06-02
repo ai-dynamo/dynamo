@@ -173,14 +173,15 @@ class PredictPluginCallable(Protocol):
     """
 
     @property
-    def plugin_id(self) -> str: ...
+    def plugin_id(self) -> str:
+        ...
 
     @property
-    def priority(self) -> int: ...
+    def priority(self) -> int:
+        ...
 
-    async def call(
-        self, method: str, context: PipelineContext
-    ) -> PredictStageResponse: ...
+    async def call(self, method: str, context: PipelineContext) -> PredictStageResponse:
+        ...
 
 
 __all__ = [

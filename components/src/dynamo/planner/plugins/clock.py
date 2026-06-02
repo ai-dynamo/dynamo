@@ -135,7 +135,9 @@ class VirtualClock(Clock):
         discarded from the heap to bound memory in long-running tests.
         """
         if seconds < 0:
-            raise ValueError(f"VirtualClock.advance: seconds must be >= 0, got {seconds}")
+            raise ValueError(
+                f"VirtualClock.advance: seconds must be >= 0, got {seconds}"
+            )
         self._now += seconds
         self._mono += seconds
         while self._sleepers and self._sleepers[0][0] <= self._mono:

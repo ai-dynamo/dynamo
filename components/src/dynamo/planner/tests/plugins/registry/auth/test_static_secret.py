@@ -74,9 +74,7 @@ def test_construction_rejects_empty_subject_among_valid_entries():
     """A mixed mapping where only one entry has an empty subject still
     fails fast — fail-closed at config validation."""
     with pytest.raises(ValueError, match="empty subject"):
-        StaticSecretAuth(
-            {"good-token": "ext-plugins", "bad-token": ""}
-        )
+        StaticSecretAuth({"good-token": "ext-plugins", "bad-token": ""})
 
 
 def test_construction_accepts_all_distinguishing_subjects():

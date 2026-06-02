@@ -154,7 +154,9 @@ async def test_plugin_with_satisfied_requires_fires():
     server, scheduler, clock = _make_ctx()
     await _register(server, "p1", requires=["predictions"])
     ctx = PipelineContext(
-        predictions=PredictionData(predicted_num_req=42.0, predicted_isl=10, predicted_osl=20),
+        predictions=PredictionData(
+            predicted_num_req=42.0, predicted_isl=10, predicted_osl=20
+        ),
     )
 
     active = scheduler.compute_active_set(clock.monotonic(), "propose", ctx=ctx)
@@ -183,9 +185,12 @@ async def test_plugin_with_nested_requires_path():
         ),
     )
 
-    assert scheduler.compute_active_set(
-        clock.monotonic(), "propose", ctx=ctx_missing
-    ).triggered == []
+    assert (
+        scheduler.compute_active_set(
+            clock.monotonic(), "propose", ctx=ctx_missing
+        ).triggered
+        == []
+    )
     assert [
         p.plugin_id
         for p in scheduler.compute_active_set(
@@ -197,22 +202,27 @@ async def test_plugin_with_nested_requires_path():
 @pytest.mark.asyncio
 async def test_multiple_requires_all_must_be_present():
     server, scheduler, clock = _make_ctx()
-    await _register(
-        server, "p1", requires=["predictions", "observations.traffic"]
-    )
+    await _register(server, "p1", requires=["predictions", "observations.traffic"])
 
     # Only predictions present — traffic missing → skip
     ctx_partial = PipelineContext(
-        predictions=PredictionData(predicted_num_req=42, predicted_isl=10, predicted_osl=20),
+        predictions=PredictionData(
+            predicted_num_req=42, predicted_isl=10, predicted_osl=20
+        ),
         observations=None,
     )
-    assert scheduler.compute_active_set(
-        clock.monotonic(), "propose", ctx=ctx_partial
-    ).triggered == []
+    assert (
+        scheduler.compute_active_set(
+            clock.monotonic(), "propose", ctx=ctx_partial
+        ).triggered
+        == []
+    )
 
     # Both present → fire
     ctx_both = PipelineContext(
-        predictions=PredictionData(predicted_num_req=42, predicted_isl=10, predicted_osl=20),
+        predictions=PredictionData(
+            predicted_num_req=42, predicted_isl=10, predicted_osl=20
+        ),
         observations=ObservationData(
             traffic=TrafficMetrics(duration_s=5, num_req=1, isl=1, osl=1),
         ),
@@ -284,9 +294,7 @@ def _stub_metrics():
 async def test_tick_requires_unsatisfied_metric_emits_with_missing_field():
     server, scheduler, clock = _make_ctx()
     scheduler._metrics = _stub_metrics()
-    await _register(
-        server, "p1", requires=["predictions", "observations.traffic"]
-    )
+    await _register(server, "p1", requires=["predictions", "observations.traffic"])
 
     # Both missing — should record the FIRST missing field, not both.
     scheduler.compute_active_set(

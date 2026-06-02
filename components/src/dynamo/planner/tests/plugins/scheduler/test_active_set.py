@@ -50,32 +50,45 @@ def _make_ctx():
         return _StubTransport(plugin_id, endpoint)
 
     server = PluginRegistryServer(
-        clock=clock, auth=AllowUnauthenticatedAuth(),
-        circuit_breaker=cb, transport_factory=factory,
+        clock=clock,
+        auth=AllowUnauthenticatedAuth(),
+        circuit_breaker=cb,
+        transport_factory=factory,
     )
     scheduler = PluginScheduler(server, cb, clock)
     return server, scheduler, cb, clock
 
 
-async def _register(server, plugin_id, plugin_type, priority,
-                    execution_interval_seconds=0.0,
-                    hold_policy=HoldPolicy.ACCEPT_WHEN_IDLE):
-    resp = await server.register(RegisterRequest(
-        plugin_id=plugin_id,
-        plugin_type=plugin_type,
-        priority=priority,
-        endpoint=f"grpc://127.0.0.1:9000",
-        protocol_version="1.0",
-        execution_interval_seconds=execution_interval_seconds,
-        hold_policy=hold_policy,
-    ))
+async def _register(
+    server,
+    plugin_id,
+    plugin_type,
+    priority,
+    execution_interval_seconds=0.0,
+    hold_policy=HoldPolicy.ACCEPT_WHEN_IDLE,
+):
+    resp = await server.register(
+        RegisterRequest(
+            plugin_id=plugin_id,
+            plugin_type=plugin_type,
+            priority=priority,
+            endpoint="grpc://127.0.0.1:9000",
+            protocol_version="1.0",
+            execution_interval_seconds=execution_interval_seconds,
+            hold_policy=hold_policy,
+        )
+    )
     assert resp.accepted, resp.reject_reason
 
 
 def _ovr(replicas):
-    return OverrideResult(targets=[
-        ComponentTarget(sub_component_type="prefill", replicas=replicas, type=OverrideType.SET)
-    ])
+    return OverrideResult(
+        targets=[
+            ComponentTarget(
+                sub_component_type="prefill", replicas=replicas, type=OverrideType.SET
+            )
+        ]
+    )
 
 
 def _record_override_tick(scheduler, plugin_id, stage, override, tick_now):
@@ -171,9 +184,14 @@ async def test_triggered_again_after_interval_elapses():
 @pytest.mark.asyncio
 async def test_hold_last_inherits_between_triggers():
     server, scheduler, _, clock = _make_ctx()
-    await _register(server, "p1", "propose", 10,
-                    execution_interval_seconds=10.0,
-                    hold_policy=HoldPolicy.HOLD_LAST)
+    await _register(
+        server,
+        "p1",
+        "propose",
+        10,
+        execution_interval_seconds=10.0,
+        hold_policy=HoldPolicy.HOLD_LAST,
+    )
     # First tick triggers.
     scheduler.compute_active_set(clock.monotonic(), "propose")
     _record_override_tick(scheduler, "p1", "propose", _ovr(7), clock.monotonic())
@@ -215,9 +233,14 @@ async def test_disabled_plugin_excluded_from_active_set():
 @pytest.mark.asyncio
 async def test_circuit_open_excludes_plugin_from_active_set():
     server, scheduler, cb, clock = _make_ctx()
-    await _register(server, "p1", "propose", 10,
-                    execution_interval_seconds=10.0,
-                    hold_policy=HoldPolicy.HOLD_LAST)
+    await _register(
+        server,
+        "p1",
+        "propose",
+        10,
+        execution_interval_seconds=10.0,
+        hold_policy=HoldPolicy.HOLD_LAST,
+    )
     # Seed the cache so inherited would otherwise be possible.
     scheduler.compute_active_set(clock.monotonic(), "propose")
     _record_override_tick(scheduler, "p1", "propose", _ovr(5), clock.monotonic())
@@ -248,8 +271,7 @@ async def test_accept_only_plugin_respects_execution_interval():
     applies uniformly across result kinds.
     """
     server, scheduler, _, clock = _make_ctx()
-    await _register(server, "p1", "propose", 10,
-                    execution_interval_seconds=10.0)
+    await _register(server, "p1", "propose", 10, execution_interval_seconds=10.0)
     # First fire happens when the full interval elapses since
     # registration (PSM-parity anchor — see test_first_fire_anchored_
     # on_registration_time).
@@ -276,13 +298,12 @@ async def test_record_evaluation_and_record_result_pair_counts_once():
     The pair must bump ``evaluations_total`` exactly once (only
     ``record_evaluation`` touches the counter)."""
     server, scheduler, _, clock = _make_ctx()
-    await _register(server, "p1", "propose", 10,
-                    hold_policy=HoldPolicy.HOLD_LAST)
+    await _register(server, "p1", "propose", 10, hold_policy=HoldPolicy.HOLD_LAST)
     scheduler.compute_active_set(clock.monotonic(), "propose")
     # Simulate the orchestrator's pair of calls for an Override-returning
     # plugin.
     scheduler.record_evaluation("p1", clock.monotonic())
     scheduler.record_result("p1", "propose", _ovr(5), clock.monotonic())
     plugin = server.get_plugin("p1")
-    assert plugin.evaluations_total == 1   # ← not 2
+    assert plugin.evaluations_total == 1  # ← not 2
     assert plugin.last_call_at == clock.monotonic()

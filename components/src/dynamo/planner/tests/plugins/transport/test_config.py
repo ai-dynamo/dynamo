@@ -5,15 +5,11 @@
 
 from __future__ import annotations
 
-import os
 
 import pytest
 
 from dynamo.planner.plugins.clock import VirtualClock, WallClock
-from dynamo.planner.plugins.transport import (
-    GrpcTransport,
-    InProcessTransport,
-)
+from dynamo.planner.plugins.transport import GrpcTransport, InProcessTransport
 from dynamo.planner.plugins.transport.config import (
     ClockConfig,
     TransportConfig,
@@ -65,7 +61,9 @@ def test_transport_config_rejects_non_positive_request_timeout():
 
 
 def test_factory_inproc_with_instance():
-    t = make_transport_for_endpoint("p1", "inproc://p1", TransportConfig(), in_process_instance=_StubPlugin())
+    t = make_transport_for_endpoint(
+        "p1", "inproc://p1", TransportConfig(), in_process_instance=_StubPlugin()
+    )
     assert isinstance(t, InProcessTransport)
     assert t.plugin_id == "p1"
     assert t.endpoint == "inproc://p1"
@@ -101,7 +99,9 @@ def test_factory_unknown_scheme():
 
 def test_factory_propagates_request_timeout():
     cfg = TransportConfig(request_timeout_seconds=12.5)
-    t = make_transport_for_endpoint("p", "inproc://p", cfg, in_process_instance=_StubPlugin())
+    t = make_transport_for_endpoint(
+        "p", "inproc://p", cfg, in_process_instance=_StubPlugin()
+    )
     assert t.timeout_seconds == 12.5
 
 

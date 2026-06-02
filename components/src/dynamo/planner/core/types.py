@@ -142,9 +142,7 @@ class TickDiagnostics:
     # override_type ∈ {"SET", "AT_LEAST", "AT_MOST", "REJECT"};
     # component_key = ``f"{sub_component_type}/{component_name}"``
     # (empty for global); value = replica target (``-1`` for REJECT).
-    plugin_overrides: list[tuple[str, str, str, str, int]] = field(
-        default_factory=list
-    )
+    plugin_overrides: list[tuple[str, str, str, str, int]] = field(default_factory=list)
 
     # Per-component reconcile reason.  Keyed by ``component_key`` as
     # above; value is a short audit string such as

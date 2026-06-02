@@ -46,7 +46,9 @@ def test_class_coverage_pydantic_side():
     }
     registered = set(_PYD_TO_PROTO.keys())
     missing = pyd_classes - registered
-    assert not missing, f"Pydantic classes missing proto registration: {sorted(c.__name__ for c in missing)}"
+    assert (
+        not missing
+    ), f"Pydantic classes missing proto registration: {sorted(c.__name__ for c in missing)}"
 
 
 def test_class_coverage_proto_side():
@@ -120,7 +122,9 @@ def test_register_response_accepted():
 
 
 def test_register_response_rejected():
-    msg = pyd.RegisterResponse(accepted=False, reject_reason="protocol_version_unsupported")
+    msg = pyd.RegisterResponse(
+        accepted=False, reject_reason="protocol_version_unsupported"
+    )
     _round_trip_pyd(msg)
 
 
@@ -162,7 +166,11 @@ def test_list_plugins_response_multi():
     msg = pyd.ListPluginsResponse(
         plugins=[
             pyd.PluginInfo(plugin_id="a", plugin_type="propose"),
-            pyd.PluginInfo(plugin_id="b", plugin_type="constrain", circuit_state=pyd.CircuitState.OPEN),
+            pyd.PluginInfo(
+                plugin_id="b",
+                plugin_type="constrain",
+                circuit_state=pyd.CircuitState.OPEN,
+            ),
         ]
     )
     _round_trip_pyd(msg)
@@ -183,7 +191,9 @@ def test_pipeline_context_full():
         request_id="req-456",
         decision_id="decision-789",
         observations=pyd.ObservationData(
-            traffic=pyd.TrafficMetrics(duration_s=60.0, num_req=1500, isl=3000, osl=150),
+            traffic=pyd.TrafficMetrics(
+                duration_s=60.0, num_req=1500, isl=3000, osl=150
+            ),
             fpm=pyd.FpmData(
                 prefill_engines={"engine-0": b"\x01\x02\x03binary-fpm-payload"},
                 decode_engines={"engine-1": b"\xff\xfe\xfd"},
@@ -209,7 +219,9 @@ def test_pipeline_context_full():
         constrained=pyd.ScalingProposal(
             targets=[
                 pyd.ComponentTarget(sub_component_type="prefill", replicas=6),
-                pyd.ComponentTarget(sub_component_type="decode", replicas=10),  # capped by AT_MOST
+                pyd.ComponentTarget(
+                    sub_component_type="decode", replicas=10
+                ),  # capped by AT_MOST
             ],
         ),
     )
@@ -232,7 +244,9 @@ def test_prediction_data_optional_unset_vs_zero():
     # Explicit 0.0 (rare but valid)
     p2 = pyd.PredictionData(predicted_num_req=0.0)
     pb2 = pydantic_to_proto(p2)
-    assert pb2.HasField("predicted_num_req"), "predicted_num_req=0.0 must round-trip as set"
+    assert pb2.HasField(
+        "predicted_num_req"
+    ), "predicted_num_req=0.0 must round-trip as set"
     assert pb2.predicted_num_req == 0.0
     assert not pb2.HasField("predicted_isl")  # still unset
 
@@ -271,9 +285,15 @@ def test_override_result_multi_target_mixed_types():
     """One OverrideResult can carry SET + AT_LEAST + AT_MOST per component."""
     msg = pyd.OverrideResult(
         targets=[
-            pyd.ComponentTarget(sub_component_type="prefill", replicas=10, type=pyd.OverrideType.SET),
-            pyd.ComponentTarget(sub_component_type="decode", replicas=4, type=pyd.OverrideType.AT_LEAST),
-            pyd.ComponentTarget(sub_component_type="decode", replicas=8, type=pyd.OverrideType.AT_MOST),
+            pyd.ComponentTarget(
+                sub_component_type="prefill", replicas=10, type=pyd.OverrideType.SET
+            ),
+            pyd.ComponentTarget(
+                sub_component_type="decode", replicas=4, type=pyd.OverrideType.AT_LEAST
+            ),
+            pyd.ComponentTarget(
+                sub_component_type="decode", replicas=8, type=pyd.OverrideType.AT_MOST
+            ),
         ],
         reason="blended throughput + load decision",
     )
@@ -343,7 +363,9 @@ def test_propose_stage_response_oneof_violation():
 def test_predict_stage_response_partial():
     """PredictionData partial set — only num_req."""
     msg = pyd.PredictStageResponse(
-        predictions=pyd.PredictionData(predicted_num_req=1500.0, source="user-llm-predictor"),
+        predictions=pyd.PredictionData(
+            predicted_num_req=1500.0, source="user-llm-predictor"
+        ),
         final=False,
     )
     msg_back = _round_trip_pyd(msg)
@@ -362,7 +384,13 @@ def test_reconcile_stage_request_with_proposals():
                 priority=50,
                 result_kind="override",
                 override=pyd.OverrideResult(
-                    targets=[pyd.ComponentTarget(sub_component_type="prefill", replicas=6, type=pyd.OverrideType.AT_LEAST)],
+                    targets=[
+                        pyd.ComponentTarget(
+                            sub_component_type="prefill",
+                            replicas=6,
+                            type=pyd.OverrideType.AT_LEAST,
+                        )
+                    ],
                 ),
             ),
             pyd.ProposeResult(
@@ -370,7 +398,9 @@ def test_reconcile_stage_request_with_proposals():
                 priority=10,
                 result_kind="override",
                 override=pyd.OverrideResult(
-                    targets=[pyd.ComponentTarget(sub_component_type="prefill", replicas=8)],
+                    targets=[
+                        pyd.ComponentTarget(sub_component_type="prefill", replicas=8)
+                    ],
                 ),
             ),
             pyd.ProposeResult(
@@ -391,8 +421,16 @@ def test_constrain_stage_response_at_least_at_most():
     msg = pyd.ConstrainStageResponse(
         override=pyd.OverrideResult(
             targets=[
-                pyd.ComponentTarget(sub_component_type="prefill", replicas=2, type=pyd.OverrideType.AT_LEAST),
-                pyd.ComponentTarget(sub_component_type="prefill", replicas=20, type=pyd.OverrideType.AT_MOST),
+                pyd.ComponentTarget(
+                    sub_component_type="prefill",
+                    replicas=2,
+                    type=pyd.OverrideType.AT_LEAST,
+                ),
+                pyd.ComponentTarget(
+                    sub_component_type="prefill",
+                    replicas=20,
+                    type=pyd.OverrideType.AT_MOST,
+                ),
             ],
             reason="builtin-budget-constrain: min_endpoint=2 max_gpu_budget=20",
         ),
@@ -425,7 +463,9 @@ def test_reset_request_with_reason():
     "msg",
     [
         pyd.RegisterRequest(plugin_id="x", plugin_type="propose", priority=10),
-        pyd.OverrideResult(targets=[pyd.ComponentTarget(sub_component_type="prefill", replicas=8)]),
+        pyd.OverrideResult(
+            targets=[pyd.ComponentTarget(sub_component_type="prefill", replicas=8)]
+        ),
         pyd.PipelineContext(request_id="r"),
     ],
     ids=["RegisterRequest", "OverrideResult", "PipelineContext"],

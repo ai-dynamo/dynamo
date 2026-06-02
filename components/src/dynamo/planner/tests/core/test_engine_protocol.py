@@ -41,7 +41,9 @@ pytestmark = [
 
 def _simple_caps() -> WorkerCapabilities:
     return WorkerCapabilities(
-        decode=EngineCapabilities(num_gpu=1, max_num_batched_tokens=2048, max_kv_tokens=16384)
+        decode=EngineCapabilities(
+            num_gpu=1, max_num_batched_tokens=2048, max_kv_tokens=16384
+        )
     )
 
 

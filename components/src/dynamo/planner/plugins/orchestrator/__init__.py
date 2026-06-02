@@ -9,13 +9,8 @@ orchestrator that drives the 4-stage plugin pipeline (PREDICT / PROPOSE
 / RECONCILE / CONSTRAIN) per tick and emits an EXECUTE decision.
 """
 
-from dynamo.planner.plugins.orchestrator.orchestrator import (
-    LocalPlannerOrchestrator,
-)
-from dynamo.planner.plugins.orchestrator.pipeline import (
-    PipelineOutcome,
-    run_pipeline,
-)
+from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
+from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome, run_pipeline
 
 __all__ = [
     "LocalPlannerOrchestrator",

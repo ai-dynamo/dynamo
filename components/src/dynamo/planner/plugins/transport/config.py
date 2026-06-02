@@ -107,7 +107,9 @@ def make_transport_for_endpoint(
                 f"make_transport_for_endpoint(plugin_id={plugin_id!r}, "
                 f"endpoint={endpoint!r}): in_process_instance required for inproc://"
             )
-        return InProcessTransport(plugin_id, in_process_instance, timeout_seconds=timeout)
+        return InProcessTransport(
+            plugin_id, in_process_instance, timeout_seconds=timeout
+        )
 
     if endpoint.startswith("grpc://"):
         if not config.allow_insecure_grpc:

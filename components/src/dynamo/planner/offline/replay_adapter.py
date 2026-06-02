@@ -36,10 +36,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from dynamo.planner.plugins.clock import VirtualClock
-from dynamo.planner.plugins.orchestrator.engine_adapter import (
-    OrchestratorEngineAdapter,
-)
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     QueuedRequestMetrics,
@@ -60,6 +56,8 @@ from dynamo.planner.core.types import (
 )
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.traffic_metrics import Metrics
+from dynamo.planner.plugins.clock import VirtualClock
+from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 
 logger = logging.getLogger(__name__)
 

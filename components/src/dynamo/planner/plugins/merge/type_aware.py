@@ -38,18 +38,13 @@ from __future__ import annotations
 import math
 from typing import Mapping, Sequence
 
+from dynamo.planner.plugins.merge.types import ComponentKey, MergeOutcome, PluginResult
 from dynamo.planner.plugins.types import (
     ComponentTarget,
     OverrideResult,
     OverrideType,
     RejectResult,
     ScalingProposal,
-)
-
-from dynamo.planner.plugins.merge.types import (
-    ComponentKey,
-    MergeOutcome,
-    PluginResult,
 )
 
 

@@ -14,12 +14,10 @@ import pytest
 
 from dynamo.planner.plugins.merge import (
     ComponentKey,
-    MergeOutcome,
     PluginResult,
     type_aware_merge,
 )
 from dynamo.planner.plugins.types import (
-    AcceptResult,
     ComponentTarget,
     OverrideResult,
     OverrideType,

@@ -277,7 +277,9 @@ class _StageOneofResponse(_ProtoMirror):
 
     def model_post_init(self, __context: Any) -> None:
         # Auto-derive result_kind from set fields if not explicit
-        set_kinds = [k for k in ("accept", "override", "reject") if getattr(self, k) is not None]
+        set_kinds = [
+            k for k in ("accept", "override", "reject") if getattr(self, k) is not None
+        ]
         if self.result_kind == "" and len(set_kinds) == 1:
             object.__setattr__(self, "result_kind", set_kinds[0])
         elif len(set_kinds) > 1:

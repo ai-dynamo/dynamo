@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 

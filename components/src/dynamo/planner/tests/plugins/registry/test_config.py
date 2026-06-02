@@ -12,9 +12,7 @@ from pydantic import ValidationError
 
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.registry.auth import (
-    AllowUnauthenticatedAuth,
     MultiSourceAuth,
-    StaticSecretAuth,
 )
 from dynamo.planner.plugins.registry.config import (
     AuthConfig,
@@ -51,8 +49,12 @@ def test_static_secret_only_builds_multi_with_one_source():
 
 
 def test_static_secret_empty_secrets_logs_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="dynamo.planner.plugins.registry.config"):
-        build_auth_validator(AuthConfig(trusted_sources=["static_secret"], static_secrets={}))
+    with caplog.at_level(
+        logging.WARNING, logger="dynamo.planner.plugins.registry.config"
+    ):
+        build_auth_validator(
+            AuthConfig(trusted_sources=["static_secret"], static_secrets={})
+        )
     assert any("static_secrets is empty" in r.message for r in caplog.records)
 
 
@@ -106,9 +108,8 @@ def test_build_registry_from_config_returns_server_and_breaker():
 
 @pytest.mark.asyncio
 async def test_build_registry_propagates_protocol_versions():
-    from dynamo.planner.plugins.types import RegisterRequest
-
     from dynamo.planner.plugins.transport.config import TransportConfig
+    from dynamo.planner.plugins.types import RegisterRequest
 
     config = PluginRegistrationConfig(
         auth=AuthConfig(trusted_sources=["allow_unauthenticated"]),
@@ -152,25 +153,29 @@ def test_in_process_plugin_spec_rejects_unknown_field_protocol_version():
 
 
 def test_in_process_plugin_spec_class_alias_works():
-    spec = InProcessPluginSpec.model_validate({
-        "module": "dynamo.example",
-        "class": "MyPlugin",
-        "plugin_id": "mp",
-        "plugin_type": "predict",
-        "priority": 5,
-    })
+    spec = InProcessPluginSpec.model_validate(
+        {
+            "module": "dynamo.example",
+            "class": "MyPlugin",
+            "plugin_id": "mp",
+            "plugin_type": "predict",
+            "priority": 5,
+        }
+    )
     assert spec.class_ == "MyPlugin"
     assert spec.module == "dynamo.example"
 
 
 def test_in_process_plugin_spec_defaults_reasonable():
-    spec = InProcessPluginSpec.model_validate({
-        "module": "x",
-        "class": "Y",
-        "plugin_id": "p",
-        "plugin_type": "propose",
-        "priority": 1,
-    })
+    spec = InProcessPluginSpec.model_validate(
+        {
+            "module": "x",
+            "class": "Y",
+            "plugin_id": "p",
+            "plugin_type": "propose",
+            "priority": 1,
+        }
+    )
     assert spec.hold_policy == "ACCEPT_WHEN_IDLE"
     assert spec.execution_interval_seconds == 0.0
     assert spec.kwargs == {}

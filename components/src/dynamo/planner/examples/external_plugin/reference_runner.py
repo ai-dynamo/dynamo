@@ -47,7 +47,6 @@ import grpc
 from dynamo.planner.plugins.proto.v1 import plugin_pb2 as pb
 from dynamo.planner.plugins.proto.v1 import plugin_pb2_grpc as pbg
 
-
 # ---------------------------------------------------------------------------
 # Per-stage Servicer implementations
 #
@@ -205,7 +204,7 @@ async def _self_register(
     if gateway_endpoint.startswith("unix://"):
         target = gateway_endpoint.replace("unix://", "unix:")
     elif gateway_endpoint.startswith("grpc://"):
-        target = gateway_endpoint[len("grpc://"):]
+        target = gateway_endpoint[len("grpc://") :]
     else:
         # Accept bare host:port as well — caller convenience.
         target = gateway_endpoint
@@ -295,7 +294,7 @@ async def main() -> None:
     # Plugin endpoint as the planner will see it (matches scheme
     # convention used by ``derive_transport_type``).
     if actual_listen.startswith("unix:"):
-        plugin_endpoint_for_planner = "unix://" + actual_listen[len("unix:"):]
+        plugin_endpoint_for_planner = "unix://" + actual_listen[len("unix:") :]
     else:
         plugin_endpoint_for_planner = "grpc://" + actual_listen
 

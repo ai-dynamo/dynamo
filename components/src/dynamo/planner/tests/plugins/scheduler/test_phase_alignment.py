@@ -91,11 +91,11 @@ def test_aligned_anchor_snaps_to_floor_boundary():
     clock = VirtualClock()
     server = _make_server(clock, scale_interval_seconds=5.0)
 
-    assert server._aligned_anchor(0.0) == 0.0     # boundary stays
-    assert server._aligned_anchor(2.5) == 0.0     # below boundary -> floor 0
-    assert server._aligned_anchor(4.999) == 0.0   # still in [0, 5)
-    assert server._aligned_anchor(5.0) == 5.0     # boundary
-    assert server._aligned_anchor(7.4) == 5.0     # snap down to 5
+    assert server._aligned_anchor(0.0) == 0.0  # boundary stays
+    assert server._aligned_anchor(2.5) == 0.0  # below boundary -> floor 0
+    assert server._aligned_anchor(4.999) == 0.0  # still in [0, 5)
+    assert server._aligned_anchor(5.0) == 5.0  # boundary
+    assert server._aligned_anchor(7.4) == 5.0  # snap down to 5
     assert server._aligned_anchor(180.6) == 180.0
     assert server._aligned_anchor(360.0) == 360.0
 

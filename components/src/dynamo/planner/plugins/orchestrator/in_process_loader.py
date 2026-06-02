@@ -26,9 +26,7 @@ import importlib
 import logging
 from typing import Sequence
 
-from dynamo.planner.plugins.orchestrator.orchestrator import (
-    LocalPlannerOrchestrator,
-)
+from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
 from dynamo.planner.plugins.registry.config import InProcessPluginSpec
 from dynamo.planner.plugins.types import HoldPolicy
 

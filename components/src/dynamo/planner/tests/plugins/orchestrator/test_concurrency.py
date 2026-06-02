@@ -76,9 +76,7 @@ async def test_multiple_propose_plugins_run_concurrently(ctx_factory):
 
     async def slow_handler(req):
         await asyncio.sleep(DELAY)
-        return ProposeStageResponse(
-            result_kind="accept", accept=AcceptResult()
-        )
+        return ProposeStageResponse(result_kind="accept", accept=AcceptResult())
 
     for i in range(5):
         orchestrator.register_internal(
@@ -93,9 +91,9 @@ async def test_multiple_propose_plugins_run_concurrently(ctx_factory):
     elapsed = time.perf_counter() - started
     # 5 plugins × 50ms serial would be 250ms; concurrent should be closer
     # to 50ms. Assert well under the serial lower bound with generous CI margin.
-    assert elapsed < DELAY * 3, (
-        f"expected concurrent execution (~{DELAY}s), got {elapsed:.3f}s"
-    )
+    assert (
+        elapsed < DELAY * 3
+    ), f"expected concurrent execution (~{DELAY}s), got {elapsed:.3f}s"
 
 
 # ---------------------------------------------------------------------------

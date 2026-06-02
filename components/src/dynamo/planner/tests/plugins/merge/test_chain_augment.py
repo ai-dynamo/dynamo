@@ -157,8 +157,12 @@ async def test_source_higher_precedence_wins_when_non_empty():
     # Sort asc: B (10) runs first with source="patch"; A (100) runs second
     # with source="base". First-writer-wins for source: B's non-empty value
     # is preserved.
-    a = _StubPlugin("A", 100, [PredictStageResponse(predictions=_pd(num_req=1.0, source="base"))])
-    b = _StubPlugin("B", 10, [PredictStageResponse(predictions=_pd(isl=2.0, source="patch"))])
+    a = _StubPlugin(
+        "A", 100, [PredictStageResponse(predictions=_pd(num_req=1.0, source="base"))]
+    )
+    b = _StubPlugin(
+        "B", 10, [PredictStageResponse(predictions=_pd(isl=2.0, source="patch"))]
+    )
     out = await chain_augment([a, b], PipelineContext())
     assert out.prediction is not None
     assert out.prediction.source == "patch"
@@ -169,8 +173,12 @@ async def test_source_falls_back_to_lower_precedence_when_higher_empty():
     # Sort asc: B (10) runs first with source=""; A (100) runs second with
     # source="base". Empty string is treated as "no opinion" for source,
     # so A's value fills in.
-    a = _StubPlugin("A", 100, [PredictStageResponse(predictions=_pd(num_req=1.0, source="base"))])
-    b = _StubPlugin("B", 10, [PredictStageResponse(predictions=_pd(isl=2.0))])  # source=""
+    a = _StubPlugin(
+        "A", 100, [PredictStageResponse(predictions=_pd(num_req=1.0, source="base"))]
+    )
+    b = _StubPlugin(
+        "B", 10, [PredictStageResponse(predictions=_pd(isl=2.0))]
+    )  # source=""
     out = await chain_augment([a, b], PipelineContext())
     assert out.prediction is not None
     assert out.prediction.source == "base"
@@ -187,8 +195,12 @@ async def test_final_breaks_chain_and_subsequent_plugins_never_called():
     # p10 ran first (set osl=100), p50 ran second (set isl=2000 + final),
     # p100 never gets to fill predicted_num_req. Misuse warning fires
     # because p50 isn't the lowest-priority plugin in the chain (p10 is).
-    p100 = _StubPlugin("p100", 100, [PredictStageResponse(predictions=_pd(num_req=500))])
-    p50 = _StubPlugin("p50", 50, [PredictStageResponse(predictions=_pd(isl=2000), final=True)])
+    p100 = _StubPlugin(
+        "p100", 100, [PredictStageResponse(predictions=_pd(num_req=500))]
+    )
+    p50 = _StubPlugin(
+        "p50", 50, [PredictStageResponse(predictions=_pd(isl=2000), final=True)]
+    )
     p10 = _StubPlugin("p10", 10, [PredictStageResponse(predictions=_pd(osl=100))])
     out = await chain_augment([p100, p50, p10], PipelineContext())
     assert out.final_from == "p50"
@@ -197,8 +209,8 @@ async def test_final_breaks_chain_and_subsequent_plugins_never_called():
     assert p100.call_count == 0
     assert out.prediction is not None
     assert out.prediction.predicted_num_req is None  # p100 never ran
-    assert out.prediction.predicted_isl == 2000      # p50 filled this
-    assert out.prediction.predicted_osl == 100       # p10 filled this
+    assert out.prediction.predicted_isl == 2000  # p50 filled this
+    assert out.prediction.predicted_osl == 100  # p10 filled this
     # p50 is not lowest priority (p10 is) → misuse warning.
     assert len(out.chain_break_warnings) == 1
     assert "p50" in out.chain_break_warnings[0]
@@ -314,11 +326,11 @@ async def test_zero_float_value_preserved_not_treated_as_unset():
     # PredictionData fields are Optional[float]: 0.0 means "I assert 0",
     # None means "no opinion". Partial-merge must distinguish them.
     a = _StubPlugin(
-        "A", 100, [PredictStageResponse(predictions=_pd(num_req=1000.0, isl=3000.0, osl=150.0))]
+        "A",
+        100,
+        [PredictStageResponse(predictions=_pd(num_req=1000.0, isl=3000.0, osl=150.0))],
     )
-    b = _StubPlugin(
-        "B", 10, [PredictStageResponse(predictions=_pd(num_req=0.0))]
-    )
+    b = _StubPlugin("B", 10, [PredictStageResponse(predictions=_pd(num_req=0.0))])
     out = await chain_augment([a, b], PipelineContext())
     assert out.prediction is not None
     assert out.prediction.predicted_num_req == 0.0  # B's assertion survives

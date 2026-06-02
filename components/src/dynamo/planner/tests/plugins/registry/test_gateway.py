@@ -23,15 +23,10 @@ import pytest
 
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.proto.v1 import plugin_pb2 as pb
-from dynamo.planner.plugins.registry.auth import (
-    AuthIdentity,
-    AuthValidator,
-)
+from dynamo.planner.plugins.registry.auth import AuthIdentity, AuthValidator
 from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
 from dynamo.planner.plugins.registry.errors import AuthError
-from dynamo.planner.plugins.registry.gateway import (
-    PluginRegistryGatewayServicer,
-)
+from dynamo.planner.plugins.registry.gateway import PluginRegistryGatewayServicer
 from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.transport.base import PluginTransport
 
@@ -90,7 +85,9 @@ def _make_servicer():
     cb = CircuitBreaker(clock)
 
     def factory(plugin_id, endpoint, *, in_process_instance=None):
-        return _StubTransport(plugin_id, endpoint, in_process_instance=in_process_instance)
+        return _StubTransport(
+            plugin_id, endpoint, in_process_instance=in_process_instance
+        )
 
     server = PluginRegistryServer(
         clock=clock,
@@ -142,9 +139,7 @@ async def test_heartbeat_invalid_token_aborts_unauthenticated():
     await _register(server)
     ctx = _FakeContext()
     with pytest.raises(grpc.aio.AbortError):
-        await svc.Heartbeat(
-            pb.HeartbeatRequest(plugin_id="p1", auth_token="bad"), ctx
-        )
+        await svc.Heartbeat(pb.HeartbeatRequest(plugin_id="p1", auth_token="bad"), ctx)
     assert ctx.aborted_code == grpc.StatusCode.UNAUTHENTICATED
 
 
@@ -155,9 +150,7 @@ async def test_heartbeat_subject_mismatch_aborts_permission_denied():
     ctx = _FakeContext()
     with pytest.raises(grpc.aio.AbortError):
         # token "B" validates but maps to a different subject.
-        await svc.Heartbeat(
-            pb.HeartbeatRequest(plugin_id="p1", auth_token="B"), ctx
-        )
+        await svc.Heartbeat(pb.HeartbeatRequest(plugin_id="p1", auth_token="B"), ctx)
     assert ctx.aborted_code == grpc.StatusCode.PERMISSION_DENIED
 
 
@@ -199,9 +192,7 @@ async def test_unregister_subject_mismatch_aborts_and_keeps_plugin():
     await _register(server, auth_token="A")
     ctx = _FakeContext()
     with pytest.raises(grpc.aio.AbortError):
-        await svc.Unregister(
-            pb.UnregisterRequest(plugin_id="p1", auth_token="B"), ctx
-        )
+        await svc.Unregister(pb.UnregisterRequest(plugin_id="p1", auth_token="B"), ctx)
     assert ctx.aborted_code == grpc.StatusCode.PERMISSION_DENIED
     assert server.get_plugin("p1") is not None  # NOT evicted
 

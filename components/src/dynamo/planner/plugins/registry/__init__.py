@@ -18,10 +18,7 @@ The orchestrator composes these with the merge algorithms and
 transport/clock primitives into the planner pipeline.
 """
 
-from dynamo.planner.plugins.registry.errors import (
-    AuthError,
-    RegistryError,
-)
+from dynamo.planner.plugins.registry.errors import AuthError, RegistryError
 from dynamo.planner.plugins.registry.types import (
     RegisteredPlugin,
     derive_transport_type,

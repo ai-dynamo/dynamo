@@ -34,9 +34,7 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
 )
 from dynamo.planner.plugins.clock import VirtualClock
-from dynamo.planner.plugins.orchestrator.engine_adapter import (
-    OrchestratorEngineAdapter,
-)
+from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -124,7 +122,6 @@ def test_scale_interval_advances_from_actual_tick_now():
     (PSM also advances from ``tick_input.now_s``).  This is the basic
     contract for scale_interval cadence advancement.
     """
-    from dynamo.planner.core.types import TickInput
 
     adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
     initial = adapter.initial_tick(start_s=0.0)
@@ -167,9 +164,7 @@ async def test_tick_advances_injected_virtual_clock_to_trace_time():
     replay path and blocking PR #10's ``use_orchestrator=True`` default.
     """
     vc = VirtualClock()
-    adapter = OrchestratorEngineAdapter(
-        _agg_config_throughput_on(), _caps(), clock=vc
-    )
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps(), clock=vc)
     # ``initial_tick`` is pure cadence math — no plugin scheduler call,
     # so the clock must not advance from this alone.
     initial = adapter.initial_tick(start_s=0.0)
@@ -207,9 +202,7 @@ async def test_tick_does_not_advance_clock_backwards():
     """
     vc = VirtualClock()
     vc.advance(500.0)  # clock already at 500s
-    adapter = OrchestratorEngineAdapter(
-        _agg_config_throughput_on(), _caps(), clock=vc
-    )
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps(), clock=vc)
     initial = adapter.initial_tick(start_s=0.0)
     # tick_input.now_s = 300.0 is *before* the clock — must not raise.
     await adapter.tick(initial, TickInput(now_s=300.0))

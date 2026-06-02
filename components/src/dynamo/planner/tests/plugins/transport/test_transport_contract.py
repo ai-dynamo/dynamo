@@ -15,11 +15,8 @@ variant lands alongside cert-manager wiring in a follow-up PR.
 
 from __future__ import annotations
 
-import asyncio
-import sys
-import tempfile
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 import grpc
 import pytest
@@ -29,7 +26,6 @@ from dynamo.planner.plugins.proto.v1 import plugin_pb2_grpc as pbg
 from dynamo.planner.plugins.transport import (
     GrpcTransport,
     InProcessTransport,
-    PluginCallError,
     PluginConnectionError,
     PluginTimeoutError,
     PluginTransport,
@@ -54,7 +50,9 @@ class EchoServicer(pbg.PredictPluginServicer):
     so we can verify the request reached the plugin and round-tripped.
     """
 
-    async def Predict(self, request: pb.PredictStageRequest, context) -> pb.PredictStageResponse:
+    async def Predict(
+        self, request: pb.PredictStageRequest, context
+    ) -> pb.PredictStageResponse:
         ctx = request.context
         resp = pb.PredictStageResponse()
         if ctx.HasField("observations") and ctx.observations.HasField("traffic"):
@@ -98,7 +96,11 @@ async def _start_grpc_server(listen: str) -> tuple[grpc.aio.Server, str]:
     port = server.add_insecure_port(listen)
     await server.start()
     # For TCP ":0", rebuild listen with actual port; for UDS, listen is unchanged
-    if listen.startswith("[::]:0") or listen.startswith("0.0.0.0:0") or listen.endswith(":0"):
+    if (
+        listen.startswith("[::]:0")
+        or listen.startswith("0.0.0.0:0")
+        or listen.endswith(":0")
+    ):
         host = listen.rsplit(":", 1)[0]
         actual_listen = f"{host}:{port}"
     else:
@@ -156,8 +158,12 @@ def _ctx_with_unicode_reason() -> pb.PipelineContext:
 
 def _ctx_multi_pool() -> pb.PipelineContext:
     c = pb.PipelineContext(request_id="req-multi-pool")
-    c.proposal.targets.add(sub_component_type="prefill", component_name="pool-A", replicas=8)
-    c.proposal.targets.add(sub_component_type="prefill", component_name="pool-B", replicas=4)
+    c.proposal.targets.add(
+        sub_component_type="prefill", component_name="pool-A", replicas=8
+    )
+    c.proposal.targets.add(
+        sub_component_type="prefill", component_name="pool-B", replicas=4
+    )
     c.proposal.targets.add(sub_component_type="decode", replicas=10)
     return c
 
@@ -223,7 +229,9 @@ async def echo_transport(transport_kind) -> AsyncIterator[PluginTransport]:
     if transport_kind == "grpc":
         server, listen = await _start_grpc_server("127.0.0.1:0")
         try:
-            t = GrpcTransport("echo", f"grpc://{listen}", allow_insecure=True, timeout_seconds=2.0)
+            t = GrpcTransport(
+                "echo", f"grpc://{listen}", allow_insecure=True, timeout_seconds=2.0
+            )
             try:
                 yield t
             finally:
@@ -264,7 +272,9 @@ async def test_round_trip_equivalence(
 
     # Echo plugin reflects traffic into predictions; verify
     if ctx.HasField("observations") and ctx.observations.HasField("traffic"):
-        assert response.predictions.predicted_num_req == ctx.observations.traffic.num_req
+        assert (
+            response.predictions.predicted_num_req == ctx.observations.traffic.num_req
+        )
         assert response.predictions.predicted_isl == ctx.observations.traffic.isl
         assert response.predictions.predicted_osl == ctx.observations.traffic.osl
     assert response.predictions.source == "echo-server"
@@ -299,7 +309,9 @@ async def test_byte_equal_response_across_transports(
     # gRPC insecure
     server_grpc, listen = await _start_grpc_server("127.0.0.1:0")
     try:
-        t_grpc = GrpcTransport("echo", f"grpc://{listen}", allow_insecure=True, timeout_seconds=2.0)
+        t_grpc = GrpcTransport(
+            "echo", f"grpc://{listen}", allow_insecure=True, timeout_seconds=2.0
+        )
         try:
             resp_grpc = await t_grpc.call("Predict", request)
             bytes_grpc = resp_grpc.SerializeToString()
@@ -308,9 +320,9 @@ async def test_byte_equal_response_across_transports(
     finally:
         await server_grpc.stop(grace=0.1)
 
-    assert bytes_inp == bytes_grpc, (
-        f"in_process vs grpc bytes differ for input {input_name!r}"
-    )
+    assert (
+        bytes_inp == bytes_grpc
+    ), f"in_process vs grpc bytes differ for input {input_name!r}"
 
 
 # ----------------------------------------------------------------------------
@@ -320,7 +332,9 @@ async def test_byte_equal_response_across_transports(
 
 @pytest.mark.parametrize("transport_kind", _TRANSPORT_KINDS, indirect=True)
 @pytest.mark.asyncio
-async def test_unknown_method_typed_error(echo_transport: PluginTransport, transport_kind: str):
+async def test_unknown_method_typed_error(
+    echo_transport: PluginTransport, transport_kind: str
+):
     """All transports must raise PluginUnknownMethodError for unregistered methods."""
     request = pb.ProposeStageRequest()  # different stage's request
     with pytest.raises(PluginUnknownMethodError):
@@ -332,7 +346,9 @@ async def test_unknown_method_typed_error(echo_transport: PluginTransport, trans
 async def test_unreachable_endpoint_raises_connection_error(tmp_path: Path):
     """gRPC: pointing transport at non-existent endpoint -> PluginConnectionError."""
     # Port not bound
-    t = GrpcTransport("noplug", "grpc://127.0.0.1:1", allow_insecure=True, timeout_seconds=0.5)
+    t = GrpcTransport(
+        "noplug", "grpc://127.0.0.1:1", allow_insecure=True, timeout_seconds=0.5
+    )
     try:
         with pytest.raises((PluginConnectionError, PluginTimeoutError)):
             await t.call("Predict", pb.PredictStageRequest())
@@ -346,10 +362,10 @@ async def test_close_idempotent_all_transports(
     echo_transport: PluginTransport, transport_kind: str
 ):
     """All transports must satisfy two close()-related invariants:
-       1. ``close()`` is idempotent (multiple calls don't raise).
-       2. Subsequent ``call()`` raises ``PluginConnectionError`` — uniform
-          contract across in-process and gRPC so the orchestrator can
-          handle post-close mistakes the same way regardless of transport.
+    1. ``close()`` is idempotent (multiple calls don't raise).
+    2. Subsequent ``call()`` raises ``PluginConnectionError`` — uniform
+       contract across in-process and gRPC so the orchestrator can
+       handle post-close mistakes the same way regardless of transport.
     """
     await echo_transport.close()
     await echo_transport.close()  # idempotent

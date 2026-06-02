@@ -110,7 +110,10 @@ class PluginRegistryServer:
         """
         if self._scale_interval_seconds <= 0.0:
             return raw_now
-        return math.floor(raw_now / self._scale_interval_seconds) * self._scale_interval_seconds
+        return (
+            math.floor(raw_now / self._scale_interval_seconds)
+            * self._scale_interval_seconds
+        )
 
     # ------------------------------------------------------------------
     # Public RPC-shaped API
@@ -282,7 +285,9 @@ class PluginRegistryServer:
 
         try:
             await plugin.transport.close()
-        except Exception as exc:  # noqa: BLE001 — defensive; close should not block unregister
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 — defensive; close should not block unregister
             log.warning(
                 "unregister: transport.close failed plugin_id=%s detail=%s",
                 plugin_id,
@@ -361,9 +366,7 @@ class PluginRegistryServer:
         main task — callbacks MUST NOT await."""
         self._unregister_callbacks.append(callback)
 
-    def attach_cache_age_lookup(
-        self, lookup: Callable[[str], float]
-    ) -> None:
+    def attach_cache_age_lookup(self, lookup: Callable[[str], float]) -> None:
         """Wire a scheduler's ``cache_age(plugin_id)`` into
         ``list_plugins``. Scheduler calls this from its own constructor so
         the server-side view reports cache age without introducing a

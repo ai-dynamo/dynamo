@@ -15,10 +15,7 @@ from __future__ import annotations
 import hmac
 from typing import Mapping
 
-from dynamo.planner.plugins.registry.auth.base import (
-    AuthIdentity,
-    AuthValidator,
-)
+from dynamo.planner.plugins.registry.auth.base import AuthIdentity, AuthValidator
 from dynamo.planner.plugins.registry.errors import AuthError
 
 
@@ -61,9 +58,7 @@ class StaticSecretAuth(AuthValidator):
         # for N small secrets, iterating + compare_digest is fine.
         for secret, subject in self._secrets.items():
             if hmac.compare_digest(token, secret):
-                return AuthIdentity(
-                    source="static_secret", subject=subject
-                )
+                return AuthIdentity(source="static_secret", subject=subject)
         raise AuthError("static_secret: token not in trusted set")
 
 

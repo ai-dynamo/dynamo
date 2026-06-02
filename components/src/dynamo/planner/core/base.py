@@ -259,9 +259,9 @@ class NativePlannerBase:
             )
 
             engine = self._ensure_engine()
-            assert isinstance(engine, OrchestratorEngineAdapter), (
-                "use_orchestrator=True but engine is not OrchestratorEngineAdapter"
-            )
+            assert isinstance(
+                engine, OrchestratorEngineAdapter
+            ), "use_orchestrator=True but engine is not OrchestratorEngineAdapter"
             await engine.bootstrap_from_fpms(
                 prefill_fpms=prefill_fpms,
                 decode_fpms=decode_fpms,
@@ -303,6 +303,7 @@ class NativePlannerBase:
             from dynamo.planner.plugins.orchestrator.engine_adapter import (
                 OrchestratorEngineAdapter,
             )
+
             self._engine = OrchestratorEngineAdapter(self.config, caps)
         else:
             psm = self._ensure_state_machine()

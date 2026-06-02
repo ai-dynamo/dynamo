@@ -33,10 +33,7 @@ from typing import Optional
 
 import grpc
 
-from dynamo.planner.plugins._proto_bridge import (
-    proto_to_pydantic,
-    pydantic_to_proto,
-)
+from dynamo.planner.plugins._proto_bridge import proto_to_pydantic, pydantic_to_proto
 from dynamo.planner.plugins.proto.v1 import plugin_pb2 as pb
 from dynamo.planner.plugins.proto.v1 import plugin_pb2_grpc as pbg
 from dynamo.planner.plugins.registry.server import PluginRegistryServer

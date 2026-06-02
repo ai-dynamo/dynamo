@@ -84,11 +84,15 @@ _PYD_TO_PROTO: dict[Type[BaseModel], Type[Message]] = {
 def proto_class_for(pyd_cls: Type[BaseModel]) -> Type[Message]:
     """Look up the proto class corresponding to a Pydantic mirror class."""
     if pyd_cls not in _PYD_TO_PROTO:
-        raise KeyError(f"No proto class registered for Pydantic class {pyd_cls.__name__}")
+        raise KeyError(
+            f"No proto class registered for Pydantic class {pyd_cls.__name__}"
+        )
     return _PYD_TO_PROTO[pyd_cls]
 
 
-def pydantic_to_proto(pyd_msg: BaseModel, proto_cls: Type[Message] | None = None) -> Message:
+def pydantic_to_proto(
+    pyd_msg: BaseModel, proto_cls: Type[Message] | None = None
+) -> Message:
     """Convert a Pydantic mirror instance to its proto generated equivalent.
 
     Uses JSON intermediate (``Pydantic.model_dump_json()`` →
@@ -126,7 +130,11 @@ def _normalize(d: Any) -> Any:
             if k == "result_kind":
                 continue
             # If a oneof payload key but doesn't match kind, skip
-            if kind not in (None, "") and k in ("accept", "override", "reject") and k != kind:
+            if (
+                kind not in (None, "")
+                and k in ("accept", "override", "reject")
+                and k != kind
+            ):
                 continue
             out[k] = _normalize(v)
         return out
@@ -143,12 +151,16 @@ def _normalize(d: Any) -> Any:
 # proto → Pydantic
 # ---------------------------------------------------------------------------
 
-_PROTO_TO_PYD: dict[Type[Message], Type[BaseModel]] = {v: k for k, v in _PYD_TO_PROTO.items()}
+_PROTO_TO_PYD: dict[Type[Message], Type[BaseModel]] = {
+    v: k for k, v in _PYD_TO_PROTO.items()
+}
 
 
 def pydantic_class_for(proto_cls: Type[Message]) -> Type[BaseModel]:
     if proto_cls not in _PROTO_TO_PYD:
-        raise KeyError(f"No Pydantic class registered for proto class {proto_cls.__name__}")
+        raise KeyError(
+            f"No Pydantic class registered for proto class {proto_cls.__name__}"
+        )
     return _PROTO_TO_PYD[proto_cls]
 
 
@@ -159,7 +171,9 @@ def proto_to_pydantic(pb_msg: Message, pyd_cls: Type[PydT] | None = None) -> Pyd
     which gives field names matching Pydantic mirror exactly, and correctly
     omits unset optional fields (HasField=False) so Pydantic sees None.
     """
-    target_cls: Type[BaseModel] = pyd_cls if pyd_cls is not None else pydantic_class_for(type(pb_msg))
+    target_cls: Type[BaseModel] = (
+        pyd_cls if pyd_cls is not None else pydantic_class_for(type(pb_msg))
+    )
     data = json_format.MessageToDict(
         pb_msg,
         preserving_proto_field_name=True,
@@ -194,7 +208,9 @@ def _decode_bytes_by_pyd_schema(d: Any, pyd_cls: Type[BaseModel]) -> Any:
         ann = fields[k].annotation
         # Strip Optional[X] -> X
         origin = typing.get_origin(ann)
-        if origin is typing.Union or (origin is not None and str(origin) == "types.UnionType"):
+        if origin is typing.Union or (
+            origin is not None and str(origin) == "types.UnionType"
+        ):
             args = [a for a in typing.get_args(ann) if a is not type(None)]
             if len(args) == 1:
                 ann = args[0]
@@ -207,17 +223,32 @@ def _decode_bytes_by_pyd_schema(d: Any, pyd_cls: Type[BaseModel]) -> Any:
         elif origin is dict:
             dict_args = typing.get_args(ann)
             if len(dict_args) == 2 and dict_args[1] is bytes and isinstance(v, dict):
-                out[k] = {kk: (base64.b64decode(vv) if isinstance(vv, str) else vv) for kk, vv in v.items()}
+                out[k] = {
+                    kk: (base64.b64decode(vv) if isinstance(vv, str) else vv)
+                    for kk, vv in v.items()
+                }
             else:
                 out[k] = v
         # Singular nested Pydantic message
-        elif isinstance(ann, type) and issubclass(ann, BaseModel) and isinstance(v, dict):
+        elif (
+            isinstance(ann, type) and issubclass(ann, BaseModel) and isinstance(v, dict)
+        ):
             out[k] = _decode_bytes_by_pyd_schema(v, ann)
         # list[NestedPydantic]
         elif origin is list:
             list_args = typing.get_args(ann)
-            if list_args and isinstance(list_args[0], type) and issubclass(list_args[0], BaseModel) and isinstance(v, list):
-                out[k] = [_decode_bytes_by_pyd_schema(x, list_args[0]) if isinstance(x, dict) else x for x in v]
+            if (
+                list_args
+                and isinstance(list_args[0], type)
+                and issubclass(list_args[0], BaseModel)
+                and isinstance(v, list)
+            ):
+                out[k] = [
+                    _decode_bytes_by_pyd_schema(x, list_args[0])
+                    if isinstance(x, dict)
+                    else x
+                    for x in v
+                ]
             else:
                 out[k] = v
         else:

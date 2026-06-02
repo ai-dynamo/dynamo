@@ -74,15 +74,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional, Sequence
 
-from dynamo.planner.plugins.types import (
-    PipelineContext,
-    PredictionData,
-)
-
 from dynamo.planner.plugins.merge.types import (
     ChainAugmentOutcome,
     PredictPluginCallable,
 )
+from dynamo.planner.plugins.types import PipelineContext, PredictionData
 
 log = logging.getLogger(__name__)
 

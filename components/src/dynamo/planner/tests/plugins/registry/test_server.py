@@ -16,14 +16,10 @@ from dynamo.planner.plugins.registry.auth import (
     StaticSecretAuth,
 )
 from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
-from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.registry.errors import AuthError
+from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.transport.base import PluginTransport
-from dynamo.planner.plugins.types import (
-    HoldPolicy,
-    ListPluginsRequest,
-    RegisterRequest,
-)
+from dynamo.planner.plugins.types import HoldPolicy, ListPluginsRequest, RegisterRequest
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -316,7 +312,9 @@ async def test_protocol_version_semantic_compare_not_lexicographic():
     accepted = await server.register(_req(plugin_id="ok-1.10", protocol_version="1.10"))
     assert accepted.accepted is True, accepted.reject_reason
 
-    accepted_mid = await server.register(_req(plugin_id="ok-1.2", protocol_version="1.2"))
+    accepted_mid = await server.register(
+        _req(plugin_id="ok-1.2", protocol_version="1.2")
+    )
     assert accepted_mid.accepted is True, accepted_mid.reject_reason
 
     rejected = await server.register(_req(plugin_id="too-new", protocol_version="2.0"))

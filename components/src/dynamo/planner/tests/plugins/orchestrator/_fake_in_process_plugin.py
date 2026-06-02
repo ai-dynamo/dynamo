@@ -9,10 +9,7 @@ with the configured ``kwargs``.
 
 from __future__ import annotations
 
-from dynamo.planner.plugins.types import (
-    AcceptResult,
-    ProposeStageResponse,
-)
+from dynamo.planner.plugins.types import AcceptResult, ProposeStageResponse
 
 
 class FakePlugin:

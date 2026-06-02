@@ -23,11 +23,7 @@ from dynamo.planner.plugins.merge import (
     PluginResult,
     type_aware_merge,
 )
-from dynamo.planner.plugins.types import (
-    ComponentTarget,
-    OverrideResult,
-    OverrideType,
-)
+from dynamo.planner.plugins.types import ComponentTarget, OverrideResult, OverrideType
 
 pytestmark = [
     pytest.mark.gpu_0,

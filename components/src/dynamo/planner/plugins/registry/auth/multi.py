@@ -18,10 +18,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from dynamo.planner.plugins.registry.auth.base import (
-    AuthIdentity,
-    AuthValidator,
-)
+from dynamo.planner.plugins.registry.auth.base import AuthIdentity, AuthValidator
 from dynamo.planner.plugins.registry.errors import AuthError
 
 

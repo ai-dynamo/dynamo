@@ -39,18 +39,15 @@ correctness.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterable
+from typing import Any, AsyncIterator
 
 import grpc
 import pytest
 
 from dynamo.planner.plugins.clock import WallClock
 from dynamo.planner.plugins.merge.types import ComponentKey
-from dynamo.planner.plugins.orchestrator.orchestrator import (
-    LocalPlannerOrchestrator,
-)
+from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
 from dynamo.planner.plugins.proto.v1 import plugin_pb2 as pb
 from dynamo.planner.plugins.proto.v1 import plugin_pb2_grpc as pbg
 from dynamo.planner.plugins.registry.auth.base import AllowUnauthenticatedAuth
@@ -145,9 +142,9 @@ async def _start_plugin_grpc_server(
     return server, listen
 
 
-def _build_orchestrator() -> tuple[
-    LocalPlannerOrchestrator, PluginRegistryServer, list[Any]
-]:
+def _build_orchestrator() -> (
+    tuple[LocalPlannerOrchestrator, PluginRegistryServer, list[Any]]
+):
     """Compose the registry + scheduler + circuit breaker + orchestrator
     with the **real** transport factory (so ``register()`` over
     ``grpc://`` / ``unix://`` actually opens a channel).
@@ -286,9 +283,9 @@ async def test_external_plugin_register_and_invoked_over_grpc(
     outcome = await orch.tick(_ctx(), _make_baseline(prefill=2, decode=2))
 
     # 1. The plugin actually got called over the network.
-    assert len(plugin.calls) == 1, (
-        f"expected exactly one Propose() call, got {len(plugin.calls)}"
-    )
+    assert (
+        len(plugin.calls) == 1
+    ), f"expected exactly one Propose() call, got {len(plugin.calls)}"
     # 2. The decision propagated end-to-end into the final proposal.
     assert outcome.execute_action == "apply"
     assert _final_targets(outcome) == {"prefill": 7, "decode": 11}
@@ -362,12 +359,8 @@ async def test_external_plugin_two_external_plugins_compose(
     plugin_a = _RecordingProposePlugin(prefill=10, decode=10)
     plugin_b = _RecordingProposePlugin(prefill=99, decode=99)
 
-    server_a, listen_a = await _start_plugin_grpc_server(
-        plugin_a, "127.0.0.1:0"
-    )
-    server_b, listen_b = await _start_plugin_grpc_server(
-        plugin_b, "127.0.0.1:0"
-    )
+    server_a, listen_a = await _start_plugin_grpc_server(plugin_a, "127.0.0.1:0")
+    server_b, listen_b = await _start_plugin_grpc_server(plugin_b, "127.0.0.1:0")
     try:
         orch, registry, _ = _build_orchestrator()
 
@@ -552,9 +545,7 @@ async def _start_constrain_grpc_server(
     return server, f"127.0.0.1:{port}"
 
 
-async def _register_with_type(
-    server, *, plugin_id, plugin_type, priority, endpoint
-):
+async def _register_with_type(server, *, plugin_id, plugin_type, priority, endpoint):
     resp = await server.register(
         RegisterRequest(
             plugin_id=plugin_id,
@@ -661,9 +652,7 @@ async def test_external_constrain_plugin_clamps_with_at_most():
     the OverrideType enum encoding survives proto round-trip — a
     common breakage mode in proto schema evolution."""
     propose_plugin = _RecordingProposePlugin(prefill=20, decode=25)
-    constrain_plugin = _RecordingConstrainPlugin(
-        ceiling_prefill=8, ceiling_decode=10
-    )
+    constrain_plugin = _RecordingConstrainPlugin(ceiling_prefill=8, ceiling_decode=10)
     s_propose, listen_p = await _start_plugin_grpc_server(propose_plugin, "127.0.0.1:0")
     s_constrain, listen_c = await _start_constrain_grpc_server(constrain_plugin)
     try:

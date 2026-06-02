@@ -14,7 +14,10 @@ import logging
 
 import grpc
 
-from dynamo.planner.plugins.transport._grpc_base import _GrpcTransportBase, grpc_channel_options
+from dynamo.planner.plugins.transport._grpc_base import (
+    _GrpcTransportBase,
+    grpc_channel_options,
+)
 
 log = logging.getLogger(__name__)
 

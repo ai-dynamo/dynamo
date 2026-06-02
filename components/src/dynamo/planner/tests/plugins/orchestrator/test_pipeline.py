@@ -26,8 +26,8 @@ import pytest
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.types import (
     AcceptResult,
-    CircuitState,
     ComponentTarget,
+    ConstrainStageResponse,
     HoldPolicy,
     OverrideResult,
     OverrideType,
@@ -36,7 +36,6 @@ from dynamo.planner.plugins.types import (
     PredictStageResponse,
     ProposeStageResponse,
     ReconcileStageResponse,
-    ConstrainStageResponse,
     RejectResult,
 )
 
@@ -55,7 +54,9 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
-def _propose_override(replicas, sub_component_type="prefill", type_=OverrideType.SET, final=False):
+def _propose_override(
+    replicas, sub_component_type="prefill", type_=OverrideType.SET, final=False
+):
     def handler(req):
         return ProposeStageResponse(
             result_kind="override",
@@ -112,10 +113,7 @@ def _constrain_at_most(replicas, sub_component_type="prefill"):
 
 def _predict_response(num_req=None, final=False):
     def handler(req):
-        preds = (
-            None if num_req is None
-            else PredictionData(predicted_num_req=num_req)
-        )
+        preds = None if num_req is None else PredictionData(predicted_num_req=num_req)
         return PredictStageResponse(predictions=preds, final=final)
 
     return handler
@@ -154,9 +152,7 @@ async def test_propose_output_flows_as_reconcile_baseline(ctx_factory):
         instance=StubPlugin(propose=_propose_override(7)),
     )
     # RECONCILE has no plugins → passes PROPOSE output through unchanged.
-    outcome = await orchestrator.tick(
-        PipelineContext(), {PREFILL: 3}
-    )
+    outcome = await orchestrator.tick(PipelineContext(), {PREFILL: 3})
     assert outcome.execute_action == "apply"
     assert outcome.final_proposal.targets[0].replicas == 7
 
@@ -509,8 +505,12 @@ async def test_reconcile_receives_propose_results_in_proposals(ctx_factory):
     def recording_reconcile(req):
         # Snapshot per-proposal data; assert later.
         captured["proposals"] = [
-            (p.plugin_id, p.priority, p.result_kind,
-             p.override.targets[0].replicas if p.override else None)
+            (
+                p.plugin_id,
+                p.priority,
+                p.result_kind,
+                p.override.targets[0].replicas if p.override else None,
+            )
             for p in req.proposals
         ]
         # Arbitrate: pick B's prefill (5), ignoring A's (4).
@@ -557,11 +557,11 @@ async def test_reconcile_receives_propose_results_in_proposals(ctx_factory):
     assert plugin_ids == {"propose_a", "propose_b"}
     # Per-plugin details preserved (priority + override replicas)
     by_id = {p[0]: p for p in captured["proposals"]}
-    assert by_id["propose_a"][1] == 1   # priority
+    assert by_id["propose_a"][1] == 1  # priority
     assert by_id["propose_a"][2] == "override"
-    assert by_id["propose_a"][3] == 4   # A wanted 4
+    assert by_id["propose_a"][3] == 4  # A wanted 4
     assert by_id["propose_b"][1] == 10
-    assert by_id["propose_b"][3] == 8   # B wanted 8
+    assert by_id["propose_b"][3] == 8  # B wanted 8
 
     # RECONCILE's override took precedence — final prefill = 5 (not A's 4, not B's 8).
     targets = {t.sub_component_type: t.replicas for t in outcome.final_proposal.targets}
@@ -612,7 +612,8 @@ def test_pipeline_py_has_no_stage_level_wait_for():
     )
     first_func = first_arg.func
     first_func_name = (
-        first_func.attr if isinstance(first_func, ast.Attribute)
+        first_func.attr
+        if isinstance(first_func, ast.Attribute)
         else getattr(first_func, "id", None)
     )
     assert first_func_name != "gather", (
@@ -661,7 +662,7 @@ async def test_predict_plugin_throttled_by_execution_interval(ctx_factory):
     # Second tick 1s later: must be throttled (interval is 60s).
     ctx["clock"].advance(1.0)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
-    assert stub.call_counts["Predict"] == 1   # ← pre-throttle-fix this was 2
+    assert stub.call_counts["Predict"] == 1  # ← pre-throttle-fix this was 2
     # After 60s: due again.
     ctx["clock"].advance(60.0)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})

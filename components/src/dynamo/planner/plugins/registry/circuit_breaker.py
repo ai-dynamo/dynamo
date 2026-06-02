@@ -30,7 +30,7 @@ HOLD_LAST cache can be invalidated (v11 cache invalidation row 3).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from dynamo.planner.plugins.clock import Clock

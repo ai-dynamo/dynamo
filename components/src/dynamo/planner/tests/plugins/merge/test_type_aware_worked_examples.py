@@ -20,16 +20,8 @@ from __future__ import annotations
 
 import pytest
 
-from dynamo.planner.plugins.merge import (
-    ComponentKey,
-    PluginResult,
-    type_aware_merge,
-)
-from dynamo.planner.plugins.types import (
-    ComponentTarget,
-    OverrideResult,
-    OverrideType,
-)
+from dynamo.planner.plugins.merge import ComponentKey, PluginResult, type_aware_merge
+from dynamo.planner.plugins.types import ComponentTarget, OverrideResult, OverrideType
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -203,9 +195,7 @@ def test_worked_example(case_name, plugin_results, baseline, expected):
         ): t.replicas
         for t in out.proposal.targets
     }
-    assert actual == expected, (
-        f"case={case_name}: expected={expected}, got={actual}"
-    )
+    assert actual == expected, f"case={case_name}: expected={expected}, got={actual}"
 
 
 def test_worked_examples_count_matches_main_doc():

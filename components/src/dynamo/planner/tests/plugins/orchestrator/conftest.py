@@ -16,7 +16,10 @@ from dynamo.planner.plugins.registry.auth import AllowUnauthenticatedAuth
 from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
 from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.scheduler import PluginScheduler
-from dynamo.planner.plugins.transport.config import TransportConfig, make_transport_for_endpoint
+from dynamo.planner.plugins.transport.config import (
+    TransportConfig,
+    make_transport_for_endpoint,
+)
 
 
 @pytest.fixture
@@ -100,9 +103,7 @@ class StubPlugin:
             "Reconcile": reconcile,
             "Constrain": constrain,
         }
-        self.call_counts: dict[str, int] = {
-            method: 0 for method in self._handlers
-        }
+        self.call_counts: dict[str, int] = {method: 0 for method in self._handlers}
 
     def __getattr__(self, name: str):
         handler = self._handlers.get(name)

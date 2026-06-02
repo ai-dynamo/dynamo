@@ -30,9 +30,7 @@ import pytest
 
 from dynamo.planner.config.planner_config import ExternalPluginEntry
 from dynamo.planner.plugins.clock import VirtualClock
-from dynamo.planner.plugins.orchestrator.orchestrator import (
-    LocalPlannerOrchestrator,
-)
+from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
 from dynamo.planner.plugins.registry.auth.base import (
     AllowUnauthenticatedAuth,
     AuthIdentity,
@@ -183,9 +181,11 @@ async def test_bootstrap_empty_list_no_op():
 @pytest.mark.asyncio
 async def test_bootstrap_happy_path_registers_entry():
     orch, server = _build_orch()
-    accepted, failures = await orch.register_external_from_config([
-        _entry("ext-a", endpoint="grpc://127.0.0.1:9000"),
-    ])
+    accepted, failures = await orch.register_external_from_config(
+        [
+            _entry("ext-a", endpoint="grpc://127.0.0.1:9000"),
+        ]
+    )
     assert accepted == 1
     assert failures == []
     plugins = server.list_plugins(ListPluginsRequest())
@@ -200,9 +200,11 @@ async def test_bootstrap_records_grpc_endpoint_correctly():
     list_plugins. Validates the entry → factory → transport_type
     derivation works for grpc:// not just unix://."""
     orch, server = _build_orch()
-    await orch.register_external_from_config([
-        _entry("ext-tcp", endpoint="grpc://10.0.0.5:9090"),
-    ])
+    await orch.register_external_from_config(
+        [
+            _entry("ext-tcp", endpoint="grpc://10.0.0.5:9090"),
+        ]
+    )
     info = server.list_plugins(ListPluginsRequest())[0]
     assert info.transport == "grpc"
 
@@ -232,10 +234,12 @@ async def test_bootstrap_auth_failure_isolated():
     still succeed — failure isolation is the primary contract this
     function exists for."""
     orch, server = _build_orch(auth=_SelectiveAuth(allow={"good"}))
-    accepted, failures = await orch.register_external_from_config([
-        _entry("bad-auth", auth_token="WRONG"),
-        _entry("good-auth", auth_token="good"),
-    ])
+    accepted, failures = await orch.register_external_from_config(
+        [
+            _entry("bad-auth", auth_token="WRONG"),
+            _entry("good-auth", auth_token="good"),
+        ]
+    )
     assert accepted == 1
     assert len(failures) == 1
     assert failures[0][0] == "bad-auth"
@@ -252,10 +256,12 @@ async def test_bootstrap_inproc_endpoint_rejected():
     The reject must surface to the caller via failures, but other
     entries must continue."""
     orch, server = _build_orch()
-    accepted, failures = await orch.register_external_from_config([
-        _entry("misconfigured", endpoint="inproc://x"),
-        _entry("ok", endpoint="grpc://127.0.0.1:9000"),
-    ])
+    accepted, failures = await orch.register_external_from_config(
+        [
+            _entry("misconfigured", endpoint="inproc://x"),
+            _entry("ok", endpoint="grpc://127.0.0.1:9000"),
+        ]
+    )
     assert accepted == 1
     assert {f[0] for f in failures} == {"misconfigured"}
     assert "inproc://" in failures[0][1]
@@ -267,10 +273,12 @@ async def test_bootstrap_protocol_mismatch_isolated():
     rejected without dragging others down. Catches operator errors
     where a stale ConfigMap entry references an old protocol."""
     orch, server = _build_orch()
-    accepted, failures = await orch.register_external_from_config([
-        _entry("too-new", protocol_version="9.9"),
-        _entry("ok"),
-    ])
+    accepted, failures = await orch.register_external_from_config(
+        [
+            _entry("too-new", protocol_version="9.9"),
+            _entry("ok"),
+        ]
+    )
     assert accepted == 1
     assert {f[0] for f in failures} == {"too-new"}
     assert "protocol_version_unsupported" in failures[0][1]
@@ -282,10 +290,12 @@ async def test_bootstrap_duplicate_plugin_id_within_config():
     rejected as duplicate. Catches a common ConfigMap copy-paste
     error before it manifests as confusing tick behaviour."""
     orch, server = _build_orch()
-    accepted, failures = await orch.register_external_from_config([
-        _entry("dup", endpoint="grpc://127.0.0.1:9000"),
-        _entry("dup", endpoint="grpc://127.0.0.1:9000"),
-    ])
+    accepted, failures = await orch.register_external_from_config(
+        [
+            _entry("dup", endpoint="grpc://127.0.0.1:9000"),
+            _entry("dup", endpoint="grpc://127.0.0.1:9000"),
+        ]
+    )
     assert accepted == 1
     assert {f[0] for f in failures} == {"dup"}
     assert "duplicate_plugin_id" in failures[0][1]
@@ -325,15 +335,19 @@ async def test_bootstrap_registers_all_four_stages():
     schema's plugin_type Literal lines up with the registry's accepted
     set."""
     orch, server = _build_orch()
-    accepted, failures = await orch.register_external_from_config([
-        _entry("ext-pred", plugin_type="predict", priority=1),
-        _entry("ext-prop", plugin_type="propose", priority=5),
-        _entry("ext-recon", plugin_type="reconcile", priority=2),
-        _entry("ext-cons", plugin_type="constrain", priority=3),
-    ])
+    accepted, failures = await orch.register_external_from_config(
+        [
+            _entry("ext-pred", plugin_type="predict", priority=1),
+            _entry("ext-prop", plugin_type="propose", priority=5),
+            _entry("ext-recon", plugin_type="reconcile", priority=2),
+            _entry("ext-cons", plugin_type="constrain", priority=3),
+        ]
+    )
     assert accepted == 4
     assert failures == []
-    by_id = {p.plugin_id: p.plugin_type for p in server.list_plugins(ListPluginsRequest())}
+    by_id = {
+        p.plugin_id: p.plugin_type for p in server.list_plugins(ListPluginsRequest())
+    }
     assert by_id == {
         "ext-pred": "predict",
         "ext-prop": "propose",

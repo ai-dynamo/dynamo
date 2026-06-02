@@ -10,7 +10,6 @@ import pytest
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.types import (
     ComponentTarget,
-    HoldPolicy,
     OverrideResult,
     OverrideType,
     PipelineContext,

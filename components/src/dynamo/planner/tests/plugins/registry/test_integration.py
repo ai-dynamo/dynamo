@@ -269,5 +269,3 @@ async def test_client_driven_version_upgrade(stub_transport):
     assert v2.accepted
     assert server.get_plugin("p").version == "v2"
     assert scheduler.cache_entries_count() == 0  # fresh; needs new record_result
-
-

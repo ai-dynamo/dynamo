@@ -70,24 +70,33 @@ def test_plugin_evaluations_total_increments_per_call(metrics):
         plugin_id="p2", stage="constrain", result="at_most"
     ).inc()
 
-    assert _sample_value(
-        metrics.plugin_evaluations_total,
-        plugin_id="p1",
-        stage="propose",
-        result="accept",
-    ) == 2
-    assert _sample_value(
-        metrics.plugin_evaluations_total,
-        plugin_id="p1",
-        stage="propose",
-        result="set",
-    ) == 1
-    assert _sample_value(
-        metrics.plugin_evaluations_total,
-        plugin_id="p2",
-        stage="constrain",
-        result="at_most",
-    ) == 1
+    assert (
+        _sample_value(
+            metrics.plugin_evaluations_total,
+            plugin_id="p1",
+            stage="propose",
+            result="accept",
+        )
+        == 2
+    )
+    assert (
+        _sample_value(
+            metrics.plugin_evaluations_total,
+            plugin_id="p1",
+            stage="propose",
+            result="set",
+        )
+        == 1
+    )
+    assert (
+        _sample_value(
+            metrics.plugin_evaluations_total,
+            plugin_id="p2",
+            stage="constrain",
+            result="at_most",
+        )
+        == 1
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +444,7 @@ def test_reject_short_circuited_total_increments(metrics):
     metrics.reject_short_circuited_total.labels(plugin_id="safety_plugin").inc()
     metrics.reject_short_circuited_total.labels(plugin_id="other_plugin").inc()
     assert (
-        _sample_value(
-            metrics.reject_short_circuited_total, plugin_id="safety_plugin"
-        )
+        _sample_value(metrics.reject_short_circuited_total, plugin_id="safety_plugin")
         == 2
     )
     assert (

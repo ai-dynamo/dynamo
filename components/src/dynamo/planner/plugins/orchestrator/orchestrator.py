@@ -36,10 +36,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
 from dynamo.planner.plugins.clock import Clock
 from dynamo.planner.plugins.merge.types import ComponentKey
-from dynamo.planner.plugins.orchestrator.pipeline import (
-    PipelineOutcome,
-    run_pipeline,
-)
+from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome, run_pipeline
 from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
 from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.registry.types import RegisteredPlugin
@@ -251,8 +248,7 @@ class LocalPlannerOrchestrator:
                 )
             else:
                 log.warning(
-                    "register_external_from_config: rejected plugin_id=%s "
-                    "reason=%s",
+                    "register_external_from_config: rejected plugin_id=%s " "reason=%s",
                     entry.plugin_id,
                     resp.reject_reason,
                 )

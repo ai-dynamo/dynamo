@@ -82,12 +82,12 @@ def test_v1_throughput_states_preserved_in_original_order():
 
 
 def test_load_additions_appended_in_order():
-    assert LOAD_DECISION_STATES[len(_V1_LOAD_STATES):] == _PLUGIN_LOAD_ADDITIONS
+    assert LOAD_DECISION_STATES[len(_V1_LOAD_STATES) :] == _PLUGIN_LOAD_ADDITIONS
 
 
 def test_throughput_additions_appended_in_order():
     assert (
-        THROUGHPUT_DECISION_STATES[len(_V1_THROUGHPUT_STATES):]
+        THROUGHPUT_DECISION_STATES[len(_V1_THROUGHPUT_STATES) :]
         == _PLUGIN_THROUGHPUT_ADDITIONS
     )
 
@@ -134,9 +134,7 @@ def test_load_state_list_has_no_duplicates():
 
 
 def test_throughput_state_list_has_no_duplicates():
-    assert len(THROUGHPUT_DECISION_STATES) == len(
-        set(THROUGHPUT_DECISION_STATES)
-    )
+    assert len(THROUGHPUT_DECISION_STATES) == len(set(THROUGHPUT_DECISION_STATES))
 
 
 def test_all_current_states_settable_end_to_end():

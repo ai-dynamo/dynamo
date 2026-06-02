@@ -81,12 +81,11 @@ from dynamo.planner.plugins.clock import Clock, VirtualClock, WallClock
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
 from dynamo.planner.plugins.registry.auth import AllowUnauthenticatedAuth
-from dynamo.planner.plugins.registry.config import build_auth_validator
 from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
+from dynamo.planner.plugins.registry.config import build_auth_validator
 from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.scheduler import PluginScheduler
 from dynamo.planner.plugins.transport.config import (
-    TransportConfig,
     make_transport_for_endpoint,
 )
 from dynamo.planner.plugins.types import (
@@ -145,9 +144,7 @@ class OrchestratorEngineAdapter:
         # ``test_decision_level_parity`` for how this matches PSM's
         # observable scaling decisions while collapsing the legacy
         # dual-cadence book-keeping into one base interval.
-        self._scale_interval: float = float(
-            config.scheduling.scale_interval_seconds
-        )
+        self._scale_interval: float = float(config.scheduling.scale_interval_seconds)
         self._last_tick_s: float = 0.0
 
         # Legacy cadence fields preserved as a compatibility shim for
@@ -259,14 +256,14 @@ class OrchestratorEngineAdapter:
         decode: Optional[Any] = None,
         agg: Optional[Any] = None,
     ) -> None:
-        self._orchestrator.install_regressions(
-            prefill=prefill, decode=decode, agg=agg
-        )
+        self._orchestrator.install_regressions(prefill=prefill, decode=decode, agg=agg)
 
     async def bootstrap_plugins(
         self, *, historical_traffic: Optional[Sequence[TrafficObservation]] = None
     ) -> None:
-        await self._orchestrator.bootstrap_plugins(historical_traffic=historical_traffic)
+        await self._orchestrator.bootstrap_plugins(
+            historical_traffic=historical_traffic
+        )
         await self._wire_external_plugins_from_config()
         await self._maybe_start_gateway()
 
@@ -525,9 +522,7 @@ class OrchestratorEngineAdapter:
         diagnostics.estimated_ttft_ms = d.get("estimated_ttft_ms")
         diagnostics.estimated_itl_ms = d.get("estimated_itl_ms")
 
-    def _project_throughput_diagnostics(
-        self, diagnostics: TickDiagnostics
-    ) -> None:
+    def _project_throughput_diagnostics(self, diagnostics: TickDiagnostics) -> None:
         """Read ``BuiltinThroughputPropose._last_throughput_diagnostics``
         and write to ``diagnostics.throughput_decision_reason*``.
 
@@ -558,7 +553,9 @@ class OrchestratorEngineAdapter:
             diagnostics.throughput_decision_reason_prefill = d.get("prefill")
             diagnostics.throughput_decision_reason_decode = d.get("decode")
             diagnostics.throughput_decision_reason = (
-                self._aggregate_disagg_throughput_reason(d.get("prefill"), d.get("decode"))
+                self._aggregate_disagg_throughput_reason(
+                    d.get("prefill"), d.get("decode")
+                )
             )
         elif mode in ("prefill", "decode"):
             diagnostics.throughput_decision_reason = d.get(mode)
@@ -789,8 +786,7 @@ class OrchestratorEngineAdapter:
             return None
 
         by_comp = {
-            t.sub_component_type: t.replicas
-            for t in outcome.final_proposal.targets
+            t.sub_component_type: t.replicas for t in outcome.final_proposal.targets
         }
         num_p = by_comp.get("prefill")
         num_d = by_comp.get("decode")

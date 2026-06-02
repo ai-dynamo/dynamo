@@ -55,10 +55,7 @@ from dynamo.planner.plugins.merge import (
     type_aware_merge,
 )
 from dynamo.planner.plugins.merge.types import PredictPluginCallable
-from dynamo.planner.plugins.registry.circuit_breaker import (
-    CircuitBreaker,
-    CircuitState,
-)
+from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker, CircuitState
 from dynamo.planner.plugins.registry.types import RegisteredPlugin
 from dynamo.planner.plugins.scheduler import PluginScheduler
 from dynamo.planner.plugins.types import (
@@ -152,9 +149,7 @@ class _PredictAdapter:
     def priority(self) -> int:
         return self._plugin.priority
 
-    async def call(
-        self, method: str, context: PipelineContext
-    ) -> PredictStageResponse:
+    async def call(self, method: str, context: PipelineContext) -> PredictStageResponse:
         assert method == "Predict", f"unexpected method for PREDICT: {method!r}"
         req = PredictStageRequest(context=context)
 
@@ -173,9 +168,7 @@ class _PredictAdapter:
         # RPC succeeded — bump scheduler bookkeeping so
         # ``execution_interval_seconds`` throttling applies to PREDICT.
         if self._scheduler is not None:
-            self._scheduler.record_evaluation(
-                self._plugin.plugin_id, self._tick_now
-            )
+            self._scheduler.record_evaluation(self._plugin.plugin_id, self._tick_now)
 
         if self._metrics is not None:
             # Classify: chain_augment consumes the response and produces
@@ -475,7 +468,11 @@ async def _run_fanout_stage(
     outcome = type_aware_merge(plugin_results, baseline, set_allowed=set_allowed)
 
     if metrics is not None:
-        _set_circuit_state(metrics, plugins + [_inh_as_plugin(i) for i in active.inherited], circuit_breaker)
+        _set_circuit_state(
+            metrics,
+            plugins + [_inh_as_plugin(i) for i in active.inherited],
+            circuit_breaker,
+        )
         _emit_override_active(
             metrics,
             stage=stage,
@@ -523,11 +520,9 @@ def _result_label(pr: PluginResult) -> str:
     need the full mix should sum
     ``plugin_override_active{override_type=...}`` instead.
     """
-    from dynamo.planner.plugins.types import (
-        AcceptResult as _AcceptResult,
-        OverrideResult as _OverrideResult,
-        RejectResult as _RejectResult,
-    )
+    from dynamo.planner.plugins.types import AcceptResult as _AcceptResult
+    from dynamo.planner.plugins.types import OverrideResult as _OverrideResult
+    from dynamo.planner.plugins.types import RejectResult as _RejectResult
 
     r = pr.result
     if isinstance(r, _RejectResult):
@@ -600,10 +595,8 @@ def _emit_override_active(
     Plugins that returned ACCEPT or REJECT-but-not-winning leave the
     gauge at all-zero — that's the correct "evaluated, no override"
     state."""
-    from dynamo.planner.plugins.types import (
-        OverrideResult as _OverrideResult,
-        RejectResult as _RejectResult,
-    )
+    from dynamo.planner.plugins.types import OverrideResult as _OverrideResult
+    from dynamo.planner.plugins.types import RejectResult as _RejectResult
 
     # Reset every plugin we saw this tick before setting their actual
     # contribution.  Iteration over plugin_results covers both triggered
@@ -614,9 +607,7 @@ def _emit_override_active(
     # Short-circuited REJECT winners (found by type_aware_merge) surface
     # as outcome.rejected; emit override_type=REJECT for them.
     rejected_ids = {
-        pr.plugin_id
-        for pr in plugin_results
-        if isinstance(pr.result, _RejectResult)
+        pr.plugin_id for pr in plugin_results if isinstance(pr.result, _RejectResult)
     }
     for pid in rejected_ids:
         metrics.plugin_override_active.labels(
@@ -731,8 +722,11 @@ async def run_pipeline(
         )
         predict_adapters: list[PredictPluginCallable] = [
             _PredictAdapter(
-                p, metrics=metrics, clock=clock,
-                scheduler=scheduler, tick_now=tick_now,
+                p,
+                metrics=metrics,
+                clock=clock,
+                scheduler=scheduler,
+                tick_now=tick_now,
             )
             for p in predict_active.triggered
         ]
@@ -744,9 +738,7 @@ async def run_pipeline(
         if ca.chain_break_warnings:
             audit.extend(ca.chain_break_warnings)
         if ca.prediction is not None:
-            current_ctx = current_ctx.model_copy(
-                update={"predictions": ca.prediction}
-            )
+            current_ctx = current_ctx.model_copy(update={"predictions": ca.prediction})
 
         # ---- PROPOSE stage ----
         propose, propose_plugin_results = await _run_fanout_stage(
@@ -770,9 +762,7 @@ async def run_pipeline(
                 audit_events=audit,
             )
         if propose.proposal is not None:
-            current_ctx = current_ctx.model_copy(
-                update={"proposal": propose.proposal}
-            )
+            current_ctx = current_ctx.model_copy(update={"proposal": propose.proposal})
 
         # ---- RECONCILE stage ----
         # Baseline flows from PROPOSE's output. Per-plugin PROPOSE
@@ -780,9 +770,7 @@ async def run_pipeline(
         # custom reconcile plugins can arbitrate per-proposal (rather
         # than only seeing the post-merge ctx.proposal).
         reconcile_baseline = _proposal_to_baseline(propose.proposal, baseline)
-        propose_proposals = [
-            _to_propose_result(pr) for pr in propose_plugin_results
-        ]
+        propose_proposals = [_to_propose_result(pr) for pr in propose_plugin_results]
         reconcile, _ = await _run_fanout_stage(
             stage="reconcile",
             scheduler=scheduler,
@@ -870,9 +858,7 @@ async def run_pipeline(
         # itself (matches what operators see as "tick cost").
         tick_start = clock.now()
         try:
-            outcome = await asyncio.wait_for(
-                _body(), timeout=tick_max_duration_seconds
-            )
+            outcome = await asyncio.wait_for(_body(), timeout=tick_max_duration_seconds)
         finally:
             if metrics is not None:
                 metrics.tick_duration_seconds.observe(

@@ -20,9 +20,7 @@ pytestmark = [
 ]
 
 
-FAKE_PLUGIN_MODULE = (
-    "dynamo.planner.tests.plugins.orchestrator._fake_in_process_plugin"
-)
+FAKE_PLUGIN_MODULE = "dynamo.planner.tests.plugins.orchestrator._fake_in_process_plugin"
 
 
 def test_loader_registers_plugin_from_module_path(ctx_factory):

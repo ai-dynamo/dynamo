@@ -21,13 +21,13 @@ from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.types import (
     AcceptResult,
     ComponentTarget,
+    ConstrainStageResponse,
     HoldPolicy,
     OverrideResult,
     OverrideType,
     PipelineContext,
     ProposeStageResponse,
     ReconcileStageResponse,
-    ConstrainStageResponse,
     RejectResult,
 )
 
@@ -345,9 +345,7 @@ async def test_held_over_plugin_emits_held_over_counter(ctx_factory, metrics):
 
 
 @pytest.mark.asyncio
-async def test_reconcile_clamp_emits_reconcile_clamped_total(
-    ctx_factory, metrics
-):
+async def test_reconcile_clamp_emits_reconcile_clamped_total(ctx_factory, metrics):
     """Two plugins at RECONCILE: one sets replicas=10, the other
     says AT_MOST=4. Merge clamps to 4; we expect
     ``reconcile_clamped_total{source='cap'}`` to increment once.
@@ -412,9 +410,7 @@ async def test_reconcile_clamp_emits_reconcile_clamped_total(
     # constrain counter untouched this tick.
     all_samples = list(metrics.constrain_capped_total.collect())[0].samples
     # Counter with no inc()s has no samples other than the _created.
-    assert not any(
-        s.name.endswith("_total") and s.value > 0 for s in all_samples
-    )
+    assert not any(s.name.endswith("_total") and s.value > 0 for s in all_samples)
 
 
 @pytest.mark.asyncio
@@ -560,16 +556,12 @@ async def test_tick_skipped_total_fires_when_plugin_not_due(ctx_factory, metrics
     ctx["clock"].advance(60.0)
     # Tick 1: first call, is_due=True → triggered, no skip
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
-    assert (
-        _counter_value(metrics.tick_skipped_total, plugin_id="cadenced") == 0
-    )
+    assert _counter_value(metrics.tick_skipped_total, plugin_id="cadenced") == 0
 
     # Tick 2: advance 1s only (way short of 60s interval) → not due → skipped
     ctx["clock"].advance(1.0)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
-    assert (
-        _counter_value(metrics.tick_skipped_total, plugin_id="cadenced") == 1
-    )
+    assert _counter_value(metrics.tick_skipped_total, plugin_id="cadenced") == 1
 
 
 @pytest.mark.asyncio
@@ -678,6 +670,4 @@ async def test_no_clamp_when_recommendation_within_bounds(ctx_factory, metrics):
     )
     # No clamp event emitted.
     samples = list(metrics.reconcile_clamped_total.collect())[0].samples
-    assert not any(
-        s.name.endswith("_total") and s.value > 0 for s in samples
-    )
+    assert not any(s.name.endswith("_total") and s.value > 0 for s in samples)

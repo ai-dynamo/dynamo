@@ -28,7 +28,6 @@ from typing import Literal
 from dynamo.planner.plugins.transport.base import PluginTransport
 from dynamo.planner.plugins.types import HoldPolicy
 
-
 TransportType = Literal["in_process", "grpc"]
 
 
