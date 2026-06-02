@@ -936,10 +936,11 @@ impl ModelDeploymentCard {
     ///   tokenizations at special-token boundaries (massive speed-up for shared chat
     ///   prefixes; default off, zero cost when unset)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 50 MB)
-    /// - `DYN_TOKENIZER_CACHE_EXTEND=1` — on a partial hit, also cache the new suffix so
-    ///   each turn of a growing multi-turn conversation hits deeper than the last
-    ///   (keeps per-turn tokenization cost flat instead of growing with history; default
-    ///   off, requires `DYN_TOKENIZER_CACHE=1`)
+    /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
+    ///   (when the cache is enabled) a partial hit also caches the new suffix so each
+    ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
+    ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
+    ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = match std::env::var("DYN_TOKENIZER") {
             Ok(v) if v == "fastokens" => true,
@@ -962,9 +963,10 @@ impl ModelDeploymentCard {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(50 * 1024 * 1024);
-        let cache_extend = matches!(
+        // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
+        let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
-            Some("1")
+            Some("0")
         );
 
         let inner: Arc<dyn crate::tokenizers::traits::Tokenizer> = match &self.tokenizer {

@@ -346,13 +346,13 @@ fn extend_on_hit_matches_uncached_across_growing_turns() {
 }
 
 #[test]
-fn default_off_hits_never_insert() {
-    // Default (extend off): partial hits must NOT mutate the cache — preserving today's
-    // behavior byte-for-byte. After turn 0 populates the cache, encoding the rest of the
-    // growing conversation produces hits but adds zero entries.
+fn extend_off_hits_never_insert() {
+    // With extension disabled, partial hits must NOT mutate the cache — the original
+    // hit-without-insert behavior. After turn 0 populates the cache, encoding the rest
+    // of the growing conversation produces hits but adds zero entries.
     let turns = growing_chat_turns(10);
     for setup in SETUPS {
-        let (_base, cached) = build_cached_setup(setup); // extend off by default
+        let (_base, cached) = build_cached_setup(setup); // CachedTokenizer::new => extend off
 
         let _ = cached.encode(&(setup.render)(&turns[0])).unwrap();
         let entries_after_turn0 = cached.cache_stats().entries;
