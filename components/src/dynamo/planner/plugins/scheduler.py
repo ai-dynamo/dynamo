@@ -45,7 +45,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from dynamo.planner.plugins.clock import Clock
 from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
@@ -119,7 +119,12 @@ class PluginScheduler:
     # Per-tick scheduling
     # ------------------------------------------------------------------
 
-    def compute_active_set(self, now: float, stage: str) -> ActiveSet:
+    def compute_active_set(
+        self,
+        now: float,
+        stage: str,
+        ctx: Optional[Any] = None,
+    ) -> ActiveSet:
         """Return triggered plugins (orchestrator must call) and inherited
         results (use cached output in place of calling the plugin) for
         this stage at ``now``.
@@ -128,12 +133,24 @@ class PluginScheduler:
           - different ``plugin_type`` than the stage
           - ``enabled=False``
           - ``CircuitBreaker.can_call`` returns False (includes OPEN)
+          - ``requires_produced_fields`` non-empty AND any dot-path
+            resolves to None in ``ctx`` (scale_interval cadence model
+            declarative dependencies — bumps
+            ``tick_requires_unsatisfied_total`` per (plugin, missing
+            field) pair)
 
         Among the remainder:
           - "due" (``now - last_call_at >= execution_interval`` or
             first-ever tick) → ``triggered``
           - "not due" + ``HoldPolicy.HOLD_LAST`` + cache hit → ``inherited``
           - otherwise → skipped (treat as ACCEPT)
+
+        ``ctx`` is optional for backward-compat with callers that don't
+        thread the PipelineContext through (e.g. test fixtures and the
+        PSM path). When ``ctx`` is None, plugins with
+        ``requires_produced_fields`` are treated as "requires
+        unsatisfied" and skipped — conservative default that prevents
+        firing a plugin without the data it declared dependence on.
         """
         triggered: list[RegisteredPlugin] = []
         inherited: list[InheritedResult] = []
@@ -148,6 +165,23 @@ class PluginScheduler:
 
             is_due = self._is_due(plugin, now)
             if is_due:
+                # Even if the throttle says due, declarative dependencies
+                # (``requires_produced_fields``) gate the fire.  If any
+                # required dot-path is None in ``ctx``, skip — upstream
+                # didn't produce; calling this plugin would feed it
+                # stale / missing input.
+                missing = self._requires_missing_field(plugin, ctx)
+                if missing is not None:
+                    if self._metrics is not None:
+                        self._metrics.tick_requires_unsatisfied_total.labels(
+                            plugin_id=plugin.plugin_id,
+                            missing_field=missing,
+                        ).inc()
+                    # Skip silently (no cache inherit for requires-gated
+                    # skip — the plugin chose to declare the dependency,
+                    # so a stale cached result would violate its own
+                    # contract).
+                    continue
                 triggered.append(plugin)
                 # tick_lag_seconds = how far behind the scheduled
                 # cadence this tick is.  For the first-ever
@@ -184,6 +218,43 @@ class PluginScheduler:
             # ACCEPT_WHEN_IDLE or HOLD_LAST with empty cache → treat as ACCEPT (skip).
 
         return ActiveSet(triggered=triggered, inherited=inherited)
+
+    @staticmethod
+    def _requires_missing_field(
+        plugin: RegisteredPlugin, ctx: Optional[Any]
+    ) -> Optional[str]:
+        """Walk ``plugin.requires_produced_fields`` against ``ctx`` and
+        return the first dot-path that resolves to None, or None if all
+        required fields are satisfied (or the plugin declared no
+        requires).
+
+        Conservative default: if the caller didn't supply ``ctx`` and
+        the plugin has requires, return the first declared path as
+        "missing" — this prevents firing a plugin without the inputs
+        it asked for.
+        """
+        if not plugin.requires_produced_fields:
+            return None
+        if ctx is None:
+            return plugin.requires_produced_fields[0]
+        for path in plugin.requires_produced_fields:
+            if PluginScheduler._ctx_get(ctx, path) is None:
+                return path
+        return None
+
+    @staticmethod
+    def _ctx_get(ctx: Any, dot_path: str) -> Any:
+        """Resolve ``ctx.a.b.c`` for ``dot_path="a.b.c"``.  Returns None
+        if any intermediate attribute is None or missing (rather than
+        raising).  Used by ``_requires_missing_field`` for declarative
+        dependency checks against ``PipelineContext``.
+        """
+        cur: Any = ctx
+        for part in dot_path.split("."):
+            if cur is None:
+                return None
+            cur = getattr(cur, part, None)
+        return cur
 
     @staticmethod
     def _compute_tick_lag(plugin: RegisteredPlugin, now: float) -> float:

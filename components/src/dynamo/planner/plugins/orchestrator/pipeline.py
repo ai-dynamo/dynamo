@@ -371,7 +371,7 @@ async def _run_fanout_stage(
     arbitrate per-proposal rather than only seeing the post-merge
     ``ctx.proposal``.
     """
-    active = scheduler.compute_active_set(tick_now, stage)
+    active = scheduler.compute_active_set(tick_now, stage, ctx=ctx)
     plugins: list[RegisteredPlugin] = list(active.triggered)
     method = _STAGE_METHOD[stage]
     request = _stage_request(stage, ctx, proposals=propose_results)
@@ -726,7 +726,9 @@ async def run_pipeline(
         current_ctx = ctx
 
         # ---- PREDICT stage (priority-ascending chain) ----
-        predict_active = scheduler.compute_active_set(tick_now, "predict")
+        predict_active = scheduler.compute_active_set(
+            tick_now, "predict", ctx=current_ctx
+        )
         predict_adapters: list[PredictPluginCallable] = [
             _PredictAdapter(
                 p, metrics=metrics, clock=clock,

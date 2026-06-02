@@ -318,6 +318,19 @@ class PluginFrameworkMetrics:
             **kw,
         )
 
+        self.tick_requires_unsatisfied_total = Counter(
+            f"{PREFIX}_tick_requires_unsatisfied_total",
+            "Times a plugin was skipped this tick because one of its "
+            "``requires_produced_fields`` dot-paths resolved to None "
+            "in the current PipelineContext (i.e., the upstream "
+            "stage that was expected to produce that field did not "
+            "fire / did not produce). ``missing_field`` is the first "
+            "dot-path that failed the check; useful for debugging "
+            "dependency cascades.",
+            labelnames=["plugin_id", "missing_field"],
+            **kw,
+        )
+
         self.tick_lag_seconds = Gauge(
             f"{PREFIX}_tick_lag_seconds",
             "Seconds between a plugin's scheduled 'due' moment and the "
