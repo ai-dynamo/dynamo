@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -36,10 +37,15 @@ from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
+    TEST_LOGITS_PROCESSOR_ENV,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LogitsProcessorSpec,
+    is_generation_stage,
+    logits_processors_for_request,
+    resolve_test_logits_processor_spec,
 )
 from dynamo.common.backend.health_check import (
     bos_token_id_or,
@@ -54,6 +60,8 @@ from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
+from dynamo.trtllm.logits_processing.adapter import attach_logits_processors
+from dynamo.trtllm.request_handlers.handler_base import TRTLLMEngineQuiesceController
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -149,6 +157,8 @@ class TrtllmLLMEngine(LLMEngine):
         self._log_request_metrics: Optional[Callable[[dict], None]] = None
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
+        # Resolved once in `start()`; None when the smoke hook is off.
+        self._logits_processor_spec: LogitsProcessorSpec | None = None
         # Per-request GenerationResult handles for `abort()` lookup. TRT-LLM's
         # abort API is `GenerationResult.abort()` (not by request-id), so we
         # need the handle. Other engines (vllm, sglang) abort by id and
@@ -179,6 +189,14 @@ class TrtllmLLMEngine(LLMEngine):
         # One-shot guards so a misbehaving engine doesn't flood logs.
         self._warned_dispatch_failed = False
         self._warned_unknown_dp_rank = False
+        self._quiesce_controller: TRTLLMEngineQuiesceController | None = None
+        self._quiesce_lock = asyncio.Lock()
+        self._inflight_lock = asyncio.Lock()
+        self._inflight_requests = 0
+        self._no_inflight_requests = asyncio.Event()
+        self._no_inflight_requests.set()
+        self._reject_new_requests = False
+        self._resume_recovery_required = False
 
     @classmethod
     async def from_args(
@@ -257,6 +275,15 @@ class TrtllmLLMEngine(LLMEngine):
                 kv_cfg["event_buffer_max_size"] = _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
             engine_args["kv_cache_config"] = kv_cfg
 
+        # Force tokenizer init for the smoke hook, after all overrides so an
+        # explicit user `skip_tokenizer_init=True` can't starve the processor.
+        # Gated to generation roles for the same reason as the spec resolution
+        # below. The flag is TRT-LLM-shaped; each backend sets its own.
+        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
+            _TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode]
+        ):
+            engine_args["skip_tokenizer_init"] = False
+
         # Use post-override engine_args so EngineConfig matches what the
         # actual TRT-LLM engine got.
         engine = cls(
@@ -293,6 +320,11 @@ class TrtllmLLMEngine(LLMEngine):
 
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
+        self._quiesce_controller = TRTLLMEngineQuiesceController(self._engine)
+
+        # Resolve the engine-declared spec now the engine (and its tokenizer)
+        # is initialized; see `logits_processor_spec()`.
+        self._logits_processor_spec = await self.logits_processor_spec()
 
         from tensorrt_llm.metrics import MetricsCollector
 
@@ -359,6 +391,18 @@ class TrtllmLLMEngine(LLMEngine):
             for rank in range(self._attention_dp_size)
         ]
 
+    async def logits_processor_spec(self) -> LogitsProcessorSpec | None:
+        # Only generation roles ever attach (PREFILL/ENCODE gate out per
+        # request), so skip spec resolution — and the tokenizer it needs —
+        # entirely for the other roles.
+        if not is_generation_stage(_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode]):
+            return None
+        # Bind the env-gated smoke hook to TRT-LLM's tokenizer; the lambda is
+        # dereferenced lazily, only when the hook is on (see the resolver).
+        assert self._engine is not None
+        engine = self._engine  # narrow for the closure
+        return resolve_test_logits_processor_spec(lambda: engine.llm.tokenizer)
+
     def component_metrics_dp_ranks(self) -> list[int]:
         return list(range(self._attention_dp_size))
 
@@ -417,9 +461,9 @@ class TrtllmLLMEngine(LLMEngine):
                             kv_used_blocks=int(kv_used),
                             kv_total_blocks=kv_total,
                             gpu_cache_usage=(kv_used / kv_total) if kv_total else 0.0,
-                            kv_cache_hit_rate=float(hit_rate)
-                            if hit_rate is not None
-                            else None,
+                            kv_cache_hit_rate=(
+                                float(hit_rate) if hit_rate is not None else None
+                            ),
                             dp_rank=rank,
                         ),
                     )
@@ -535,7 +579,145 @@ class TrtllmLLMEngine(LLMEngine):
             if removed:
                 publisher.publish_removed(removed)
 
+    def supported_controls(self) -> set[str]:
+        return {"release_memory_occupation", "resume_memory_occupation"}
+
+    async def engine_control(self, control: str, body: dict) -> dict:
+        handlers = {
+            "release_memory_occupation": self.release_memory_occupation,
+            "resume_memory_occupation": self.resume_memory_occupation,
+        }
+        handler = handlers.get(control)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine control: {control}",
+            }
+        return await handler(body or {})
+
+    async def _set_reject_new_requests(self, reject: bool) -> None:
+        async with self._inflight_lock:
+            self._reject_new_requests = reject
+
+    async def _mark_request_started(self) -> bool:
+        async with self._inflight_lock:
+            if self._reject_new_requests:
+                return False
+            self._inflight_requests += 1
+            self._no_inflight_requests.clear()
+            return True
+
+    async def _mark_request_finished(self) -> None:
+        async with self._inflight_lock:
+            if self._inflight_requests == 0:
+                return
+            self._inflight_requests -= 1
+            if self._inflight_requests == 0:
+                self._no_inflight_requests.set()
+
+    async def _wait_for_inflight_requests(self, timeout_s: float) -> None:
+        try:
+            await asyncio.wait_for(self._no_inflight_requests.wait(), timeout_s)
+        except asyncio.TimeoutError as exc:
+            async with self._inflight_lock:
+                inflight = self._inflight_requests
+            raise RuntimeError(
+                f"Timed out waiting for {inflight} in-flight request(s) to finish"
+            ) from exc
+
+    @staticmethod
+    def _controller_needs_resume_recovery(
+        controller: TRTLLMEngineQuiesceController,
+    ) -> bool:
+        needs_recovery = getattr(controller, "needs_resume_recovery", False)
+        return needs_recovery if isinstance(needs_recovery, bool) else False
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        controller = self._quiesce_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if controller.is_quiesced:
+                return {"status": "ok", "message": "Memory already released"}
+            if (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
+            ):
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
+            try:
+                await self._set_reject_new_requests(True)
+                timeout_s = float(body.get("timeout_s", 30.0))
+                await self._wait_for_inflight_requests(timeout_s)
+            except Exception as exc:
+                logger.error("release_memory_occupation failed before quiesce: %s", exc)
+                await self._set_reject_new_requests(False)
+                return {"status": "error", "message": str(exc)}
+
+            try:
+                await controller.quiesce(tags)
+                self._resume_recovery_required = False
+                return {"status": "ok", "message": "Memory released"}
+            except Exception as exc:
+                logger.error("release_memory_occupation quiesce failed: %s", exc)
+                self._resume_recovery_required = True
+                return {"status": "error", "message": str(exc)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        controller = self._quiesce_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            needs_recovery = (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
+            )
+            if not controller.is_quiesced and not needs_recovery:
+                return {"status": "ok", "message": "Memory already resumed"}
+            try:
+                if controller.is_quiesced or self._controller_needs_resume_recovery(
+                    controller
+                ):
+                    await controller.resume(tags)
+                await self._set_reject_new_requests(False)
+                controller.mark_resumed()
+                self._resume_recovery_required = False
+                return {"status": "ok", "message": "Memory resumed"}
+            except Exception as exc:
+                logger.error("resume_memory_occupation failed: %s", exc)
+                self._resume_recovery_required = True
+                return {"status": "error", "message": str(exc)}
+
     async def generate(
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
+        if not await self._mark_request_started():
+            yield {
+                "finish_reason": "error",
+                "token_ids": [],
+                "index": 0,
+                "completion_usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            }
+            return
+        try:
+            async for chunk in self._generate_started(request, context):
+                yield chunk
+        finally:
+            await self._mark_request_finished()
+
+    async def _generate_started(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
         assert self._engine is not None, "Engine not initialized"
@@ -610,7 +792,13 @@ class TrtllmLLMEngine(LLMEngine):
             else None
         )
 
-        # Prefill returns one non-streaming chunk carrying the handoff —
+        entries = logits_processors_for_request(
+            self._logits_processor_spec,
+            disaggregation_mode=_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode],
+        )
+        attach_logits_processors(sampling_params, entries)
+
+        # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
         generation_result = self._engine.llm.generate_async(
@@ -853,6 +1041,7 @@ class TrtllmLLMEngine(LLMEngine):
         self._kv_events_thread = None
         self._metrics_thread = None
         self._kv_publishers.clear()
+        self._quiesce_controller = None
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")

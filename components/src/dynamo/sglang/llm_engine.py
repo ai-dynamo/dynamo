@@ -23,6 +23,13 @@ import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+from sglang.srt.managers.io_struct import (
+    UpdateWeightFromDiskReqInput,
+    UpdateWeightsFromDistributedReqInput,
+    UpdateWeightsFromIPCReqInput,
+    UpdateWeightsFromTensorReqInput,
+    UpdateWeightVersionReqInput,
+)
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
@@ -59,6 +66,7 @@ from dynamo.sglang.capacity import (
     runtime_capacity,
 )
 from dynamo.sglang.publisher import format_zmq_endpoint
+from dynamo.sglang.quiesce import SGLangEngineQuiesceController
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -122,6 +130,8 @@ class SglangLLMEngine(LLMEngine):
         # `dp_rank` against this node's range before forwarding to SGLang.
         self._dp_start: int = 0
         self._dp_size: int = 1
+        self._quiesce_controller: SGLangEngineQuiesceController | None = None
+        self._quiesce_lock = asyncio.Lock()
 
     @classmethod
     async def from_args(
@@ -149,6 +159,7 @@ class SglangLLMEngine(LLMEngine):
         del worker_id  # SGLang bootstrap uses host/port/room triples
 
         self.engine = sgl.Engine(server_args=self.server_args)
+        self._quiesce_controller = SGLangEngineQuiesceController(self.engine)
 
         tokenizer = (
             self.engine.tokenizer_manager.tokenizer
@@ -405,6 +416,167 @@ class SglangLLMEngine(LLMEngine):
 
             yield out
 
+    def supported_controls(self) -> set[str]:
+        return {
+            "start_profile",
+            "stop_profile",
+            "release_memory_occupation",
+            "resume_memory_occupation",
+            "update_weights_from_disk",
+            "update_weights_from_tensor",
+            "update_weights_from_distributed",
+            "update_weights_from_ipc",
+            "update_weight_version",
+        }
+
+    async def engine_control(self, control: str, body: dict) -> dict:
+        handlers = {
+            "start_profile": self.start_profile,
+            "stop_profile": self.stop_profile,
+            "release_memory_occupation": self.release_memory_occupation,
+            "resume_memory_occupation": self.resume_memory_occupation,
+            "update_weights_from_disk": self.update_weights_from_disk,
+            "update_weights_from_tensor": self.update_weights_from_tensor,
+            "update_weights_from_distributed": self.update_weights_from_distributed,
+            "update_weights_from_ipc": self.update_weights_from_ipc,
+            "update_weight_version": self.update_weight_version,
+        }
+        handler = handlers.get(control)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine control: {control}",
+            }
+        return await handler(body or {})
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        controller = self._quiesce_controller
+        if controller is None:
+            return {
+                "status": "error",
+                "message": "memory control not supported on this worker",
+            }
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if controller.is_quiesced:
+                return {"status": "ok", "message": "Memory already released"}
+            if controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
+            try:
+                await controller.quiesce(tags)
+                return {
+                    "status": "ok",
+                    "message": (
+                        f"Memory released for tags: {tags}"
+                        if tags is not None
+                        else "Memory released"
+                    ),
+                }
+            except Exception as e:
+                logger.warning("Failed to release memory occupation: %s", e)
+                return {"status": "error", "message": str(e)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        controller = self._quiesce_controller
+        if controller is None:
+            return {
+                "status": "error",
+                "message": "memory control not supported on this worker",
+            }
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            needs_recovery = controller.needs_resume_recovery
+            if not controller.is_quiesced and not needs_recovery:
+                return {"status": "ok", "message": "Memory already resumed"}
+            try:
+                await controller.resume(tags)
+                controller.mark_resumed()
+                return {
+                    "status": "ok",
+                    "message": (
+                        f"Memory resumed for tags: {tags}"
+                        if tags is not None
+                        else "Memory resumed"
+                    ),
+                }
+            except Exception as e:
+                logger.warning("Failed to resume memory occupation: %s", e)
+                return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        body = body or {}
+        await self.engine.tokenizer_manager.start_profile(**body)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        await self.engine.tokenizer_manager.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+    async def update_weights_from_disk(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightFromDiskReqInput(**(body or {}))
+        (
+            success,
+            message,
+            num_paused_requests,
+        ) = await self.engine.tokenizer_manager.update_weights_from_disk(req, None)
+        return {
+            "success": success,
+            "message": message,
+            "num_paused_requests": num_paused_requests,
+        }
+
+    async def update_weights_from_tensor(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightsFromTensorReqInput(**(body or {}))
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_tensor(req, None)
+        return {"success": success, "message": message}
+
+    async def update_weights_from_distributed(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightsFromDistributedReqInput(**(body or {}))
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_distributed(
+            req, None
+        )
+        return {"success": success, "message": message}
+
+    async def update_weights_from_ipc(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightsFromIPCReqInput(**(body or {}))
+        success, message = await self.engine.tokenizer_manager.update_weights_from_ipc(
+            req, None
+        )
+        if success and not self.engine.tokenizer_manager.initial_weights_loaded:
+            self.engine.tokenizer_manager.initial_weights_loaded = True
+        return {"success": success, "message": message}
+
+    async def update_weight_version(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightVersionReqInput(**(body or {}))
+        if req.abort_all_requests:
+            self.engine.tokenizer_manager.abort_request(abort_all=True)
+        self.engine.tokenizer_manager.server_args.weight_version = req.new_version
+        return {
+            "success": True,
+            "message": f"Weight version updated to {req.new_version}",
+            "new_version": req.new_version,
+        }
+
     async def abort(self, context: Context) -> None:
         rid = context.trace_id
         if self.engine is None or rid is None:
@@ -466,6 +638,7 @@ class SglangLLMEngine(LLMEngine):
             except Exception:
                 pass
             self._metrics_zmq_ctx = None
+        self._quiesce_controller = None
         if self.engine is not None:
             self.engine.shutdown()
             logger.info("SGLang engine shutdown")

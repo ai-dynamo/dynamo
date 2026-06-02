@@ -94,7 +94,13 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id003
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: |-
           <｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
@@ -104,7 +110,8 @@ cases:
           <｜tool▁call▁end｜>
           <｜tool▁call▁end｜>
           <｜tool▁call▁end｜>
-      vllm: *id003
+        reason: vllm preserves malformed bare-wrapper parser syntax in normal_text for this recovery case; Dynamo recovers
+          the call and suppresses parser-owned markers so they do not leak into message.content.
       sglang:
         calls:
         - arguments:
