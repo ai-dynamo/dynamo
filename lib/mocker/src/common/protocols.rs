@@ -119,10 +119,18 @@ impl KvEventPublishers {
 /// schema in `components/src/dynamo/common/forward_pass_metrics.py`.
 ///
 /// Produced by the scheduler core after each `execute_pass_internal()` call.
-/// The runtime-dependent layer (`lib/llm`) wraps this with identity fields
-/// (worker_id, dp_rank, counter_id) and serializes to msgpack for the event plane.
+/// Runtime publishers may either stamp identity at serialization time or fill
+/// the identity fields directly when snapshots are consumed in-process.
 #[derive(Debug, Clone, Default)]
 pub struct ForwardPassSnapshot {
+    // -- identity --
+    // `Default::default()` leaves `version == 0` and identity fields empty or
+    // zero, which means an unstamped local snapshot. Runtime publishers may
+    // stamp or overwrite these fields at the serialization boundary.
+    pub version: u32,
+    pub worker_id: String,
+    pub dp_rank: u32,
+    pub counter_id: u64,
     // -- scheduled requests (executed this iteration) --
     pub num_prefill_requests: u32,
     pub sum_prefill_tokens: u64,
@@ -399,11 +407,14 @@ struct MockEngineArgsSerde {
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
     num_g2_blocks: OptionalConfigValue<usize>,
     num_g3_blocks: OptionalConfigValue<usize>,
+    enable_g4_storage: OptionalConfigValue<bool>,
     offload_batch_size: OptionalConfigValue<usize>,
     bandwidth_g1_to_g2_gbps: OptionalConfigValue<f64>,
     bandwidth_g2_to_g1_gbps: OptionalConfigValue<f64>,
     bandwidth_g2_to_g3_gbps: OptionalConfigValue<f64>,
     bandwidth_g3_to_g2_gbps: OptionalConfigValue<f64>,
+    bandwidth_g2_to_g4_gbps: OptionalConfigValue<f64>,
+    bandwidth_g4_to_g2_gbps: OptionalConfigValue<f64>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
     zmq_kv_events_port: OptionalConfigValue<u16>,
     zmq_replay_port: OptionalConfigValue<u16>,
@@ -618,10 +629,15 @@ pub struct MockEngineArgs {
     pub num_g2_blocks: Option<usize>,
 
     /// KVBM G3 shared lower-tier block capacity. Positive values require
-    /// `num_g2_blocks` and `kv_bytes_per_token`; 0 disables G3.
+    /// `num_g2_blocks` and a resolvable KV block byte size; 0 disables G3.
     #[builder(default = "None")]
     #[validate(range(min = 1))]
     pub num_g3_blocks: Option<usize>,
+
+    /// Enable KVBM mock G4 object-storage simulation. G4 stages through G2
+    /// and uses object presence operations instead of a `BlockManager<G4>`.
+    #[builder(default = "false")]
+    pub enable_g4_storage: bool,
 
     /// Batch size for the G1→G2 offload pipeline. Offloads are grouped
     /// into batches of this size before being handed to the worker.
@@ -655,6 +671,16 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     #[validate(range(min = 0.0))]
     pub bandwidth_g3_to_g2_gbps: Option<f64>,
+
+    /// G2→G4 object offload bandwidth in GB/s for the shared PS-queue simulation.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g2_to_g4_gbps: Option<f64>,
+
+    /// G4→G2 object staging bandwidth in GB/s for the shared PS-queue simulation.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g4_to_g2_gbps: Option<f64>,
 
     /// Reasoning/thinking token configuration.
     /// When set, the mocker wraps output in thinking boundary tokens.
@@ -706,6 +732,13 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         return Err(mock_engine_args_validation_error(
             "g3_requires_g2",
             "num_g3_blocks requires num_g2_blocks because mocker stages G3 through G2".to_string(),
+        ));
+    }
+    if args.enable_g4_storage && args.num_g2_blocks.is_none() {
+        return Err(mock_engine_args_validation_error(
+            "g4_requires_g2",
+            "enable_g4_storage requires num_g2_blocks because mocker stages G4 through G2"
+                .to_string(),
         ));
     }
 
@@ -878,6 +911,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(num_g3_blocks) = compat.num_g3_blocks.into_nullable() {
             builder = builder.num_g3_blocks(num_g3_blocks);
         }
+        if let Some(enable_g4_storage) = compat
+            .enable_g4_storage
+            .into_non_null("enable_g4_storage")?
+        {
+            builder = builder.enable_g4_storage(enable_g4_storage);
+        }
         if let Some(offload_batch_size) = compat.offload_batch_size.into_nullable() {
             builder = builder.offload_batch_size(offload_batch_size);
         }
@@ -892,6 +931,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(bandwidth_g3_to_g2_gbps) = compat.bandwidth_g3_to_g2_gbps.into_nullable() {
             builder = builder.bandwidth_g3_to_g2_gbps(bandwidth_g3_to_g2_gbps);
+        }
+        if let Some(bandwidth_g2_to_g4_gbps) = compat.bandwidth_g2_to_g4_gbps.into_nullable() {
+            builder = builder.bandwidth_g2_to_g4_gbps(bandwidth_g2_to_g4_gbps);
+        }
+        if let Some(bandwidth_g4_to_g2_gbps) = compat.bandwidth_g4_to_g2_gbps.into_nullable() {
+            builder = builder.bandwidth_g4_to_g2_gbps(bandwidth_g4_to_g2_gbps);
         }
         if let Some(reasoning) = compat.reasoning.into_nullable() {
             builder = builder.reasoning(reasoning);
@@ -1058,11 +1103,14 @@ mod tests {
             "kv_transfer_bandwidth": args.kv_transfer_bandwidth,
             "num_g2_blocks": args.num_g2_blocks,
             "num_g3_blocks": args.num_g3_blocks,
+            "enable_g4_storage": args.enable_g4_storage,
             "offload_batch_size": args.offload_batch_size,
             "bandwidth_g1_to_g2_gbps": args.bandwidth_g1_to_g2_gbps,
             "bandwidth_g2_to_g1_gbps": args.bandwidth_g2_to_g1_gbps,
             "bandwidth_g2_to_g3_gbps": args.bandwidth_g2_to_g3_gbps,
             "bandwidth_g3_to_g2_gbps": args.bandwidth_g3_to_g2_gbps,
+            "bandwidth_g2_to_g4_gbps": args.bandwidth_g2_to_g4_gbps,
+            "bandwidth_g4_to_g2_gbps": args.bandwidth_g4_to_g2_gbps,
             "reasoning": args.reasoning,
             "zmq_kv_events_port": args.zmq_kv_events_port,
             "zmq_replay_port": args.zmq_replay_port,
@@ -1201,6 +1249,21 @@ mod tests {
     }
 
     #[test]
+    fn test_normalized_g4_requires_g2() {
+        let missing_g2 = MockEngineArgs::builder()
+            .enable_g4_storage(true)
+            .kv_bytes_per_token(Some(1024))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(
+            missing_g2.to_string().contains("requires num_g2_blocks"),
+            "unexpected error: {missing_g2}",
+        );
+    }
+
+    #[test]
     fn test_normalized_zero_disables_optional_offload_knobs() {
         let args = MockEngineArgs::builder()
             .num_g2_blocks(Some(0))
@@ -1213,6 +1276,7 @@ mod tests {
 
         assert_eq!(args.num_g2_blocks, None);
         assert_eq!(args.num_g3_blocks, None);
+        assert!(!args.enable_g4_storage);
         assert_eq!(args.offload_batch_size, None);
     }
 
@@ -1240,6 +1304,21 @@ mod tests {
 
         assert_eq!(args.num_g2_blocks, Some(10));
         assert_eq!(args.num_g3_blocks, Some(10));
+        assert_eq!(args.kv_bytes_per_token, None);
+    }
+
+    #[test]
+    fn test_normalized_g4_allows_missing_kv_bytes_for_cli_auto_compute() {
+        let args = MockEngineArgs::builder()
+            .num_g2_blocks(Some(10))
+            .enable_g4_storage(true)
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.num_g2_blocks, Some(10));
+        assert!(args.enable_g4_storage);
         assert_eq!(args.kv_bytes_per_token, None);
     }
 

@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: llama3_json
+model_label: Llama 3 (JSON fmt)
+mode: stream
+cases:
+  TOOLCALLING.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: <|
+    - delta_text: pyt
+    - delta_text: hon_t
+    - delta_text: ag|>{"name"
+    - delta_text: ': "get_weather", "a'
+    - delta_text: rg
+    - delta_text: ume
+    - delta_text: 'nts":'
+    - delta_text: ' {"location'
+    - delta_text: '": "NYC"}}'
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang: *id001
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: <|python_t

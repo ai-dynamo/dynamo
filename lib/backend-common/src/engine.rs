@@ -286,19 +286,55 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
-    /// Metrics snapshot sources, one per dp_rank. Empty by default.
-    async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
-        Ok(Vec::new())
+    /// Wire up Prometheus surfaces. Called once by `Worker` after
+    /// [`start`](LLMEngine::start) succeeds. Default returns an empty
+    /// [`MetricsBindings`] (no per-rank gauges, no foreign callbacks).
+    ///
+    /// Two things an engine can produce here:
+    /// 1. Bridge a vendor-prefixed registry (`vllm:*`, `sglang:*`,
+    ///    `trtllm_*`, `lmcache:*`) into the runtime's `/metrics` output
+    ///    via [`EngineMetrics::add_expfmt_callback`](crate::metrics::EngineMetrics::add_expfmt_callback)
+    ///    on `ctx.metrics`. Side-effect only.
+    /// 2. Declare `dp_ranks` in [`MetricsBindings`] to opt into the
+    ///    per-rank `dynamo_component_*` gauges + KV router signal. The
+    ///    framework constructs a
+    ///    [`SnapshotPublisher`](crate::snapshot_publisher::SnapshotPublisher)
+    ///    sized to those ranks and hands it back via
+    ///    [`MetricsBindings::on_publisher_ready`]. Stash the `Arc` and
+    ///    call `publisher.publish(rank, snap)` from your stat-logger
+    ///    thread thereafter — event-driven, no polling.
+    ///
+    /// Framework-owned lifecycle gauges (cleanup_time, drain_time,
+    /// model_load_time) are emitted by `Worker` independent of this
+    /// method — they do NOT require the engine to opt in.
+    ///
+    /// Errors abort startup; `cleanup` runs on the partial state. Do not
+    /// retain `ctx.metrics` past return.
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        Ok(MetricsBindings::default())
+    }
+
+    /// Canary payload registered with the runtime's `HealthCheckManager`.
+    /// `Worker` calls this once after [`start`](LLMEngine::start). Returning
+    /// `Ok(None)` (default) disables active probing — the endpoint then
+    /// relies on the activity-driven notifier. Operator overrides
+    /// (`DYN_HEALTH_CHECK_PAYLOAD` env / `WorkerConfig`) take precedence
+    /// and fully replace this value when set.
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        Ok(None)
     }
 }
+
+/// Marker key stamped on canary payloads. Handlers may inspect it to branch
+/// probe-specific behavior (e.g. skip a synthetic first-yield that would
+/// mask a hung engine rank). Re-exported to Python via
+/// `lib/bindings/python/src/dynamo/health_check.py`.
+pub const HEALTH_CHECK_KEY: &str = "_HEALTH_CHECK";
 
 /// Invoked once with a freshly-built publisher; engine drives `publish`
 /// from its own thread thereafter.
 pub type OnPublisherReady =
     Box<dyn FnOnce(Arc<KvEventPublisher>) -> Result<(), DynamoError> + Send + 'static>;
-
-/// Worker reads this on a fixed interval. MUST be a cheap member-field read.
-pub type SnapshotFn = Arc<dyn Fn() -> Option<Metrics> + Send + Sync>;
 
 /// KV event source descriptor. Two flavors: subscribe to an engine-provided
 /// ZMQ PUB, or hand a publisher to the engine and let it drive `publish`
@@ -324,15 +360,6 @@ impl KvEventSource {
     }
 }
 
-/// One metrics-snapshot source per data-parallel rank.
-pub struct MetricsSource {
-    /// Worker polls this on a fixed interval. MUST be a cheap member-field
-    /// read — engine-internal calls land in the 10s of ms and stall the
-    /// publish loop. Conformance kit enforces a 1 ms ceiling.
-    pub snapshot: SnapshotFn,
-    pub dp_rank: u32,
-}
-
 /// Worker-level metrics snapshot consumed by the KV router.
 ///
 /// `kv_used_blocks` is the primary load signal the router scores against.
@@ -342,6 +369,75 @@ pub struct MetricsSource {
 pub struct Metrics {
     /// Number of KV blocks currently occupied across all in-flight requests.
     pub kv_used_blocks: Option<u64>,
+}
+
+/// Rich per-rank snapshot driving both the router-input signal and the
+/// per-rank `dynamo_component_*` gauges.
+///
+/// Engines call
+/// [`SnapshotPublisher::publish`](crate::snapshot_publisher::SnapshotPublisher::publish)
+/// with a fresh `ComponentSnapshot` from their stat-logger thread —
+/// event-driven, no polling. The publisher atomically updates both
+/// consumers inline (Rust gauges + NATS router signal).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ComponentSnapshot {
+    pub kv_used_blocks: u64,
+    pub kv_total_blocks: u64,
+    /// Fractional cache usage, 0.0..1.0.
+    pub gpu_cache_usage: f32,
+    /// Fractional prefix cache hit rate, 0.0..1.0.
+    ///
+    /// Tri-state:
+    /// - `Some(x)`: engine measured a hit rate this interval (publish as gauge).
+    /// - `None`: no data yet OR engine has no prefix cache. The
+    ///   gauge is NOT updated — distinguishes "0% hits" (which is a
+    ///   legitimate measurement) from "we never measured."
+    ///
+    /// Each backend computes from its native counters
+    /// (vLLM: `PrefixCacheStats.hits/queries`,
+    ///  SGLang: `kv_metrics.cache_hit_rate_perc`,
+    ///  TRT-LLM: `kv_stats["cacheHitRate"]`).
+    pub kv_cache_hit_rate: Option<f32>,
+    pub dp_rank: u32,
+}
+
+/// Context handed to [`LLMEngine::setup_metrics`].
+pub struct MetricsCtx<'a> {
+    pub model: &'a str,
+    pub component: &'a str,
+    pub model_load_time_seconds: f64,
+    /// Use this to bridge a vendor-prefixed Prometheus registry into the
+    /// runtime's `/metrics` output via `add_expfmt_callback`. Do NOT
+    /// retain past the call's return.
+    pub metrics: &'a crate::metrics::EngineMetrics,
+}
+
+/// Invoked once with a freshly-built [`SnapshotPublisher`]; engine drives
+/// `publish(rank, snapshot)` from its own stat-logger threads thereafter.
+///
+/// Mirror of [`OnPublisherReady`] for the KV-event Push flavor — same
+/// "framework constructs, engine writes" handoff pattern.
+pub type OnSnapshotPublisherReady = Box<
+    dyn FnOnce(Arc<crate::snapshot_publisher::SnapshotPublisher>) -> Result<(), DynamoError>
+        + Send
+        + 'static,
+>;
+
+/// What an engine returns from [`LLMEngine::setup_metrics`].
+///
+/// - `dp_ranks`: the data-parallel ranks this engine will publish
+///   snapshots for. Stable for the engine's lifetime. Empty = opt out.
+/// - `on_publisher_ready`: invoked exactly once with the constructed
+///   `SnapshotPublisher`. Engine stashes it and calls
+///   `publisher.publish(rank, snap)` from its stat-logger thereafter.
+///
+/// Foreign-registry expfmt callbacks (vLLM/SGLang/TRT-LLM vendor metrics)
+/// are wired as a side effect on `ctx.metrics` in `setup_metrics` — they
+/// don't flow through this struct.
+#[derive(Default)]
+pub struct MetricsBindings {
+    pub dp_ranks: Vec<u32>,
+    pub on_publisher_ready: Option<OnSnapshotPublisherReady>,
 }
 
 /// Non-terminal chunk constructor. Terminal chunks come from upstream

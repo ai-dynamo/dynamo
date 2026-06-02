@@ -46,10 +46,11 @@ use crate::protocols::openai::chat_completions::{
     aggregator::ChatCompletionAggregator,
 };
 use crate::protocols::unified::UnifiedRequest;
-use crate::request_template::RequestTemplate;
+use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
+use super::metadata::extract_metadata_from_http;
 use super::openai::{get_body_limit, get_or_create_request_id};
 
 // ---------------------------------------------------------------------------
@@ -149,12 +150,20 @@ async fn handler_anthropic_messages(
     // Create request context
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.stream;
+    let resolved_model = resolve_request_model(&request.model, template.as_ref());
     let cancellation_labels = CancellationLabels {
-        model: request.model.clone(),
+        model: state.manager().metric_model_for(resolved_model).to_string(),
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let metadata = extract_metadata_from_http(&headers).map_err(|err| {
+        anthropic_error(
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "invalid_request_error",
+            &err.to_string(),
+        )
+    })?;
+    let request = Context::with_id_and_metadata(request, request_id, metadata);
     let context = request.context();
 
     // Create connection handles
@@ -211,7 +220,8 @@ async fn anthropic_messages(
     }
 
     let model = request.model.clone();
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 

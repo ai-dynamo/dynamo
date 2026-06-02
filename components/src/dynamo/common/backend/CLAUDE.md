@@ -6,22 +6,51 @@ Two-class abstraction: `Worker` (runtime integration) and
 ## Engine Lifecycle
 
 ```
-from_args(argv) -> start() -> generate()/abort() -> drain() -> cleanup()
-     |                |              |                  |          |
-  parse args,    start engine,   serve requests    drain in-flight, shutdown,
-  return config  return metadata (concurrent)      then cleanup    release resources
+from_args -> start -> register_prometheus -> component_metrics_dp_ranks -> attach_snapshot_publisher -> generate/abort -> drain -> cleanup
+     |          |              |                       |                              |                          |             |        |
+  parse args, start engine, vendor registry      declare dp_ranks            engine stashes publisher,   serve requests  drain in-flight,
+  return     return        bridge (optional)     for component gauges        pushes ComponentSnapshot    (concurrent)    then cleanup,
+  config     metadata                                                        from natural producer                       release resources
 ```
+
+(On the Rust trait side, `register_prometheus`,
+`component_metrics_dp_ranks`, and `attach_snapshot_publisher` collapse
+into one `setup_metrics(ctx) -> MetricsBindings` method. The PyO3
+bridge calls Python's three methods and assembles the bindings —
+Python engine authors keep the split API.)
 
 1. `from_args(argv)` -- classmethod factory. Parses CLI args, returns
    `(engine, WorkerConfig)`. Engine is NOT started yet.
 2. `start()` -- starts the engine, returns `EngineConfig`. After this returns
    `generate()` MUST be ready to accept calls.
-3. `generate(request, context)` -- streaming inference, called concurrently.
-4. `abort(context)` -- cancel an in-flight request (optional, default no-op).
-5. `drain()` -- backend-side drain before cleanup (optional, default no-op).
+3. `register_prometheus(metrics)` -- bridge a vendor-prefixed registry
+   (`vllm:`, `sglang:`, `trtllm_`, `lmcache:`) into the runtime's
+   `/metrics` output. Optional, default no-op. The engine receives a
+   slim `EngineMetrics` capability handle. Framework-owned lifecycle
+   gauges (`cleanup_time_seconds`, `drain_time_seconds`,
+   `model_load_time_seconds`) emit regardless of what this method does.
+4. `component_metrics_dp_ranks()` -- declare which data-parallel ranks
+   this engine will publish snapshots for. Default empty list opts
+   out of per-rank gauges (lifecycle gauges still emit). When
+   non-empty, the framework constructs a Rust-owned
+   `SnapshotPublisher` (per-rank `dynamo_component_*` `GaugeVec`s
+   seeded at zero + per-rank `WorkerMetricsPublisher` for the
+   router's `kv_used_blocks` NATS signal).
+5. `attach_snapshot_publisher(publisher)` -- framework invokes this
+   once with the constructed `SnapshotPublisher`. Engine stashes the
+   reference and calls `publisher.publish(dp_rank, ComponentSnapshot(...))`
+   from its natural producer thread (engine iteration callback,
+   stat-logger, ZMQ recv loop, etc.) on every tick. Push is
+   event-driven — no framework poll loop, no snapshot-fn latency
+   ceiling. `ComponentSnapshot.kv_cache_hit_rate` is tri-state:
+   `None` means "no data yet" or "no prefix cache" (gauge child not
+   written); `0.0` is a legitimate zero-hit measurement.
+6. `generate(request, context)` -- streaming inference, called concurrently.
+7. `abort(context)` -- cancel an in-flight request (optional, default no-op).
+8. `drain()` -- backend-side drain before cleanup (optional, default no-op).
    Called after the discovery unregister + grace period; use it for in-flight
    NIXL transfers (issue #7319) that must complete while the runtime is alive.
-6. `cleanup()` -- called exactly once. Runs after `start()` succeeded
+9. `cleanup()` -- called exactly once. Runs after `start()` succeeded
    on shutdown, **and** after `start()` raised — so implementations
    must be null-safe against partial state (inner engine handle,
    sockets, background tasks). All current engines guard each
@@ -29,7 +58,8 @@ from_args(argv) -> start() -> generate()/abort() -> drain() -> cleanup()
    idempotent: a second call after a successful first is a no-op.
    Not called when `start()` was never invoked (e.g. pre-start
    shutdown); use `__del__` for resources allocated in the
-   constructor.
+   constructor. Engine **must** stop any producer thread it started
+   for `publisher.publish(...)` here.
 
 ## Design Constraints
 
@@ -144,6 +174,29 @@ proper error chain observability. Engines can raise `DynamoException`
 subclasses directly from `generate()` -- these pass through unchanged.
 Non-`DynamoException` errors are wrapped as `Unknown`.
 
+## Metrics cost notes
+
+`publisher.publish(dp_rank, snapshot)` is the hot path: one atomic
+gauge write per field plus one NATS publish, no allocation, no GIL
+on the gauge side. Engines call it from their natural producer
+thread at the engine's own cadence — there is no framework poll
+loop.
+
+Per-backend producer:
+
+- **vLLM**: per-iteration stat-logger calls `publisher.publish(...)`.
+- **SGLang**: ZMQ pull loop on the leader node calls `publisher.publish(...)`
+  on every received `KvMetrics`.
+- **TRT-LLM**: a dedicated `_metrics_poll_loop` thread calls
+  `engine.llm.get_stats(timeout=0.2)` and then `publisher.publish(...)`.
+  The 200 ms `get_stats` cycle is the cost — driven by
+  `enable_iter_perf_stats=True` and `return_perf_metrics=True`, both
+  unconditional. If you run TRT-LLM without KV routing AND don't
+  scrape `dynamo_component_*`, opt out via
+  `--trtllm.enable_iter_perf_stats false` (and `--trtllm.return_perf_metrics false`);
+  the gauges will keep their seeded zero values and the poll thread
+  will run but find nothing to publish.
+
 ## Logging
 
 Keep logging **standardized across all three engines** (vllm, sglang, trtllm).
@@ -210,7 +263,9 @@ spans should be.
 
 | File | What it does |
 |------|-------------|
-| `engine.py` | `LLMEngine` ABC -- the only interface engines must implement |
+| `engine.py` | `LLMEngine` ABC -- the only interface engines must implement (includes `component_metrics_dp_ranks` + `attach_snapshot_publisher`). |
+| `publisher.py` | `ComponentSnapshot` dataclass (the push payload). The `SnapshotPublisher` itself is a Rust-owned object exposed as `dynamo._core.backend.SnapshotPublisher`. |
+| `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
 | `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
 | `sample_engine.py` | Reference engine -- use as template and for testing |

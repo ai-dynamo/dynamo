@@ -5,6 +5,10 @@ title: Overall Architecture
 subtitle: Architecture and components of the Dynamo inference runtime
 ---
 
+<p align="left">
+  <a href="./architecture.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 # Dynamo Architecture
 
 Dynamo is a distributed inference runtime for generative AI systems that must operate at high throughput, low latency, and high reliability under changing traffic conditions. It is backend-agnostic (SGLang, TRT-LLM, vLLM, and others) and is built around three cooperating concerns:
@@ -129,6 +133,15 @@ In Kubernetes deployments, the same architecture maps to declarative resources:
 - Independent prefill/decode elasticity is represented via `PodCliqueScalingGroup` with separate `replicas` and `min` targets.
 
 The diagram labels such as `PodClique A/B`, `ScalingGroup "Prefill"`, `ScalingGroup "Decode"`, and `(replicas, min)` represent this grouped scaling model.
+
+## Deployment Modes
+
+The request plane can be exposed in two ways:
+
+- **Standalone mode** (default) — the Dynamo Frontend is the request entry point and the integrated Dynamo Router selects workers using KV-aware scoring. Used by all local installs and the default Kubernetes deployment.
+- **Gateway mode (GAIE)** — Dynamo runs behind a Kubernetes [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway. KV-aware routing is performed at the gateway layer by the Dynamo Endpoint Picker Plugin (EPP); the Frontend runs as a sidecar in `--router-mode direct` and respects the EPP's per-request worker selection passed via request headers.
+
+Both modes share the same control plane, storage/events plane, and backend integrations — only the request entry point and the location of the routing decision differ. See the [Inference Gateway (GAIE) guide](../kubernetes/inference-gateway.md) for the gateway-mode setup and configuration reference.
 
 ## Fault Tolerance Architecture
 

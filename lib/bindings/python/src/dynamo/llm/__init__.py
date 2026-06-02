@@ -37,6 +37,7 @@ from dynamo._core import RouterMode as RouterMode
 from dynamo._core import RoutingConstraints as RoutingConstraints
 from dynamo._core import SglangArgs as SglangArgs
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
+from dynamo._core import WorkerType as WorkerType
 from dynamo._core import compute_block_hash_for_seq as compute_block_hash_for_seq
 from dynamo._core import fetch_model as fetch_model
 from dynamo._core import lora_name_to_id as lora_name_to_id
@@ -48,6 +49,19 @@ from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError
+
+try:
+    from dynamo._core import AicEngineConfig as AicEngineConfig
+    from dynamo._core import EngineCapacity as EngineCapacity
+    from dynamo._core import EngineCapacityRequest as EngineCapacityRequest
+    from dynamo._core import EnginePerfLimits as EnginePerfLimits
+    from dynamo._core import OptimizationTarget as OptimizationTarget
+    from dynamo._core import RustEnginePerfModel as RustEnginePerfModel
+    from dynamo._core import RustEnginePerfOptions as RustEnginePerfOptions
+except ImportError:
+    # These classes are available only when the Python extension is built with
+    # the optional `aic-forward-pass` Cargo feature.
+    pass
 
 
 class RoutedEngine(Protocol):

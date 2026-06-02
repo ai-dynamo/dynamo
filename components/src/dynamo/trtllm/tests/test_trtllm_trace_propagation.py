@@ -54,10 +54,12 @@ def _make_engine(generate_async) -> TrtllmLLMEngine:
     # Couples to TrtllmLLMEngine.__init__ attribute names — keep in sync.
     engine = TrtllmLLMEngine.__new__(TrtllmLLMEngine)
     engine._engine = SimpleNamespace(llm=SimpleNamespace(generate_async=generate_async))
+    engine._logits_processor_spec = None
     engine._default_sampling_params = SimpleNamespace()
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
     engine.max_seq_len = 1024
     engine._active_requests = {}
+    engine._additional_metrics = None
     # Single-rank default: validate_global_dp_rank(None, 0, 1, ...) -> None,
     # so scheduling_params stays None and never touches a real SchedulingParams.
     engine._attention_dp_size = 1

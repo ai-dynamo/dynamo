@@ -31,6 +31,32 @@ The `--help` output is organized into the following groups:
 
 Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/dynamo.md#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/dynamo.md#supported-reasoning-parsers).
 
+### Priority Scheduling
+
+vLLM engine-level request priority is controlled by the upstream vLLM
+`--scheduling-policy priority` argument.
+
+```bash
+python -m dynamo.vllm \
+    --model <model> \
+    --scheduling-policy priority
+```
+
+Clients still send the Dynamo API value directly:
+`nvext.agent_hints.priority`. Higher values mean higher priority at the Dynamo
+API layer. Dynamo converts that value before passing it to vLLM, which uses a
+different native priority polarity internally.
+
+Do not negate `nvext.agent_hints.priority` in the client for vLLM. If you are
+also using the router queue, configure the frontend-side
+`--router-queue-threshold` separately; vLLM engine scheduling only applies
+after a request reaches the worker.
+
+For the cross-layer behavior, see
+[Priority Scheduling](../../agents/priority-scheduling.md). For the upstream
+flag definition, see the
+[vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
+
 ### Prompt Embeddings
 
 Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features/prompt_embeds.html) — pre-computed embeddings bypass tokenization in the Rust frontend and are decoded to tensors in the worker.

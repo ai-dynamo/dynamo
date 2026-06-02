@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(matches[0], "[foo(a=1, b=2), bar(x= 3)]");
     }
 
-    #[test] // helper, PARSER.batch.7
+    #[test] // helper, TOOLCALLING.batch.7
     fn test_get_regex_matches_new_line_in_arg_and_value() {
         // New Line in Arg and value
         let message = "Hey \n yo ! [foo(a=1,b=2), \n bar(x=3)] Hey yo";
@@ -262,8 +262,8 @@ mod tests {
         assert_eq!(matches.len(), 0);
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a in tests/parity/parser/fixtures/pythonic/PARSER.batch.2.yaml.
-    #[test] // PARSER.batch.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a in tests/parity/toolcalling/fixtures/pythonic/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2
     fn test_parse_tool_call_parse_pythonic_basic() {
         let message = "[foo(a=1, b=2), bar(x=3)]";
         let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
@@ -279,8 +279,8 @@ mod tests {
         assert_eq!(args["x"], 3);
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.c, PARSER.batch.8.c in tests/parity/parser/fixtures/pythonic/PARSER.batch.2.yaml, tests/parity/parser/fixtures/pythonic/PARSER.batch.8.yaml.
-    #[test] // PARSER.batch.2, PARSER.batch.8
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.c, TOOLCALLING.batch.8.c in tests/parity/toolcalling/fixtures/pythonic/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/pythonic/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.batch.8
     fn test_parse_tool_call_parse_pythonic_with_text() {
         let message = "Hey yo ! [foo(a=1, b=2), bar(x=3)] Hey yo";
         let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
@@ -296,8 +296,8 @@ mod tests {
         assert_eq!(args["x"], 3);
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.c, PARSER.batch.8.c in tests/parity/parser/fixtures/pythonic/PARSER.batch.2.yaml, tests/parity/parser/fixtures/pythonic/PARSER.batch.8.yaml.
-    #[test] // PARSER.batch.2, PARSER.batch.8, PARSER.fmt.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.c, TOOLCALLING.batch.8.c in tests/parity/toolcalling/fixtures/pythonic/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/pythonic/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.batch.8, TOOLCALLING.fmt.2
     fn test_parse_tool_call_parse_pythonic_with_text_and_new_line() {
         let message = "Hey \n yo ! [foo(a=1, b=2), bar(x=3)] Hey yo";
         let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(args["x"], 3);
     }
 
-    #[test] // PARSER.batch.3
+    #[test] // TOOLCALLING.batch.3
     fn test_parse_tool_call_parse_pythonic_with_no_calls() {
         let message = "Hey \n yo !";
         let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
@@ -322,8 +322,8 @@ mod tests {
         assert_eq!(result.len(), 0)
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a in tests/parity/parser/fixtures/pythonic/PARSER.batch.2.yaml.
-    #[test] // PARSER.batch.2, PARSER.fmt.3
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a in tests/parity/toolcalling/fixtures/pythonic/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.fmt.3
     fn test_parse_tool_call_parse_pythonic_with_python_tags() {
         let message = "<|python_start|>[foo(a=1, b=2), bar(x=3)]<|python_end|>";
         let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
@@ -339,8 +339,8 @@ mod tests {
         assert_eq!(args["x"], 3);
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/pythonic/PARSER.batch.7.yaml.
-    #[test] // PARSER.batch.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/pythonic/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_tool_call_parse_pythonic_with_list_arg_values() {
         let message = "[foo(a=[1, 2, 3], b=2), bar(x=[3, 4, 5])]";
         let (result, _) = try_tool_call_parse_pythonic(message, None).unwrap();
@@ -355,8 +355,8 @@ mod tests {
         assert_eq!(args["x"], json!([3, 4, 5]));
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/pythonic/PARSER.batch.7.yaml.
-    #[test] // PARSER.batch.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/pythonic/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_tool_call_parse_pythonic_with_dict_arg_values() {
         let message = "[foo(a={'a': 1, 'b': 2}, b=2), bar(x={'x': 3, 'y': {'e': 'f'}})]";
         let (result, _) = try_tool_call_parse_pythonic(message, None).unwrap();
