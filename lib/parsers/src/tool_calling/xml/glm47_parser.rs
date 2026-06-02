@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::super::ToolDefinition;
 use super::super::config::Glm47ParserConfig;
+use super::parsed_value::{ParsedValue, coerce_integer_literal};
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
 /// Render a tool_call block snippet for logs. Bounded so a huge truncated
@@ -481,35 +482,38 @@ fn decode_xml_entities(s: &str) -> String {
         .replace("&apos;", "'")
 }
 
-/// Coerce a raw string value to a JSON Value using the tool's parameter schema.
+/// Coerce a raw string value using the tool's parameter schema.
 /// Falls back to string if no schema is available or the type is unrecognized.
-fn coerce_value(raw: &str, schema_type: Option<&str>) -> Value {
+fn coerce_value(raw: &str, schema_type: Option<&str>) -> ParsedValue {
     let trimmed = raw.trim();
 
     // If the value already looks like JSON (object, array, or quoted string), parse it directly
     if (trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"'))
-        && let Ok(v) = serde_json::from_str(trimmed)
+        && let Ok(v) = serde_json::from_str::<Value>(trimmed)
     {
-        return v;
+        return v.into();
     }
 
     // Use schema type hints for coercion when available
     match schema_type {
         Some("integer") | Some("int") => {
-            if let Ok(n) = trimmed.parse::<i64>() {
-                return Value::Number(n.into());
+            if let Some(value) = coerce_integer_literal(trimmed) {
+                return value;
             }
         }
         Some("number") | Some("float") | Some("double") => {
+            if let Some(value) = coerce_integer_literal(trimmed) {
+                return value;
+            }
             if let Ok(n) = trimmed.parse::<f64>()
                 && let Some(num) = serde_json::Number::from_f64(n)
             {
-                return Value::Number(num);
+                return Value::Number(num).into();
             }
         }
         Some("boolean") | Some("bool") => match trimmed.to_lowercase().as_str() {
-            "true" | "1" | "yes" => return Value::Bool(true),
-            "false" | "0" | "no" => return Value::Bool(false),
+            "true" | "1" | "yes" => return Value::Bool(true).into(),
+            "false" | "0" | "no" => return Value::Bool(false).into(),
             _ => {}
         },
         Some("array") => {
@@ -517,23 +521,23 @@ fn coerce_value(raw: &str, schema_type: Option<&str>) -> Value {
             if let Ok(v) = serde_json::from_str::<Value>(trimmed)
                 && v.is_array()
             {
-                return v;
+                return v.into();
             }
             let items: Vec<Value> = trimmed
                 .split(',')
                 .map(|s| Value::String(s.trim().to_string()))
                 .collect();
-            return Value::Array(items);
+            return Value::Array(items).into();
         }
         Some("null") => {
             if trimmed == "null" || trimmed == "None" || trimmed.is_empty() {
-                return Value::Null;
+                return Value::Null.into();
             }
         }
         _ => {}
     }
 
-    Value::String(raw.to_string())
+    Value::String(raw.to_string()).into()
 }
 
 /// Look up the JSON Schema type for a parameter by name from a tool's parameter schema.
@@ -995,13 +999,16 @@ mod tests {
                     "degrees": {"type": "number"},
                     "enabled": {"type": "boolean"},
                     "count": {"type": "integer"},
+                    "huge_integer": {"type": "integer"},
+                    "large_count": {"type": "number"},
+                    "huge_count": {"type": "number"},
                     "label": {"type": "string"}
                 }
             })),
             strict: None,
         }];
 
-        let message = "<tool_call>set_temperature<arg_key>degrees</arg_key><arg_value>72.5</arg_value><arg_key>enabled</arg_key><arg_value>true</arg_value><arg_key>count</arg_key><arg_value>3</arg_value><arg_key>label</arg_key><arg_value>warm</arg_value></tool_call>";
+        let message = "<tool_call>set_temperature<arg_key>degrees</arg_key><arg_value>72.5</arg_value><arg_key>enabled</arg_key><arg_value>true</arg_value><arg_key>count</arg_key><arg_value>3</arg_value><arg_key>huge_integer</arg_key><arg_value>9223372036854775808</arg_value><arg_key>large_count</arg_key><arg_value>9007199254740993</arg_value><arg_key>huge_count</arg_key><arg_value>100000000000000000000</arg_value><arg_key>label</arg_key><arg_value>warm</arg_value></tool_call>";
 
         let (calls, _) = try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
         assert_eq!(calls.len(), 1);
@@ -1015,6 +1022,15 @@ mod tests {
         assert!(args.get("enabled").unwrap().as_bool().unwrap());
         // integer coercion
         assert_eq!(args.get("count").unwrap().as_i64().unwrap(), 3);
+        // integer-like numbers should not be rounded through f64
+        assert_eq!(
+            args.get("large_count").unwrap().as_i64().unwrap(),
+            9007199254740993
+        );
+        let raw_args: HashMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(raw_args["huge_integer"].get(), "9223372036854775808");
+        assert_eq!(raw_args["huge_count"].get(), "100000000000000000000");
         // string stays string
         assert_eq!(args.get("label").unwrap().as_str().unwrap(), "warm");
     }

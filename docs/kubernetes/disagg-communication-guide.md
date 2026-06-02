@@ -15,6 +15,7 @@ This guide explains how prefill and decode workers communicate in Dynamo's disag
 - **RDMA (InfiniBand, RoCE, or AWS EFA) is required** for production disaggregated deployments
 - **Without RDMA, expect 200-500x performance degradation** in Time To First Token (TTFT) — observed ~98s TTFT with TCP vs ~200-500ms with RDMA
 - **UCX or libfabric** are the communication layers that NIXL uses to transfer KV cache between workers
+- **Topology-aware KV transfer** can constrain or bias decode routing so KV transfers stay within a selected topology domain such as zone or rack. See [Topology-Aware KV Transfer](topology-aware-kv-transfer.md).
 
 ---
 

@@ -8,42 +8,13 @@ use std::collections::HashMap;
 
 use num_traits::ToPrimitive;
 use regex::Regex;
-use serde::Serialize;
 use serde_json::Value;
-use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use super::super::ToolDefinition;
 use super::super::config::XmlParserConfig;
+use super::parsed_value::{ParsedValue, is_integer_literal, raw_number_literal};
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
-
-enum ParsedParamValue {
-    Json(Value),
-    RawNumber(Box<RawValue>),
-}
-
-impl From<Value> for ParsedParamValue {
-    fn from(value: Value) -> Self {
-        Self::Json(value)
-    }
-}
-
-impl Serialize for ParsedParamValue {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Json(value) => value.serialize(serializer),
-            Self::RawNumber(raw) => raw.serialize(serializer),
-        }
-    }
-}
-
-fn is_integer_literal(value: &str) -> bool {
-    let value = value.strip_prefix('-').unwrap_or(value);
-    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
-}
 
 /// Build a `<start>name>(body)<end>` regex pattern. When `strict` is false,
 /// missing `<end>` falls back to end-of-block so truncated input still parses
@@ -396,7 +367,7 @@ fn parse_tool_call_block(
         let param_config = get_arguments_config(function_name, tools);
 
         // Parse parameters from the function body.
-        let mut parameters: HashMap<String, ParsedParamValue> = HashMap::new();
+        let mut parameters: HashMap<String, ParsedValue> = HashMap::new();
 
         for param_cap in parameter_regex.captures_iter(function_body) {
             let param_name_raw = param_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
@@ -554,7 +525,7 @@ fn convert_param_value(
     param_name: &str,
     param_config: &HashMap<String, Value>,
     func_name: &str,
-) -> ParsedParamValue {
+) -> ParsedValue {
     // HTML unescape and trim
     let param_value = html_unescape(param_value.trim());
 
@@ -636,8 +607,8 @@ fn convert_param_value(
             if is_integer_literal(&param_value) {
                 if let Ok(int_val) = param_value.parse::<i64>() {
                     Value::Number(int_val.into()).into()
-                } else if let Ok(raw) = RawValue::from_string(param_value.clone()) {
-                    ParsedParamValue::RawNumber(raw)
+                } else if let Some(raw) = raw_number_literal(&param_value) {
+                    raw
                 } else {
                     Value::String(param_value).into()
                 }
@@ -647,8 +618,8 @@ fn convert_param_value(
                         if float_val.fract() == 0.0 && float_val.is_finite() {
                             if let Some(int_val) = float_val.to_i64() {
                                 Value::Number(int_val.into()).into()
-                            } else if let Ok(raw) = RawValue::from_string(param_value.clone()) {
-                                ParsedParamValue::RawNumber(raw)
+                            } else if let Some(raw) = raw_number_literal(&param_value) {
+                                raw
                             } else {
                                 Value::String(param_value).into()
                             }
@@ -905,7 +876,7 @@ mod tests {
 
         let (calls, normal) =
             try_tool_call_parse_xml(input, &XmlParserConfig::default(), Some(&tools)).unwrap();
-        let args: HashMap<String, Box<RawValue>> =
+        let args: HashMap<String, Box<serde_json::value::RawValue>> =
             serde_json::from_str(&calls[0].function.arguments).unwrap();
 
         assert_eq!(normal, Some("".to_string()));
