@@ -19,7 +19,6 @@ except ImportError:
 from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import AICPerfModelSpec, PlannerConfig
 from dynamo.planner.core.perf_model import rust_adapter
-from dynamo.planner.core.perf_model.prefill import PrefillRegressionModel
 from dynamo.planner.core.perf_model.rust_adapter import PlannerEnginePerfModel
 from dynamo.planner.core.types import EngineCapabilities
 
@@ -46,6 +45,15 @@ class _FakeAicConfig:
         self.kwargs = kwargs
 
 
+class _FakeOptimizationTarget:
+    Throughput = "throughput"
+
+
+class _FakeCapacityRequest:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
 class _FakeRustFactory:
     next_model = None
 
@@ -56,10 +64,12 @@ class _FakeRustFactory:
 
 
 class _FakeRustModel:
-    def __init__(self, *, diagnostics, queued_prefill_time=None):
+    def __init__(self, *, diagnostics, queued_prefill_time=None, capacity=None):
         self._diagnostics = diagnostics
         self._queued_prefill_time = queued_prefill_time
+        self._capacity = capacity
         self.tuned_iterations = []
+        self.capacity_requests = []
 
     def diagnostics(self):
         return json.dumps(self._diagnostics)
@@ -70,12 +80,18 @@ class _FakeRustModel:
     def get_queued_prefill_time(self, _metrics_by_rank):
         return self._queued_prefill_time
 
+    def find_engine_capacity_rps(self, request):
+        self.capacity_requests.append(request)
+        return self._capacity
+
 
 def _install_fake_rust(monkeypatch, fake_model: _FakeRustModel) -> None:
     _FakeRustFactory.next_model = fake_model
     monkeypatch.setattr(rust_adapter, "_RUST_SHIM_AVAILABLE", True)
     monkeypatch.setattr(rust_adapter, "AicEngineConfig", _FakeAicConfig)
     monkeypatch.setattr(rust_adapter, "EnginePerfLimits", _FakeLimits)
+    monkeypatch.setattr(rust_adapter, "EngineCapacityRequest", _FakeCapacityRequest)
+    monkeypatch.setattr(rust_adapter, "OptimizationTarget", _FakeOptimizationTarget)
     monkeypatch.setattr(rust_adapter, "RustEnginePerfOptions", _FakeOptions)
     monkeypatch.setattr(rust_adapter, "RustEnginePerfModel", _FakeRustFactory)
 
@@ -143,7 +159,6 @@ def test_rust_diagnostics_gate_sufficient_data(monkeypatch):
         worker_type="prefill",
         config=_config(),
         capabilities=_caps(),
-        legacy_model=PrefillRegressionModel(16, min_observations=5),
     )
 
     assert not model.has_sufficient_data()
@@ -152,7 +167,7 @@ def test_rust_diagnostics_gate_sufficient_data(monkeypatch):
     assert model.has_sufficient_data()
 
 
-def test_rust_none_result_falls_back_to_legacy_prefill(monkeypatch):
+def test_rust_none_result_remains_unavailable(monkeypatch):
     fake = _FakeRustModel(
         diagnostics={
             "source": "aic",
@@ -164,12 +179,10 @@ def test_rust_none_result_falls_back_to_legacy_prefill(monkeypatch):
         queued_prefill_time=None,
     )
     _install_fake_rust(monkeypatch, fake)
-    legacy = PrefillRegressionModel(16, min_observations=1)
     model = PlannerEnginePerfModel(
         worker_type="prefill",
         config=_config(min_observations=1),
         capabilities=_caps(),
-        legacy_model=legacy,
     )
     model.load_benchmark_fpms([_prefill_fpm(scheduled_tokens=256, wall_time=0.02)])
 
@@ -178,8 +191,7 @@ def test_rust_none_result_falls_back_to_legacy_prefill(monkeypatch):
         max_num_batched_tokens=1024,
     )
 
-    assert result is not None
-    assert result > 0
+    assert result is None
 
 
 def test_flat_bootstrap_fpms_skip_rust_tuning_for_attention_dp(monkeypatch):
@@ -197,13 +209,35 @@ def test_flat_bootstrap_fpms_skip_rust_tuning_for_attention_dp(monkeypatch):
         worker_type="prefill",
         config=_config(dp=2, min_observations=1),
         capabilities=_caps(),
-        legacy_model=PrefillRegressionModel(16, min_observations=1),
     )
 
     model.load_benchmark_fpms([_prefill_fpm(scheduled_tokens=256, wall_time=0.02)])
 
     assert fake.tuned_iterations == []
-    assert model.num_observations == 1
+    assert model.num_observations == 0
+    assert model.avg_isl == 256
+
+
+def test_capacity_request_passes_kv_hit_rate(monkeypatch):
+    fake = _FakeRustModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+    _install_fake_rust(monkeypatch, fake)
+    model = PlannerEnginePerfModel(
+        worker_type="aggregated",
+        config=_config(min_observations=1),
+        capabilities=_caps(),
+    )
+
+    assert model.find_engine_capacity_rps(isl=1000, osl=100, kv_hit_rate=0.4) is None
+    assert fake.capacity_requests
+    assert fake.capacity_requests[0].kwargs["kv_hit_rate"] == 0.4
 
 
 def test_adapter_does_not_expose_legacy_prediction_passthroughs():

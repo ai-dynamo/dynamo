@@ -14,7 +14,6 @@ import logging
 import math
 from typing import Optional
 
-from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
 from dynamo.planner.core.types import ScalingDecision, TrafficObservation
 
 logger = logging.getLogger(__name__)
@@ -243,14 +242,11 @@ class ThroughputScalingMixin:
         osl: float,
         kv_hit_rate: Optional[float] = None,
     ) -> Optional[int]:
-        # Prefix cache reuse shrinks the *compute* work of prefill but not
-        # decode KV residency, so we discount only the ISL fed into the
-        # prefill perf model.
-        effective_isl = isl * (1.0 - _clamp_kv_hit_rate(kv_hit_rate))
         capacity = self._prefill_regression.find_engine_capacity_rps(
-            isl=effective_isl,
+            isl=isl,
             osl=osl,
             ttft_sla_ms=self._config.ttft_ms,
+            kv_hit_rate=kv_hit_rate,
         )
         engine_rps = capacity.rps if capacity is not None else 0.0
         if engine_rps <= 0:

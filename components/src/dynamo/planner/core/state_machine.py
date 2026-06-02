@@ -29,12 +29,7 @@ from dynamo.planner.core.budget import (
 )
 from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
 from dynamo.planner.core.load_scaling import LoadScalingMixin
-from dynamo.planner.core.perf_model import (
-    AggRegressionModel,
-    DecodeRegressionModel,
-    PlannerEnginePerfModel,
-    PrefillRegressionModel,
-)
+from dynamo.planner.core.perf_model import PlannerEnginePerfModel
 from dynamo.planner.core.throughput_scaling import ThroughputScalingMixin
 from dynamo.planner.core.types import (
     FpmObservations,
@@ -77,41 +72,23 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         # Easy mode uses static thresholds -- no perf models or predictors needed
         if not self._is_easy:
             if self._is_agg:
-                legacy = AggRegressionModel(
-                    max_num_fpm_samples=config.max_num_fpm_samples,
-                    min_observations=config.load_min_observations,
-                    bucket_count=config.fpm_sample_bucket_size,
-                )
                 self._agg_regression = PlannerEnginePerfModel(
                     worker_type="aggregated",
                     config=config,
                     capabilities=self._capabilities.decode,
-                    legacy_model=legacy,
                 )
             else:
                 if self._has_prefill:
-                    legacy = PrefillRegressionModel(
-                        max_num_fpm_samples=config.max_num_fpm_samples,
-                        min_observations=config.load_min_observations,
-                        bucket_count=config.fpm_sample_bucket_size,
-                    )
                     self._prefill_regression = PlannerEnginePerfModel(
                         worker_type="prefill",
                         config=config,
                         capabilities=self._capabilities.prefill,
-                        legacy_model=legacy,
                     )
                 if self._has_decode:
-                    legacy = DecodeRegressionModel(
-                        max_num_fpm_samples=config.max_num_fpm_samples,
-                        min_observations=config.load_min_observations,
-                        bucket_count=config.fpm_sample_bucket_size,
-                    )
                     self._decode_regression = PlannerEnginePerfModel(
                         worker_type="decode",
                         config=config,
                         capabilities=self._capabilities.decode,
-                        legacy_model=legacy,
                     )
 
             predictor_cls = LOAD_PREDICTORS[config.load_predictor]
