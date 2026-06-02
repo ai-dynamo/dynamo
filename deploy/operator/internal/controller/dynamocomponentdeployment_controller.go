@@ -1008,7 +1008,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
 	if r.Config.Checkpoint.Enabled {
-		if checkpointInfo != nil && checkpoint.UsesImmediateStartup(checkpointInfo.StartupPolicy) {
+		if checkpointInfo != nil &&
+			(checkpointInfo.StartupPolicy == "" ||
+				string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyImmediate)) {
 			// Immediate mode keeps owner pod templates stable when checkpoint
 			// readiness changes. The pod-create webhook performs restore shaping
 			// only for newly-created Pods after the checkpoint is Ready.
@@ -1043,7 +1045,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	// Restore labels are operator-controlled state. Immediate mode stamps a
 	// stable candidate annotation and defers restore mutation to Pod CREATE; all
 	// other modes can shape the owner template once the checkpoint is ready.
-	if checkpointInfo != nil && checkpoint.UsesImmediateStartup(checkpointInfo.StartupPolicy) {
+	if checkpointInfo != nil &&
+		(checkpointInfo.StartupPolicy == "" ||
+			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyImmediate)) {
 		if err := checkpoint.ApplyRestoreCandidateMetadata(podLabels, podAnnotations, checkpointInfo); err != nil {
 			return nil, errors.Wrap(err, "failed to apply checkpoint candidate metadata")
 		}

@@ -2006,7 +2006,8 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	shouldUseAdmissionRestore := p.operatorConfig.Checkpoint.Enabled &&
 		p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
-		checkpoint.UsesImmediateStartup(p.checkpointInfo.StartupPolicy)
+		(p.checkpointInfo.StartupPolicy == "" ||
+			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
 	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
 		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
@@ -2052,7 +2053,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	replicas := p.r.Replicas
 	if p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
-		checkpoint.UsesWaitForCheckpointStartup(p.checkpointInfo.StartupPolicy) &&
+		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!p.checkpointInfo.Ready {
 		replicas = 0
 		minAvailable = 0
@@ -2264,7 +2265,7 @@ func GenerateGrovePodCliqueSet(
 			replicas := component.Replicas
 			minAvailable := ptr.To(int32(1))
 			if checkpointInfo != nil &&
-				checkpoint.UsesWaitForCheckpointStartup(checkpointInfo.StartupPolicy) &&
+				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 				!checkpointInfo.Ready {
 				replicas = ptr.To(int32(0))
 				minAvailable = ptr.To(int32(0))

@@ -81,7 +81,13 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 		podNamespace = req.Namespace
 	}
 
-	if shouldSkipPod(pod) {
+	if pod.Labels != nil &&
+		(pod.Labels[snapshotprotocol.CheckpointIDLabel] != "" ||
+			pod.Labels[snapshotprotocol.CheckpointSourceLabel] != "") {
+		return admission.Allowed("pod is already checkpoint-shaped")
+	}
+	if pod.Annotations == nil ||
+		pod.Annotations[consts.CheckpointRestoreCandidateAnnotation] != consts.KubeLabelValueTrue {
 		return admission.Allowed("pod is not a checkpoint restore candidate")
 	}
 	checkpointName := pod.Annotations[consts.CheckpointNameAnnotation]
@@ -159,18 +165,4 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 		return admission.Allowed("checkpoint restore mutation unavailable")
 	}
 	return admission.PatchResponseFromRaw(original, mutated)
-}
-
-func shouldSkipPod(pod *corev1.Pod) bool {
-	if pod == nil {
-		return true
-	}
-	if pod.Labels != nil {
-		if pod.Labels[snapshotprotocol.CheckpointIDLabel] != "" ||
-			pod.Labels[snapshotprotocol.CheckpointSourceLabel] != "" {
-			return true
-		}
-	}
-	return pod.Annotations == nil ||
-		pod.Annotations[consts.CheckpointRestoreCandidateAnnotation] != consts.KubeLabelValueTrue
 }

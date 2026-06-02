@@ -739,7 +739,16 @@ func preserveGrovePodCliqueSetReplicas(
 	if desired == nil || existing == nil {
 		return
 	}
-	replicaPreserveSkips := checkpointReplicaPreserveSkipComponents(checkpointInfoByComponent...)
+	replicaPreserveSkips := map[string]struct{}{}
+	if len(checkpointInfoByComponent) > 0 {
+		for componentName, info := range checkpointInfoByComponent[0] {
+			if info != nil &&
+				info.Enabled &&
+				info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint {
+				replicaPreserveSkips[strings.ToLower(componentName)] = struct{}{}
+			}
+		}
+	}
 
 	cliquesInScalingGroups := make(map[string]struct{})
 	for _, config := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
@@ -789,28 +798,6 @@ func preserveGrovePodCliqueSetReplicas(
 			config.Replicas = replicas
 		}
 	}
-}
-
-func checkpointReplicaPreserveSkipComponents(
-	checkpointInfoByComponent ...map[string]*checkpoint.CheckpointInfo,
-) map[string]struct{} {
-	if len(checkpointInfoByComponent) == 0 {
-		return map[string]struct{}{}
-	}
-	skips := make(map[string]struct{})
-	for componentName, info := range checkpointInfoByComponent[0] {
-		if info != nil && info.Enabled && checkpoint.UsesWaitForCheckpointStartup(info.StartupPolicy) {
-			skips[strings.ToLower(componentName)] = struct{}{}
-		}
-	}
-	return skips
-}
-
-func checkpointStartupGated(info *checkpoint.CheckpointInfo) bool {
-	return info != nil &&
-		info.Enabled &&
-		checkpoint.UsesWaitForCheckpointStartup(info.StartupPolicy) &&
-		!info.Ready
 }
 
 func orderLikeExisting[T any](existing []T, desired []T, nameOf func(T) string) []T {
@@ -926,7 +913,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
 		componentName := component.ComponentName
-		gated := checkpointStartupGated(checkpointInfos[componentName])
+		info := checkpointInfos[componentName]
+		gated := info != nil &&
+			info.Enabled &&
+			info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+			!info.Ready
 		if component.Replicas == nil && !gated {
 			continue
 		}
@@ -1517,7 +1508,10 @@ func applyCheckpointStartupReadiness(
 	}
 	var waiting []string
 	for componentName, info := range checkpointInfos {
-		if !checkpointStartupGated(info) {
+		if info == nil ||
+			!info.Enabled ||
+			info.StartupPolicy != nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint ||
+			info.Ready {
 			continue
 		}
 		if info.CheckpointName != "" {
@@ -1637,16 +1631,19 @@ func applyDCDCheckpointStartupPolicy(
 		dcd.Spec.Experimental.Checkpoint.CheckpointRef = &checkpointName
 		dcd.Spec.Experimental.Checkpoint.Identity = nil
 		dcd.Spec.Experimental.Checkpoint.Job = nil
-		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(
-			checkpoint.StartupPolicy(checkpointInfo.StartupPolicy),
-		)
+		startupPolicy := checkpointInfo.StartupPolicy
+		if startupPolicy == "" {
+			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+		}
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
-	if checkpoint.UsesWaitForCheckpointStartup(checkpointInfo.StartupPolicy) && !checkpointInfo.Ready {
+	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
 		dcd.Spec.Replicas = ptr.To(int32(0))
 		return nil
 	}
-	if checkpoint.UsesImmediateStartup(checkpointInfo.StartupPolicy) {
+	if checkpointInfo.StartupPolicy == "" ||
+		checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
 		labels := dynamo.GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 		if labels == nil {
 			if dcd.Spec.PodTemplate == nil {
@@ -1851,7 +1848,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		}
 
 		alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
-		startupPolicy := checkpoint.StartupPolicy(alphaCheckpointConfig.StartupPolicy)
+		startupPolicy := alphaCheckpointConfig.StartupPolicy
+		if startupPolicy == "" {
+			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+		}
 
 		var info *checkpoint.CheckpointInfo
 		var err error

@@ -120,7 +120,11 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	}
 	annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
 	annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.CheckpointName
-	annotations[commonconsts.CheckpointStartupPolicyAnnotation] = string(StartupPolicy(checkpointInfo.StartupPolicy))
+	startupPolicy := checkpointInfo.StartupPolicy
+	if startupPolicy == "" {
+		startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+	}
+	annotations[commonconsts.CheckpointStartupPolicyAnnotation] = string(startupPolicy)
 	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
 	return nil
 }

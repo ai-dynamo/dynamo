@@ -41,21 +41,6 @@ type CheckpointInfo struct {
 	RestoreTargetContainers []string
 }
 
-func StartupPolicy(policy nvidiacomv1alpha1.CheckpointStartupPolicy) nvidiacomv1alpha1.CheckpointStartupPolicy {
-	if policy == "" {
-		return nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
-	}
-	return policy
-}
-
-func UsesImmediateStartup(policy nvidiacomv1alpha1.CheckpointStartupPolicy) bool {
-	return StartupPolicy(policy) == nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
-}
-
-func UsesWaitForCheckpointStartup(policy nvidiacomv1alpha1.CheckpointStartupPolicy) bool {
-	return StartupPolicy(policy) == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint
-}
-
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
 	hash, err := CheckpointID(ckpt)
 	if err != nil {
@@ -88,8 +73,8 @@ func ResolveCheckpointForService(
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
 ) (*CheckpointInfo, error) {
 	startupPolicy := nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
-	if config != nil {
-		startupPolicy = StartupPolicy(config.StartupPolicy)
+	if config != nil && config.StartupPolicy != "" {
+		startupPolicy = config.StartupPolicy
 	}
 	switch {
 	case config == nil || !config.Enabled:
