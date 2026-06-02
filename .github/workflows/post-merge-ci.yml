@@ -572,6 +572,33 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  snapshot-placeholder:
+    name: Snapshot Placeholder
+    needs: [vllm-copy-to-acr]
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-vllm-placeholder
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
+
   vllm-dev-copy-to-acr:
     name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-dev-build]
@@ -756,11 +783,11 @@ jobs:
 
   deploy-test-checkpoint:
     name: DynamoCheckpoint Deploy Test
-    needs: [deploy-operator, deploy-snapshot-agent, vllm-copy-to-acr]
+    needs: [deploy-operator, deploy-snapshot-agent, snapshot-placeholder]
     if: |
       always() && !cancelled() &&
       needs.deploy-snapshot-agent.result == 'success' &&
-      (needs.vllm-copy-to-acr.result == 'success' || needs.vllm-copy-to-acr.result == 'skipped')
+      needs.snapshot-placeholder.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
     permissions:
@@ -811,7 +838,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ needs.vllm-copy-to-acr.result == 'success' && format('{0}/ai-dynamo/dynamo:{1}-vllm-runtime', secrets.AZURE_ACR_HOSTNAME, github.sha) || 'nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1' }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
           test_name: checkpoint_dgd_restore
           test_file: tests/deploy/test_dynamocheckpoint.py
           extra_pytest_args: -m dynamocheckpoint
@@ -894,7 +921,7 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, deploy-test-checkpoint, deploy-test-gaie, deploy-cleanup]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, snapshot-placeholder, deploy-test-checkpoint, deploy-test-gaie, deploy-cleanup]
     if: always()
     steps:
       - name: "Check all deploy test jobs"
@@ -909,7 +936,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-agent, snapshot-placeholder, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
