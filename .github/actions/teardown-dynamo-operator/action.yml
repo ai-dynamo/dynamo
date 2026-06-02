@@ -26,6 +26,22 @@ runs:
     - name: Install vCluster CLI
       uses: ./.github/actions/install-vcluster-cli
 
+    - name: Stop port-forward supervisor
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ inputs.vcluster_name }}
+        NAMESPACE: ${{ inputs.vcluster_namespace }}
+      run: |
+        # Stop the self-healing port-forward started by connect-vcluster so it does
+        # not leak on the persistent ARC runner and interfere with later jobs. The
+        # script path and PID file are deterministic; tolerate their absence.
+        SUPERVISOR="${{ github.workspace }}/.pf-supervisor.sh"
+        if [ -x "${SUPERVISOR}" ]; then
+          "${SUPERVISOR}" stop || true
+        else
+          pkill -f "port-forward -n ${NAMESPACE} svc/${VCLUSTER_NAME} 8443:443" 2>/dev/null || true
+        fi
+
     - name: Delete vCluster
       shell: bash
       env:

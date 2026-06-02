@@ -20,6 +20,30 @@ from kubernetes_asyncio.client import exceptions
 from tests.utils.test_output import resolve_test_output_path
 
 
+async def _retry_on_transient_connection_error(coro_factory, logger, attempts=5, delay=2):
+    """Await ``coro_factory()``, retrying only on transient transport failures.
+
+    In CI the vCluster API is reached through a port-forward to 127.0.0.1:8443 that a
+    supervisor relaunches whenever the long-lived stream drops. During the brief
+    window between the old tunnel dying and the new one coming up, a call fails with a
+    connection error (``OSError`` / aiohttp's ``ClientConnectorError``, which
+    subclasses ``OSError``). Those are retried with a short backoff; ``ApiException``
+    is a real API response (not transport) and is not caught here, so it propagates
+    unchanged.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return await coro_factory()
+        except OSError as e:
+            if attempt == attempts:
+                raise
+            logger.warning(
+                f"Transient connection error talking to the cluster API "
+                f"(attempt {attempt}/{attempts}), retrying in {delay}s: {e}"
+            )
+            await asyncio.sleep(delay)
+
+
 def _get_workspace_dir() -> str:
     """Get workspace directory without depending on dynamo.common package.
 
@@ -1245,12 +1269,15 @@ class ManagedDeployment:
 
         try:
             assert self._custom_api is not None, "Kubernetes API not initialized"
-            await self._custom_api.create_namespaced_custom_object(
-                group="nvidia.com",
-                version=self.deployment_spec.api_version,
-                namespace=self.namespace,
-                plural="dynamographdeployments",
-                body=self.deployment_spec.spec(),
+            await _retry_on_transient_connection_error(
+                lambda: self._custom_api.create_namespaced_custom_object(
+                    group="nvidia.com",
+                    version=self.deployment_spec.api_version,
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    body=self.deployment_spec.spec(),
+                ),
+                self._logger,
             )
             self._logger.info(self.deployment_spec.spec())
             self._logger.info(f"Deployment Started {self._deployment_name}")
@@ -1494,12 +1521,15 @@ class ManagedDeployment:
         """
         try:
             if self._deployment_name and self._custom_api is not None:
-                await self._custom_api.delete_namespaced_custom_object(
-                    group="nvidia.com",
-                    version=self.deployment_spec.api_version,
-                    namespace=self.namespace,
-                    plural="dynamographdeployments",
-                    name=self._deployment_name,
+                await _retry_on_transient_connection_error(
+                    lambda: self._custom_api.delete_namespaced_custom_object(
+                        group="nvidia.com",
+                        version=self.deployment_spec.api_version,
+                        namespace=self.namespace,
+                        plural="dynamographdeployments",
+                        name=self._deployment_name,
+                    ),
+                    self._logger,
                 )
         except exceptions.ApiException as e:
             if e.status != 404:  # Ignore if already deleted
