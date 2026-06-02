@@ -668,6 +668,7 @@ jobs:
         dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
         checkpoint_enabled: 'true'
+        checkpoint_storage_size: 64Gi
 
   deploy-test-vllm:
     needs: [deploy-operator, vllm-copy-to-acr]
@@ -739,6 +740,7 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -786,6 +788,7 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster

@@ -670,6 +670,7 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: ${{ (needs.changed-files.outputs.operator == 'true' || needs.changed-files.outputs.snapshot == 'true' || needs.changed-files.outputs.deploy == 'true') && 'true' || 'false' }}
+          checkpoint_storage_size: 64Gi
 
   deploy-test-vllm:
     name: vllm Deploy Test
@@ -756,6 +757,7 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -806,6 +808,7 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
