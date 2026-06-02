@@ -84,3 +84,23 @@ jobs:
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           override_arch: ${{ inputs.override_arch }}
+      # Mirror the matching per-SHA `-test` image too, so the in-cluster deploy
+      # test Job (which the Azure cluster pulls from ACR) has its image. Shares
+      # layers with the runtime image, so the extra copy is cheap. Same guard as
+      # the runtime copy above (it's a sibling step in this guarded job).
+      - name: Copy test image to target registry
+        timeout-minutes: ${{ inputs.copy_timeout_minutes }}
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}-test
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}-test
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          override_arch: ${{ inputs.override_arch }}

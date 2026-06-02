@@ -1,16 +1,16 @@
 name: 'Dynamo Graph Deployment Test'
-description: 'Deploy a DynamoGraphDeployment to Kubernetes, validate it serves requests, and cleanup'
+description: 'Run the deploy test suite as an in-cluster Job so pytest talks to the vCluster API in-network (no port-forward)'
 
 inputs:
-  # Kubernetes Configuration
-  kubeconfig_base64:
-    description: 'Base64-encoded kubeconfig for cluster access'
+  # Cluster targeting
+  host_namespace:
+    description: 'Host namespace where the vCluster (and its kubeconfig secret vc-<name>) lives, and where the test Job runs'
     required: true
-  namespace:
-    description: 'Kubernetes namespace for deployment'
+  vcluster_name:
+    description: 'Name of the vCluster; used to locate secret vc-<name> and build the in-cluster API server URL'
     required: true
   registry:
-    description: 'Container registry hostname'
+    description: 'Container registry hostname (ACR) the host cluster pulls images from'
     required: true
   operator_tag:
     description: 'Operator image tag (default: main-operator)'
@@ -29,6 +29,7 @@ inputs:
     required: false
     default: ''
 
+  # Test configuration
   framework:
     description: 'Framework name (vllm, sglang, trtllm)'
     required: false
@@ -41,6 +42,9 @@ inputs:
     description: 'Full container image reference for the framework runtime'
     required: false
     default: ''
+  test_image:
+    description: 'Full container image reference for the per-SHA test image the Job runs (contains /workspace tests + deps)'
+    required: true
   platform_arch:
     description: 'Platform architecture (amd64, arm64)'
     required: false
@@ -57,135 +61,195 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Setup Kubeconfig
-      id: setup-kubeconfig
+    # The runner already has ambient host-cluster access via KUBECONFIG (set up by
+    # the runner/setup-dynamo-operator). We never build a vCluster kubeconfig on the
+    # runner anymore: the Job reads the vCluster kubeconfig in-cluster from secret
+    # vc-<name> and reaches the API over the stable ClusterIP, so there is no
+    # long-lived port-forward to drop mid-job.
+    - name: Resolve names
+      id: names
       shell: bash
       env:
-        NAMESPACE: ${{ inputs.namespace }}
+        FRAMEWORK: ${{ inputs.framework }}
+        PROFILE: ${{ inputs.profile }}
+        TEST_NAME: ${{ inputs.test_name }}
       run: |
-        set +x
-        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
-        chmod 600 ${{ github.workspace }}/.kubeconfig
-        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
+        set -euo pipefail
+        if [ -z "${TEST_NAME}" ]; then
+          TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
+        fi
+        echo "test_name=${TEST_NAME}" >> "$GITHUB_OUTPUT"
 
-        export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-        kubectl config set-context --current --namespace=${NAMESPACE}
-        kubectl config get-contexts
+        # Job names must be DNS-1123 and <= 63 chars. Lowercase, replace illegal
+        # chars, and key on run id + attempt + profile so reruns/matrix entries
+        # never collide.
+        RAW="deploy-test-${PROFILE:-unknown}-${{ github.run_id }}-${{ github.run_attempt }}"
+        JOB_NAME=$(echo "${RAW}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-63)
+        echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
 
-    - name: Set up Python
-      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-      with:
-        python-version: '3.12'
-        cache: 'pip'
-        cache-dependency-path: 'container/deps/requirements.test.txt'
-    - name: Install test dependencies
-      shell: bash
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r container/deps/requirements.test.txt
-
-    - name: Deploy and Test
-      id: deploy
+    - name: Render and apply test Job
+      id: apply
       shell: bash
       env:
-        KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-        NAMESPACE: ${{ inputs.namespace }}
+        HOST_NAMESPACE: ${{ inputs.host_namespace }}
+        VCLUSTER_NAME: ${{ inputs.vcluster_name }}
+        JOB_NAME: ${{ steps.names.outputs.job_name }}
+        TEST_IMAGE: ${{ inputs.test_image }}
         FRAMEWORK: ${{ inputs.framework }}
         PROFILE: ${{ inputs.profile }}
         IMAGE: ${{ inputs.image }}
-        DYN_TEST_OUTPUT_PATH: ${{ github.workspace }}/test-output
-        TEST_NAME: ${{ inputs.test_name }}
         EXTRA_PYTEST_ARGS: ${{ inputs.extra_pytest_args }}
-        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
-        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
-        DYNAMO_TEST_TYPE: deploy_${{ inputs.profile }}
-        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+        TEST_NAME: ${{ steps.names.outputs.test_name }}
+        PLATFORM_ARCH: ${{ inputs.platform_arch }}
+        # Echoed by the in-pod prologue verbatim; keep components separate so we
+        # never need quoting gymnastics for the pytest invocation.
+        JUNIT_FILENAME: pytest_deploy_${{ steps.names.outputs.test_name }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
       run: |
-        mkdir -p test-results
+        set -euo pipefail
 
-        PYTEST_ARGS=""
-        if [ -n "${FRAMEWORK}" ]; then
-          PYTEST_ARGS+=" --framework=${FRAMEWORK}"
-        fi
-        if [ -n "${PROFILE}" ]; then
-          PYTEST_ARGS+=" --profile=${PROFILE}"
-        fi
-        if [ -n "${IMAGE}" ]; then
-          PYTEST_ARGS+=" --image=${IMAGE}"
-        fi
+        # In-cluster API server for the vCluster. The cert embedded in the
+        # vc-<name> secret authenticates regardless of the network path, so we
+        # only swap the server URL to the stable ClusterIP service.
+        VC_SERVER="https://${VCLUSTER_NAME}.${HOST_NAMESPACE}.svc:443"
 
-        if [ -z "${TEST_NAME}" ]; then
-          TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
-        fi
+        export DEPLOY_TEST_JOB_NAME="${JOB_NAME}"
+        bash "${GITHUB_ACTION_PATH}/render-job.sh" \
+          "${JOB_NAME}" \
+          "${HOST_NAMESPACE}" \
+          "${TEST_IMAGE}" \
+          "${VCLUSTER_NAME}" \
+          "${VC_SERVER}" \
+          | tee "${RUNNER_TEMP}/${JOB_NAME}.yaml"
 
-        pytest tests/deploy/test_deploy.py \
-          --namespace="${NAMESPACE}" \
-          ${PYTEST_ARGS} \
-          ${EXTRA_PYTEST_ARGS} \
-          -v -s \
-          --durations=10 \
-          --junitxml=test-results/pytest_deploy_${TEST_NAME}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
-          --alluredir=test-results/allure-results \
-          --log-cli-level=INFO
-
-    - name: Cleanup Deployment
-      if: always()
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.namespace }}
-        GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
-      run: |
-        echo "::group::Cleanup Deployment"
-        set -x
-        export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-
-        echo "=== PRE-CLEANUP STATUS ==="
-        kubectl get dynamographdeployments -n $NAMESPACE || true
-        kubectl get pods -n $NAMESPACE || true
-
-        kubectl get dynamographdeployments -n $NAMESPACE --no-headers 2>/dev/null \
-          | awk '$2 == "False" {print $1}' \
-          | while read -r dep_name; do
-              echo ">>> DETAILED DESCRIPTION FOR FAILED DEPLOYMENT: $dep_name"
-              kubectl describe dynamographdeployments "$dep_name" -n $NAMESPACE
-          done || true
-
-        if kubectl get dynamographdeployments "${GRAPH_NAME}" -n $NAMESPACE &>/dev/null; then
-          echo "DGD ${GRAPH_NAME} still exists after test, deleting..."
-          kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s
-        else
-          echo "DGD ${GRAPH_NAME} already cleaned up by test"
-        fi
+        echo "::group::Apply Job ${JOB_NAME}"
+        kubectl apply -f "${RUNNER_TEMP}/${JOB_NAME}.yaml"
         echo "::endgroup::"
 
+    - name: Wait for Job and stream logs
+      id: wait
+      shell: bash
+      env:
+        HOST_NAMESPACE: ${{ inputs.host_namespace }}
+        JOB_NAME: ${{ steps.names.outputs.job_name }}
+      run: |
+        set -uo pipefail
+        # Bounded poll of .status — no `logs -f`, so there is no long-lived
+        # stream that can silently drop. Tracks the pod so we can tail fresh
+        # log lines each tick without re-printing the whole buffer.
+        TIMEOUT=$((25 * 60))
+        DEADLINE=$(( $(date +%s) + TIMEOUT ))
 
-    - name: Determine test name for artifacts
-      id: test-name
+        echo "::group::Wait for Job ${JOB_NAME}"
+        POD=""
+        SINCE=1s
+        RESULT="timeout"
+        while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
+          if [ -z "${POD}" ]; then
+            POD=$(kubectl get pods -n "${HOST_NAMESPACE}" \
+              -l "job-name=${JOB_NAME}" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          fi
+          if [ -n "${POD}" ]; then
+            kubectl logs -n "${HOST_NAMESPACE}" "${POD}" --since="${SINCE}" 2>/dev/null || true
+            SINCE=10s
+          fi
+
+          SUCCEEDED=$(kubectl get job -n "${HOST_NAMESPACE}" "${JOB_NAME}" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)
+          FAILED=$(kubectl get job -n "${HOST_NAMESPACE}" "${JOB_NAME}" -o jsonpath='{.status.failed}' 2>/dev/null || true)
+          if [ "${SUCCEEDED:-0}" = "1" ]; then
+            RESULT="succeeded"
+            break
+          fi
+          if [ -n "${FAILED}" ] && [ "${FAILED}" != "0" ]; then
+            RESULT="failed"
+            break
+          fi
+          sleep 10
+        done
+        echo "::endgroup::"
+
+        echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
+        echo "Job ${JOB_NAME} result: ${RESULT}"
+
+    - name: Collect JUnit and pod logs
       if: always()
       shell: bash
       env:
-        TEST_NAME: ${{ inputs.test_name }}
-        FRAMEWORK: ${{ inputs.framework }}
-        PROFILE: ${{ inputs.profile }}
+        HOST_NAMESPACE: ${{ inputs.host_namespace }}
+        JOB_NAME: ${{ steps.names.outputs.job_name }}
+        TEST_NAME: ${{ steps.names.outputs.test_name }}
+        PLATFORM_ARCH: ${{ inputs.platform_arch }}
+        JUNIT_FILENAME: pytest_deploy_${{ steps.names.outputs.test_name }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
       run: |
-        if [ -z "${TEST_NAME}" ]; then
-          TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
+        set -uo pipefail
+        mkdir -p test-results/allure-results "${{ github.workspace }}/test-output"
+
+        POD=$(kubectl get pods -n "${HOST_NAMESPACE}" \
+          -l "job-name=${JOB_NAME}" \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+        if [ -n "${POD}" ]; then
+          echo "::group::Final pod logs (${POD})"
+          kubectl logs -n "${HOST_NAMESPACE}" "${POD}" --tail=-1 \
+            > "${{ github.workspace }}/test-output/${POD}.log" 2>&1 || true
+          cat "${{ github.workspace }}/test-output/${POD}.log" || true
+          echo "::endgroup::"
+
+          # Pull the JUnit XML the Job wrote to /results. kubectl cp needs tar in
+          # the source container; the test image has it. The pod has terminated
+          # by now (Never restart), so cp reads from the stopped container's fs.
+          echo "::group::Extract JUnit XML"
+          kubectl cp -n "${HOST_NAMESPACE}" \
+            "${POD}:/results/${JUNIT_FILENAME}" \
+            "test-results/${JUNIT_FILENAME}" 2>/dev/null \
+            || echo "::warning::Could not copy JUnit XML from ${POD}:/results/${JUNIT_FILENAME}"
+          kubectl cp -n "${HOST_NAMESPACE}" \
+            "${POD}:/results/allure-results" \
+            "test-results/allure-results" 2>/dev/null \
+            || echo "Allure results not present (optional)"
+          echo "::endgroup::"
+        else
+          echo "::warning::No pod found for Job ${JOB_NAME}; nothing to collect"
         fi
-        echo "name=${TEST_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Delete test Job
+      if: always()
+      shell: bash
+      env:
+        HOST_NAMESPACE: ${{ inputs.host_namespace }}
+        JOB_NAME: ${{ steps.names.outputs.job_name }}
+      run: |
+        set -uo pipefail
+        echo "::group::Delete Job ${JOB_NAME}"
+        kubectl delete job -n "${HOST_NAMESPACE}" "${JOB_NAME}" \
+          --ignore-not-found --timeout=60s || true
+        echo "::endgroup::"
+
+    - name: Report Job result
+      if: always()
+      shell: bash
+      env:
+        RESULT: ${{ steps.wait.outputs.result }}
+      run: |
+        case "${RESULT}" in
+          succeeded) echo "Deploy test Job succeeded"; exit 0 ;;
+          *) echo "::error::Deploy test Job ${RESULT:-unknown}"; exit 1 ;;
+        esac
 
     - name: Upload Test Results
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
-        name: test-results-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/pytest_deploy_${{ steps.test-name.outputs.name }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        name: test-results-${{ steps.names.outputs.test_name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_deploy_${{ steps.names.outputs.test_name }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
+        if-no-files-found: warn
 
     - name: Upload Pod Logs
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
-        name: pod-logs-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: pod-logs-${{ steps.names.outputs.test_name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: ${{ github.workspace }}/test-output/
         if-no-files-found: warn
         retention-days: 7
@@ -194,7 +258,7 @@ runs:
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
-        name: allure-results-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: allure-results-${{ steps.names.outputs.test_name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore

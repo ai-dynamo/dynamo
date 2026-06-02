@@ -63,23 +63,22 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-      - name: Connect to vCluster
-        id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
-        with:
-          vcluster_name: ${{ inputs.vcluster_name }}
-          vcluster_namespace: ${{ inputs.namespace }}
+      # No more on-runner `connect-vcluster` / port-forward for the test: the
+      # deploy-test action launches an in-cluster Job that talks to the vCluster
+      # API over its ClusterIP. The runner only needs ambient host-cluster
+      # access (already on KUBECONFIG) to apply/poll/delete the Job.
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
         with:
-          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
-          namespace: default
+          host_namespace: ${{ inputs.namespace }}
+          vcluster_name: ${{ inputs.vcluster_name }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ inputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ inputs.framework }}
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
+          test_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}-test
           platform_arch: amd64
           extra_pytest_args: -m framework_only
