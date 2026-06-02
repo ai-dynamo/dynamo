@@ -24,7 +24,7 @@ use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
     sync::{
@@ -185,9 +185,10 @@ pub enum RouterMode {
 }
 
 #[derive(Clone, Copy)]
-enum TransportFallback {
+enum TransportFallback<'a> {
     Allow,
     Deny,
+    Within(&'a HashSet<u64>),
 }
 
 struct DeviceAwareCandidates {
@@ -739,6 +740,19 @@ where
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
+        self.direct_within(request, instance_id, None).await
+    }
+
+    /// Like [`direct`], but if the selected instance disappears between selection and dispatch,
+    /// the internal reselection is constrained to `allowed_fallback` (when `Some`). Callers that
+    /// pre-narrowed the candidate set (e.g. LoRA replica-set filtering) pass that set so the
+    /// vanished-instance fallback cannot escape it and route to an arbitrary worker.
+    pub async fn direct_within(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        allowed_fallback: Option<&HashSet<u64>>,
+    ) -> anyhow::Result<ManyOut<U>> {
         // When fault detection is disabled, check the raw discovery list
         // (not filtered by report_instance_down) so transient failures
         // don't poison the instance for subsequent retries.
@@ -768,7 +782,10 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        let fallback = allowed_fallback
+            .map(TransportFallback::Within)
+            .unwrap_or(TransportFallback::Allow);
+        self.generate_with_fault_detection(instance_id, request, fallback)
             .await
     }
 
@@ -1166,7 +1183,7 @@ where
         &self,
         instance_id: u64,
         request: SingleIn<T>,
-        fallback: TransportFallback,
+        fallback: TransportFallback<'_>,
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
@@ -1251,7 +1268,7 @@ where
     fn resolve_transport(
         &self,
         instance_id: u64,
-        fallback: TransportFallback,
+        fallback: TransportFallback<'_>,
     ) -> anyhow::Result<(u64, String, &'static str, Instance)> {
         use crate::component::TransportType;
 
@@ -1274,20 +1291,22 @@ where
         if let Some((addr, kind, inst)) = lookup(instance_id) {
             return Ok((instance_id, addr, kind, inst));
         }
-        if matches!(fallback, TransportFallback::Deny) {
-            return Err(anyhow::anyhow!(
-                "Instance {} not found for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            ));
-        }
+        let allowed_fallback = match fallback {
+            TransportFallback::Allow => None,
+            TransportFallback::Deny => {
+                return Err(anyhow::anyhow!(
+                    "Instance {} not found for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ));
+            }
+            TransportFallback::Within(allowed) => Some(allowed),
+        };
 
         let routing_instances = self.client.routing_instances();
-        let fallback_id = routing_instances
-            .free_ids()
-            .iter()
-            .copied()
-            .find(|&id| id != instance_id);
+        let fallback_id = routing_instances.free_ids().iter().copied().find(|&id| {
+            id != instance_id && allowed_fallback.is_none_or(|allowed| allowed.contains(&id))
+        });
         match fallback_id {
             Some(id) => {
                 tracing::warn!(

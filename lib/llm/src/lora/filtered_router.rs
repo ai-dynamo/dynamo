@@ -221,7 +221,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             "LoRA-filtered router selected worker"
         );
 
-        let response_stream = self.inner.direct(request, target).await?;
+        // Constrain the inner router's vanished-target fallback to the LoRA candidate set, so a
+        // race where `target` disappears mid-dispatch reselects another replica-set worker rather
+        // than escaping to an arbitrary worker outside the placement table.
+        let candidate_set: std::collections::HashSet<u64> = candidates.iter().copied().collect();
+        let response_stream = self
+            .inner
+            .direct_within(request, target, Some(&candidate_set))
+            .await?;
         let tracking = LoadTrackingStream {
             inner: response_stream,
             _guard: guard,
