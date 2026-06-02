@@ -145,12 +145,16 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             return
         if self._is_agg and hasattr(self, "_agg_regression"):
             self._agg_regression.update_capabilities(self._capabilities.decode)
-        if self._has_prefill and not self._is_agg and hasattr(
-            self, "_prefill_regression"
+        if (
+            self._has_prefill
+            and not self._is_agg
+            and hasattr(self, "_prefill_regression")
         ):
             self._prefill_regression.update_capabilities(self._capabilities.prefill)
-        if self._has_decode and not self._is_agg and hasattr(
-            self, "_decode_regression"
+        if (
+            self._has_decode
+            and not self._is_agg
+            and hasattr(self, "_decode_regression")
         ):
             self._decode_regression.update_capabilities(self._capabilities.decode)
 

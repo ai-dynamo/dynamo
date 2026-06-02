@@ -270,7 +270,7 @@ class ThroughputScalingMixin:
         logger.info(
             f"Prefill: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
             f"est_ttft={ttft_ms:.1f}ms, isl_raw={isl:.1f}, "
-            f"isl_effective={effective_isl:.1f}"
+            f"kv_hit_rate={kv_hit_rate or 0.0:.3f}"
         )
         return result
 

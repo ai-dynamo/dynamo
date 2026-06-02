@@ -515,9 +515,7 @@ class LoadScalingMixin:
         can_scale_down = num_workers > 1
         consolidation_refused = False
         for label, group in self._decode_regression.query_groups(fpm_stats):
-            sched_kv = max(
-                fpm.scheduled_requests.sum_decode_kv_tokens for fpm in group
-            )
+            sched_kv = max(fpm.scheduled_requests.sum_decode_kv_tokens for fpm in group)
             queued_kv = max(fpm.queued_requests.sum_decode_kv_tokens for fpm in group)
             est = self._decode_regression.estimate_scheduled_decode_itl(
                 group,
@@ -583,7 +581,6 @@ class LoadScalingMixin:
         can_scale_down = num_workers > 1
         consolidation_refused = False
         for _label, group in self._agg_regression.query_groups(fpm_stats):
-            queued = max(fpm.queued_requests.sum_prefill_tokens for fpm in group)
             # Pre-consolidation prediction uses scheduled-only decode load.
             # Queued decode is modeled only in the consolidation check below.
             est = self._agg_regression.estimate_queued_prefill_time(
@@ -665,9 +662,7 @@ class LoadScalingMixin:
         can_scale_down = num_workers > 1
         consolidation_refused = False
         for _label, group in self._agg_regression.query_groups(fpm_stats):
-            sched_kv = max(
-                fpm.scheduled_requests.sum_decode_kv_tokens for fpm in group
-            )
+            sched_kv = max(fpm.scheduled_requests.sum_decode_kv_tokens for fpm in group)
             queued_kv = max(fpm.queued_requests.sum_decode_kv_tokens for fpm in group)
             queued_prefill = max(
                 fpm.queued_requests.sum_prefill_tokens for fpm in group

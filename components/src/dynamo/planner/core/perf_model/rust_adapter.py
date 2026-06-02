@@ -23,37 +23,40 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.planner.config.parallelization import (
-    PickedParallelConfig,
-    picked_to_aic_model_config_kwargs,
-)
+from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import AICPerfModelSpec, PlannerConfig
 from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
 from dynamo.planner.core.types import EngineCapabilities
 
 logger = logging.getLogger(__name__)
 
-try:  # pragma: no cover - availability depends on the optional Rust feature.
-    from dynamo.llm import (
-        AicEngineConfig,
-        EngineCapacityRequest,
-        EnginePerfLimits,
-        OptimizationTarget,
-        RustEnginePerfModel,
-        RustEnginePerfOptions,
-    )
+AicEngineConfig: Any = None
+EngineCapacityRequest: Any = None
+EnginePerfLimits: Any = None
+OptimizationTarget: Any = None
+RustEnginePerfModel: Any = None
+RustEnginePerfOptions: Any = None
 
+try:  # pragma: no cover - availability depends on the optional Rust feature.
+    from dynamo.llm import AicEngineConfig as _AicEngineConfig
+    from dynamo.llm import EngineCapacityRequest as _EngineCapacityRequest
+    from dynamo.llm import EnginePerfLimits as _EnginePerfLimits
+    from dynamo.llm import OptimizationTarget as _OptimizationTarget
+    from dynamo.llm import RustEnginePerfModel as _RustEnginePerfModel
+    from dynamo.llm import RustEnginePerfOptions as _RustEnginePerfOptions
+
+    AicEngineConfig = _AicEngineConfig
+    EngineCapacityRequest = _EngineCapacityRequest
+    EnginePerfLimits = _EnginePerfLimits
+    OptimizationTarget = _OptimizationTarget
+    RustEnginePerfModel = _RustEnginePerfModel
+    RustEnginePerfOptions = _RustEnginePerfOptions
     _RUST_SHIM_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised in pure-Python planner tests.
-    AicEngineConfig = None  # type: ignore[assignment]
-    EngineCapacityRequest = None  # type: ignore[assignment]
-    EnginePerfLimits = None  # type: ignore[assignment]
-    OptimizationTarget = None  # type: ignore[assignment]
-    RustEnginePerfModel = None  # type: ignore[assignment]
-    RustEnginePerfOptions = None  # type: ignore[assignment]
     _RUST_SHIM_AVAILABLE = False
 
 _RUST_SHIM_FALLBACK_EXCEPTIONS = (RuntimeError, ValueError, TypeError)
+
 
 @dataclass(frozen=True)
 class PlannerEngineCapacity:
@@ -184,34 +187,47 @@ class PlannerEnginePerfModel:
     def _rust_ready(self) -> bool:
         return self._rust_diagnostics().get("readiness") == "ready"
 
-    def _build_limits(self) -> Optional[Any]:
+    def _limit_values(self) -> Optional[tuple[int, int, int]]:
         caps = self._capabilities
-        if caps is None or EnginePerfLimits is None:
+        if caps is None:
             return None
-        values = (
-            caps.max_num_batched_tokens,
-            caps.max_num_seqs,
-            caps.max_kv_tokens,
-        )
-        if any(v is None or v <= 0 for v in values):
+        max_num_batched_tokens = caps.max_num_batched_tokens
+        max_num_seqs = caps.max_num_seqs
+        max_kv_tokens = caps.max_kv_tokens
+        if (
+            max_num_batched_tokens is None
+            or max_num_seqs is None
+            or max_kv_tokens is None
+            or max_num_batched_tokens <= 0
+            or max_num_seqs <= 0
+            or max_kv_tokens <= 0
+        ):
             return None
+        return (max_num_batched_tokens, max_num_seqs, max_kv_tokens)
+
+    def _build_limits(self) -> Optional[Any]:
+        values = self._limit_values()
+        if values is None or EnginePerfLimits is None:
+            return None
+        max_num_batched_tokens, max_num_seqs, max_kv_tokens = values
         return EnginePerfLimits(
-            max_num_batched_tokens=int(caps.max_num_batched_tokens),
-            max_num_seqs=int(caps.max_num_seqs),
-            max_kv_tokens=int(caps.max_kv_tokens),
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+            max_kv_tokens=max_kv_tokens,
         )
 
     def _build_options(self) -> Any:
         assert RustEnginePerfOptions is not None
-        caps = self._capabilities
-        assert caps is not None
+        values = self._limit_values()
+        assert values is not None
+        max_num_batched_tokens, max_num_seqs, max_kv_tokens = values
         return RustEnginePerfOptions(
             max_observations=self._config.max_num_fpm_samples,
             min_observations=self._config.load_min_observations,
             bucket_count=self._config.fpm_sample_bucket_size,
-            max_num_tokens=int(caps.max_num_batched_tokens),
-            max_batch_size=int(caps.max_num_seqs),
-            max_kv_tokens=int(caps.max_kv_tokens),
+            max_num_tokens=max_num_batched_tokens,
+            max_batch_size=max_num_seqs,
+            max_kv_tokens=max_kv_tokens,
         )
 
     def _build_aic_config(self) -> Optional[Any]:
@@ -221,12 +237,16 @@ class PlannerEnginePerfModel:
         pick = self._pick_for_worker(spec)
         if pick is None:
             return None
-        kwargs = picked_to_aic_model_config_kwargs(pick)
         return AicEngineConfig(
             model_name=spec.hf_id,
             backend=spec.backend,
             system_name=spec.system,
             backend_version=spec.backend_version,
+            tp_size=pick.tp,
+            pp_size=pick.pp,
+            moe_tp_size=pick.moe_tp,
+            moe_ep_size=pick.moe_ep,
+            attention_dp_size=pick.dp,
             kv_block_size=(
                 self._capabilities.kv_cache_block_size
                 if self._capabilities is not None
@@ -237,7 +257,6 @@ class PlannerEnginePerfModel:
             moe_dtype=spec.moe_dtype,
             activation_dtype=spec.activation_dtype,
             kv_cache_dtype=spec.kv_cache_dtype,
-            **kwargs,
         )
 
     def _pick_for_worker(

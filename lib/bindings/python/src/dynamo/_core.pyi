@@ -1553,6 +1553,7 @@ class EngineCapacityRequest:
         ttft_sla_ms: Optional[float] = None,
         itl_sla_ms: Optional[float] = None,
         e2e_latency_sla_ms: Optional[float] = None,
+        kv_hit_rate: Optional[float] = None,
         optimization_target: OptimizationTarget = OptimizationTarget.Throughput,
     ) -> None:
         ...
